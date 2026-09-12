@@ -200,6 +200,8 @@ func createWallet(cfg *config) error {
 		return err
 	}
 
+	//nolint:staticcheck // Wallet setup still closes the legacy address
+	// manager directly.
 	w.AddrManager().Close()
 	fmt.Println("The wallet has been created successfully.")
 	return nil

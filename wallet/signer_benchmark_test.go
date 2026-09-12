@@ -14,8 +14,8 @@ import (
 
 // BenchmarkDerivePubKey benchmarks the DerivePubKey method across different
 // wallet sizes. The benchmark measures the performance of deriving a public
-// key from a BIP-32 path, which involves database lookups and cryptographic
-// operations.
+// key from a selected account, which involves database lookups and
+// cryptographic operations.
 func BenchmarkDerivePubKey(b *testing.B) {
 	const (
 		startGrowthIteration = 0
@@ -25,7 +25,7 @@ func BenchmarkDerivePubKey(b *testing.B) {
 	var (
 		// accountGrowth uses linearGrowth to test how performance
 		// scales with the number of accounts in the wallet. Key
-		// derivation uses the account index in the BIP-32 path, so
+		// derivation uses the semantic account selector, so
 		// database lookup time should remain constant due to indexed
 		// lookups.
 		accountGrowth = mapRange(
@@ -72,23 +72,20 @@ func BenchmarkDerivePubKey(b *testing.B) {
 				},
 			)
 
-			// Use a path from the middle of the account range
+			// Select an account from the middle of the account range
 			// for representative performance.
-			accountIndex := uint32(accountGrowth[i] / 2)
-			path := BIP32Path{
-				KeyScope: scopes[0],
-				DerivationPath: waddrmgr.DerivationPath{
-					InternalAccount: accountIndex,
-					Branch:          0,
-					Index:           0,
-				},
+			accountNumber := AccountNumber(accountGrowth[i] / 2)
+			params := DerivePubKeyParams{
+				Account: NewAccountSelectorByNumber(
+					scopes[0], accountNumber,
+				),
 			}
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := w.DerivePubKey(b.Context(), path)
+				_, err := w.DerivePubKey(b.Context(), params)
 				require.NoError(b, err)
 			}
 		})

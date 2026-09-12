@@ -9,6 +9,8 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
 const (
@@ -40,6 +42,22 @@ var (
 	ErrStateChanged = errors.New("wallet state changed unexpectedly")
 )
 
+// The passphrase sentinels below are part of the wallet's public API: callers
+// match on them with errors.Is. They alias the values used inside the wallet's
+// key vault rather than copying them, so an error raised deep in the vault
+// matches here with no translation step -- which matters because the vault
+// lives under wallet/internal and external callers cannot import it.
+var (
+
+	// ErrInvalidPassphrase is returned when a supplied passphrase does not
+	// match the one guarding the wallet.
+	ErrInvalidPassphrase = keyvault.ErrInvalidPassphrase
+
+	// ErrEmptyPassphrase is returned when wallet creation or a passphrase
+	// change omits a required passphrase.
+	ErrEmptyPassphrase = keyvault.ErrEmptyPassphrase
+)
+
 // UnlockRequest contains the parameters for unlocking the wallet.
 type UnlockRequest struct {
 	// Passphrase is the private passphrase to unlock the wallet.
@@ -53,7 +71,8 @@ type UnlockRequest struct {
 }
 
 // Info provides a comprehensive snapshot of the wallet's static configuration
-// and dynamic synchronization state.
+// and dynamic synchronization state. Producing the snapshot reads the observed
+// tip from the chain source and fails if that tip is unavailable.
 type Info struct {
 	// BirthdayBlock is the block from which the wallet started scanning.
 	BirthdayBlock waddrmgr.BlockStamp
@@ -69,35 +88,49 @@ type Info struct {
 	// Locked indicates if the wallet is currently locked.
 	Locked bool
 
-	// Synced indicates if the wallet is synced to the chain tip.
+	// Synced is true only when live delivery is ready and SyncedTo exactly
+	// matches the observed chain tip by height and hash.
 	Synced bool
 
 	// SyncedTo is the block to which the wallet is currently synced.
 	SyncedTo waddrmgr.BlockStamp
-
-	// IsRecoveryMode indicates if the wallet is currently in recovery
-	// mode.
-	IsRecoveryMode bool
-
-	// RecoveryProgress is the progress of the recovery (0.0 - 1.0).
-	RecoveryProgress float64
 }
 
 // ChangePassphraseRequest contains the parameters for changing wallet
-// passphrases. It supports changing the public passphrase, the private
-// passphrase, or both simultaneously.
+// passphrases.
+//
+// The two halves are selected independently. A SQL wallet has only the private
+// passphrase; kvdb additionally protects its public metadata with a separate
+// public passphrase, so a caller on that backend may rotate either half or
+// both. At least one half must be selected. Private rotation requires non-empty
+// old and new passphrases; legacy public passphrases may be empty.
 type ChangePassphraseRequest struct {
 	// ChangePublic indicates whether the public passphrase should be
 	// changed.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. This field will be removed with kvdb
+	// support.
 	ChangePublic bool
-	PublicOld    []byte
-	PublicNew    []byte
+
+	// PublicOld and PublicNew are read only when ChangePublic is set.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. These fields will be removed with kvdb
+	// support.
+	PublicOld []byte
+	PublicNew []byte
 
 	// ChangePrivate indicates whether the private passphrase should be
 	// changed.
 	ChangePrivate bool
-	PrivateOld    []byte
-	PrivateNew    []byte
+
+	// PrivateOld and PrivateNew are read only when ChangePrivate is set.
+	// The old passphrase is required even when the wallet is unlocked,
+	// because the rotation re-derives the old master key to unwrap the
+	// existing key material.
+	PrivateOld []byte
+	PrivateNew []byte
 }
 
 // Controller provides an interface for managing the wallet's lifecycle and
@@ -116,16 +149,17 @@ type Controller interface {
 	ChangePassphrase(ctx context.Context, req ChangePassphraseRequest) error
 
 	// Info returns a comprehensive snapshot of the wallet's static
-	// configuration and dynamic synchronization state.
+	// configuration and dynamic synchronization state. It returns an error
+	// if the chain source's observed tip cannot be read.
 	Info(ctx context.Context) (*Info, error)
 
 	// Start starts the background processes necessary to manage the wallet.
 	// It returns an error if the wallet is already started.
 	Start(ctx context.Context) error
 
-	// Stop signals all wallet background processes to shutdown and blocks
-	// until they have all exited. It returns an error if the context is
-	// canceled before the shutdown is complete.
+	// Stop synchronously shuts down the wallet. The context remains in this
+	// temporary public interface for compatibility but is not consulted,
+	// because terminal teardown cannot be abandoned after it begins.
 	Stop(ctx context.Context) error
 
 	// Resync rewinds the wallet's synchronization state to a specific
@@ -141,6 +175,8 @@ type Controller interface {
 }
 
 // Start starts the background processes necessary to manage the wallet.
+// The Manager owns lifecycle sequencing and calls Start at most once for a
+// Wallet instance; a stopped Wallet must be loaded as a new instance.
 //
 // This is part of the Controller interface.
 func (w *Wallet) Start(startCtx context.Context) error {
@@ -179,6 +215,9 @@ func (w *Wallet) Start(startCtx context.Context) error {
 	// 4. Start background goroutines.
 	w.wg.Add(1)
 
+	// Requests retain their own contexts; the routed legacy tip accessor still
+	// has no context parameter. Its existing exemption follows the call path.
+	//nolint:contextcheck // SyncedTo takes no context.
 	go w.mainLoop()
 
 	w.wg.Add(1)
@@ -202,7 +241,7 @@ func (w *Wallet) Start(startCtx context.Context) error {
 // retries and exponential backoff. It ensures the wallet attempts to stay
 // synced even if the backend connection is flaky.
 func (w *Wallet) runSyncLoop() {
-	backoff := initialBackoff
+	backoff := w.initialSyncBackoff()
 
 	for {
 		startTime := time.Now()
@@ -237,6 +276,16 @@ func (w *Wallet) runSyncLoop() {
 	}
 }
 
+// initialSyncBackoff returns the Wallet-local retry policy, preserving the
+// controller default for legacy or test Wallets assembled without Manager.
+func (w *Wallet) initialSyncBackoff() time.Duration {
+	if w.cfg.WalletSyncRetryInterval <= 0 {
+		return initialBackoff
+	}
+
+	return w.cfg.WalletSyncRetryInterval
+}
+
 // waitForBackoff handles the delay between synchronization retry attempts. It
 // resets the backoff if the previous run was stable, waits for the calculated
 // delay, and then returns the updated backoff duration for the next attempt.
@@ -247,7 +296,7 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 	// If the syncer ran for a significant amount of time, we consider it a
 	// "stable" run and reset the backoff.
 	if time.Since(startTime) > stableRunTime {
-		backoff = initialBackoff
+		backoff = w.initialSyncBackoff()
 	}
 
 	log.Infof("Restarting sync loop in %v...", backoff)
@@ -272,7 +321,8 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 
 // performRuntimeSetup executes the synchronous initialization tasks required
 // before the wallet's main loops can start. This includes sanity checking the
-// birthday block, loading accounts into memory, and cleaning up expired locks.
+// birthday block, fail-fast verifying that the wallet's accounts can be read
+// from the store, and cleaning up expired locks.
 func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	// Perform the birthday sanity check synchronously to ensure we are
 	// connected and our status is valid before starting the main loop.
@@ -284,23 +334,50 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 		return err
 	}
 
-	// Ensure all accounts are loaded into memory so we can efficiently
-	// access them during the scan loop without database lookups.
-	err = w.DBGetAllAccounts(startCtx)
+	// Fail fast on store connectivity by reading the wallet's accounts
+	// before entering the main loop. The result is intentionally discarded:
+	// the read itself surfaces a broken or unreachable store as a startup
+	// error rather than a mid-scan failure.
+	_, err = w.cache.ListAccounts(
+		startCtx, db.ListAccountsQuery{
+			WalletID: w.id,
+		},
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("list accounts: %w", err)
 	}
 
 	// Cleanup any expired output locks.
-	return w.DBDeleteExpiredLockedOutputs(startCtx)
+	err = w.store.DeleteExpiredLeases(startCtx, w.id)
+	if err != nil {
+		return fmt.Errorf("delete expired leases: %w", err)
+	}
+
+	return nil
 }
 
-// Stop signals all wallet background processes to shutdown and blocks until
-// they have all exited. It returns an error if the context is canceled before
-// the shutdown is complete.
+// Stop synchronously shuts down the Wallet through its private lifecycle
+// operation. The context remains only for Controller compatibility and is not
+// consulted, because terminal teardown cannot be abandoned after it begins.
+// The Manager serializes Stop with Start, so Stop can transition an
+// Initialized Wallet directly to its terminal Stopped state.
 //
 // This is part of the Controller interface.
-func (w *Wallet) Stop(stopCtx context.Context) error {
+func (w *Wallet) Stop(_ context.Context) error {
+	return w.stop()
+}
+
+// stop performs the Wallet's complete terminal teardown synchronously. The
+// Manager serializes lifecycle operations, so this method never runs alongside
+// Start or another stop and needs no additional synchronization primitive.
+func (w *Wallet) stop() error {
+	// A Wallet stopped before its first Start has no workers to cancel or
+	// join, but it must still become terminal so a retained pointer cannot
+	// start a new runtime later.
+	if lifecycle(w.state.lifecycle.Load()) == lifecycleInitialized {
+		return w.state.toStopped()
+	}
+
 	// Attempt to transition from Started to Stopping.
 	err := w.state.toStopping()
 	if err != nil {
@@ -321,18 +398,17 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 	// guarantees we only reach this point once).
 	w.cancel()
 
-	// Wait for all goroutines to finish.
-	done := make(chan struct{})
-	go func() {
-		w.wg.Wait()
-		close(done)
-	}()
+	// Terminal teardown cannot be abandoned by a caller deadline. Draining
+	// here ensures no accepted request or Wallet worker can retain Store or
+	// key material after stop returns.
+	w.wg.Wait()
 
-	select {
-	case <-done:
-	case <-stopCtx.Done():
-		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
-	}
+	// Lock the key vault so no decrypted signing keys outlive the shutdown.
+	// The background goroutines have exited, so no signer is running.
+	// Unconditional rather than gated on the unlocked state bit: Lock is
+	// void and idempotent, so a never-unlocked vault is a no-op, and gating
+	// would only add a way to skip it.
+	w.keyVault.Lock()
 
 	// Mark the wallet as stopped.
 	err = w.state.toStopped()
@@ -367,8 +443,14 @@ func (w *Wallet) Unlock(ctx context.Context, req UnlockRequest) error {
 		return err
 	}
 
-	// Wait for the result from the mainLoop.
-	return w.waitForResp(ctx, r.resp)
+	// Wait for the accepted request's result even if wallet shutdown begins.
+	// The caller context remains the only way to stop waiting early.
+	reqErr, err := waitForReq(ctx, r.resp)
+	if err != nil {
+		return err
+	}
+
+	return reqErr
 }
 
 // Lock locks the wallet.
@@ -388,8 +470,14 @@ func (w *Wallet) Lock(ctx context.Context) error {
 		return err
 	}
 
-	// Wait for the result.
-	return w.waitForResp(ctx, r.resp)
+	// Wait for the accepted request's result even if wallet shutdown begins.
+	// The caller context remains the only way to stop waiting early.
+	reqErr, err := waitForReq(ctx, r.resp)
+	if err != nil {
+		return err
+	}
+
+	return reqErr
 }
 
 // ChangePassphrase changes the wallet's passphrases according to the request.
@@ -411,32 +499,119 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 		return err
 	}
 
-	// Wait for the result.
-	return w.waitForResp(ctx, r.resp)
+	// Wait for the accepted request's result even if wallet shutdown begins.
+	// The caller context remains the only way to stop waiting early.
+	reqErr, err := waitForReq(ctx, r.resp)
+	if err != nil {
+		return err
+	}
+
+	return reqErr
+}
+
+// infoReq keeps metadata work inside the accepted handler's Wallet lifetime.
+type infoReq struct {
+	reqCtx
+
+	respChan chan infoResp
+}
+
+// infoResp lets an accepted metadata read finish after its caller cancels.
+type infoResp struct {
+	info *Info
+	err  error
+}
+
+// rescanReq transfers the target list to the existing joined syncer.
+type rescanReq struct {
+	typ         scanType
+	startHeight uint32
+	targets     []waddrmgr.AccountScope
+	respErrChan chan error
 }
 
 // Info returns a comprehensive snapshot of the wallet's static configuration
-// and dynamic synchronization state.
+// and dynamic synchronization state. It returns an error if the chain source's
+// observed tip cannot be read.
 //
 // This is part of the Controller interface.
-func (w *Wallet) Info(_ context.Context) (*Info, error) {
+func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	info := &Info{
-		BirthdayBlock:    w.birthdayBlock,
-		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      w.cfg.ChainParams,
-		Locked:           !w.state.isUnlocked(),
-		Synced:           w.state.isSynced(),
-		SyncedTo:         w.SyncedTo(),
-		IsRecoveryMode:   w.state.isRecoveryMode(),
-		RecoveryProgress: 0,
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := infoReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		respChan: make(chan infoResp, 1),
 	}
 
-	return info, nil
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.info, result.err
+}
+
+// handleInfo assembles an accepted snapshot without checking admission again.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleInfo(r infoReq) {
+	// The outer request owns dependency access until this snapshot completes.
+	walletInfo, err := w.store.GetWallet(r.ctx, w.cfg.Name)
+	if err != nil {
+		r.respChan <- infoResp{err: fmt.Errorf("get wallet info: %w", err)}
+
+		return
+	}
+
+	syncedTo, err := db.OptionalBlockStampFromBlock(walletInfo.SyncedTo)
+	if err != nil {
+		r.respChan <- infoResp{
+			err: fmt.Errorf("decode wallet sync tip: %w", err),
+		}
+
+		return
+	}
+
+	// Info is an ownership boundary, so return a fresh network snapshot
+	// instead of exposing the Wallet's retained mutable configuration.
+	chainParams, err := cloneChainParams(*w.cfg.ChainParams)
+	if err != nil {
+		r.respChan <- infoResp{
+			err: fmt.Errorf("copy chain parameters: %w", err),
+		}
+
+		return
+	}
+
+	bestHash, bestHeight, err := w.cfg.Chain.GetBestBlock()
+	if err != nil {
+		r.respChan <- infoResp{err: fmt.Errorf("get chain tip: %w", err)}
+
+		return
+	}
+
+	state := w.sync.syncState()
+	liveReady := state == syncStateSynced || state == syncStateRescanning
+
+	synced := liveReady &&
+		syncedTo.Height == bestHeight && syncedTo.Hash.IsEqual(bestHash)
+
+	info := &Info{
+		BirthdayBlock: w.birthdayBlock,
+		Backend:       w.cfg.Chain.BackEnd(),
+		ChainParams:   &chainParams,
+		Locked:        !w.state.isUnlocked(),
+		Synced:        synced,
+		SyncedTo:      syncedTo,
+	}
+
+	r.respChan <- infoResp{info: info}
 }
 
 // Resync rewinds the wallet's synchronization state to a specific block
@@ -465,8 +640,7 @@ func (w *Wallet) Rescan(ctx context.Context, startHeight uint32,
 	)
 }
 
-// submitRescanRequest validates the rescan request and submits it to the
-// syncer.
+// submitRescanRequest admits a scan description before chain access.
 func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 	startHeight uint32, targets []waddrmgr.AccountScope) error {
 
@@ -476,10 +650,36 @@ func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 		return err
 	}
 
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := rescanReq{
+		typ:         typ,
+		startHeight: startHeight,
+		targets:     targets,
+		respErrChan: make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleRescanReq validates an accepted scan and transfers it to the syncer.
+// The response acknowledges transfer, preserving asynchronous scan semantics.
+func (w *Wallet) handleRescanReq(r rescanReq) {
+	startHeight := r.startHeight
+
 	// BlockStamp.Height is int32, so we need to ensure the requested
 	// startHeight does not exceed math.MaxInt32.
 	if startHeight > math.MaxInt32 {
-		return fmt.Errorf("%w: %d", ErrStartHeightTooLarge, startHeight)
+		r.respErrChan <- fmt.Errorf(
+			"%w: %d", ErrStartHeightTooLarge, startHeight,
+		)
+
+		return
 	}
 
 	startHeightInt32 := int32(startHeight)
@@ -487,25 +687,31 @@ func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 	// Fetch the current best block to ensure we don't resync past the tip.
 	_, bestHeightInt32, err := w.cfg.Chain.GetBestBlock()
 	if err != nil {
-		return fmt.Errorf("unable to get chain tip: %w", err)
+		r.respErrChan <- fmt.Errorf("unable to get chain tip: %w", err)
+
+		return
 	}
 
 	if startHeightInt32 > bestHeightInt32 {
-		return fmt.Errorf("%w: start height %d is greater than "+
+		r.respErrChan <- fmt.Errorf("%w: start height %d is greater than "+
 			"current chain tip %d", ErrStartHeightTooHigh,
 			startHeight, bestHeightInt32)
+
+		return
 	}
 
 	// Submit the rescan request to the syncer.
 	req := &scanReq{
-		typ: typ,
+		typ: r.typ,
 		startBlock: waddrmgr.BlockStamp{
 			Height: startHeightInt32,
 		},
-		targets: targets,
+		targets: r.targets,
 	}
 
-	return w.sync.requestScan(ctx, req)
+	// The existing joined worker owns scans after transfer. Its lifetime must
+	// also cancel a full mailbox send when shutdown stops consuming scans.
+	r.respErrChan <- w.sync.requestScan(w.lifetimeCtx, req)
 }
 
 // mainLoop is the central event loop for the wallet, responsible for
@@ -533,8 +739,11 @@ func (w *Wallet) mainLoop() {
 				w.handleChangePassphraseReq(r)
 
 			default:
-				log.Errorf("Wallet received unknown request "+
-					"type: %T", req)
+				// Non-control requests run concurrently. Register the handler
+				// before launch so Stop drains every accepted request.
+				w.wg.Add(1)
+
+				go w.handleReq(req)
 			}
 
 		// The auto-lock timer has expired. We trigger a lock with a
@@ -549,6 +758,135 @@ func (w *Wallet) mainLoop() {
 
 			return
 		}
+	}
+}
+
+// reqCtx carries caller cancellation and values across the Wallet request
+// boundary. Keeping the context in one embedded type centralizes the bounded
+// retention contract and its lint exemption for every routed request.
+type reqCtx struct {
+	//nolint:containedctx // Store calls must inherit the caller context.
+	ctx context.Context
+}
+
+// handleReq owns completion bookkeeping for requests accepted by mainLoop. Its
+// type switch is the single routing table for concurrent public method work.
+// Component responses have capacity one and each handler sends exactly once,
+// so delivery cannot block even before the admitted caller receives its result.
+//
+//nolint:cyclop,gocyclo,funlen // Enumerate all request routes in one table.
+func (w *Wallet) handleReq(req any) {
+	defer w.wg.Done()
+
+	switch r := req.(type) {
+	case infoReq:
+		w.handleInfo(r)
+
+	case rescanReq:
+		w.handleRescanReq(r)
+
+	case newAddressReq:
+		w.handleNewAddress(r)
+
+	case getUnusedAddressReq:
+		w.handleGetUnusedAddress(r)
+
+	case getAddressInfoReq:
+		w.handleGetAddressInfo(r)
+
+	case listAddressesReq:
+		w.handleListAddresses(r)
+
+	case importPublicKeyReq:
+		w.handleImportPublicKey(r)
+
+	case importTaprootScriptReq:
+		w.handleImportTaprootScript(r)
+
+	case scriptForOutputReq:
+		w.handleScriptForOutput(r)
+
+	case getDerivationInfoReq:
+		w.handleGetDerivationInfo(r)
+
+	case listUnspentReq:
+		w.handleListUnspent(r)
+
+	case getUtxoReq:
+		w.handleGetUtxo(r)
+
+	case leaseOutputReq:
+		w.handleLeaseOutput(r)
+
+	case releaseOutputReq:
+		w.handleReleaseOutput(r)
+
+	case listLeasedOutputsReq:
+		w.handleListLeasedOutputs(r)
+
+	case getTxReq:
+		w.handleGetTx(r)
+
+	case listTxnsReq:
+		w.handleListTxns(r)
+
+	case labelTxReq:
+		w.handleLabelTx(r)
+
+	case createTransactionReq:
+		w.handleCreateTransaction(r)
+
+	case checkMempoolAcceptanceReq:
+		w.handleCheckMempoolAcceptance(r)
+
+	case broadcastReq:
+		w.handleBroadcast(r)
+
+	case derivePubKeyReq:
+		w.handleDerivePubKey(r)
+
+	case ecdhReq:
+		w.handleECDH(r)
+
+	case signDigestReq:
+		w.handleSignDigest(r)
+
+	case unlockingScriptReq:
+		w.handleComputeUnlockingScript(r)
+
+	case rawSigReq:
+		w.handleComputeRawSig(r)
+
+	case derivePrivKeyReq:
+		w.handleDerivePrivKey(r)
+
+	case privKeyForAddressReq:
+		w.handleGetPrivKeyForAddress(r)
+
+	case decorateInputsReq:
+		w.handleDecorateInputs(r)
+
+	case fundPsbtReq:
+		w.handleFundPsbt(r)
+
+	case signPsbtReq:
+		w.handleSignPsbt(r)
+
+	case finalizePsbtReq:
+		w.handleFinalizePsbt(r)
+
+	case newAccountReq:
+		w.handleNewAccount(r)
+	case renameAccountReq:
+		w.handleRenameAccount(r)
+	case importAccountReq:
+		w.handleImportAccount(r)
+	case getAccountReq:
+		w.handleGetAccount(r)
+	case listAccountsReq:
+		w.handleListAccounts(r)
+	default:
+		log.Errorf("Wallet received unknown request type: %T", req)
 	}
 }
 
@@ -567,24 +905,23 @@ func (w *Wallet) mainLoop() {
 //     wallet's sync tip to this point to ensure a clean rescan range.
 //  6. Update the memory cache.
 func (w *Wallet) verifyBirthday(ctx context.Context) error {
-	// We'll start by fetching our wallet's birthday block.
-	birthdayBlock, verified, err := w.DBGetBirthdayBlock(ctx)
+	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
 	if err != nil {
-		var mgrErr waddrmgr.ManagerError
-		if !errors.As(err, &mgrErr) ||
-			mgrErr.ErrorCode != waddrmgr.ErrBirthdayBlockNotSet {
+		log.Errorf("Unable to sanity check wallet birthday block: %v", err)
 
-			log.Errorf("Unable to sanity check wallet birthday "+
-				"block: %v", err)
-
-			return err
-		}
-		// If not set, we proceed to locate it.
+		return fmt.Errorf("get wallet birthday: %w", err)
 	}
 
 	// If the birthday block has already been verified, we initialize the
 	// cache and exit our sanity check to avoid redundant lookups.
-	if verified {
+	if walletInfo.BirthdayBlock != nil {
+		birthdayBlock, err := db.BlockStampFromBlock(
+			walletInfo.BirthdayBlock,
+		)
+		if err != nil {
+			return fmt.Errorf("decode birthday block: %w", err)
+		}
+
 		log.Infof("Birthday block verified: height=%d, hash=%v",
 			birthdayBlock.Height, birthdayBlock.Hash)
 		w.birthdayBlock = birthdayBlock
@@ -593,22 +930,36 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 	}
 	// Otherwise, we'll attempt to locate a better one now that we have
 	// access to the chain.
-	timestamp := w.addrStore.Birthday()
+	timestamp := walletInfo.Birthday
 
 	newBirthdayBlock, err := locateBirthdayBlock(w.cfg.Chain, timestamp)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("locate birthday block: %w", err)
 	}
 
-	err = w.DBPutBirthdayBlock(ctx, *newBirthdayBlock)
+	storeBlock, err := db.BlockFromBlockStamp(*newBirthdayBlock)
+	if err != nil {
+		return fmt.Errorf("block from stamp: %w", err)
+	}
+
+	// Use walletInfo.ID instead of w.cfg's cached value: Manager.Load
+	// currently initializes the in-memory id to zero, but the store row
+	// we just read carries the authoritative wallet ID.
+	err = w.store.UpdateWallet(
+		ctx, db.UpdateWalletParams{
+			WalletID:      walletInfo.ID,
+			BirthdayBlock: storeBlock,
+			SyncedTo:      storeBlock,
+		},
+	)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("update birthday block: %w", err)
 	}
 
 	w.birthdayBlock = *newBirthdayBlock
@@ -674,8 +1025,10 @@ func (w *Wallet) handleUnlockReq(req unlockReq) {
 		return
 	}
 
-	// Attempt to unlock the underlying address manager.
-	err = w.DBUnlock(w.lifetimeCtx, req.req.Passphrase)
+	// Attempt to unlock the key vault. The vault has no auto-lock of its
+	// own; the controller keeps owning the auto-lock schedule through its
+	// lockTimer below.
+	err = w.keyVault.Unlock(w.lifetimeCtx, req.req.Passphrase)
 	if err != nil {
 		req.resp <- err
 		return
@@ -726,22 +1079,12 @@ func (w *Wallet) handleLockReq(req lockReq) {
 		}
 	}
 
-	// Signal the address manager to lock, clearing sensitive data.
-	err = w.addrStore.Lock()
-	if err != nil {
-		log.Errorf("Could not lock wallet: %v", err)
+	// Signal the key vault to lock, clearing sensitive data. Lock is void
+	// and idempotent: the vault swallows an already-locked condition and
+	// logs any other failure internally.
+	w.keyVault.Lock()
 
-		// If the wallet is already locked, we consider this a success
-		// (idempotency) and proceed to ensure our state is consistent.
-		if !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-			req.resp <- err
-
-			return
-		}
-	}
-
-	// Even if an error occurred (e.g. already locked), we ensure the
-	// wallet's high-level state is synchronized to 'locked'.
+	// Synchronize the wallet's high-level state to 'locked'.
 	w.state.toLocked()
 
 	// Report the result back to the caller.
@@ -749,8 +1092,9 @@ func (w *Wallet) handleLockReq(req lockReq) {
 }
 
 // handleChangePassphraseReq processes a request to rotate the wallet's
-// passphrases. It can change either the public passphrase, the private
-// passphrase, or both in a single atomic database update.
+// passphrase, re-wrapping the persisted key material under the new one.
+//
+//nolint:staticcheck // Bridges the legacy kvdb public-passphrase fields.
 func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 	// First, validate that the wallet is in a state that allows changing
 	// the passphrase.
@@ -760,38 +1104,67 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 		return
 	}
 
-	// Delegate the cryptographic rotation to the database layer.
-	err = w.DBPutPassphrase(w.lifetimeCtx, req.req)
+	// The vault owns the encryption boundary, so it performs the rotation.
+	// Both halves travel together: kvdb applies them in one transaction,
+	// and SQL refuses a request naming the public half before touching
+	// anything.
+	params := keyvault.ChangePassphraseParams{}
+	if req.req.ChangePublic {
+		params.PublicOld = req.req.PublicOld
+		if params.PublicOld == nil {
+			params.PublicOld = []byte{}
+		}
+
+		params.PublicNew = req.req.PublicNew
+	}
+
+	if req.req.ChangePrivate {
+		params.PrivateOld = req.req.PrivateOld
+		if params.PrivateOld == nil {
+			params.PrivateOld = []byte{}
+		}
+
+		params.PrivateNew = req.req.PrivateNew
+	}
+
+	err = w.keyVault.ChangePassphrase(w.lifetimeCtx, params)
+	if err != nil {
+		req.resp <- err
+		return
+	}
 
 	// Report the result back to the caller.
 	req.resp <- err
 }
 
-// sendReq sends an operation request to the main loop or handles cancellation.
+// sendReq transfers an operation request to mainLoop, which makes receipt the
+// Wallet-owned admission point. A successful send means shutdown must drain
+// the accepted handler; cancellation before receipt leaves no admitted work.
 func (w *Wallet) sendReq(ctx context.Context, req any) error {
 	select {
 	case w.requestChan <- req:
 		return nil
 
 	case <-w.lifetimeCtx.Done():
-		return ErrWalletShuttingDown
+		return ErrWalletStopped
 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// waitForResp waits for the response from an operation request or handles
-// cancellation.
-func (w *Wallet) waitForResp(ctx context.Context, resp <-chan error) error {
+// waitForReq waits for a typed result after sendReq has transferred ownership
+// to mainLoop. It intentionally observes only caller cancellation: Wallet
+// shutdown must continue draining the accepted handler, whose response channel
+// is buffered so completion never depends on the caller remaining present.
+func waitForReq[T any](ctx context.Context, respChan <-chan T) (T, error) {
 	select {
-	case err := <-resp:
-		return err
-
-	case <-w.lifetimeCtx.Done():
-		return ErrWalletShuttingDown
+	case result := <-respChan:
+		return result, nil
 
 	case <-ctx.Done():
-		return ctx.Err()
+		var zero T
+
+		return zero, ctx.Err()
 	}
 }

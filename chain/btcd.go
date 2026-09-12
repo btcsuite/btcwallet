@@ -336,6 +336,24 @@ func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []address.Address,
 	return c.Client.Rescan(startHash, addrs, flatOutpoints) // nolint:staticcheck
 }
 
+// WatchAddrsFromTip registers addresses with btcd's existing transaction
+// notification filter without issuing a rescan. The context is checked before
+// registration so a canceled delivery attempt cannot introduce new watches.
+func (c *RPCClient) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	// Staticcheck recommends LoadTxFilter because NotifyReceived is
+	// deprecated. This adapter intentionally keeps NotifyReceived because
+	// its handlers consume OnRecvTx and OnRedeemingTx; LoadTxFilter delivers
+	// through the newer relevant-transaction notification path instead.
+	return c.Client.NotifyReceived(addrs) //nolint:staticcheck
+}
+
 // GetCFilter returns a compact filter for the given block hash and filter
 // type. It wraps the underlying rpcclient method and converts the result to a
 // *gcs.Filter.

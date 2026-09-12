@@ -2,21 +2,54 @@ package wallet
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-// TestHandleUnlockReq verifies that the handleUnlockReq method correctly
-// processes an unlock request by invoking the address manager's Unlock method
-// and updating the wallet state.
+// TestPerformRuntimeSetupRoutesStoreStartup verifies that startup setup uses
+// the runtime store paths for account loading and lease cleanup.
+func TestPerformRuntimeSetupRoutesStoreStartup(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createTestWalletWithMocks(t)
+	w.id = 51
+	birthdayBlock := &db.Block{
+		Hash:      chainhash.Hash{51},
+		Height:    100,
+		Timestamp: time.Unix(1710003700, 0),
+	}
+	accountNumber0 := uint32(0)
+
+	deps.store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
+		Name:          "",
+		BirthdayBlock: birthdayBlock,
+	}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: w.id,
+	}).Return([]db.AccountInfo{{AccountNumber: &accountNumber0}}, nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything, w.id).Return(nil).
+		Once()
+
+	err := w.performRuntimeSetup(t.Context())
+	require.NoError(t, err)
+}
+
+// TestHandleUnlockReq verifies that handleUnlockReq unlocks the key vault and
+// updates the wallet state.
 func TestHandleUnlockReq(t *testing.T) {
 	t.Parallel()
 
@@ -31,8 +64,10 @@ func TestHandleUnlockReq(t *testing.T) {
 	pass := []byte("password")
 	req := newUnlockReq(UnlockRequest{Passphrase: pass})
 
-	// Setup the expected call to the address manager's Unlock method.
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	// Setup the expected call to the key vault's Unlock method.
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 
 	// Act: Dispatch the unlock request to the handler.
 	w.handleUnlockReq(req)
@@ -44,9 +79,8 @@ func TestHandleUnlockReq(t *testing.T) {
 	require.True(t, w.state.isUnlocked())
 }
 
-// TestHandleUnlockReq_Errors verifies that handleUnlockReq correctly handles
-// error conditions, such as attempting to unlock a stopped wallet or a failure
-// from the underlying storage.
+// TestHandleUnlockReq_Errors verifies that handleUnlockReq rejects a stopped
+// wallet and propagates key-vault failures.
 func TestHandleUnlockReq_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -68,7 +102,7 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 		require.ErrorIs(t, err, ErrStateForbidden)
 	})
 
-	t.Run("DBUnlock_Failure", func(t *testing.T) {
+	t.Run("key vault failure", func(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Create a test wallet and transition to 'Started'.
@@ -78,17 +112,143 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 
 		pass := []byte("password")
 		req := newUnlockReq(UnlockRequest{Passphrase: pass})
-		deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+		deps.vault.On(
+			"Unlock", mock.Anything, pass,
+		).Return(
 			errDBMock,
 		).Once()
 
 		// Act: Attempt to unlock the wallet.
 		w.handleUnlockReq(req)
 
-		// Assert: Verify that the database error is propagated.
+		// Assert: Verify that the key-vault error is propagated.
 		err := <-req.resp
 		require.ErrorContains(t, err, "db error")
 	})
+}
+
+// TestControllerChangePassphrase_Interrupted_WaitCancelled verifies
+// ChangePassphrase when response wait is interrupted by context cancellation.
+func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block during response wait and cancel context.
+	w, _ := createTestWalletWithMocks(t)
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.ChangePassphrase(ctx,
+			ChangePassphraseRequest{})
+	}()
+
+	select {
+	case <-w.requestChan:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for request")
+	}
+
+	// Act: Cancel context.
+	cancel()
+
+	// Assert: Verify error.
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for response")
+	}
+}
+
+// TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown verifies
+// that shutdown does not hide the result of an accepted passphrase change.
+func TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown(
+	t *testing.T) {
+
+	t.Parallel()
+
+	// Arrange: Start a wallet and call ChangePassphrase asynchronously so the
+	// test can capture the request after the wallet has accepted ownership.
+	w, _ := createTestWalletWithMocks(t)
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.ChangePassphrase(t.Context(),
+			ChangePassphraseRequest{})
+	}()
+
+	var accepted changePassphraseReq
+	select {
+	case rawReq := <-w.requestChan:
+		var ok bool
+
+		accepted, ok = rawReq.(changePassphraseReq)
+		require.True(t, ok, "expected a change passphrase request")
+
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for request")
+	}
+
+	// Act: Begin shutdown after admission, then deliver the handler result.
+	// This ordering reproduces the race where shutdown previously preempted
+	// the response even though the accepted operation could still complete.
+	w.cancel()
+
+	accepted.resp <- errDBMock
+
+	// Assert: The caller receives the accepted request's exact result instead
+	// of a lifecycle error produced solely because shutdown began.
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, errDBMock)
+
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for response")
+	}
+}
+
+// TestControllerChangePassphrase_Interrupted_WaitTimeout verifies
+// ChangePassphrase when response wait times out.
+func TestControllerChangePassphrase_Interrupted_WaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block during response wait and allow timeout.
+	w, _ := createTestWalletWithMocks(t)
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	ctx, cancel := context.WithTimeout(t.Context(),
+		10*time.Millisecond)
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.ChangePassphrase(ctx,
+			ChangePassphraseRequest{})
+	}()
+
+	select {
+	case <-w.requestChan:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	// Assert: Verify timeout.
+	select {
+	case err := <-errChan:
+		require.ErrorContains(t, err,
+			"context deadline exceeded")
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for response")
+	}
 }
 
 // TestHandleLockReq verifies that the handleLockReq method correctly processes
@@ -106,48 +266,14 @@ func TestHandleLockReq(t *testing.T) {
 
 	req := newLockReq()
 
-	// Setup the expected call to the address manager's Lock method.
-	deps.addrStore.On("Lock").Return(nil).Once()
+	// Setup the expected call to the key vault's Lock method.
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Dispatch the lock request to the handler.
 	w.handleLockReq(req)
 
 	// Assert: Verify that the response indicates success and the wallet
 	// state is no longer 'Unlocked'.
-	resp := <-req.resp
-	require.NoError(t, resp)
-	require.False(t, w.state.isUnlocked())
-}
-
-// TestHandleLockReq_Idempotency verifies that if the wallet is already locked
-// (indicated by waddrmgr.ErrLocked), the lock request treats it as a success
-// and ensures the state is consistent.
-func TestHandleLockReq_Idempotency(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a test wallet and transition it to 'Started'.
-	w, deps := createTestWalletWithMocks(t)
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	// Transition the wallet to the 'Unlocked' state for testing.
-	w.state.toUnlocked()
-
-	req := newLockReq()
-
-	// Setup the expected call to the address manager's Lock method
-	// returning ErrLocked.
-	errLocked := waddrmgr.ManagerError{
-		ErrorCode:   waddrmgr.ErrLocked,
-		Description: "address manager is locked",
-	}
-	deps.addrStore.On("Lock").Return(errLocked).Once()
-
-	// Act: Dispatch the lock request to the handler.
-	w.handleLockReq(req)
-
-	// Assert: Verify that the response indicates success and the wallet
-	// state is 'Locked'.
 	resp := <-req.resp
 	require.NoError(t, resp)
 	require.False(t, w.state.isUnlocked())
@@ -220,11 +346,13 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 	}
 	req := newChangePassphraseReq(reqStruct)
 
-	// Setup the expected call to the address manager's ChangePassphrase
-	// method.
-	deps.addrStore.On(
-		"ChangePassphrase", mock.Anything, []byte("old"),
-		[]byte("new"), true, mock.Anything,
+	// The handler rotates the passphrase through the key vault.
+	deps.vault.On(
+		"ChangePassphrase", mock.Anything,
+		keyvault.ChangePassphraseParams{
+			PrivateOld: []byte("old"),
+			PrivateNew: []byte("new"),
+		},
 	).Return(nil).Once()
 
 	// Act: Call the handler.
@@ -247,27 +375,28 @@ func TestControllerStart(t *testing.T) {
 
 	// 1. Mock verifyBirthday: Expect a call to retrieve the birthday
 	//    block.
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
+	).Once()
 
 	// 2. Mock DBGetAllAccounts: Expect a call to load active account
 	//    managers.
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
 
-	// 3. Mock deleteExpiredLockedOutputs: Expect a call to cleanup expired
-	//    locks in the transaction store.
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	// 3. Mock deleteExpiredLeases: Expect a call to cleanup expired
+	//    leases through the store.
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 
 	// 4. Mock syncer.run: Expect the syncer to be started.
 	deps.syncer.On(
 		"run", mock.Anything,
 	).Return(nil).Once()
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
 	err := w.Start(t.Context())
@@ -338,7 +467,7 @@ func TestControllerUnlock_Interrupted_SendShutdown(t *testing.T) {
 	// Assert: Verify shutdown error.
 	select {
 	case err := <-errChan2:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, ErrWalletStopped)
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -382,12 +511,13 @@ func TestControllerUnlock_Interrupted_WaitCancelled(t *testing.T) {
 	}
 }
 
-// TestControllerUnlock_Interrupted_WaitShutdown verifies Unlock when the
-// response wait is interrupted by wallet shutdown.
-func TestControllerUnlock_Interrupted_WaitShutdown(t *testing.T) {
+// TestControllerUnlockWaitsForAcceptedResultDuringShutdown verifies that
+// shutdown does not hide the result of an accepted unlock request.
+func TestControllerUnlockWaitsForAcceptedResultDuringShutdown(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a wallet and trigger shutdown during response wait.
+	// Arrange: Start a wallet and call Unlock asynchronously so the test can
+	// capture the request after the wallet has accepted ownership.
 	w4, _ := createTestWalletWithMocks(t)
 	require.NoError(t, w4.state.toStarting())
 	require.NoError(t, w4.state.toStarted())
@@ -398,19 +528,31 @@ func TestControllerUnlock_Interrupted_WaitShutdown(t *testing.T) {
 			UnlockRequest{Passphrase: []byte("pw")})
 	}()
 
+	var accepted unlockReq
 	select {
-	case <-w4.requestChan:
+	case rawReq := <-w4.requestChan:
+		var ok bool
+
+		accepted, ok = rawReq.(unlockReq)
+		require.True(t, ok, "expected an unlock request")
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for request")
 	}
 
-	// Act: Stop wallet.
+	// Act: Begin shutdown after admission, then deliver the handler result.
+	// This ordering reproduces the race where shutdown previously preempted
+	// the response even though the accepted operation could still complete.
 	w4.cancel()
 
-	// Assert: Verify shutdown error.
+	accepted.resp <- errDBMock
+
+	// Assert: The caller receives the accepted request's exact result instead
+	// of a lifecycle error produced solely because shutdown began.
 	select {
 	case err := <-errChan4:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, errDBMock)
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -424,8 +566,13 @@ func TestControllerVerifyBirthday_Verified(t *testing.T) {
 	// Arrange: Setup a wallet where the birthday block is already verified.
 	w, deps := createTestWalletWithMocks(t)
 	bs := waddrmgr.BlockStamp{Height: 123, Hash: chainhash.Hash{0x01}}
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{
+			BirthdayBlock: &db.Block{
+				Height: 123,
+				Hash:   chainhash.Hash{0x01},
+			},
+		}, nil).Once()
 
 	// Act: Verify birthday.
 	err := w.verifyBirthday(t.Context())
@@ -444,11 +591,8 @@ func TestControllerVerifyBirthday_LocateFail(t *testing.T) {
 	// and chain lookup fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		waddrmgr.BlockStamp{}, false, waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrBirthdayBlockNotSet,
-		}).Once()
-	deps.addrStore.On("Birthday").Return(time.Now()).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{Birthday: time.Now()}, nil).Once()
 	deps.chain.On("GetBestBlock").Return(nil, int32(0), errChainMock).Once()
 
 	// Act: Attempt to verify birthday.
@@ -467,19 +611,16 @@ func TestControllerVerifyBirthday_PutFail(t *testing.T) {
 	// persisting the birthday block fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		waddrmgr.BlockStamp{}, false, waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrBirthdayBlockNotSet,
-		}).Once()
-	deps.addrStore.On("Birthday").Return(time.Now()).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{Birthday: time.Now()}, nil).Once()
 	deps.chain.On("GetBestBlock").Return(
 		&chainhash.Hash{}, int32(100), nil).Once()
 	deps.chain.On("GetBlockHash", mock.Anything).Return(
 		&chainhash.Hash{}, nil).Maybe()
 	deps.chain.On("GetBlockHeader", mock.Anything).Return(
 		&wire.BlockHeader{}, nil).Maybe()
-	deps.addrStore.On("SetBirthdayBlock", mock.Anything, mock.Anything,
-		true).Return(errPutMock).Once()
+	deps.store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
+		errPutMock).Once()
 
 	// Act: Attempt to verify birthday.
 	err := w.verifyBirthday(t.Context())
@@ -510,8 +651,7 @@ func TestSubmitRescanRequest_Errors(t *testing.T) {
 
 		// Arrange: Setup a started wallet where best block lookup fails.
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 		deps.chain.On("GetBestBlock").Return(
@@ -526,52 +666,113 @@ func TestSubmitRescanRequest_Errors(t *testing.T) {
 	})
 }
 
-// TestControllerStop verifies that the Stop method correctly shuts down the
-// wallet, waiting for the syncer and other background processes to exit.
+// TestControllerStop verifies that Stop completes terminal teardown even when
+// its compatibility context is already canceled, and remains safe to repeat.
 func TestControllerStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create and start a test wallet.
+	// Arrange: Start a Wallet whose sync worker observes shutdown but cannot
+	// return until released. A pre-canceled Stop context proves terminal
+	// cleanup is owned by the Wallet rather than by that caller's deadline.
 	w, deps := createTestWalletWithMocks(t)
+	draining := make(chan struct{})
+	release := make(chan struct{})
 
-	// Setup mocks for the startup sequence.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 
-	// Mock syncer.run to simulate a long-running process that exits when
-	// the context is cancelled.
+	// Keep the worker alive after it observes Wallet cancellation so the test
+	// can distinguish shutdown initiation from complete teardown.
 	deps.syncer.On("run", mock.Anything).Run(func(args mock.Arguments) {
 		ctx, ok := args.Get(0).(context.Context)
 		if !ok {
 			return
 		}
+
 		<-ctx.Done()
+		close(draining)
+		<-release
 	}).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
 	require.True(t, w.state.isStarted())
 
-	// Act: Stop the wallet.
+	// Put the wallet in the unlocked state, mirroring a wallet that holds
+	// decrypted vault keys at shutdown. Stop must lock the vault exactly
+	// once so no runtime key outlives a serial Stop and a later Unlock does
+	// not fail with ErrVaultUnlocked.
+	w.state.toUnlocked()
+	require.True(t, w.state.isUnlocked())
+
+	deps.vault.On("Lock").Return().Once()
+
+	stopCtx, cancelStop := context.WithCancel(t.Context())
+	cancelStop()
+
+	stopResult := make(chan error, 1)
+
+	// Act: Invoke Stop with the canceled compatibility context, wait until
+	// its worker begins draining, and keep teardown blocked until the test
+	// has observed that Stop did not return early.
+	go func() {
+		stopResult <- w.Stop(stopCtx)
+	}()
+
+	<-draining
+
+	// Assert: Cancellation cannot abandon teardown while the Wallet worker
+	// remains active; after release, Stop locks the Vault and records the
+	// terminal state before returning its ordinary result.
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before worker drain: %v", err)
+	default:
+	}
+
+	close(release)
+	require.NoError(t, <-stopResult)
+	require.False(t, w.state.isStarted())
+	require.Equal(t, uint32(lifecycleStopped), w.state.lifecycle.Load())
+	deps.vault.AssertExpectations(t)
+
+	// Act: Call Stop again after the serialized teardown has completed.
 	err := w.Stop(t.Context())
 
-	// Assert: Verify that Stop returned no error and the wallet state is
-	// no longer 'Started'.
+	// Assert: A sequential repeated Stop returns the same successful terminal
+	// outcome without running Vault cleanup again.
 	require.NoError(t, err)
-	require.False(t, w.state.isStarted())
 
-	// Act: Call Stop again to verify idempotency.
-	err = w.Stop(t.Context())
+	// Act: Attempt to restart the terminal Wallet after both Stop calls
+	// have completed.
+	err = w.Start(t.Context())
 
-	// Assert: Verify that subsequent Stop calls are safe and return no
-	// error.
-	require.NoError(t, err)
+	// Assert: A stopped Wallet cannot create a second runtime and returns
+	// the stable terminal sentinel.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestControllerStopBeforeStart verifies that Stop makes an Initialized
+// Wallet terminal without attempting to cancel workers that do not exist.
+func TestControllerStopBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a Wallet whose maintained runtime has never started,
+	// so no startup dependency or background-worker expectation is needed.
+	w, _ := createTestWalletWithMocks(t)
+
+	// Act: Stop the fresh Wallet and then attempt its first Start.
+	stopErr := w.Stop(t.Context())
+	startErr := w.Start(t.Context())
+
+	// Assert: Stop succeeds directly and permanently prevents the retained
+	// Wallet instance from starting later.
+	require.NoError(t, stopErr)
+	require.ErrorIs(t, startErr, ErrWalletStopped)
 }
 
 // TestControllerLock verifies the Lock method. It ensures that the wallet
@@ -583,15 +784,13 @@ func TestControllerLock(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for startup.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -600,8 +799,8 @@ func TestControllerLock(t *testing.T) {
 	w.state.toUnlocked()
 	require.True(t, w.state.isUnlocked())
 
-	// Expect a call to the address manager's Lock method.
-	deps.addrStore.On("Lock").Return(nil).Once()
+	// Expect a call to the key vault's Lock method.
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Call the Lock method.
 	err := w.Lock(t.Context())
@@ -609,6 +808,11 @@ func TestControllerLock(t *testing.T) {
 	// Assert: Verify success and that the wallet state is locked.
 	require.NoError(t, err)
 	require.False(t, w.state.isUnlocked())
+
+	// Allow Stop's extra Lock. Registered
+	// after the operation's Lock().Once() above so that expectation is
+	// matched first and this pass-through absorbs only the teardown Lock.
+	expectStopTeardown(deps)
 
 	// Cleanup: Stop the wallet to release resources.
 	err = w.Stop(t.Context())
@@ -625,15 +829,13 @@ func TestControllerUnlock(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for startup.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -641,8 +843,13 @@ func TestControllerUnlock(t *testing.T) {
 
 	pass := []byte("password")
 
-	// Expect a call to the address manager's Unlock method.
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	// Expect a call to the key vault's Unlock method. Unlock dispatches no
+	// Lock; the only Lock here comes from the cleanup Stop below, so it is
+	// permitted rather than expected -- TestControllerStop is the sole
+	// Stop-to-Vault dispatch falsifier.
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 
 	// Act: Call the Unlock method.
 	err := w.Unlock(t.Context(), UnlockRequest{Passphrase: pass})
@@ -651,7 +858,8 @@ func TestControllerUnlock(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, w.state.isUnlocked())
 
-	// Cleanup: Stop the wallet to release resources.
+	expectStopTeardown(deps)
+
 	err = w.Stop(t.Context())
 	require.NoError(t, err)
 	w.wg.Wait()
@@ -667,15 +875,13 @@ func TestControllerChangePassphrase(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for startup.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -686,11 +892,17 @@ func TestControllerChangePassphrase(t *testing.T) {
 		PrivateNew:    []byte("new"),
 	}
 
-	// Expect a call to ChangePassphrase in the address store.
-	deps.addrStore.On(
-		"ChangePassphrase", mock.Anything, []byte("old"), []byte("new"),
-		true, mock.Anything,
+	// ChangePassphrase rotates the passphrase through the key vault.
+	deps.vault.On(
+		"ChangePassphrase", mock.Anything,
+		keyvault.ChangePassphraseParams{
+			PrivateOld: []byte("old"),
+			PrivateNew: []byte("new"),
+		},
 	).Return(nil).Once()
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	// Act: Call ChangePassphrase.
 	err := w.ChangePassphrase(t.Context(), req)
@@ -795,30 +1007,26 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 
 	// Arrange: Setup a wallet with existing accounts in the address store.
 	w, deps := createTestWalletWithMocks(t)
+	accountNumber0 := uint32(0)
+	accountNumber1 := uint32(1)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
+	).Once()
 
-	scopedMgr := &mockAccountStore{}
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo{
+			{AccountNumber: &accountNumber0},
+			{AccountNumber: &accountNumber1},
+		}, nil).Once()
 
-	scopedMgr.On("LastAccount", mock.Anything).Return(uint32(1), nil).Once()
-	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Maybe()
-	scopedMgr.On(
-		"AccountProperties", mock.Anything, uint32(0),
-	).Return(&waddrmgr.AccountProperties{AccountNumber: 0}, nil).Once()
-	scopedMgr.On(
-		"AccountProperties", mock.Anything, uint32(1),
-	).Return(&waddrmgr.AccountProperties{AccountNumber: 1}, nil).Once()
-
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
 	err := w.Start(t.Context())
@@ -850,9 +1058,9 @@ func TestMainLoop_AutoLock(t *testing.T) {
 	w.lockTimer = time.NewTimer(time.Millisecond * 10)
 
 	lockCalled := make(chan struct{})
-	deps.addrStore.On("Lock").Run(func(args mock.Arguments) {
+	deps.vault.On("Lock").Run(func(args mock.Arguments) {
 		close(lockCalled)
-	}).Return(nil).Once()
+	}).Return().Once()
 
 	// Act: Start main loop.
 	w.wg.Add(1)
@@ -913,7 +1121,7 @@ func TestControllerLock_Interrupted_SendShutdown(t *testing.T) {
 	err := w.Lock(t.Context())
 
 	// Assert: Verify error.
-	require.ErrorIs(t, err, ErrWalletShuttingDown)
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestControllerLock_Interrupted_WaitCancelled verifies Lock when response
@@ -953,12 +1161,13 @@ func TestControllerLock_Interrupted_WaitCancelled(t *testing.T) {
 	}
 }
 
-// TestControllerLock_Interrupted_WaitShutdown verifies Lock when response
-// wait is interrupted by wallet shutdown.
-func TestControllerLock_Interrupted_WaitShutdown(t *testing.T) {
+// TestControllerLockWaitsForAcceptedResultDuringShutdown verifies that
+// shutdown does not hide the result of an accepted lock request.
+func TestControllerLockWaitsForAcceptedResultDuringShutdown(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block during response wait and trigger shutdown.
+	// Arrange: Start a wallet and call Lock asynchronously so the test can
+	// capture the request after the wallet has accepted ownership.
 	w, _ := createTestWalletWithMocks(t)
 
 	require.NoError(t, w.state.toStarting())
@@ -969,19 +1178,31 @@ func TestControllerLock_Interrupted_WaitShutdown(t *testing.T) {
 		errChan <- w.Lock(t.Context())
 	}()
 
+	var accepted lockReq
 	select {
-	case <-w.requestChan:
+	case rawReq := <-w.requestChan:
+		var ok bool
+
+		accepted, ok = rawReq.(lockReq)
+		require.True(t, ok, "expected a lock request")
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for request")
 	}
 
-	// Act: Stop wallet.
+	// Act: Begin shutdown after admission, then deliver the handler result.
+	// This ordering reproduces the race where shutdown previously preempted
+	// the response even though the accepted operation could still complete.
 	w.cancel()
 
-	// Assert: Verify error.
+	accepted.resp <- errDBMock
+
+	// Assert: The caller receives the accepted request's exact result instead
+	// of a lifecycle error produced solely because shutdown began.
 	select {
 	case err := <-errChan:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, errDBMock)
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -1043,116 +1264,7 @@ func TestControllerChangePassphrase_Interrupted_SendShutdown(t *testing.T) {
 		ChangePassphraseRequest{})
 
 	// Assert: Verify error.
-	require.ErrorIs(t, err, ErrWalletShuttingDown)
-}
-
-// TestControllerChangePassphrase_Interrupted_WaitCancelled verifies
-// ChangePassphrase when response wait is interrupted by context cancellation.
-func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and cancel context.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	ctx, cancel := context.WithCancel(t.Context())
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
-	}
-
-	// Act: Cancel context.
-	cancel()
-
-	// Assert: Verify error.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
-}
-
-// TestControllerChangePassphrase_Interrupted_WaitShutdown verifies
-// ChangePassphrase when response wait is interrupted by wallet shutdown.
-func TestControllerChangePassphrase_Interrupted_WaitShutdown(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and trigger shutdown.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(t.Context(),
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
-	}
-
-	// Act: Stop wallet.
-	w.cancel()
-
-	// Assert: Verify error.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
-}
-
-// TestControllerChangePassphrase_Interrupted_WaitTimeout verifies
-// ChangePassphrase when response wait times out.
-func TestControllerChangePassphrase_Interrupted_WaitTimeout(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and allow timeout.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	ctx, cancel := context.WithTimeout(t.Context(),
-		10*time.Millisecond)
-	defer cancel()
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
-
-	// Assert: Verify timeout.
-	select {
-	case err := <-errChan:
-		require.ErrorContains(t, err,
-			"context deadline exceeded")
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestHandleChangePassphraseReq_Errors verifies error handling for the
@@ -1176,6 +1288,145 @@ func TestHandleChangePassphraseReq_Errors(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
+// TestControllerInfoWaitsForAcceptedResult verifies that caller cancellation
+// cannot discard an accepted result or let Stop pass unfinished Store work.
+func TestControllerInfoWaitsForAcceptedResult(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "Success",
+		},
+		{
+			name: "Dependency error",
+			err:  errDBMock,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Hold an accepted Store read that ignores cancellation.
+			// Its release determines when both Info and shutdown can finish.
+			w, deps := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
+			enteredChan := make(chan struct{})
+			releaseChan := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(releaseChan) })
+			t.Cleanup(unblock)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			deps.store.On("GetWallet", ctx, "").Run(
+				func(mock.Arguments) {
+					close(enteredChan)
+					<-releaseChan
+				},
+			).Return(&db.WalletInfo{}, tc.err).Once()
+			deps.vault.On("Lock").Return().Once()
+
+			if tc.err == nil {
+				deps.chain.On("BackEnd").Return("mock").Once()
+				deps.syncer.On("syncState").Return(syncStateSynced).Once()
+				deps.chain.On("GetBestBlock").Return(
+					&chainhash.Hash{}, int32(0), nil,
+				).Once()
+			}
+
+			resultChan := make(chan infoResp, 1)
+			go func() {
+				info, err := w.Info(ctx)
+				resultChan <- infoResp{info: info, err: err}
+			}()
+
+			<-enteredChan
+
+			// Act: Cancel after admission and begin shutdown while Store is
+			// held. Neither path may abandon the accepted operation.
+			cancel()
+
+			stoppedChan := make(chan error, 1)
+			go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+			<-w.lifetimeCtx.Done()
+
+			// Assert: Both calls stay joined until release, then Info returns
+			// the ordinary result and Stop completes its vault teardown.
+			select {
+			case result := <-resultChan:
+				t.Fatalf("Info returned before Store completion: %v",
+					result.err)
+			case err := <-stoppedChan:
+				t.Fatalf("Stop returned before Store completion: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+
+			unblock()
+
+			result := <-resultChan
+			require.ErrorIs(t, result.err, tc.err)
+
+			if tc.err == nil {
+				require.Equal(t, "mock", result.info.Backend)
+			} else {
+				require.Nil(t, result.info)
+			}
+
+			require.NoError(t, <-stoppedChan)
+		})
+	}
+}
+
+// TestControllerRescanFullMailboxStops prevents an accepted scan from
+// stranding Stop when the syncer stops consuming its already-full mailbox.
+func TestControllerRescanFullMailboxStops(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use the real mailboxChan transfer with a queued scan and no
+	// consumer, matching the syncer's shutdown state. Chain entry proves the
+	// new request is accepted before shutdown begins.
+	w, deps := createTestWalletWithMocks(t)
+
+	mailboxChan := make(chan *scanReq, 1)
+	mailboxChan <- &scanReq{}
+
+	w.sync = &syncer{scanReqChan: mailboxChan}
+	startLoadedWalletForTest(t, w)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.vault.On("Lock").Return().Once()
+
+	enteredChan := make(chan struct{})
+	deps.chain.On("GetBestBlock").Run(func(mock.Arguments) {
+		close(enteredChan)
+	}).Return(&chainhash.Hash{}, int32(100), nil).Once()
+
+	resultChan := make(chan error, 1)
+	go func() { resultChan <- w.Resync(t.Context(), 10) }()
+
+	<-enteredChan
+
+	// Act: Stop while the accepted transfer cannot enqueue another scan.
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	// Assert: Wallet cancellation releases the mailbox send and its handler;
+	// the original queued scan stays intact and the new caller gets the
+	// transfer's cancellation error rather than a substituted shutdown error.
+	select {
+	case err := <-stoppedChan:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("full scan mailboxChan stranded Stop")
+	}
+
+	require.ErrorIs(t, <-resultChan, context.Canceled)
+	require.Len(t, mailboxChan, 1)
+}
+
 // TestControllerInfo verifies the Info method. It checks that the wallet
 // correctly aggregates information from its subsystems (chain backend,
 // address manager, and syncer).
@@ -1185,28 +1436,37 @@ func TestControllerInfo(t *testing.T) {
 	// Arrange: Create and start a test wallet with mocked subsystems.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	syncedTo := &db.Block{
+		Hash:   chainhash.Hash{100},
+		Height: 100,
+	}
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{
+			BirthdayBlock: &db.Block{Height: 100},
+		}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	// Mock the chain backend to return a specific name.
 	deps.chain.On("BackEnd").Return("mock")
 
-	// Mock SyncedTo to return a known block stamp.
-	deps.addrStore.On("SyncedTo").Return(bs)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.chain.On("GetBestBlock").Return(
+		&syncedTo.Hash, int32(syncedTo.Height), nil,
+	).Once()
 
-	// Mock syncState to indicate the wallet is fully synced.
-	deps.syncer.On("syncState").Return(syncStateSynced)
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	require.NoError(t, w.Start(t.Context()))
+
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{SyncedTo: syncedTo}, nil,
+	).Once()
 
 	// Act: Call the Info method.
 	info, err := w.Info(t.Context())
@@ -1217,12 +1477,292 @@ func TestControllerInfo(t *testing.T) {
 	require.Equal(t, "mock", info.Backend)
 	require.Equal(t, int32(100), info.BirthdayBlock.Height)
 	require.True(t, info.Synced)
+	require.Equal(t, int32(syncedTo.Height), info.SyncedTo.Height)
+	require.Equal(t, syncedTo.Hash, info.SyncedTo.Hash)
 	require.True(t, info.Locked)
 
 	// Cleanup: Stop the wallet to release resources.
 	err = w.Stop(t.Context())
 	require.NoError(t, err)
 	w.wg.Wait()
+}
+
+// TestControllerInfoCopiesChainParams verifies the information API never
+// exposes the Wallet's retained network policy through a mutable pointer.
+func TestControllerInfoCopiesChainParams(t *testing.T) {
+	t.Parallel()
+
+	const mutatedName = "mutated"
+
+	// Arrange: Build a started Wallet around strict Store, Chain, and Syncer
+	// mocks.
+	// Two calls are expected so a mutation of the first result can be checked
+	// against a separately produced second snapshot.
+	store := &walletmock.Store{}
+	chain := &bwmock.Chain{}
+	syncer := &mockChainSyncer{}
+
+	store.On("GetWallet", mock.Anything, "isolated").Return(
+		&db.WalletInfo{}, nil,
+	).Twice()
+	chain.On("BackEnd").Return("mock").Twice()
+	syncer.On("syncState").Return(syncStateBackendSyncing).Twice()
+	chain.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(0), nil,
+	).Twice()
+
+	params := chaincfg.MainNetParams
+	// This fixture assembles its own runtime; the shared start helper
+	// only starts the request loop and joins it before storage cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+
+	w := &Wallet{
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+		lockTimer:   time.NewTimer(time.Hour),
+		store:       store,
+		cfg: Config{
+			Name:        "isolated",
+			Chain:       chain,
+			ChainParams: &params,
+		},
+		sync:  syncer,
+		state: newWalletState(nil),
+	}
+	// Disable auto-lock timing so this fixture exercises only its API call.
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
+
+	// Act: Mutate nested values in the first Info result, then request a new
+	// snapshot from the same retained Wallet configuration.
+	first, err := w.Info(t.Context())
+	require.NoError(t, err)
+
+	first.ChainParams.Name = mutatedName
+	first.ChainParams.PowLimit.SetInt64(1)
+
+	second, err := w.Info(t.Context())
+
+	// Assert: Verify the second result still matches the Wallet's policy and
+	// every mocked interaction occurred with its exact planned cardinality.
+	require.NoError(t, err)
+	require.Equal(t, params.Name, second.ChainParams.Name)
+	require.Equal(t, params.PowLimit, second.ChainParams.PowLimit)
+	store.AssertExpectations(t)
+	chain.AssertExpectations(t)
+	syncer.AssertExpectations(t)
+}
+
+// TestControllerInfoSyncTipErrors verifies Info preserves Store errors and
+// represents a wallet without a committed sync tip using the legacy unknown
+// height.
+func TestControllerInfoSyncTipErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Store error", func(t *testing.T) {
+		t.Parallel()
+
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+
+		deps.store.On("GetWallet", mock.Anything, "").Return(
+			nil, errDBMock,
+		).Once()
+
+		_, err := w.Info(t.Context())
+		require.ErrorIs(t, err, errDBMock)
+	})
+
+	t.Run("No synced tip", func(t *testing.T) {
+		t.Parallel()
+
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+
+		deps.store.On("GetWallet", mock.Anything, "").Return(
+			&db.WalletInfo{}, nil,
+		).Once()
+		deps.syncer.On("syncState").Return(syncStateSynced).Once()
+		deps.chain.On("GetBestBlock").Return(
+			&chainhash.Hash{}, int32(0), nil,
+		).Once()
+		deps.chain.On("BackEnd").Return("mock")
+
+		info, err := w.Info(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, int32(-1), info.SyncedTo.Height)
+		require.False(t, info.Synced)
+	})
+}
+
+// TestControllerInfoExactSyncStatus verifies that Info reports synchronized
+// only when live delivery is ready and the committed Wallet tip exactly matches
+// the observed chain tip.
+func TestControllerInfoExactSyncStatus(t *testing.T) {
+	t.Parallel()
+
+	syncedHash := chainhash.Hash{100}
+	otherHash := chainhash.Hash{101}
+
+	testCases := []struct {
+		name        string
+		syncState   syncState
+		walletTip   *db.Block
+		chainHash   chainhash.Hash
+		chainHeight int32
+		expectSync  bool
+	}{
+		{
+			name:        "exact ready tip",
+			syncState:   syncStateSynced,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  true,
+		},
+		{
+			name:        "backend not ready",
+			syncState:   syncStateBackendSyncing,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+		{
+			name:        "targeted rescan at exact live tip",
+			syncState:   syncStateRescanning,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  true,
+		},
+		{
+			name:        "targeted rescan with height mismatch",
+			syncState:   syncStateRescanning,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 99},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+		},
+		{
+			name:        "targeted rescan with hash mismatch",
+			syncState:   syncStateRescanning,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   otherHash,
+			chainHeight: 100,
+		},
+		{
+			name:        "live delivery not ready",
+			syncState:   syncStateSyncing,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+		{
+			name:        "height mismatch",
+			syncState:   syncStateSynced,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 99},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+		{
+			name:        "same height hash mismatch",
+			syncState:   syncStateSynced,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   otherHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start a Wallet with independently controlled
+			// committed, observed, and live-delivery state.
+			w, deps := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
+			deps.store.On("GetWallet", mock.Anything, "").Return(
+				&db.WalletInfo{SyncedTo: testCase.walletTip}, nil,
+			).Once()
+			deps.syncer.On("syncState").Return(
+				testCase.syncState,
+			).Once()
+			deps.chain.On("GetBestBlock").Return(
+				&testCase.chainHash, testCase.chainHeight, nil,
+			).Once()
+			deps.chain.On("BackEnd").Return("mock")
+
+			// Act: Read the public Wallet snapshot.
+			info, err := w.Info(t.Context())
+
+			// Assert: Readiness alone is insufficient; both tip fields
+			// must identify the same block.
+			require.NoError(t, err)
+			require.Equal(t, testCase.expectSync, info.Synced)
+		})
+	}
+}
+
+// TestControllerInfoChainTipError verifies that Info cannot report a
+// successful snapshot when the observed chain tip is unavailable.
+func TestControllerInfoChainTipError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start a Wallet with a committed tip while the chain source
+	// fails to provide its observed tip.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
+	deps.store.On("GetWallet", mock.Anything, "").Return(
+		&db.WalletInfo{SyncedTo: &db.Block{
+			Hash: chainhash.Hash{100}, Height: 100,
+		}}, nil,
+	).Once()
+	deps.chain.On("GetBestBlock").Return(
+		(*chainhash.Hash)(nil), int32(0), errBestBlock,
+	).Once()
+
+	// Act: Read the public Wallet snapshot.
+	_, err := w.Info(t.Context())
+
+	// Assert: The source error remains identifiable through the public call.
+	require.ErrorIs(t, err, errBestBlock)
+}
+
+// TestControllerInfoSmallGapReportsUnsynced verifies that Info remains exact
+// while the wallet's committed tip trails the observed tip by one block.
+func TestControllerInfoSmallGapReportsUnsynced(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the live delivery state ready while the persisted Wallet
+	// tip trails the observed source by one block.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
+	walletHash := chainhash.Hash{99}
+	bestHash := chainhash.Hash{100}
+	deps.store.On("GetWallet", mock.Anything, "").Return(
+		&db.WalletInfo{SyncedTo: &db.Block{
+			Hash: walletHash, Height: 99,
+		}}, nil,
+	).Once()
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.chain.On("GetBestBlock").Return(
+		&bestHash, int32(100), nil,
+	).Once()
+	deps.chain.On("BackEnd").Return("mock")
+
+	// Act: Read the public snapshot without changing admission state.
+	info, err := w.Info(t.Context())
+
+	// Assert: Info does not conflate admission readiness with exact sync.
+	require.NoError(t, err)
+	require.False(t, info.Synced)
 }
 
 // TestControllerResync verifies the Resync method.
@@ -1233,8 +1773,7 @@ func TestControllerResync(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 		deps.chain.On("GetBestBlock").Return(
@@ -1249,8 +1788,7 @@ func TestControllerResync(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 		deps.chain.On("GetBestBlock").Return(
@@ -1276,8 +1814,7 @@ func TestControllerRescan(t *testing.T) {
 		t.Parallel()
 
 		w, _ := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		err := w.Rescan(t.Context(), 50, nil)
 		require.ErrorIs(t, err, ErrNoScanTargets)
@@ -1287,8 +1824,7 @@ func TestControllerRescan(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 
@@ -1315,12 +1851,12 @@ func TestControllerRescan(t *testing.T) {
 func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where birthday block lookup fails.
+	// Arrange: Setup mock expectations where GetWallet fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, false, errDBMock).Once()
+	deps.store.On(
+		"GetWallet", mock.Anything, mock.Anything,
+	).Return(nil, errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
 	err := w.Start(t.Context())
@@ -1328,6 +1864,13 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
 	require.False(t, w.state.isStarted())
+
+	// Act: Attempt to start again after setup canceled the Wallet-owned
+	// runtime and moved the lifecycle to terminal Stopped.
+	err = w.Start(t.Context())
+
+	// Assert: Startup failure is terminal for this Wallet instance.
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestControllerStart_DBGetAllAccountsFail verifies Start fails when
@@ -1339,19 +1882,13 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 	// startup.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On(
+		"GetWallet", mock.Anything, mock.Anything,
+	).Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 
-	mockScopedMgr := &mockAccountStore{}
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore{mockScopedMgr}).Once()
-
-	mockScopedMgr.On(
-		"LastAccount", mock.Anything,
-	).Return(uint32(0), errDBMock).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
 	err := w.Start(t.Context())
@@ -1370,14 +1907,9 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	// and must be located from the chain.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, false, waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrBirthdayBlockNotSet,
-	}).Once()
-
 	birthday := time.Now()
-	deps.addrStore.On("Birthday").Return(birthday).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{Birthday: birthday}, nil).Once()
 
 	deps.chain.On(
 		"GetBestBlock",
@@ -1391,23 +1923,23 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 		"GetBlockHeader", mock.Anything,
 	).Return(header, nil).Once()
 
-	deps.addrStore.On(
-		"SetBirthdayBlock", mock.Anything,
-		mock.MatchedBy(func(bs waddrmgr.BlockStamp) bool {
-			return bs.Height == 50
-		}), true,
-	).Return(nil).Once()
-	deps.addrStore.On(
-		"SetSyncedTo", mock.Anything, mock.Anything,
+	deps.store.On(
+		"UpdateWallet", mock.Anything,
+		mock.MatchedBy(func(p db.UpdateWalletParams) bool {
+			return p.BirthdayBlock != nil &&
+				p.BirthdayBlock.Height == 50
+		}),
 	).Return(nil).Once()
 
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
 	err := w.Start(t.Context())
@@ -1421,39 +1953,57 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestControllerUnlock_DefaultTimeout verifies default timeout usage.
-func TestControllerUnlock_DefaultTimeout(t *testing.T) {
+// TestControllerUnlockDefaultTimeout verifies an omitted request timeout is
+// replaced with the Manager-normalized Wallet policy before timer handling.
+func TestControllerUnlockDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a wallet with an auto-lock duration and start the
-	// main loop.
-	w, deps := createTestWalletWithMocks(t)
-
-	w.cfg.AutoLockDuration = time.Minute
+	// Arrange: Put a Wallet in the state accepted by Unlock and configure a
+	// distinctive default. Leave its main loop stopped so the test can inspect
+	// the serialized request at the boundary immediately before handleUnlockReq
+	// uses the request timeout to reset the auto-lock timer.
+	w, _ := createTestWalletWithMocks(t)
+	autoLockDuration := time.Minute
+	w.cfg.AutoLockDuration = autoLockDuration
 
 	require.NoError(t, w.state.toStarting())
 	require.NoError(t, w.state.toStarted())
 
-	w.wg.Add(1)
+	// Act: Invoke Unlock asynchronously because it waits for the main loop's
+	// response, then intercept the exact request the main loop would handle.
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.Unlock(t.Context(), UnlockRequest{
+			Passphrase: []byte("pass"),
+		})
+	}()
 
-	go w.mainLoop()
+	var req unlockReq
+	select {
+	case rawReq := <-w.requestChan:
+		var ok bool
 
-	pass := []byte("pass")
-	req := UnlockRequest{Passphrase: pass}
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
-	// Auto-lock might trigger if the test runs slowly, but it's not
-	// guaranteed.
-	deps.addrStore.On("Lock").Return(nil).Maybe()
+		req, ok = rawReq.(unlockReq)
+		require.True(t, ok)
 
-	// Act: Perform Unlock with default timeout.
-	err := w.Unlock(t.Context(), req)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unlock request")
+	}
 
-	// Assert: Verify success.
-	require.NoError(t, err)
+	// Assert: The serialized request carries the configured default into the
+	// timer handler. Complete the intercepted request and verify Unlock returns
+	// successfully so its caller-facing response path is not left blocked.
+	require.Equal(t, autoLockDuration, req.req.Timeout)
 
-	// Clean up.
-	w.cancel()
-	w.wg.Wait()
+	req.resp <- nil
+
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unlock response")
+	}
 }
 
 // TestControllerStart_DeleteExpiredFail verifies Start fails when
@@ -1465,14 +2015,15 @@ func TestControllerStart_DeleteExpiredFail(t *testing.T) {
 	// fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		bs, true, nil).Once()
-	deps.addrStore.On("ActiveScopedKeyManagers").Return(
-		[]waddrmgr.AccountStore(nil)).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 
-	deps.txStore.On("DeleteExpiredLockedOutputs", mock.Anything).Return(
-		errDBMock).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).Return(
+		[]db.AccountInfo(nil), nil).Once()
+
+	deps.store.On("DeleteExpiredLeases", mock.Anything, mock.Anything).
+		Return(errDBMock).Once()
 
 	// Act: Attempt to start.
 	err := w.Start(t.Context())
@@ -1499,7 +2050,9 @@ func TestControllerUnlock_NegativeTimeout(t *testing.T) {
 
 	pass := []byte("pass")
 	req := UnlockRequest{Passphrase: pass, Timeout: -1}
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 
 	// Act: Perform Unlock with negative timeout (no auto-lock).
 	err := w.Unlock(t.Context(), req)
@@ -1512,9 +2065,8 @@ func TestControllerUnlock_NegativeTimeout(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestControllerUnlock_DBUnlockFail verifies Unlock failure when
-// DBUnlock fails.
-func TestControllerUnlock_DBUnlockFail(t *testing.T) {
+// TestControllerUnlockVaultFailure verifies Unlock reports a key-vault error.
+func TestControllerUnlockVaultFailure(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a wallet and mock an unlock failure.
@@ -1528,7 +2080,7 @@ func TestControllerUnlock_DBUnlockFail(t *testing.T) {
 	go w.mainLoop()
 
 	pass := []byte("pass")
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+	deps.vault.On("Unlock", mock.Anything, pass).Return(
 		errDBMock).Once()
 
 	// Act: Attempt Unlock.
@@ -1542,28 +2094,6 @@ func TestControllerUnlock_DBUnlockFail(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestHandleLockReq_LockError verifies error handling when Lock fails.
-func TestHandleLockReq_LockError(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup mock expectations where internal lock fails.
-	w, deps := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	req := lockReq{resp: make(chan error, 1)}
-
-	deps.addrStore.On("Lock").Return(errLockMock).Once()
-
-	// Act: Handle lock request.
-	w.handleLockReq(req)
-	err := <-req.resp
-
-	// Assert: Verify error.
-	require.ErrorContains(t, err, "lock fail")
-}
-
 // TestSubmitRescanRequest_HeightOverflow verifies large start height rejection.
 func TestSubmitRescanRequest_HeightOverflow(t *testing.T) {
 	t.Parallel()
@@ -1571,8 +2101,7 @@ func TestSubmitRescanRequest_HeightOverflow(t *testing.T) {
 	// Arrange: Setup a wallet and attempt a rescan with an invalid height.
 	w, deps := createTestWalletWithMocks(t)
 
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	startLoadedWalletForTest(t, w)
 
 	deps.syncer.On("syncState").Return(syncStateSynced).Maybe()
 
@@ -1647,24 +2176,24 @@ func TestControllerLock_StateError(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
-// TestWaitForBackoff_StableRun verifies that the backoff is reset to the
-// initial value if the syncer has been running for a stable amount of time.
-func TestWaitForBackoff_StableRun(t *testing.T) {
+// TestWaitForBackoffStableRun verifies a stable sync run resets to the
+// Wallet-local retry policy instead of an independent controller constant.
+func TestWaitForBackoffStableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet with a canceled context to avoid waiting.
+	// Arrange: Give a Wallet a distinctive Manager-owned retry interval and a
+	// timer seam that records the reset value while firing immediately.
+	retryInterval := 3 * time.Second
 	w := &Wallet{
 		lifetimeCtx: context.Background(),
+		cfg: Config{
+			WalletSyncRetryInterval: retryInterval,
+		},
 	}
-
-	// Mock a start time that exceeds the stable run time.
 	startTime := time.Now().Add(-stableRunTime - time.Minute)
 	currentBackoff := maxBackoff
-
-	// Mock the timer function to fire immediately.
 	timerFn := func(d time.Duration) <-chan time.Time {
-		// Verify that the backoff was reset to initial before waiting.
-		require.Equal(t, initialBackoff, d)
+		require.Equal(t, retryInterval, d)
 
 		c := make(chan time.Time, 1)
 		c <- time.Now()
@@ -1672,12 +2201,13 @@ func TestWaitForBackoff_StableRun(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
+	// Act: Apply retry backoff after a run long enough to be stable.
 	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
 
-	// Assert: Verify that the operation continued and backoff doubled.
+	// Assert: Verify the configured interval was used and exponential growth
+	// continues from that Manager-owned reset point.
 	require.True(t, ok)
-	require.Equal(t, initialBackoff*2, nextBackoff)
+	require.Equal(t, retryInterval*2, nextBackoff)
 }
 
 // TestWaitForBackoff_UnstableRun verifies that the backoff duration doubles
@@ -1772,4 +2302,23 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 	// Assert: Verify that the operation was aborted.
 	require.False(t, ok)
 	require.Equal(t, time.Duration(0), nextBackoff)
+}
+
+// TestPassphraseSentinelIsReachable pins that the wallet's exported
+// passphrase sentinel is the same value the key vault returns, wrapped as a
+// real return path wraps them. External callers cannot import
+// wallet/internal/keyvault, so if these ever became independent copies instead
+// of aliases, errors.Is would silently stop matching for every caller outside
+// this module.
+func TestPassphraseSentinelIsReachable(t *testing.T) {
+	t.Parallel()
+
+	require.ErrorIs(
+		t, fmt.Errorf("vault: %w", keyvault.ErrInvalidPassphrase),
+		ErrInvalidPassphrase,
+	)
+	require.ErrorIs(
+		t, fmt.Errorf("vault: %w", keyvault.ErrEmptyPassphrase),
+		ErrEmptyPassphrase,
+	)
 }

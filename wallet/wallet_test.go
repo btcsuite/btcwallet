@@ -10,7 +10,10 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,94 +40,55 @@ var (
 	}
 )
 
-// TestConfigValidate ensures that the Config.validate method correctly
-// identifies missing required parameters.
-func TestConfigValidate(t *testing.T) {
+// TestErrIndeterminateCommitWrapping verifies that operation context can wrap
+// an indeterminate durable-mutation result without hiding its public identity.
+func TestErrIndeterminateCommitWrapping(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
+	// Arrange: choose representative context that a wallet operation would
+	// retain while reporting an indeterminate commit to its caller.
+	operation := "create wallet"
 
-	testCases := []struct {
-		name        string
-		config      Config
-		expectedErr string
-	}{
-		{
-			name: "valid config",
-			config: Config{
-				DB:             db,
-				Chain:          &mockChain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			},
-		},
-		{
-			name: "invalid RecoveryWindow",
-			config: Config{
-				DB:             db,
-				Chain:          &mockChain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow - 1,
-			},
-			expectedErr: "RecoveryWindow",
-		},
-		{
-			name: "missing DB",
-			config: Config{
-				Chain:          &mockChain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			},
-			expectedErr: "DB",
-		},
-		{
-			name: "missing Chain",
-			config: Config{
-				DB:             db,
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			},
-			expectedErr: "Chain",
-		},
-		{
-			name: "missing ChainParams",
-			config: Config{
-				DB:             db,
-				Chain:          &mockChain{},
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			},
-			expectedErr: "ChainParams",
-		},
-		{
-			name: "missing Name",
-			config: Config{
-				DB:             db,
-				Chain:          &mockChain{},
-				ChainParams:    &chainParams,
-				RecoveryWindow: MinRecoveryWindow,
-			},
-			expectedErr: "Name",
-		},
+	// Act: wrap the sentinel with the standard error-chain mechanism used to
+	// preserve operation-specific context at public boundaries.
+	err := fmt.Errorf("%s: %w", operation, ErrIndeterminateCommit)
+
+	// Assert: confirm callers can match the stable identity without losing
+	// the useful context that identifies the affected operation.
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.ErrorContains(t, err, operation)
+}
+
+// TestWalletSyncedToUsesStore verifies that a wallet without a legacy address
+// manager reads its synced tip from the Store.
+func TestWalletSyncedToUsesStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a Store-backed wallet with no legacy address manager.
+	store := &walletmock.Store{}
+	t.Cleanup(func() { store.AssertExpectations(t) })
+
+	syncedTo := &db.Block{
+		Hash:      chainhash.Hash{0x01},
+		Height:    123,
+		Timestamp: time.Unix(10, 0),
+	}
+	store.On("GetWallet", mock.Anything, "store-wallet").Return(
+		&db.WalletInfo{SyncedTo: syncedTo}, nil,
+	).Once()
+
+	wallet := &Wallet{
+		cfg:   Config{Name: "store-wallet"},
+		store: store,
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	// Act: Read the current synced tip.
+	got := wallet.SyncedTo()
 
-			err := tc.config.validate()
-			if tc.expectedErr == "" {
-				require.NoError(t, err)
-			} else {
-				require.ErrorContains(t, err, tc.expectedErr)
-			}
-		})
-	}
+	// Assert: Verify the Store metadata is returned as a block stamp.
+	want, err := db.BlockStampFromBlock(syncedTo)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 // mockChainConn is a mock in-memory implementation of the chainConn interface

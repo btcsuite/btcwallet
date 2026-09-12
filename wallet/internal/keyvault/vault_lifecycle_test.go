@@ -1,0 +1,807 @@
+package keyvault
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/snacl"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	bwmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+)
+
+// errStoreUnavailable is a sentinel error for simulating store failures in
+// tests.
+var errStoreUnavailable = errors.New("store unavailable")
+
+var (
+	// correctPassphrase is used to assert correct passphrase usage.
+	correctPassphrase = []byte("correct-passphrase")
+
+	// wrongPassphrase is used to assert wrong passphrase usage.
+	wrongPassphrase = []byte("wrong-passphrase")
+)
+
+// TestWalletVaultLockClearsUnlockedState verifies that Lock returns the
+// vault to the locked state and wipes runtime secrets.
+func TestWalletVaultLockClearsUnlockedState(t *testing.T) {
+	t.Parallel()
+
+	vault := NewWalletVault(nil, 1, false)
+	state := makeUnlockedState(t)
+	vault.unlockedState = state
+
+	require.False(t, vault.IsLocked())
+
+	vault.Lock()
+
+	require.True(t, vault.IsLocked())
+	require.Nil(t, vault.unlockedState)
+	require.Equal(t, snacl.CryptoKey{}, state.cryptoKeyPrivate)
+	require.Equal(t, snacl.CryptoKey{}, state.cryptoKeyScript)
+	require.Nil(t, state.hdRootKey)
+}
+
+// TestWalletVaultLockIdempotent verifies that Lock stays a no-op when already
+// locked.
+func TestWalletVaultLockIdempotent(t *testing.T) {
+	t.Parallel()
+
+	vault := NewWalletVault(nil, 1, false)
+	require.True(t, vault.IsLocked())
+
+	vault.Lock()
+
+	require.True(t, vault.IsLocked())
+	require.Nil(t, vault.unlockedState)
+
+	vault.Lock()
+	require.True(t, vault.IsLocked())
+	require.Nil(t, vault.unlockedState)
+}
+
+// TestWalletVaultIsLockedInitialState verifies that a new vault starts locked.
+func TestWalletVaultIsLockedInitialState(t *testing.T) {
+	t.Parallel()
+
+	vault := NewWalletVault(nil, 1, false)
+	require.True(t, vault.IsLocked())
+}
+
+// TestWalletVaultIsLockedUnlockedState verifies that populated runtime state is
+// reported as unlocked.
+func TestWalletVaultIsLockedUnlockedState(t *testing.T) {
+	t.Parallel()
+
+	vault := NewWalletVault(nil, 1, false)
+	vault.unlockedState = &unlockedState{}
+	require.False(t, vault.IsLocked())
+}
+
+// TestWalletVaultUnlockSuccess verifies that Unlock loads persisted secrets and
+// reconstructs the runtime crypto and HD root key state.
+func TestWalletVaultUnlockSuccess(t *testing.T) {
+	t.Parallel()
+
+	secrets, expected := makeWalletSecrets(t, correctPassphrase)
+
+	const walletID = uint32(7)
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		secrets, nil,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	require.False(t, vault.IsLocked())
+	require.NotNil(t, vault.unlockedState)
+	require.Equal(
+		t, expected.cryptoKeyPrivate[:],
+		vault.unlockedState.cryptoKeyPrivate[:],
+	)
+	require.Equal(
+		t, expected.cryptoKeyScript[:], vault.unlockedState.cryptoKeyScript[:],
+	)
+	require.Equal(
+		t, expected.hdRootKey.String(), vault.unlockedState.hdRootKey.String(),
+	)
+}
+
+// TestWalletVaultUnlockWrongPassphraseKeepsLocked verifies that an invalid
+// passphrase preserves the vault sentinel error and leaves no runtime state.
+func TestWalletVaultUnlockWrongPassphraseKeepsLocked(t *testing.T) {
+	t.Parallel()
+
+	secrets, _ := makeWalletSecrets(t, correctPassphrase)
+
+	const walletID = uint32(8)
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		secrets, nil,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	err := vault.Unlock(t.Context(), wrongPassphrase)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPassphrase)
+	require.True(t, vault.IsLocked())
+	require.Nil(t, vault.unlockedState)
+}
+
+// TestWalletVaultUnlockAlreadyUnlockedReturnsError verifies that Unlock reports
+// already-unlocked state without touching runtime state.
+func TestWalletVaultUnlockAlreadyUnlockedReturnsError(t *testing.T) {
+	t.Parallel()
+
+	secrets, expected := makeWalletSecrets(t, correctPassphrase)
+
+	const walletID = uint32(10)
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		secrets, nil,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+
+	previousState := vault.unlockedState
+	previousPrivate := vault.unlockedState.cryptoKeyPrivate
+	previousScript := vault.unlockedState.cryptoKeyScript
+	previousHDRoot := vault.unlockedState.hdRootKey.String()
+
+	err := vault.Unlock(t.Context(), wrongPassphrase)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrVaultUnlocked)
+	require.False(t, vault.IsLocked())
+	require.Same(t, previousState, vault.unlockedState)
+	require.Equal(
+		t, expected.cryptoKeyPrivate[:],
+		vault.unlockedState.cryptoKeyPrivate[:],
+	)
+	require.Equal(
+		t, expected.cryptoKeyScript[:], vault.unlockedState.cryptoKeyScript[:],
+	)
+	require.Equal(
+		t, expected.hdRootKey.String(), vault.unlockedState.hdRootKey.String(),
+	)
+	require.Equal(t, previousPrivate, vault.unlockedState.cryptoKeyPrivate)
+	require.Equal(t, previousScript, vault.unlockedState.cryptoKeyScript)
+	require.Equal(t, previousHDRoot, vault.unlockedState.hdRootKey.String())
+}
+
+// TestWalletVaultUnlockStoreErrorPropagates verifies that store failures are
+// wrapped with wallet context without creating unlocked runtime state.
+func TestWalletVaultUnlockStoreErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	const walletID = uint32(9)
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		(*db.WalletSecrets)(nil), errStoreUnavailable,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	err := vault.Unlock(t.Context(), correctPassphrase)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStoreUnavailable)
+	require.True(t, vault.IsLocked())
+}
+
+// TestWalletVaultUnlockMalformedScriptKeyLocksVault verifies that a failure
+// after partial runtime state allocation leaves the vault locked.
+func TestWalletVaultUnlockMalformedScriptKeyLocksVault(t *testing.T) {
+	t.Parallel()
+
+	secrets, _ := makeWalletSecrets(t, correctPassphrase)
+	secrets.EncryptedCryptoScriptKey = []byte("malformed")
+
+	const walletID = uint32(13)
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		secrets, nil,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	err := vault.Unlock(t.Context(), correctPassphrase)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errUnexpectedState)
+	require.ErrorIs(t, err, snacl.ErrMalformed)
+	require.True(t, vault.IsLocked())
+	require.Nil(t, vault.unlockedState)
+}
+
+// TestWalletVaultChangePassphraseLockedRotates verifies that a locked vault can
+// rotate its passphrase from persisted ciphertext and stays locked with no
+// decrypted state left behind.
+func TestWalletVaultChangePassphraseLockedRotates(t *testing.T) {
+	t.Parallel()
+
+	oldSecrets, oldExpected := makeWalletSecrets(t, correctPassphrase)
+	newPassphrase := []byte("new-passphrase")
+
+	const walletID = uint32(19)
+
+	var capturedUpdate db.UpdateWalletSecretsParams
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Once()
+	store.On("UpdateWalletSecrets", mock.Anything, mock.MatchedBy(
+		func(params db.UpdateWalletSecretsParams) bool {
+			capturedUpdate = params
+			return true
+		},
+	)).Return(nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	// Never unlock the vault: it must rotate from persisted ciphertext.
+	vault := NewWalletVault(store, walletID, false)
+	require.True(t, vault.IsLocked())
+
+	err := vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: correctPassphrase,
+			PrivateNew: newPassphrase,
+		},
+	)
+	require.NoError(t, err)
+
+	// The vault must remain locked with no runtime state.
+	require.True(t, vault.IsLocked())
+	require.Nil(t, vault.unlockedState)
+
+	// The rotated secrets must decrypt with the new passphrase to the same
+	// runtime keys and reject the old passphrase.
+	cryptoScriptKey := capturedUpdate.EncryptedCryptoScriptKey
+	masterHDPrivKey := capturedUpdate.EncryptedMasterHdPrivKey
+
+	updatedSecrets := &db.WalletSecrets{
+		MasterPrivParams:         capturedUpdate.MasterPrivParams,
+		EncryptedCryptoPrivKey:   capturedUpdate.EncryptedCryptoPrivKey,
+		EncryptedCryptoScriptKey: cryptoScriptKey,
+		EncryptedMasterHdPrivKey: masterHDPrivKey,
+	}
+
+	newState, err := decryptWalletSecrets(
+		updatedSecrets, newPassphrase, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(newState.zero)
+	require.Equal(
+		t, oldExpected.cryptoKeyPrivate[:],
+		newState.cryptoKeyPrivate[:],
+	)
+	require.Equal(
+		t, oldExpected.cryptoKeyScript[:], newState.cryptoKeyScript[:],
+	)
+	require.Equal(
+		t, oldExpected.hdRootKey.String(), newState.hdRootKey.String(),
+	)
+
+	_, err = decryptWalletSecrets(updatedSecrets, correctPassphrase, false)
+	require.ErrorIs(t, err, ErrInvalidPassphrase)
+}
+
+// TestWalletVaultChangePassphraseWrongOldPassphrase verifies that a wrong old
+// private passphrase is rejected without mutating persisted or runtime state.
+func TestWalletVaultChangePassphraseWrongOldPassphrase(t *testing.T) {
+	t.Parallel()
+
+	oldSecrets, oldExpected := makeWalletSecrets(t, correctPassphrase)
+
+	const walletID = uint32(20)
+
+	store := new(bwmock.Store)
+
+	// Unlock fetches the secrets once; ChangePassphrase fetches them again
+	// before validating the (wrong) old passphrase.
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Twice()
+	t.Cleanup(func() {
+		// UpdateWalletSecrets must never be called on a wrong
+		// passphrase.
+		store.AssertExpectations(t)
+		store.AssertNotCalled(t, "UpdateWalletSecrets")
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	oldState := vault.unlockedState
+	err := vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: wrongPassphrase,
+			PrivateNew: []byte("new-passphrase"),
+		},
+	)
+	require.ErrorIs(t, err, ErrInvalidPassphrase)
+
+	// Runtime state must be untouched.
+	require.Same(t, oldState, vault.unlockedState)
+	require.Equal(
+		t, oldExpected.cryptoKeyPrivate[:],
+		oldState.cryptoKeyPrivate[:],
+	)
+	require.False(t, vault.IsLocked())
+}
+
+// TestWalletVaultChangePassphraseEmptyPrivateNew verifies that an empty new
+// private passphrase takes precedence over context and credential errors before
+// persisted state is read or mutated.
+func TestWalletVaultChangePassphraseEmptyPrivateNew(t *testing.T) {
+	t.Parallel()
+
+	const walletID = uint32(22)
+
+	store := new(bwmock.Store)
+	t.Cleanup(func() {
+		store.AssertNotCalled(t, "GetWalletSecrets")
+		store.AssertNotCalled(t, "UpdateWalletSecrets")
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := vault.ChangePassphrase(
+		ctx, ChangePassphraseParams{
+			PrivateOld: wrongPassphrase,
+			PrivateNew: []byte{},
+		},
+	)
+	require.ErrorIs(t, err, ErrEmptyPassphrase)
+	require.True(t, vault.IsLocked())
+}
+
+// TestWalletVaultChangePassphraseUpdateErrorPreservesState verifies that
+// persistence failures leave the vault unlocked with existing runtime state.
+func TestWalletVaultChangePassphraseUpdateErrorPreservesState(t *testing.T) {
+	t.Parallel()
+
+	oldSecrets, oldExpected := makeWalletSecrets(t, correctPassphrase)
+	newPassphrase := []byte("new-passphrase")
+
+	const walletID = uint32(15)
+
+	var capturedUpdate db.UpdateWalletSecretsParams
+
+	store := new(bwmock.Store)
+
+	// Unlock and ChangePassphrase each fetch the persisted secrets once.
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Twice()
+	store.On("UpdateWalletSecrets", mock.Anything, mock.MatchedBy(
+		func(params db.UpdateWalletSecretsParams) bool {
+			capturedUpdate = params
+			return true
+		},
+	)).Return(errStoreUnavailable).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	oldState := vault.unlockedState
+	err := vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: correctPassphrase,
+			PrivateNew: newPassphrase,
+		},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStoreUnavailable)
+
+	require.Equal(t, walletID, capturedUpdate.WalletID)
+	require.Same(t, oldState, vault.unlockedState)
+	require.Equal(
+		t, oldExpected.cryptoKeyPrivate[:], oldState.cryptoKeyPrivate[:],
+	)
+	require.Equal(
+		t, oldExpected.cryptoKeyScript[:], oldState.cryptoKeyScript[:],
+	)
+	require.Equal(
+		t, oldExpected.hdRootKey.String(), oldState.hdRootKey.String(),
+	)
+	require.False(t, vault.IsLocked())
+}
+
+// TestWalletVaultChangePassphraseSuccessPersistsRotation verifies that a change
+// persists wallet secrets encrypted by the new passphrase while keeping
+// unlocked runtime state unchanged.
+func TestWalletVaultChangePassphraseSuccessPersistsRotation(t *testing.T) {
+	t.Parallel()
+
+	oldSecrets, oldExpected := makeWalletSecrets(t, correctPassphrase)
+	newPassphrase := []byte("new-passphrase")
+
+	const walletID = uint32(16)
+
+	var capturedUpdate db.UpdateWalletSecretsParams
+
+	store := new(bwmock.Store)
+
+	// Unlock and ChangePassphrase each fetch the persisted secrets once.
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Twice()
+	store.On("UpdateWalletSecrets", mock.Anything, mock.MatchedBy(
+		func(params db.UpdateWalletSecretsParams) bool {
+			capturedUpdate = params
+			return true
+		},
+	)).Return(nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	oldState := vault.unlockedState
+
+	require.NoError(t, vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: correctPassphrase,
+			PrivateNew: newPassphrase,
+		},
+	))
+	require.Same(t, oldState, vault.unlockedState)
+	require.Equal(
+		t, oldExpected.cryptoKeyPrivate[:],
+		vault.unlockedState.cryptoKeyPrivate[:],
+	)
+	require.Equal(
+		t, oldExpected.cryptoKeyScript[:],
+		vault.unlockedState.cryptoKeyScript[:],
+	)
+	require.Equal(
+		t, oldExpected.hdRootKey.String(),
+		vault.unlockedState.hdRootKey.String(),
+	)
+	require.False(t, vault.IsLocked())
+
+	updatedSecrets := &db.WalletSecrets{
+		MasterPrivParams:         capturedUpdate.MasterPrivParams,
+		EncryptedCryptoPrivKey:   capturedUpdate.EncryptedCryptoPrivKey,
+		EncryptedCryptoScriptKey: capturedUpdate.EncryptedCryptoScriptKey,
+		EncryptedMasterHdPrivKey: capturedUpdate.EncryptedMasterHdPrivKey,
+	}
+
+	newState, err := decryptWalletSecrets(updatedSecrets, newPassphrase, false)
+	require.NoError(t, err)
+	t.Cleanup(newState.zero)
+	require.Equal(
+		t, oldExpected.cryptoKeyPrivate[:], newState.cryptoKeyPrivate[:],
+	)
+	require.Equal(
+		t, oldExpected.cryptoKeyScript[:], newState.cryptoKeyScript[:],
+	)
+	require.Equal(
+		t, oldExpected.hdRootKey.String(), newState.hdRootKey.String(),
+	)
+
+	_, err = decryptWalletSecrets(updatedSecrets, correctPassphrase, false)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPassphrase)
+}
+
+// TestWalletVaultChangePassphrasePreservesHDRootCiphertext verifies that
+// private passphrase rotation carries the HD root key ciphertext forward
+// unchanged.
+func TestWalletVaultChangePassphrasePreservesHDRootCiphertext(t *testing.T) {
+	t.Parallel()
+
+	oldSecrets, _ := makeWalletSecrets(t, correctPassphrase)
+	newPassphrase := []byte("new-passphrase")
+
+	const walletID = uint32(17)
+
+	var capturedUpdate db.UpdateWalletSecretsParams
+
+	store := new(bwmock.Store)
+
+	// Unlock and ChangePassphrase each fetch the persisted secrets once.
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Twice()
+	store.On("UpdateWalletSecrets", mock.Anything, mock.MatchedBy(
+		func(params db.UpdateWalletSecretsParams) bool {
+			capturedUpdate = params
+			return true
+		},
+	)).Return(nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	err := vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: correctPassphrase,
+			PrivateNew: newPassphrase,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t, oldSecrets.EncryptedMasterHdPrivKey,
+		capturedUpdate.EncryptedMasterHdPrivKey,
+	)
+}
+
+// TestWalletVaultChangePassphraseCorruptHDRootFails verifies that private
+// passphrase rotation validates the carried HD-root ciphertext before
+// persisting it. A corrupt/mismatched root ciphertext must fail the rotation
+// instead of reporting success while stranding the wallet (the rotated
+// secrets would be unusable because unlock can no longer recover the HD root).
+func TestWalletVaultChangePassphraseCorruptHDRootFails(t *testing.T) {
+	t.Parallel()
+
+	oldSecrets, _ := makeWalletSecrets(t, correctPassphrase)
+	newPassphrase := []byte("new-passphrase")
+
+	// Corrupt the persisted HD-root ciphertext. The old master key still
+	// derives (correctPassphrase is valid) and both crypto keys still
+	// re-encrypt, so without an HD-root validation step the rotation would
+	// wrongly report success.
+	oldSecrets.EncryptedMasterHdPrivKey = []byte("not-a-valid-ciphertext")
+
+	const walletID = uint32(19)
+
+	store := new(bwmock.Store)
+
+	// ChangePassphrase fetches the persisted secrets once. It must never
+	// reach UpdateWalletSecrets because validation fails first, so no
+	// UpdateWalletSecrets expectation is registered.
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+
+	err := vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: correctPassphrase,
+			PrivateNew: newPassphrase,
+		},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errUnexpectedState)
+}
+
+// TestWalletVaultUnlockWatchOnlySkipsPrivateMaterial verifies that watch-only
+// unlock reconstructs script runtime state without requiring spendable secrets.
+func TestWalletVaultUnlockWatchOnlySkipsPrivateMaterial(t *testing.T) {
+	t.Parallel()
+
+	secrets, expected := makeWatchOnlyWalletSecrets(t, correctPassphrase)
+
+	const walletID = uint32(14)
+
+	store := new(bwmock.Store)
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		secrets, nil,
+	).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, true)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	require.False(t, vault.IsLocked())
+	require.NotNil(t, vault.unlockedState)
+	require.Equal(
+		t, expected.cryptoKeyScript[:], vault.unlockedState.cryptoKeyScript[:],
+	)
+	require.Equal(t, snacl.CryptoKey{}, vault.unlockedState.cryptoKeyPrivate)
+	require.Nil(t, vault.unlockedState.hdRootKey)
+
+	plaintext, err := vault.Decrypt(waddrmgr.CKTPrivate, []byte("ciphertext"))
+	require.Nil(t, plaintext)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errUnsupportedCryptoKeyType)
+}
+
+// TestWalletVaultChangePassphraseWatchOnlyRotatesScriptMaterial verifies that
+// watch-only passphrase rotation preserves script-only runtime state.
+func TestWalletVaultChangePassphraseWatchOnlyRotatesScriptMaterial(
+	t *testing.T) {
+
+	t.Parallel()
+
+	oldSecrets, expected := makeWatchOnlyWalletSecrets(t, correctPassphrase)
+	newPassphrase := []byte("new-passphrase")
+
+	const walletID = uint32(18)
+
+	var capturedUpdate db.UpdateWalletSecretsParams
+
+	store := new(bwmock.Store)
+
+	// Unlock and ChangePassphrase each fetch the persisted secrets once.
+	store.On("GetWalletSecrets", mock.Anything, walletID).Return(
+		oldSecrets, nil,
+	).Twice()
+	store.On("UpdateWalletSecrets", mock.Anything, mock.MatchedBy(
+		func(params db.UpdateWalletSecretsParams) bool {
+			capturedUpdate = params
+			return true
+		},
+	)).Return(nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, walletID, true)
+	require.NoError(t, vault.Unlock(t.Context(), correctPassphrase))
+	t.Cleanup(vault.Lock)
+
+	oldState := vault.unlockedState
+	require.NoError(t, vault.ChangePassphrase(
+		t.Context(), ChangePassphraseParams{
+			PrivateOld: correctPassphrase,
+			PrivateNew: newPassphrase,
+		},
+	))
+	require.Same(t, oldState, vault.unlockedState)
+	require.Equal(
+		t, expected.cryptoKeyScript[:], vault.unlockedState.cryptoKeyScript[:],
+	)
+	require.Nil(t, capturedUpdate.EncryptedCryptoPrivKey)
+	require.Nil(t, capturedUpdate.EncryptedMasterHdPrivKey)
+
+	updatedSecrets := &db.WalletSecrets{
+		MasterPrivParams:         capturedUpdate.MasterPrivParams,
+		EncryptedCryptoScriptKey: capturedUpdate.EncryptedCryptoScriptKey,
+	}
+
+	newState, err := decryptWalletSecrets(updatedSecrets, newPassphrase, true)
+	require.NoError(t, err)
+	t.Cleanup(newState.zero)
+	require.Equal(t, expected.cryptoKeyScript[:], newState.cryptoKeyScript[:])
+	require.Equal(t, snacl.CryptoKey{}, newState.cryptoKeyPrivate)
+	require.Nil(t, newState.hdRootKey)
+
+	_, err = decryptWalletSecrets(updatedSecrets, correctPassphrase, true)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPassphrase)
+}
+
+// TestDecryptWalletSecretsWatchOnlyAllowsScriptKeys verifies the legal
+// watch-only shape where script crypto material exists without spendable
+// secrets.
+func TestDecryptWalletSecretsWatchOnlyAllowsScriptKeys(t *testing.T) {
+	t.Parallel()
+
+	secrets, expected := makeWalletSecrets(t, correctPassphrase)
+	secrets.EncryptedCryptoPrivKey = nil
+	secrets.EncryptedMasterHdPrivKey = nil
+
+	state, err := decryptWalletSecrets(secrets, correctPassphrase, true)
+	require.NoError(t, err)
+	t.Cleanup(state.zero)
+
+	require.Equal(t, expected.cryptoKeyScript[:], state.cryptoKeyScript[:])
+	require.Equal(t, snacl.CryptoKey{}, state.cryptoKeyPrivate)
+	require.Nil(t, state.hdRootKey)
+}
+
+// TestDecryptWalletSecretsSpendableRequiresHDRoot verifies that spendable
+// wallets cannot unlock without HD private root material.
+func TestDecryptWalletSecretsSpendableRequiresHDRoot(t *testing.T) {
+	t.Parallel()
+
+	secrets, _ := makeWalletSecrets(t, correctPassphrase)
+	secrets.EncryptedMasterHdPrivKey = nil
+
+	state, err := decryptWalletSecrets(secrets, correctPassphrase, false)
+	require.Nil(t, state)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errUnexpectedState)
+}
+
+// makeWalletSecrets creates encrypted wallet secret material for unlock tests.
+func makeWalletSecrets(t *testing.T, passphrase []byte) (*db.WalletSecrets,
+	unlockedState) {
+
+	t.Helper()
+
+	masterPrivateKey, err := snacl.NewSecretKey(
+		&passphrase, waddrmgr.FastScryptOptions.N,
+		waddrmgr.FastScryptOptions.R, waddrmgr.FastScryptOptions.P,
+	)
+	require.NoError(t, err)
+	t.Cleanup(masterPrivateKey.Zero)
+
+	privateKey, err := snacl.GenerateCryptoKey()
+	require.NoError(t, err)
+	scriptKey, err := snacl.GenerateCryptoKey()
+	require.NoError(t, err)
+
+	seed := []byte("0123456789abcdef0123456789abcdef")
+	hdRootKey, err := hdkeychain.NewMaster(
+		seed, &chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	encryptedPrivateKey, err := masterPrivateKey.Encrypt(privateKey[:])
+	require.NoError(t, err)
+	encryptedScriptKey, err := masterPrivateKey.Encrypt(scriptKey[:])
+	require.NoError(t, err)
+	encryptedHDRootKey, err := privateKey.Encrypt([]byte(hdRootKey.String()))
+	require.NoError(t, err)
+
+	secrets := &db.WalletSecrets{
+		MasterPrivParams:         masterPrivateKey.Marshal(),
+		EncryptedCryptoPrivKey:   encryptedPrivateKey,
+		EncryptedCryptoScriptKey: encryptedScriptKey,
+		EncryptedMasterHdPrivKey: encryptedHDRootKey,
+	}
+
+	return secrets, unlockedState{
+		cryptoKeyPrivate: *privateKey,
+		cryptoKeyScript:  *scriptKey,
+		hdRootKey:        hdRootKey,
+	}
+}
+
+// makeWatchOnlyWalletSecrets removes spendable material from test secrets.
+func makeWatchOnlyWalletSecrets(t *testing.T,
+	passphrase []byte) (*db.WalletSecrets, unlockedState) {
+
+	t.Helper()
+
+	secrets, expected := makeWalletSecrets(t, passphrase)
+	secrets.EncryptedCryptoPrivKey = nil
+	secrets.EncryptedMasterHdPrivKey = nil
+
+	expected.hdRootKey.Zero()
+	expected.cryptoKeyPrivate = snacl.CryptoKey{}
+	expected.hdRootKey = nil
+
+	return secrets, expected
+}
