@@ -3409,3 +3409,110 @@ func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	)
 	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
 }
+
+// TestNewDerivedAddressesConcurrentBatches checks that concurrent transactions
+// return complete contiguous batches without interleaving their child indexes.
+func TestNewDerivedAddressesConcurrentBatches(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Both requests allocate two children from the same account and
+	// branch, so only transaction-level serialization can keep batches intact.
+	store := NewTestStore(t)
+	id := newWallet(t, store, "concurrent-batches")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		Scope:            db.KeyScopeBIP0084,
+		AccountName:      derivedAccountName,
+		RequireChainSync: true,
+	}
+
+	type result struct {
+		batch []db.AddressInfo
+		err   error
+	}
+
+	results := make(chan result, 2)
+
+	// Act: Submit both batches independently. Collect both results before
+	// asserting, so both allocators finish before cleanup closes storage.
+	for range 2 {
+		go func() {
+			batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+			results <- result{
+				batch: batch,
+				err:   err,
+			}
+		}()
+	}
+
+	completed := []result{<-results, <-results}
+
+	// Assert: Each batch contains adjacent children and their starting indexes
+	// are 0 and 2, regardless of which concurrent request finishes first.
+	starts := make([]uint32, 0, len(completed))
+	for _, result := range completed {
+		require.NoError(t, result.err)
+		require.Len(t, result.batch, 2)
+		require.Equal(t, result.batch[0].Index+1, result.batch[1].Index)
+
+		starts = append(starts, result.batch[0].Index)
+	}
+
+	require.ElementsMatch(t, []uint32{0, 2}, starts)
+}
+
+// TestNewDerivedAddressesSurvivesReopen checks that both address rows and the
+// next-child counter survive closing and reopening the SQL Store.
+func TestNewDerivedAddressesSurvivesReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit one internal batch through the real SQL transaction.
+	// Reuse the existing reopen fixture to read it through a fresh connection.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	id := newWallet(t, store, "reopened-batch")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		Scope:            db.KeyScopeBIP0084,
+		AccountName:      derivedAccountName,
+		Change:           true,
+		RequireChainSync: true,
+	}
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+
+	// Act: Close the original pool, read its persisted rows, then allocate from
+	// the same branch using only the reopened Store's durable state.
+	require.NoError(t, store.Close())
+	store = reopen()
+	rows, rowsErr := store.ListAddresses(
+		t.Context(),
+		listAccountAddressesQuery(t, id, params.Scope, params.AccountName, 10),
+	)
+	// Select by semantic number alone to exercise the SQL lookup independently
+	// of the name used for the first batch and its durable row query.
+	require.NotNil(t, batch[0].AccountNumber)
+
+	params.AccountName = ""
+	params.AccountNumber = batch[0].AccountNumber
+	next, nextErr := store.NewDerivedAddresses(t.Context(), params, 1)
+
+	// Assert: Reopening preserves the original destinations and starts the
+	// next allocation after their indexes instead of returning either again.
+	require.NoError(t, rowsErr)
+	require.Len(t, rows.Items, 2)
+	require.Equal(t, batch[0].ScriptPubKey, rows.Items[0].ScriptPubKey)
+	require.Equal(t, batch[1].ScriptPubKey, rows.Items[1].ScriptPubKey)
+	require.NoError(t, nextErr)
+	require.Len(t, next, 1)
+	require.Equal(t, batch[0].AccountNumber, next[0].AccountNumber)
+	require.Equal(t, derivedAccountName, next[0].AccountName)
+	require.Equal(t, uint32(2), next[0].Index)
+	require.Equal(t, uint32(1), next[0].Branch)
+}
