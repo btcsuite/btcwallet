@@ -124,6 +124,11 @@ var (
 	// its maximum representable value.
 	ErrMaxAddressIndexReached = errors.New("max address index reached")
 
+	// ErrAddressChildUnavailable marks a consumed leaf that cannot be returned,
+	// either because HD derivation rejected it or its script is already owned.
+	// Other derivation or database errors must roll back the allocation.
+	ErrAddressChildUnavailable = errors.New("address child unavailable")
+
 	// ErrTxNotFound is returned when a transaction is not found in the
 	// database.
 	ErrTxNotFound = errors.New("tx not found")
@@ -329,6 +334,13 @@ type DerivedAccountData struct {
 
 // AddressStore defines the database actions for managing addresses.
 type AddressStore interface {
+	// NewDerivedAddresses atomically allocates count fresh children in order.
+	// Errors return no addresses; exhaustion may commit consumed invalid
+	// indexes, and an ambiguous commit must never be retried automatically.
+	// RequireChainSync applies before mutation. Kvdb is unsupported.
+	NewDerivedAddresses(ctx context.Context, params NewDerivedAddressParams,
+		count uint32) ([]AddressInfo, error)
+
 	// NewDerivedAddress creates a new HD-derived address for the specified
 	// account and key scope. The concrete backend owns address derivation:
 	// SQL backends use their configured AddressDerivationFunc, while kvdb

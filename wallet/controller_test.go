@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -2321,4 +2322,100 @@ func TestPassphraseSentinelIsReachable(t *testing.T) {
 		t, fmt.Errorf("vault: %w", keyvault.ErrEmptyPassphrase),
 		ErrEmptyPassphrase,
 	)
+}
+
+// TestRuntimeSetupReplaysStoredAddresses ensures startup watches eligible rows
+// in both branches and raw imports before admitting work, or fails setup.
+func TestRuntimeSetupReplaysStoredAddresses(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		watchErr error
+	}{
+		{
+			name: "registered before admission",
+		},
+		{
+			name:     "registration prevents startup",
+			watchErr: errDBMock,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Return a custom-scope account, an excluded account,
+			// plus a keyless alias. Read only eligible children and raw rows.
+			w, deps := createTestWalletWithMocks(t)
+			w.addrStore = nil
+			scope := db.KeyScope{Purpose: 1234, Coin: 0}
+			name := "replayed-account"
+			accounts := []db.AccountInfo{
+				{
+					AccountName: name,
+					KeyScope:    scope,
+				},
+				{
+					AccountName: "excluded",
+					NoChainSync: true,
+				},
+				{
+					AccountName: db.DefaultImportedAccountName,
+					IsImported:  true,
+				},
+			}
+
+			deps.store.On("GetWallet", t.Context(), w.cfg.Name).
+				Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+			deps.store.On("ListAccounts", t.Context(),
+				db.ListAccountsQuery{WalletID: w.id}).
+				Return(accounts, nil).Once()
+			key := storeDerivationAccountPubKey(t)
+
+			var (
+				stored  = make([]db.AddressInfo, 0, 3)
+				watched = make([]address.Address, 0, 3)
+			)
+			for index := range uint32(3) {
+				addr, script, _ := expectedStoreAddress(
+					t, key, db.WitnessPubKey, index%2, index,
+				)
+				stored = append(stored, db.AddressInfo{
+					ScriptPubKey: script,
+					Branch:       index % 2,
+				})
+				watched = append(watched, addr)
+			}
+
+			page, err := addressPageRequest()
+			require.NoError(t, err)
+			deps.store.On("IterAddresses", t.Context(), db.ListAddressesQuery{
+				WalletID: w.id,
+				Page:     page,
+			}).Return(addressIter(stored[0])).Once()
+			deps.store.On("IterAddresses", t.Context(), db.ListAddressesQuery{
+				WalletID:    w.id,
+				Page:        page,
+				AccountName: &name,
+				Scope:       &scope,
+			}).Return(addressIter(stored[1:]...)).Once()
+			deps.chain.On("WatchAddrsFromTip", t.Context(), watched).
+				Run(func(mock.Arguments) {
+					require.Error(t, w.state.validateStarted())
+				}).Return(tc.watchErr).Once()
+
+			if tc.watchErr == nil {
+				deps.store.On("DeleteExpiredLeases", t.Context(), w.id).
+					Return(nil).Once()
+			}
+
+			// Act: Run the synchronous setup boundary called by Start before
+			// its request loop; failure must stop it before remaining setup.
+			err = w.performRuntimeSetup(t.Context())
+
+			// Assert: Setup's outcome matches registration, and shared cleanup
+			// checks the exact eligible query/watch set and omitted accounts.
+			require.ErrorIs(t, err, tc.watchErr)
+		})
+	}
 }

@@ -832,6 +832,10 @@ type AddressSecret struct {
 // NewDerivedAddressParams contains the parameters for creating a new derived
 // address.
 type NewDerivedAddressParams struct {
+	// AccountNumber selects a stable account identity instead of AccountName.
+	// A nil value preserves the existing name-based allocation contract.
+	AccountNumber *uint32
+
 	// WalletID is the ID of the wallet to create the address in.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL

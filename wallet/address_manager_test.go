@@ -6,8 +6,11 @@ package wallet
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -18,9 +21,11 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -1574,4 +1579,432 @@ func TestScriptForOutputNestedWitness(t *testing.T) {
 	require.Equal(t, witnessProgram, scriptInfo.WitnessProgram)
 	require.Equal(t, witnessProgram, scriptInfo.RedeemScript)
 	require.Equal(t, expectedSigScript, scriptInfo.SigScript)
+}
+
+// TestNewBulkAddressesReturnsWatchedBatch checks the minimum and maximum batch
+// sizes, preserving order for both semantic selectors and address branches.
+func TestNewBulkAddressesReturnsWatchedBatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		count    uint32
+		internal bool
+		numbered bool
+	}{
+		{
+			name:  "single external by name",
+			count: 1,
+		},
+		{
+			name:     "maximum internal by number",
+			count:    MaxBulkAddressCount,
+			internal: true,
+			numbered: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start a SQL-mode wallet with one complete Store batch
+			// and one ordered registration expectation on its lifetime context.
+			w, deps := createTestWalletWithMocks(t)
+			w.addrStore = nil
+			startLoadedWalletForTest(t, w)
+
+			scope := waddrmgr.KeyScopeBIP0084
+			selector := NewAccountSelectorByName(scope, "batch")
+
+			params := db.NewDerivedAddressParams{
+				WalletID:         w.id,
+				AccountName:      "batch",
+				Scope:            db.KeyScope(scope),
+				Change:           tc.internal,
+				RequireChainSync: true,
+			}
+			if tc.numbered {
+				selector = NewAccountSelectorByNumber(scope, 0)
+				params.AccountName = ""
+				params.AccountNumber = new(uint32)
+			}
+
+			key := storeDerivationAccountPubKey(t)
+
+			var branch uint32
+			if tc.internal {
+				branch = 1
+			}
+
+			stored := make([]db.AddressInfo, 0, tc.count)
+
+			watched := make([]address.Address, 0, tc.count)
+			for index := range tc.count {
+				addr, script, pubKey := expectedStoreAddress(
+					t, key, db.WitnessPubKey, branch, index,
+				)
+				stored = append(stored, db.AddressInfo{
+					AddrType:          db.WitnessPubKey,
+					HasDerivationPath: true,
+					Branch:            branch,
+					Index:             index,
+					ScriptPubKey:      script,
+					PubKey:            pubKey,
+				})
+				watched = append(watched, addr)
+			}
+
+			deps.store.On("NewDerivedAddresses", t.Context(), params,
+				tc.count).Return(stored, nil).Once()
+			deps.chain.On("WatchAddrsFromTip", w.lifetimeCtx, watched).
+				Return(nil).Once()
+
+			// Act: Allocate through public admission, letting the handler
+			// finish persistence and watching before the result is published.
+			batch, err := w.NewBulkAddresses(
+				t.Context(), selector, tc.internal, tc.count,
+			)
+
+			// Assert: Every result retains its ordered destination and branch.
+			// Shared cleanup checks the single allocation and registration.
+			require.NoError(t, err)
+			require.Len(t, batch, int(tc.count))
+
+			for i := range batch {
+				require.Equal(t, watched[i], batch[i].Addr)
+				require.Equal(t, tc.internal, batch[i].Internal)
+			}
+		})
+	}
+}
+
+// TestNewBulkAddressesRejectsAdmission checks invalid requests and modern kvdb
+// without registering any expected Store or chain mutation.
+func TestNewBulkAddressesRejectsAdmission(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		count   uint32
+		invalid bool
+		kvdb    bool
+		wantErr error
+	}{
+		{
+			name:    "zero count",
+			count:   0,
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "over maximum",
+			count:   MaxBulkAddressCount + 1,
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "missing selector",
+			count:   1,
+			invalid: true,
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "unsupported kvdb",
+			count:   1,
+			kvdb:    true,
+			wantErr: ErrAccountOperationUnsupported,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Leave strict Store/chain mocks without expectations;
+			// any dependency call would fail this pre-mutation guard test.
+			w, _ := createTestWalletWithMocks(t)
+			if !tc.kvdb {
+				w.addrStore = nil
+			}
+
+			startLoadedWalletForTest(t, w)
+
+			selector := NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084, "batch",
+			)
+			if tc.invalid {
+				selector = AccountSelector{}
+			}
+
+			// Act: Submit the invalid count/selector or unsupported backend
+			// through the same public method used for successful allocation.
+			batch, err := w.NewBulkAddresses(
+				t.Context(), selector, false, tc.count,
+			)
+
+			// Assert: Admission refuses the call with no result. Strict mocks
+			// and shared cleanup prove no allocation or registration occurred.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, batch)
+		})
+	}
+}
+
+// TestNewBulkAddressesMapsStoreFailure keeps durable-outcome errors distinct
+// from cancellation and prevents any result or watch after a failed allocation.
+func TestNewBulkAddressesMapsStoreFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		storeErr error
+		wantErr  error
+	}{
+		{
+			name:     "excluded account",
+			storeErr: db.ErrAccountOperationUnsupported,
+			wantErr:  ErrAccountOperationUnsupported,
+		},
+		{
+			name:     "missing account",
+			storeErr: db.ErrAccountNotFound,
+			wantErr:  ErrAccountNotFound,
+		},
+		{
+			name:     "terminal exhaustion",
+			storeErr: db.ErrMaxAddressIndexReached,
+			wantErr:  ErrAddressDerivationExhausted,
+		},
+		{
+			name: "ambiguous canceled commit",
+			storeErr: errors.Join(
+				dbruntime.ErrAmbiguousTxCommit, context.Canceled,
+			),
+			wantErr: ErrIndeterminateCommit,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Return exactly one Store failure, with no chain
+			// expectation, to prove the public method never retries it.
+			w, deps := createTestWalletWithMocks(t)
+			w.addrStore = nil
+			startLoadedWalletForTest(t, w)
+			deps.store.On("NewDerivedAddresses", t.Context(),
+				mock.Anything, uint32(1)).Return(nil, tc.storeErr).Once()
+
+			// Act: Use normal admission so error mapping is exercised at the
+			// public boundary rather than by directly calling the mapper.
+			batch, err := w.NewBulkAddresses(t.Context(),
+				NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+				false, 1,
+			)
+
+			// Assert: No batch escapes and the stable wallet error survives.
+			// Cleanup verifies the single Store call without any chain call.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, batch)
+		})
+	}
+}
+
+// TestNewBulkAddressesFinishesCommittedWatch checks that failure and caller
+// cancellation discard delivery without abandoning committed address watches.
+func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{
+			name: "watch failure",
+		},
+		{
+			name:   "caller cancellation after commit",
+			cancel: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Simulate a committed child and optionally cancel its
+			// caller at Store return. Watching uses the wallet context.
+			w, deps := createTestWalletWithMocks(t)
+			w.addrStore = nil
+			startLoadedWalletForTest(t, w)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			addr, script, _ := expectedStoreAddress(t,
+				storeDerivationAccountPubKey(t), db.WitnessPubKey, 0, 0,
+			)
+			stored := db.AddressInfo{
+				AddrType:          db.WitnessPubKey,
+				ScriptPubKey:      script,
+				HasDerivationPath: true,
+			}
+			deps.store.On("NewDerivedAddresses", ctx, mock.Anything,
+				uint32(1)).Run(func(mock.Arguments) {
+				if tc.cancel {
+					cancel()
+				}
+			}).Return([]db.AddressInfo{stored}, nil).Once()
+
+			watchErr := errors.New("watch unavailable")
+
+			wantErr := watchErr
+			if tc.cancel {
+				watchErr = nil
+				wantErr = context.Canceled
+			}
+
+			deps.chain.On("WatchAddrsFromTip", w.lifetimeCtx,
+				[]address.Address{addr}).Run(func(mock.Arguments) {
+				require.NoError(t, w.lifetimeCtx.Err())
+			}).Return(watchErr).Once()
+
+			if !tc.cancel {
+				deps.store.On("IterAddresses", t.Context(), mock.Anything).
+					Return(addressIter(stored)).Once()
+				deps.chain.On("WatchAddrsFromTip", w.lifetimeCtx,
+					[]address.Address{addr}).Return(watchErr).Once()
+			}
+
+			// Act: Finish the admitted call after the committed Store result.
+			batch, err := w.NewBulkAddresses(ctx,
+				NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+				false, 1,
+			)
+
+			var (
+				reused   address.Address
+				reuseErr error
+			)
+			if !tc.cancel {
+				reused, reuseErr = w.GetUnusedAddress(t.Context(), "batch",
+					waddrmgr.WitnessPubKey, false,
+				)
+			}
+
+			// Assert: Errors never expose the committed child, including
+			// later reuse after failed watching. Cleanup verifies both calls.
+			require.ErrorIs(t, err, wantErr)
+			require.Nil(t, batch)
+
+			if !tc.cancel {
+				require.ErrorIs(t, reuseErr, watchErr)
+				require.Nil(t, reused)
+			}
+		})
+	}
+}
+
+// TestNewBulkAddressesReplaysCommittedBatch verifies fresh startup watches
+// destinations committed before failed delivery, using a reopened SQLite Store.
+func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{
+			name: "failed registration",
+		},
+		{
+			name:   "canceled delivery",
+			cancel: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Use a real Store with a strict chain boundary. The first
+			// watch captures destinations that fresh startup must replay.
+			path := filepath.Join(t.TempDir(), "reopen.sqlite")
+			chainMock := &bwmock.Chain{}
+			openManager := func() *Manager {
+				m, err := NewManager(t.Context(), ManagerConfig{
+					Backend:     DBBackendSQLite,
+					DataSource:  path,
+					ChainParams: chainParams,
+					ChainSource: chainMock,
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = m.Close() })
+
+				return m
+			}
+			m := openManager()
+			params := sqliteCreateParams(t)
+			w, err := m.Create(params)
+			require.NoError(t, err)
+			startLoadedWalletForTest(t, w)
+			require.NoError(t, w.keyVault.Unlock(t.Context(),
+				params.PrivatePassphrase))
+			w.state.toUnlocked()
+			_, err = w.NewAccount(t.Context(), NewAccountParams{
+				Scope: waddrmgr.KeyScopeBIP0084,
+				Name:  "batch",
+			})
+			require.NoError(t, err)
+			require.NoError(t, w.store.UpdateWallet(t.Context(),
+				db.UpdateWalletParams{
+					WalletID: w.id,
+					BirthdayBlock: &db.Block{
+						Hash:      *chainParams.GenesisHash,
+						Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+					},
+				}))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			watchErr := errDBMock
+
+			wantErr := errDBMock
+			if tc.cancel {
+				watchErr = nil
+				wantErr = context.Canceled
+			}
+
+			var committed []address.Address
+			chainMock.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+				Run(func(args mock.Arguments) {
+					addrs, ok := args.Get(1).([]address.Address)
+					require.True(t, ok)
+
+					committed = addrs
+
+					if tc.cancel {
+						cancel()
+					}
+				}).Return(watchErr).Once()
+			chainMock.On("WatchAddrsFromTip", t.Context(), mock.Anything).
+				Run(func(args mock.Arguments) {
+					require.Equal(t, committed, args.Get(1))
+				}).Return(nil).Once()
+
+			// Act: Fail public delivery, shut down its request loop, close the
+			// database, and run synchronous startup on a freshly loaded wallet.
+			batch, deliveryErr := w.NewBulkAddresses(ctx,
+				NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+				false, 2,
+			)
+			require.NoError(t, w.Stop(t.Context()))
+			require.NoError(t, m.Close())
+
+			fresh, err := openManager().Load(LoadWalletParams{
+				Name: params.Name,
+			})
+			require.NoError(t, err)
+			err = fresh.performRuntimeSetup(t.Context())
+
+			// Assert: Delivery exposed no batch but both committed addresses
+			// survived closing the database and were watched by fresh startup.
+			require.ErrorIs(t, deliveryErr, wantErr)
+			require.Nil(t, batch)
+			require.Len(t, committed, 2)
+			require.NoError(t, err)
+			chainMock.AssertExpectations(t)
+		})
+	}
 }

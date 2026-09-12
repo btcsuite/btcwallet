@@ -27,10 +27,18 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
+// MaxBulkAddressCount bounds one atomic allocation and registration request.
+const MaxBulkAddressCount uint32 = 100
+
 var (
+	// ErrAddressDerivationExhausted means too few normal children remain to
+	// fill a batch. Skipped children may persist without any returned address.
+	ErrAddressDerivationExhausted = errors.New("address derivation exhausted")
+
 	// errMissingAccountPubKey is returned by deriveAddressData when the
 	// AddressDerivationParams arrive without the account-level extended public
 	// key required to derive an address. The wallet's account loader is
@@ -167,6 +175,14 @@ type OutputScriptInfo struct {
 // AddressManager provides an interface for generating and inspecting wallet
 // addresses and scripts.
 type AddressManager interface {
+	// NewBulkAddresses force-allocates 1..MaxBulkAddressCount fresh addresses
+	// for the selected account and branch (internal when true). SQL wallets
+	// register the complete committed batch before returning it. Errors return
+	// no batch but may leave durable allocation progress; callers must not
+	// assume retrying will reuse it. Kvdb and NoChainSync are unsupported.
+	NewBulkAddresses(ctx context.Context, selector AccountSelector,
+		internal bool, count uint32) ([]AddressInfo, error)
+
 	// NewAddress returns a new address for the given account and address
 	// type. NoChainSync accounts return ErrAccountOperationUnsupported
 	// because receiving requires automatic chain tracking.
@@ -376,7 +392,7 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 	}
 	defer branchKey.Zero()
 
-	addrKey, err := deriveChildKey(branchKey, params.Index)
+	addrKey, err := deriveStoreAddressChild(branchKey, params.Index)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive address "+
 			"index: %w", err)
@@ -409,6 +425,19 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 	}
 
 	return addr, scriptPubKey, pubKeyBytes, nil
+}
+
+// deriveStoreAddressChild marks invalid leaf derivations as consumed children
+// while preserving the HD cause used by recovery to skip invalid indexes.
+func deriveStoreAddressChild(branchKey *hdkeychain.ExtendedKey,
+	index uint32) (*hdkeychain.ExtendedKey, error) {
+
+	key, err := deriveChildKey(branchKey, index)
+	if errors.Is(err, hdkeychain.ErrInvalidChild) {
+		return nil, fmt.Errorf("%w: %w", db.ErrAddressChildUnavailable, err)
+	}
+
+	return key, err
 }
 
 // deriveAddressData derives one SQL-store address from account public material
@@ -467,6 +496,21 @@ func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	}
 
 	return balances, nil
+}
+
+// newBulkAddressesReq joins allocation and registration to Wallet shutdown.
+type newBulkAddressesReq struct {
+	reqCtx
+
+	params   db.NewDerivedAddressParams
+	count    uint32
+	respChan chan bulkAddressesResp
+}
+
+// bulkAddressesResp publishes a complete watched batch or only its error.
+type bulkAddressesResp struct {
+	addresses []AddressInfo
+	err       error
 }
 
 // newAddressReq retains value parameters until derivation and notification end.
@@ -655,6 +699,123 @@ func (w *Wallet) NewAddress(ctx context.Context, accountName string,
 	return result.addr, result.err
 }
 
+// NewBulkAddresses force-allocates fresh addresses instead of reusing unused
+// children. Large unused gaps can hinder seed recovery. Count must be 1..100;
+// internal selects the change branch. SQL commits atomically, then registers
+// the entire batch using the existing chain backend behavior (including
+// Neutrino history). Kvdb and NoChainSync accounts are unsupported.
+// Every error returns a nil batch, even when allocation committed. Cancellation
+// cannot abandon admitted registration; ErrIndeterminateCommit never implies
+// that children are reusable. Exhaustion may persist consumed invalid children.
+func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
+	internal bool, count uint32) ([]AddressInfo, error) {
+
+	if count == 0 || count > MaxBulkAddressCount {
+		return nil, fmt.Errorf("%w: count must be 1..%d",
+			ErrInvalidParam, MaxBulkAddressCount)
+	}
+
+	err := selector.validate()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidParam, err)
+	}
+
+	if w.addrStore != nil {
+		return nil, ErrAccountOperationUnsupported
+	}
+
+	err = w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	// Copy the semantic selector into the admitted request. The Store resolves
+	// it inside the write transaction, including the receiving-policy guard.
+	params := db.NewDerivedAddressParams{
+		WalletID: w.id, Scope: db.KeyScope(selector.keyScope),
+		AccountNumber: (*uint32)(selector.accountNumber),
+		Change:        internal, RequireChainSync: true,
+	}
+	if selector.accountName != nil {
+		params.AccountName = *selector.accountName
+	}
+
+	r := newBulkAddressesReq{
+		reqCtx: reqCtx{ctx: ctx}, params: params, count: count,
+		respChan: make(chan bulkAddressesResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, join all dependency access even if the caller cancels.
+	result := <-r.respChan
+
+	return result.addresses, result.err
+}
+
+// handleNewBulkAddresses commits a batch before registering its destinations.
+// Only the Wallet lifetime can cancel registration of already committed rows.
+func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
+	stored, err := w.store.NewDerivedAddresses(r.ctx, r.params, r.count)
+	if err != nil {
+		r.respChan <- bulkAddressesResp{err: bulkAddressErr(err)}
+
+		return
+	}
+
+	// Reuse the public metadata conversion, including imported-xpub semantics.
+	batch := make([]AddressInfo, 0, len(stored))
+
+	addrs := make([]address.Address, 0, len(stored))
+	for i := range stored {
+		info, err := addressInfoFromStoreAddress(&stored[i], w.cfg.ChainParams)
+		if err != nil {
+			r.respChan <- bulkAddressesResp{err: err}
+
+			return
+		}
+
+		batch = append(batch, info)
+		addrs = append(addrs, info.Addr)
+	}
+
+	err = w.cfg.Chain.WatchAddrsFromTip(w.lifetimeCtx, addrs)
+	if err != nil {
+		r.respChan <- bulkAddressesResp{err: err}
+
+		return
+	}
+
+	err = r.ctx.Err()
+	if err != nil {
+		r.respChan <- bulkAddressesResp{err: err}
+
+		return
+	}
+
+	r.respChan <- bulkAddressesResp{addresses: batch}
+}
+
+// bulkAddressErr exposes wallet-owned allocation identities. Ambiguity wins
+// over cancellation because it represents potentially committed child indexes.
+func bulkAddressErr(err error) error {
+	switch {
+	case errors.Is(err, dbruntime.ErrAmbiguousTxCommit):
+		return fmt.Errorf("%w: %w", ErrIndeterminateCommit, err)
+	case errors.Is(err, db.ErrMaxAddressIndexReached):
+		return publicAccountErr(err, ErrAddressDerivationExhausted)
+	case errors.Is(err, db.ErrAccountOperationUnsupported):
+		return publicAccountErr(err, ErrAccountOperationUnsupported)
+	case isAccountMissing(err):
+		return publicAccountErr(err, ErrAccountNotFound)
+	default:
+		return publicAccountErr(err, nil)
+	}
+}
+
 // handleNewAddress delivers the result of an accepted component request.
 func (w *Wallet) handleNewAddress(r newAddressReq) {
 	// Reuse address derivation shared with the unused-address fallback.
@@ -714,6 +875,56 @@ func (w *Wallet) newAddress(ctx context.Context, accountName string,
 	}
 
 	return addr, nil
+}
+
+// watchStoredAddresses restores SQL receive watches before request admission.
+// The snapshot cannot race this Wallet's allocations; later admitted batches
+// add their own watches. Raw imports use the existing accountless query shape.
+func (w *Wallet) watchStoredAddresses(ctx context.Context,
+	accounts []db.AccountInfo) error {
+
+	page, err := addressPageRequest()
+	if err != nil {
+		return err
+	}
+
+	queries := []db.ListAddressesQuery{{WalletID: w.id, Page: page}}
+	for _, account := range accounts {
+		if account.NoChainSync || keylessImportedAccount(account) {
+			continue
+		}
+
+		queries = append(queries, db.ListAddressesQuery{
+			WalletID: w.id, Page: page,
+			AccountName: &account.AccountName, Scope: &account.KeyScope,
+		})
+	}
+
+	// Include both branches and custom scopes; the history scan's separate
+	// address filter deliberately omits some external rows needed for watches.
+	var addrs []address.Address
+	for _, query := range queries {
+		for info, err := range w.store.IterAddresses(ctx, query) {
+			if err != nil {
+				return err
+			}
+
+			addr := extractAddrFromPKScript(
+				info.ScriptPubKey, w.cfg.ChainParams,
+			)
+			if addr == nil {
+				return ErrUnableToExtractAddress
+			}
+
+			addrs = append(addrs, addr)
+		}
+	}
+
+	if len(addrs) == 0 {
+		return nil
+	}
+
+	return w.cfg.Chain.WatchAddrsFromTip(ctx, addrs)
 }
 
 // GetUnusedAddress returns the first, oldest, unused address by scanning
@@ -834,8 +1045,8 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 			return
 		}
 
-		unusedAddr, ok, err := nextUnusedStoreAddress(
-			storeAddr, r.change, w.cfg.ChainParams,
+		unusedAddr, ok, err := w.nextUnusedStoreAddress(
+			storeAddr, r.change,
 		)
 		if err != nil {
 			r.respChan <- addressResp{err: err}
@@ -861,9 +1072,9 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 
 // nextUnusedStoreAddress returns the unused address candidate represented by a
 // store record, if it matches the requested branch and is not already used.
-func nextUnusedStoreAddress(storeAddr db.AddressInfo,
-	change bool,
-	chainParams *chaincfg.Params) (address.Address, bool, error) {
+// SQL candidates are registered before return so callers can safely reuse them.
+func (w *Wallet) nextUnusedStoreAddress(storeAddr db.AddressInfo,
+	change bool) (address.Address, bool, error) {
 
 	if !storeAddr.HasDerivationPath {
 		return nil, false, nil
@@ -877,10 +1088,21 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 		return nil, false, nil
 	}
 
-	addr := extractAddrFromPKScript(storeAddr.ScriptPubKey, chainParams)
+	addr := extractAddrFromPKScript(storeAddr.ScriptPubKey, w.cfg.ChainParams)
 	if addr == nil {
 		return nil, false, fmt.Errorf("%w: from pkscript %x",
 			ErrUnableToExtractAddress, storeAddr.ScriptPubKey)
+	}
+
+	// A prior allocation may have committed before registration failed.
+	// Re-register stored SQL rows before exposing them through reuse.
+	if w.addrStore == nil {
+		err := w.cfg.Chain.WatchAddrsFromTip(
+			w.lifetimeCtx, []address.Address{addr},
+		)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
 	return addr, true, nil

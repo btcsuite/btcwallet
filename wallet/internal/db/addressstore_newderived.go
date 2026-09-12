@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 )
 
 var (
@@ -133,34 +135,7 @@ func NewDerivedAddressWithOps(ctx context.Context,
 			errNilAddressDerivationFunc)
 	}
 
-	key := AccountKeyFromParams(params)
-
-	account, err := ops.GetAccount(ctx, key)
-	if err != nil {
-		if errors.Is(err, ErrAccountNotFound) {
-			return nil, fmt.Errorf("account %q in scope %d/%d: %w",
-				key.AccountName, key.Purpose, key.CoinType, ErrAccountNotFound)
-		}
-
-		return nil, fmt.Errorf("get account: %w", err)
-	}
-
-	// A receiving request needs chain tracking. Enforce it using the account
-	// already loaded, while leaving internal allocation free of this promise.
-	if params.RequireChainSync && account.NoChainSync {
-		return nil, fmt.Errorf("%w: account %q has chain synchronization "+
-			"disabled", ErrAccountOperationUnsupported, key.AccountName)
-	}
-
-	// Non-derived accounts have a NULL account_number; their derivation uses
-	// AccountPubKey directly so a BIP44 number is not available.
-	accountNumValue, errAccount := DerivedAddressAccountNumber(
-		account.AccountNumber,
-	)
-
-	accountNumber, err := resolveAccountNumber(
-		account.IsDerived, accountNumValue, errAccount,
-	)
+	account, accountNumber, err := derivedAddressAccount(ctx, params, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +159,156 @@ func NewDerivedAddressWithOps(ctx context.Context,
 	return info, nil
 }
 
+// derivedAddressAccount resolves ownership and receiving policy before either
+// allocation path consumes children. Sharing this preflight preserves the
+// count-one account-shape checks and error context for batches as well.
+func derivedAddressAccount(ctx context.Context, params NewDerivedAddressParams,
+	ops NewDerivedAddressOps) (DerivedAddressAccount, *uint32, error) {
+
+	key := AccountKeyFromParams(params)
+
+	account, err := ops.GetAccount(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return account, nil, fmt.Errorf("account %q in scope %d/%d: %w",
+				key.AccountName, key.Purpose, key.CoinType, ErrAccountNotFound)
+		}
+
+		return account, nil, fmt.Errorf("get account: %w", err)
+	}
+
+	// A receiving request needs chain tracking. Enforce it using the account
+	// already loaded, while leaving internal allocation free of this promise.
+	if params.RequireChainSync && account.NoChainSync {
+		return account, nil, fmt.Errorf(
+			"%w: account %q has chain synchronization disabled",
+			ErrAccountOperationUnsupported, key.AccountName,
+		)
+	}
+
+	// Non-derived accounts have a NULL account_number; their derivation uses
+	// AccountPubKey directly so a BIP44 number is not available.
+	accountNumValue, errAccount := DerivedAddressAccountNumber(
+		account.AccountNumber,
+	)
+
+	accountNumber, err := resolveAccountNumber(
+		account.IsDerived, accountNumValue, errAccount,
+	)
+	if err != nil {
+		return account, nil, err
+	}
+
+	return account, accountNumber, nil
+}
+
+// NewDerivedAddressesWithOps derives a complete batch within the caller's write
+// transaction. Exhausted reports consumed children to commit without rows;
+// other errors require rollback. The caller must discard
+// all results on a commit error and must never retry an ambiguous commit.
+func NewDerivedAddressesWithOps(ctx context.Context,
+	params NewDerivedAddressParams, count uint32, ops NewDerivedAddressOps,
+	deriveFn AddressDerivationFunc) ([]AddressInfo, bool, error) {
+
+	if deriveFn == nil {
+		return nil, false, errNilAddressDerivationFunc
+	}
+
+	account, number, err := derivedAddressAccount(ctx, params, ops)
+	if err != nil {
+		return nil, false, err
+	}
+
+	candidates, exhausted, err := derivedAddressCandidates(
+		ctx, params, count, account, number, ops, deriveFn,
+	)
+	if err != nil || exhausted {
+		return nil, exhausted, err
+	}
+
+	// Use count-one insertion and metadata assembly for every candidate.
+	// Any insert failure rolls back all rows and counter advances together.
+	addresses := make([]AddressInfo, 0, count)
+	for _, candidate := range candidates {
+		info, err := insertDerivedAddress(
+			ctx, candidate, number, account.WalletWatchOnly, ops,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+
+		err = ApplyAddressAccountMetadata(
+			info, account.AccountNumber, account.AccountName,
+			account.MasterFingerprint, account.Purpose, account.CoinType,
+			!account.IsDerived,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+
+		addresses = append(addresses, *info)
+	}
+
+	return addresses, false, nil
+}
+
+// derivedAddressCandidates collects children before inserting any address rows.
+// Separating this loop makes exhausted progress distinct from a partial batch
+// and retains the existing derivation callback and counter-locking mechanism.
+func derivedAddressCandidates(ctx context.Context,
+	params NewDerivedAddressParams, count uint32, account DerivedAddressAccount,
+	number *uint32, ops NewDerivedAddressOps,
+	deriveFn AddressDerivationFunc) (
+	[]CreateDerivedAddressRequest, bool, error) {
+
+	// The callback sees even invalid leaf indexes. Remember the last attempt
+	// to stop at the normal-child boundary without incrementing past it.
+	var lastIndex uint32
+
+	derive := func(ctx context.Context,
+		input AddressDerivationParams) (*DerivedAddressData, error) {
+
+		lastIndex = input.Index
+		if lastIndex >= hdkeychain.HardenedKeyStart {
+			return nil, ErrMaxAddressIndexReached
+		}
+
+		return deriveFn(ctx, input)
+	}
+
+	// Hold candidates until the requested count exists. Exhaustion must not
+	// persist a prefix, but invalid or already-owned children stay consumed.
+	candidates := make([]CreateDerivedAddressRequest, 0, count)
+	for len(candidates) < int(count) {
+		addrType, branch, index, script, pubKey, err := derivedAddressInput(
+			ctx, params, account, number, ops, derive,
+		)
+		switch {
+		case err == nil:
+			candidates = append(candidates, CreateDerivedAddressRequest{
+				WalletID:     int64(params.WalletID),
+				AccountID:    account.AccountID,
+				AddrType:     addrType,
+				Branch:       branch,
+				Index:        index,
+				ScriptPubKey: script,
+				PubKey:       pubKey,
+			})
+
+		case errors.Is(err, ErrAddressChildUnavailable):
+			// The counter advances even though this child is not returned.
+		default:
+			return nil, false, err
+		}
+
+		if lastIndex == hdkeychain.HardenedKeyStart-1 {
+			break
+		}
+	}
+
+	return candidates, len(candidates) < int(count), nil
+}
+
 // createDerivedAddress prepares the derivation inputs, inserts the address
 // through the backend adapter, and assembles the AddressInfo result.
 func createDerivedAddress(ctx context.Context,
@@ -198,7 +323,7 @@ func createDerivedAddress(ctx context.Context,
 		return nil, err
 	}
 
-	row, err := ops.CreateDerivedAddress(ctx, CreateDerivedAddressRequest{
+	return insertDerivedAddress(ctx, CreateDerivedAddressRequest{
 		WalletID:     int64(params.WalletID),
 		AccountID:    account.AccountID,
 		AddrType:     addrType,
@@ -206,7 +331,17 @@ func createDerivedAddress(ctx context.Context,
 		Index:        index,
 		ScriptPubKey: scriptPubKey,
 		PubKey:       pubKey,
-	})
+	}, accountNumber, account.WalletWatchOnly, ops)
+}
+
+// insertDerivedAddress stores a derived child and assembles its result.
+// Keeping insertion separate lets a batch finish deriving before writing rows,
+// while retaining the same identity conversions as count-one allocation.
+func insertDerivedAddress(ctx context.Context, req CreateDerivedAddressRequest,
+	accountNumber *uint32, watchOnly bool,
+	ops NewDerivedAddressOps) (*AddressInfo, error) {
+
+	row, err := ops.CreateDerivedAddress(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("create address: %w", err)
 	}
@@ -216,7 +351,7 @@ func createDerivedAddress(ctx context.Context,
 		return nil, err
 	}
 
-	convertedAcctID, err := optionalAccountID(account.AccountID)
+	convertedAcctID, err := optionalAccountID(req.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -225,14 +360,14 @@ func createDerivedAddress(ctx context.Context,
 		ID:                id,
 		AccountID:         convertedAcctID,
 		AccountNumber:     accountNumber,
-		AddrType:          addrType,
+		AddrType:          req.AddrType,
 		CreatedAt:         row.CreatedAt,
 		HasDerivationPath: true,
-		Branch:            branch,
-		Index:             index,
-		ScriptPubKey:      scriptPubKey,
-		PubKey:            pubKey,
-		IsWatchOnly:       account.WalletWatchOnly,
+		Branch:            req.Branch,
+		Index:             req.Index,
+		ScriptPubKey:      req.ScriptPubKey,
+		PubKey:            req.PubKey,
+		IsWatchOnly:       watchOnly,
 	}, nil
 }
 

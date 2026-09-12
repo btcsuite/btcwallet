@@ -33,6 +33,19 @@ func NewTestStoreWithDerive(t *testing.T,
 
 	t.Helper()
 
+	store, _ := newReopenableTestStore(t, deriveAddress)
+
+	return store
+}
+
+// newReopenableTestStore retains the same database configuration across opens
+// so batch tests can prove progress survives a closed connection pool.
+func newReopenableTestStore(t *testing.T,
+	deriveAddress db.AddressDerivationFunc) (
+	*sqlite.Store, func() *sqlite.Store) {
+
+	t.Helper()
+
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
@@ -45,14 +58,18 @@ func NewTestStoreWithDerive(t *testing.T,
 		Identity:       identity,
 	}
 
-	store, err := sqlite.NewStore(t.Context(), cfg)
-	require.NoError(t, err, "failed to create sqlite store")
+	open := func() *sqlite.Store {
+		store, err := sqlite.NewStore(t.Context(), cfg)
+		require.NoError(t, err, "failed to create sqlite store")
 
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
+		t.Cleanup(func() {
+			_ = store.Close()
+		})
 
-	return store
+		return store
+	}
+
+	return open(), open
 }
 
 // sqliteDatabaseIdentityFixture exposes SQLite setup behind the shared test
