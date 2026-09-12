@@ -376,7 +376,7 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 	}
 	defer branchKey.Zero()
 
-	addrKey, err := deriveChildKey(branchKey, params.Index)
+	addrKey, err := deriveStoreAddressChild(branchKey, params.Index)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive address "+
 			"index: %w", err)
@@ -409,6 +409,19 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 	}
 
 	return addr, scriptPubKey, pubKeyBytes, nil
+}
+
+// deriveStoreAddressChild marks invalid leaf derivations as consumed children
+// while preserving the HD cause used by recovery to skip invalid indexes.
+func deriveStoreAddressChild(branchKey *hdkeychain.ExtendedKey,
+	index uint32) (*hdkeychain.ExtendedKey, error) {
+
+	key, err := deriveChildKey(branchKey, index)
+	if errors.Is(err, hdkeychain.ErrInvalidChild) {
+		return nil, fmt.Errorf("%w: %w", db.ErrAddressChildUnavailable, err)
+	}
+
+	return key, err
 }
 
 // deriveAddressData derives one SQL-store address from account public material
