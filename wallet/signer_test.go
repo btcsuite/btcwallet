@@ -3267,3 +3267,111 @@ func TestSignDigestLocked(t *testing.T) {
 	// Assert: Check for forbidden/locked error.
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
+
+// TestECDHRejectsNilRemoteKey verifies that a nil remote public key is refused
+// before the operation is admitted, so no leaf private key is derived for a
+// request that cannot succeed.
+func TestECDHRejectsNilRemoteKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet whose store would serve the account secret
+	// if the request reached it. No expectation is registered for that read,
+	// so the mock fails the test if the derivation is attempted.
+	w, _ := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	// Act: Ask for a shared secret with no counterparty key.
+	secret, err := w.ECDH(t.Context(), path, nil)
+
+	// Assert: The request is refused with the package's nil-argument identity,
+	// and returns the zero secret rather than faulting on the handler
+	// goroutine.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Equal(t, [32]byte{}, secret)
+}
+
+// TestECDHRejectsOffCurveRemoteKey verifies that a remote key which is not a
+// curve point is refused rather than multiplied to the point at infinity,
+// whose X coordinate would be returned as an all-zero shared secret.
+func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet and a structurally valid but degenerate
+	// public key, the shape a caller gets by forgetting to parse one. No
+	// store expectation is registered, so a derivation attempt fails the test.
+	w, _ := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	offCurve := &btcec.PublicKey{}
+
+	require.False(t, offCurve.IsOnCurve(), "probe key is a curve point")
+
+	// Act: Ask for a shared secret with the degenerate key.
+	secret, err := w.ECDH(t.Context(), path, offCurve)
+
+	// Assert: The key is refused before the account secret is read, which the
+	// strict mock enforces by failing on an unexpected call. Reaching the
+	// multiplication instead yields a nil error and 32 zero bytes: the X
+	// coordinate of the point at infinity, which both sides could agree on
+	// while holding no key at all.
+	require.ErrorIs(t, err, ErrInvalidSignParam)
+	require.Equal(t, [32]byte{}, secret)
+}
+
+// TestSignerRejectsNilArguments verifies that every Signer method taking a
+// pointer argument refuses a nil one before the request is admitted, rather
+// than faulting inside the handler goroutine that serves it.
+func TestSignerRejectsNilArguments(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet, so each call clears the signing-state gate
+	// and reaches the argument check under test.
+	w, _ := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	// Act: Sign a digest with no intent.
+	_, err := w.SignDigest(t.Context(), path, nil)
+
+	// Assert: The absent intent is reported, not dereferenced.
+	require.ErrorIs(t, err, ErrNilArguments)
+
+	// Act: Assemble an unlocking script with no params.
+	script, err := w.ComputeUnlockingScript(t.Context(), nil)
+
+	// Assert: The absent params are reported before admission.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, script)
+
+	// Act: Produce a raw signature with no params.
+	rawSig, err := w.ComputeRawSig(t.Context(), nil)
+
+	// Assert: The same contract holds for the low-level signing entry point.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, rawSig)
+}
+
+// TestSignerRejectsUnsetRequiredParams verifies that a params struct missing a
+// field the handler dereferences unconditionally is refused at the boundary,
+// which is the likelier caller mistake than passing no params at all.
+func TestSignerRejectsUnsetRequiredParams(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet, so each call reaches the field check.
+	w, _ := createUnlockedWalletWithMocks(t)
+
+	// Act: Assemble an unlocking script for no output.
+	script, err := w.ComputeUnlockingScript(
+		t.Context(), &UnlockingScriptParams{},
+	)
+
+	// Assert: The absent output is reported rather than dereferenced on the
+	// handler goroutine.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, script)
+
+	// Act: Produce a raw signature with no version-specific details.
+	rawSig, err := w.ComputeRawSig(t.Context(), &RawSigParams{})
+
+	// Assert: The unset interface is reported before any key is derived.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, rawSig)
+}

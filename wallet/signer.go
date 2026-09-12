@@ -71,12 +71,17 @@ type Signer interface {
 	// a key from the wallet and a remote public key. The output returned
 	// will be the raw 32-byte shared secret (the X-coordinate of the
 	// result point).
+	//
+	// A nil remote key returns ErrNilArguments, and one that is not a curve
+	// point returns ErrInvalidSignParam; neither derives a wallet key.
 	ECDH(ctx context.Context, path BIP32Path, pub *btcec.PublicKey) (
 		[32]byte, error)
 
 	// SignDigest signs a message digest based on the provided intent. The
 	// returned Signature is a marker interface that can be asserted to the
 	// concrete signature types, ECDSASignature or SchnorrSignature.
+	//
+	// A nil intent returns ErrNilArguments.
 	SignDigest(ctx context.Context, path BIP32Path,
 		intent *SignDigestIntent) (Signature, error)
 
@@ -92,6 +97,8 @@ type Signer interface {
 	// multisig, the ComputeRawSig method should be used to generate the raw
 	// signature, which can then be manually assembled into the final
 	// witness.
+	//
+	// Nil params, or params with no Output, return ErrNilArguments.
 	ComputeUnlockingScript(ctx context.Context,
 		params *UnlockingScriptParams) (*UnlockingScript, error)
 
@@ -105,6 +112,8 @@ type Signer interface {
 	// where signatures may need to be exchanged and combined before the
 	// final witness is created. For most common, single-signature spends,
 	// ComputeUnlockingScript should be used instead.
+	//
+	// Nil params, or params with no Details, return ErrNilArguments.
 	ComputeRawSig(ctx context.Context, params *RawSigParams) (
 		RawSignature, error)
 }
@@ -654,6 +663,26 @@ func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 		return [32]byte{}, err
 	}
 
+	// Reject the remote key before admission. The computation runs on its own
+	// goroutine, where a nil key would fault with no caller to recover it, and
+	// it would do so only after the leaf private key had been derived.
+	if pub == nil {
+		return [32]byte{}, fmt.Errorf(
+			"%w: remote public key is nil", ErrNilArguments,
+		)
+	}
+
+	// A key that is not a curve point multiplies to the point at infinity,
+	// whose X coordinate is zero. That is a valid-looking 32-byte secret both
+	// sides could agree on without either holding a private key, so it has to
+	// be an error rather than a result.
+	if !pub.IsOnCurve() {
+		return [32]byte{}, fmt.Errorf(
+			"%w: remote public key is not a curve point",
+			ErrInvalidSignParam,
+		)
+	}
+
 	// Admission keeps dependency access joined through concurrent Stop.
 	r := ecdhReq{
 		reqCtx:   reqCtx{ctx: ctx},
@@ -701,6 +730,12 @@ func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 
 // validateSignDigestIntent validates the parameters of a SignDigestIntent.
 func validateSignDigestIntent(intent *SignDigestIntent) error {
+	// Every field below is read through the intent, so its absence has to be
+	// answered before any of them are.
+	if intent == nil {
+		return fmt.Errorf("%w: intent is nil", ErrNilArguments)
+	}
+
 	// The digest must be exactly 32 bytes.
 	if len(intent.Digest) != chainhash.HashSize {
 		return ErrInvalidDigestSize
@@ -837,6 +872,22 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	err := w.state.canSign()
 	if err != nil {
 		return nil, err
+	}
+
+	// The handler dereferences these params on its own goroutine, where a nil
+	// would fault with no caller to recover it.
+	if params == nil {
+		return nil, fmt.Errorf(
+			"%w: unlocking script params are nil", ErrNilArguments,
+		)
+	}
+
+	// Output is dereferenced unconditionally by the handler and is documented
+	// as required, so its absence is the same fault as a nil params.
+	if params.Output == nil {
+		return nil, fmt.Errorf(
+			"%w: unlocking script output is nil", ErrNilArguments,
+		)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
@@ -1382,6 +1433,23 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	err := w.state.canSign()
 	if err != nil {
 		return nil, err
+	}
+
+	// The handler dereferences these params on its own goroutine, where a nil
+	// would fault with no caller to recover it.
+	if params == nil {
+		return nil, fmt.Errorf(
+			"%w: raw signature params are nil", ErrNilArguments,
+		)
+	}
+
+	// Details carries the version-specific signing behavior and its own
+	// documentation requires it to be set. The handler calls through it
+	// unconditionally, so an unset interface faults there.
+	if params.Details == nil {
+		return nil, fmt.Errorf(
+			"%w: raw signature details are nil", ErrNilArguments,
+		)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
