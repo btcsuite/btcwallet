@@ -5,6 +5,7 @@ package itest
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"sort"
 	"sync"
@@ -3515,4 +3516,324 @@ func TestNewDerivedAddressesSurvivesReopen(t *testing.T) {
 	require.Equal(t, derivedAccountName, next[0].AccountName)
 	require.Equal(t, uint32(2), next[0].Index)
 	require.Equal(t, uint32(1), next[0].Branch)
+}
+
+// TestNewDerivedAddressesSkipsInvalidChildren checks that an invalid leaf is
+// consumed without shortening the batch or being reused by the next call.
+func TestNewDerivedAddressesSkipsInvalidChildren(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reject one leaf through the existing derivation seam. Return
+	// the ordinary deterministic derivation for every other child.
+	derive := mockDeriveFunc()
+	store := NewTestStoreWithDerive(t, func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		if params.Index == 1 {
+			return nil, db.ErrAddressChildUnavailable
+		}
+
+		return derive(ctx, params)
+	})
+	id := newWallet(t, store, "invalid-child")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		AccountName:      derivedAccountName,
+		Scope:            db.KeyScopeBIP0084,
+		RequireChainSync: true,
+	}
+
+	// Act: Fill a batch across the invalid child, then allocate again to
+	// verify the next request starts after the consumed index.
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	next, nextErr := store.NewDerivedAddresses(t.Context(), params, 1)
+
+	// Assert: Both requested children are returned in order, and the
+	// next allocation starts after both the skipped and returned children.
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	require.Equal(t, uint32(0), batch[0].Index)
+	require.Equal(t, uint32(2), batch[1].Index)
+	require.NoError(t, nextErr)
+	require.Equal(t, uint32(3), next[0].Index)
+}
+
+// TestNewDerivedAddressesRollsBackFailure checks that a definite derivation
+// failure persists neither candidate rows nor consumed counter progress.
+func TestNewDerivedAddressesRollsBackFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fail after one candidate exists, then allow the subsequent
+	// independent request to prove that definite rollback made it reusable.
+	failure := errors.New("derivation failed")
+	fail := true
+	derive := mockDeriveFunc()
+	store := NewTestStoreWithDerive(t, func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		if fail && params.Index == 1 {
+			return nil, failure
+		}
+
+		return derive(ctx, params)
+	})
+	id := newWallet(t, store, "rollback-batch")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		AccountName:      derivedAccountName,
+		Scope:            db.KeyScopeBIP0084,
+		RequireChainSync: true,
+	}
+
+	// Act: Fail the batch and read the persisted counter and rows before
+	// making a new request with derivation available again.
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	account := getAccountByName(
+		t, store, id, params.Scope, params.AccountName,
+	)
+	rows, rowsErr := store.ListAddresses(t.Context(),
+		listAccountAddressesQuery(t, id, params.Scope, params.AccountName, 10))
+	fail = false
+	next, nextErr := store.NewDerivedAddresses(t.Context(), params, 2)
+
+	// Assert: The failed batch has no rows or progress, and the next request
+	// safely obtains both original indexes rather than a truncated result.
+	require.ErrorIs(t, err, failure)
+	require.Nil(t, batch)
+	require.NoError(t, rowsErr)
+	require.Empty(t, rows.Items)
+	require.Zero(t, account.ExternalKeyCount)
+	require.NoError(t, nextErr)
+	require.Len(t, next, 2)
+	require.Equal(t, uint32(0), next[0].Index)
+	require.Equal(t, uint32(1), next[1].Index)
+}
+
+// TestNewDerivedAddressesPreservesRawOwnership skips an imported candidate
+// without changing its ownership, secret material, or absent derivation path.
+func TestNewDerivedAddressesPreservesRawOwnership(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Import exactly the script that the next account child would
+	// produce. Preserve its encrypted secret as an ownership regression probe.
+	store := NewTestStore(t)
+	id := newWallet(t, store, "raw-collision")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	account := getAccountByName(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	data, err := mockDeriveFunc()(t.Context(), db.AddressDerivationParams{
+		Scope:                db.KeyScopeBIP0084,
+		DerivedAccountNumber: account.AccountNumber,
+	})
+	require.NoError(t, err)
+
+	secret := RandomBytes(32)
+	raw, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            id,
+			AddressType:         db.WitnessPubKey,
+			ScriptPubKey:        data.ScriptPubKey,
+			PubKey:              RandomBytes(33),
+			EncryptedPrivateKey: secret,
+		},
+	)
+	require.NoError(t, err)
+
+	// Act: Fill a batch beyond the collision, then reload the original raw
+	// row and its secret to detect an ownership rewrite or accidental upsert.
+	batch, err := store.NewDerivedAddresses(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:         id,
+			AccountName:      derivedAccountName,
+			Scope:            db.KeyScopeBIP0084,
+			RequireChainSync: true,
+		}, 2,
+	)
+	rows := rawImportedAddresses(t, store, id, 10)
+	storedSecret, secretErr := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     id,
+			ScriptPubKey: data.ScriptPubKey,
+		},
+	)
+
+	// Assert: The complete batch skips child zero while the imported row
+	// retains its identity, accountless ownership, path, and encrypted secret.
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	require.Equal(t, uint32(1), batch[0].Index)
+	require.Equal(t, uint32(2), batch[1].Index)
+	require.Len(t, rows, 1)
+	require.Equal(t, raw.ID, rows[0].ID)
+	require.Nil(t, rows[0].AccountID)
+	require.False(t, rows[0].HasDerivationPath)
+	require.NoError(t, secretErr)
+	require.Equal(t, secret, storedSecret.EncryptedPrivKey)
+}
+
+// TestNewDerivedAddressesExhaustion preserves terminal progress without partial
+// rows, including repeated allocations at the final normal child.
+func TestNewDerivedAddressesExhaustion(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		start    uint32
+		count    uint32
+		skipLast bool
+		winners  int
+	}{
+		{
+			name:     "discard partial batch",
+			start:    db.MaxAddressIndex - 1,
+			count:    2,
+			skipLast: true,
+		},
+		{
+			name:    "allocate final normal child",
+			start:   db.MaxAddressIndex,
+			count:   1,
+			winners: 1,
+		},
+		{
+			name:  "already exhausted",
+			start: db.MaxAddressIndex + 1,
+			count: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Put the durable counter at the domain boundary using
+			// the SQL fixture, optionally making the last leaf invalid.
+			derive := mockDeriveFunc()
+			store, reopen := newReopenableTestStore(t, func(ctx context.Context,
+				p db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+				if tc.skipLast && p.Index == db.MaxAddressIndex {
+					return nil, db.ErrAddressChildUnavailable
+				}
+
+				return derive(ctx, p)
+			})
+			id := newWallet(t, store, "exhaustion")
+			createDerivedAccount(
+				t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+			)
+			scopeID := GetKeyScopeID(t, store.Queries(), id, db.KeyScopeBIP0084)
+			accountID := GetAccountID(
+				t, store.Queries(), scopeID, derivedAccountName,
+			)
+			UpdateAccountNextExternalIndex(t, store.DB(), accountID, tc.start)
+
+			params := db.NewDerivedAddressParams{
+				WalletID:         id,
+				AccountName:      derivedAccountName,
+				Scope:            db.KeyScopeBIP0084,
+				RequireChainSync: true,
+			}
+
+			// Act: Allocate twice at the boundary, checking each result before
+			// reopening. The separate batch test covers concurrent allocation.
+			var winners int
+			for range 2 {
+				batch, err := store.NewDerivedAddresses(
+					t.Context(), params, tc.count,
+				)
+				if err != nil {
+					require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+					require.Nil(t, batch)
+
+					continue
+				}
+
+				require.Len(t, batch, int(tc.count))
+				require.Equal(t, db.MaxAddressIndex, batch[0].Index)
+
+				winners++
+			}
+
+			require.NoError(t, store.Close())
+			store = reopen()
+			again, err := store.NewDerivedAddresses(t.Context(), params, 1)
+			account := getAccountByName(
+				t, store, id, params.Scope, derivedAccountName,
+			)
+			rows, rowsErr := store.ListAddresses(t.Context(),
+				listAccountAddressesQuery(
+					t, id, params.Scope, derivedAccountName, 10,
+				),
+			)
+
+			// Assert: Only a complete final-child winner can persist a row.
+			// Exhaustion, including repeat calls, leaves the counter terminal.
+			require.Equal(t, tc.winners, winners)
+			require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+			require.Nil(t, again)
+			require.Equal(t, db.MaxAddressIndex+1, account.ExternalKeyCount)
+			require.NoError(t, rowsErr)
+			require.Len(t, rows.Items, tc.winners)
+		})
+	}
+}
+
+// TestNewDerivedAddressesRejectsNoChainSync verifies receiving refusal before
+// derivation, child-counter changes, or address-row insertion.
+func TestNewDerivedAddressesRejectsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An excluded account and an observed derivation callback make
+	// even a rolled-back, incorrectly admitted derivation observable.
+	calls := 0
+	store := NewTestStoreWithDerive(t, func(context.Context,
+		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		calls++
+
+		return nil, errors.New("unexpected derivation")
+	})
+	id := newWallet(t, store, "excluded-batch")
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    id,
+			Scope:       db.KeyScopeBIP0084,
+			Name:        "key-only",
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	// Act: Request a receiving batch and inspect persisted account/address
+	// state through the same public Store queries used by other callers.
+	batch, err := store.NewDerivedAddresses(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:         id,
+			Scope:            db.KeyScopeBIP0084,
+			AccountName:      "key-only",
+			RequireChainSync: true,
+		}, 2,
+	)
+	account := getAccountByName(
+		t, store, id, db.KeyScopeBIP0084, "key-only",
+	)
+	rows, rowsErr := store.ListAddresses(t.Context(),
+		listAccountAddressesQuery(t, id, db.KeyScopeBIP0084, "key-only", 10))
+
+	// Assert: Policy refusal performs no derivation and persists no progress
+	// or addresses, rather than merely hiding results after mutation.
+	require.ErrorIs(t, err, db.ErrAccountOperationUnsupported)
+	require.Nil(t, batch)
+	require.Zero(t, calls)
+	require.Zero(t, account.ExternalKeyCount)
+	require.NoError(t, rowsErr)
+	require.Empty(t, rows.Items)
 }
