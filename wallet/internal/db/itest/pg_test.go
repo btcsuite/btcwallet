@@ -263,6 +263,19 @@ func NewTestStoreWithDerive(t *testing.T,
 	deriveAddress db.AddressDerivationFunc) *pg.Store {
 
 	t.Helper()
+
+	store, _ := newReopenableTestStore(t, deriveAddress)
+
+	return store
+}
+
+// newReopenableTestStore retains the same database configuration across opens
+// so batch tests can prove progress survives a closed connection pool.
+func newReopenableTestStore(t *testing.T,
+	deriveAddress db.AddressDerivationFunc) (*pg.Store, func() *pg.Store) {
+
+	t.Helper()
+
 	testConnStr := newPostgresIdentityDSN(t)
 	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
 	require.NoError(t, err)
@@ -274,14 +287,18 @@ func NewTestStoreWithDerive(t *testing.T,
 		Identity:       identity,
 	}
 
-	store, err := pg.NewStore(t.Context(), cfg)
-	require.NoError(t, err, "failed to create postgres store")
+	open := func() *pg.Store {
+		store, err := pg.NewStore(t.Context(), cfg)
+		require.NoError(t, err, "failed to create postgres store")
 
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
+		t.Cleanup(func() {
+			_ = store.Close()
+		})
 
-	return store
+		return store
+	}
+
+	return open(), open
 }
 
 // newPostgresIdentityDSN uses admin SQL to isolate one schema-absent DSN.
