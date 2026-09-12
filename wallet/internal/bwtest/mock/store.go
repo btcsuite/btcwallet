@@ -211,6 +211,19 @@ func (m *Store) RenameAccount(ctx context.Context,
 	return args.Error(0)
 }
 
+// NewDerivedAddresses exposes the batch call to mock expectations so tests can
+// verify one allocation and distinguish committed facts from delivery failures.
+func (m *Store) NewDerivedAddresses(ctx context.Context,
+	params db.NewDerivedAddressParams, count uint32) ([]db.AddressInfo, error) {
+
+	args := m.Called(ctx, params, count)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.AddressInfo), args.Error(1)
+}
+
 // NewDerivedAddress implements the db.AddressStore interface.
 func (m *Store) NewDerivedAddress(ctx context.Context,
 	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {

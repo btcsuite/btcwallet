@@ -42,6 +42,14 @@ var (
 	errNoAddressInPkScript = errors.New("pkScript has no address")
 )
 
+// NewDerivedAddresses rejects batches because legacy allocation cannot provide
+// the SQL transaction contract. Reject before accessing the legacy manager.
+func (s *Store) NewDerivedAddresses(context.Context,
+	db.NewDerivedAddressParams, uint32) ([]db.AddressInfo, error) {
+
+	return nil, db.ErrAccountOperationUnsupported
+}
+
 // NewDerivedAddress creates one derived address through the legacy address-
 // manager path.
 func (s *Store) NewDerivedAddress(ctx context.Context,
