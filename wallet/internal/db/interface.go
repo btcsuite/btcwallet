@@ -124,6 +124,11 @@ var (
 	// its maximum representable value.
 	ErrMaxAddressIndexReached = errors.New("max address index reached")
 
+	// ErrAddressChildUnavailable marks a consumed leaf that cannot be returned,
+	// either because HD derivation rejected it or its script is already owned.
+	// Other derivation or database errors must roll back the allocation.
+	ErrAddressChildUnavailable = errors.New("address child unavailable")
+
 	// ErrTxNotFound is returned when a transaction is not found in the
 	// database.
 	ErrTxNotFound = errors.New("tx not found")
