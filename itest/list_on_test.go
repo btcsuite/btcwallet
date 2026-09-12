@@ -146,8 +146,44 @@ var allTestCases = []*testCase{
 	// Keep the public Signer request in the integration matrix so callers
 	// cannot accidentally depend on wallet-internal database types.
 	{
-		Name:     "signer derive pubkey",
-		TestFunc: testSignerDerivePubKey,
+		Name:     "signer derive pubkey paths",
+		TestFunc: testSignerDerivePubKeyPaths,
+	},
+	{
+		Name:     "signer derive pubkey wallet state",
+		TestFunc: testSignerDerivePubKeyWalletState,
+	},
+	{
+		Name:     "signer derive pubkey reject request",
+		TestFunc: testSignerDerivePubKeyRejectRequest,
+	},
+	{
+		Name:     "signer derive pubkey watchonly",
+		TestFunc: testSignerDerivePubKeyWatchOnly,
+	},
+	{
+		Name:     "signer ecdh agreement",
+		TestFunc: testSignerECDHAgreement,
+	},
+	{
+		Name:     "signer ecdh wallet state",
+		TestFunc: testSignerECDHWalletState,
+	},
+	{
+		Name:     "signer ecdh reject account",
+		TestFunc: testSignerECDHRejectAccount,
+	},
+	{
+		Name:     "signer ecdh watchonly",
+		TestFunc: testSignerECDHWatchOnly,
+	},
+	{
+		Name:     "signer derivation durable reopen",
+		TestFunc: testSignerDerivationDurableReopen,
+	},
+	{
+		Name:     "signer derive imported xpub",
+		TestFunc: testSignerDeriveImportedXPub,
 	},
 	{
 		Name:     "utxomanager list unspent",

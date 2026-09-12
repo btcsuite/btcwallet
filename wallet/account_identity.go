@@ -10,7 +10,11 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
-var errInvalidAccountSelector = errors.New(
+// ErrInvalidAccountSelector is returned when a selector does not name exactly
+// one account identity. It is exported so callers outside the wallet, and the
+// integration tests, can match the contract by identity rather than by the
+// error's text.
+var ErrInvalidAccountSelector = errors.New(
 	"exactly one of account name or account number must be provided",
 )
 
@@ -58,7 +62,7 @@ func NewAccountSelectorByNumber(keyScope waddrmgr.KeyScope,
 // and account existence are resolved by the consuming operation.
 func (s AccountSelector) validate() error {
 	if (s.accountName == nil) == (s.accountNumber == nil) {
-		return errInvalidAccountSelector
+		return ErrInvalidAccountSelector
 	}
 
 	return nil
