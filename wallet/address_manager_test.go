@@ -6,6 +6,8 @@ package wallet
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -1795,6 +1798,143 @@ func TestNewBulkAddressesRejectsAdmission(t *testing.T) {
 			// Assert: Admission refuses the call with no result. Strict mocks
 			// and shared cleanup prove no allocation or registration occurred.
 			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, batch)
+		})
+	}
+}
+
+// TestNewBulkAddressesMapsStoreFailure keeps durable-outcome errors distinct
+// from cancellation and prevents any result or watch after a failed allocation.
+func TestNewBulkAddressesMapsStoreFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		storeErr error
+		wantErr  error
+	}{
+		{
+			name:     "excluded account",
+			storeErr: db.ErrAccountOperationUnsupported,
+			wantErr:  ErrAccountOperationUnsupported,
+		},
+		{
+			name:     "missing account",
+			storeErr: db.ErrAccountNotFound,
+			wantErr:  ErrAccountNotFound,
+		},
+		{
+			name:     "terminal exhaustion",
+			storeErr: db.ErrMaxAddressIndexReached,
+			wantErr:  ErrAddressDerivationExhausted,
+		},
+		{
+			name: "ambiguous canceled commit",
+			storeErr: errors.Join(
+				dbruntime.ErrAmbiguousTxCommit, context.Canceled,
+			),
+			wantErr: ErrIndeterminateCommit,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Return exactly one Store failure, with no chain
+			// expectation, to prove the public method never retries it.
+			w, deps := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+			deps.store.On(
+				"NewDerivedAddresses", t.Context(), mock.Anything,
+				uint32(1),
+			).Return(nil, tc.storeErr).Once()
+
+			// Act: Use normal admission so error mapping is exercised at the
+			// public boundary rather than by directly calling the mapper.
+			batch, err := w.NewBulkAddresses(
+				t.Context(),
+				NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+				false, 1,
+			)
+
+			// Assert: Only the wallet-owned failure escapes, even when a
+			// possibly committed allocation also reports cancellation.
+			// Cleanup verifies the single Store call without any chain call.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.NotErrorIs(t, err, context.Canceled)
+			require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+			require.Nil(t, batch)
+		})
+	}
+}
+
+// TestNewBulkAddressesFinishesCommittedWatch checks that failure and caller
+// cancellation discard delivery without abandoning committed address watches.
+func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{
+			name: "watch failure",
+		},
+		{
+			name:   "caller cancellation after commit",
+			cancel: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Simulate a committed child and optionally cancel its
+			// caller at Store return. Watching uses the wallet context.
+			w, deps := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			addr, script, _ := expectedStoreAddress(
+				t, storeDerivationAccountPubKey(t), db.WitnessPubKey, 0, 0,
+			)
+			stored := db.AddressInfo{
+				AddrType:          db.WitnessPubKey,
+				ScriptPubKey:      script,
+				HasDerivationPath: true,
+			}
+			deps.store.On(
+				"NewDerivedAddresses", ctx, mock.Anything, uint32(1),
+			).Run(func(mock.Arguments) {
+				if tc.cancel {
+					cancel()
+				}
+			}).Return([]db.AddressInfo{stored}, nil).Once()
+
+			watchErr := errors.New("watch unavailable")
+
+			wantErr := watchErr
+			if tc.cancel {
+				watchErr = nil
+				wantErr = context.Canceled
+			}
+
+			deps.chain.On(
+				"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+			).Run(func(mock.Arguments) {
+				require.NoError(t, w.lifetimeCtx.Err())
+			}).Return(watchErr).Once()
+
+			// Act: Finish the admitted call after the committed Store result.
+			batch, err := w.NewBulkAddresses(
+				ctx,
+				NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+				false, 1,
+			)
+
+			// Assert: Failed delivery never exposes the committed child.
+			// Cleanup verifies allocation and the admitted watch attempt.
+			require.ErrorIs(t, err, wantErr)
 			require.Nil(t, batch)
 		})
 	}
