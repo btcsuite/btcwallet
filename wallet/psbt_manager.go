@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -278,21 +277,25 @@ type SignPsbtResult struct {
 // change output in the `fundedPacket.UnsignedTx.TxOut` slice, or -1 if
 // no change output was added.
 //
+// FundPsbt does not modify `barePacket`. It returns a funded packet of its
+// own, so every step below works on `fundedPacket`; `barePacket` still
+// describes the unfunded template it did before the call.
+//
 // 3. Sign the PSBT:
 // The wallet signs all inputs it has the keys for.
 //
-//	signParams := &wallet.SignPsbtParams{Packet: barePacket}
+//	signParams := &wallet.SignPsbtParams{Packet: fundedPacket}
 //	result, err := psbtManager.SignPsbt(ctx, signParams)
 //
 // 4. Finalize the PSBT:
 // The final scriptSig and/or witness for each input is constructed.
 //
-//	err = psbtManager.FinalizePsbt(ctx, barePacket)
+//	err = psbtManager.FinalizePsbt(ctx, fundedPacket)
 //
 // 5. Extract and Broadcast:
 // The final, network-ready transaction is extracted and broadcast.
 //
-//	finalTx, err := psbt.Extract(barePacket)
+//	finalTx, err := psbt.Extract(fundedPacket)
 //	err = broadcaster.Broadcast(ctx, finalTx, "payment")
 //
 // For more detailed examples, including multi-party collaborative workflows,
@@ -708,6 +711,11 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 // handleFundPsbt completes its accepted operation with the caller's packet.
 // The admitted caller waits for this result before reusing its inputs.
 func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
+	// Everything from here on works on a clone. The caller's packet is
+	// never the thing being rewritten, so however this ends, and however
+	// far it got, the caller gets its own packet back exactly as it was.
+	packet := clonePacket(r.intent.Packet)
+
 	// Create a TxIntent from the FundIntent.
 	txIntent := w.createTxIntent(r.intent)
 
@@ -737,7 +745,7 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 
 	// Populate the PSBT packet with the new transaction details.
 	packet, changeIndex, err := w.populatePsbtPacket(
-		r.ctx, r.intent.Packet, authoredTx,
+		r.ctx, packet, authoredTx,
 	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
@@ -755,53 +763,84 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	authoredTx *txauthor.AuthoredTx) (*psbt.Packet, int32, error) {
 
-	// The authored transaction contains the selected inputs and the change
-	// output (if any). We'll update the PSBT packet with this new
-	// unsigned transaction.
-	packet.UnsignedTx = authoredTx.Tx
+	// Take the caller's own records off the packet before the authored
+	// transaction replaces the transaction they were attached to. Inputs
+	// are keyed by outpoint and outputs by the position they were handed
+	// to authoring at, since neither survives as a position in the result.
+	callerTx := packet.UnsignedTx
+	callerInputs := indexCallerInputs(packet)
+	callerOutputs := packet.Outputs
 
-	// We'll also re-initialize the input and output slices to match the
-	// dimensions of the new transaction. This is crucial because the
-	// `authoredTx` may have a different output order than the original PSBT
-	// (e.g., due to change output randomization in txauthor.AuthoredTx),
-	// which would otherwise cause a misalignment between the wire outputs
-	// and the PSBT's output metadata. By resetting, we ensure consistency.
-	packet.Inputs = make([]psbt.PInput, len(authoredTx.Tx.TxIn))
-	packet.Outputs = make([]psbt.POutput, len(authoredTx.Tx.TxOut))
+	tx := authoredTx.Tx
+
+	// The caller's transaction-level choices are the caller's. Authoring
+	// resets the version and locktime to its own defaults and rebuilds
+	// every input with a default sequence number, which would silently
+	// undo a locktime the caller set, or its opt-in to replacement.
+	tx.Version = callerTx.Version
+	tx.LockTime = callerTx.LockTime
+
+	packet.UnsignedTx = tx
+	packet.Inputs = make([]psbt.PInput, len(tx.TxIn))
+
+	for _, txIn := range tx.TxIn {
+		caller, ok := callerInputs[txIn.PreviousOutPoint]
+		if !ok {
+			// An input the wallet selected itself, which keeps
+			// authoring's own sequence number.
+			continue
+		}
+
+		txIn.Sequence = caller.sequence
+	}
+
+	// Authoring leaves the caller's outputs in their own order and swaps
+	// its own change output into a random position among them. Mirroring
+	// that one exchange onto the records keeps each caller's metadata with
+	// the output it describes.
+	outputs, err := changeSwappedOutputs(
+		callerOutputs, authoredTx.ChangeIndex,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	packet.Outputs = outputs
 
 	// With the new inputs in place, we'll decorate them with UTXO and
 	// derivation information from the wallet. We set `skipUnknown` to
 	// false because all inputs in the `authoredTx` must be known to the
 	// wallet.
-	_, err := w.decorateInputs(ctx, packet, false)
+	_, err = w.decorateInputs(ctx, packet, false)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Decoration states what the wallet knows about each input. Now put
+	// the caller's own input records back on top of it, which is also
+	// where a caller that contradicted the wallet about its own coin is
+	// refused.
+	err = restoreInputMetadata(packet, callerInputs)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	// If a change output was created, we need to add its derivation
 	// information to the corresponding PSBT output.
-	var changeOutput *wire.TxOut
 	if authoredTx.ChangeIndex >= 0 {
 		err := w.addChangeOutputInfo(ctx, packet, authoredTx)
 		if err != nil {
 			return nil, 0, err
 		}
-
-		changeOutput = authoredTx.Tx.TxOut[authoredTx.ChangeIndex]
 	}
 
 	// The PSBT specification recommends that inputs and outputs are
-	// sorted. This is done for privacy and standardization. We'll sort
-	// the packet in place.
-	err = psbt.InPlaceSort(packet)
-	if err != nil {
-		return nil, 0, fmt.Errorf("cannot sort psbt: %w", err)
-	}
-
-	// After sorting, the original change index from `authoredTx` is no
-	// longer valid. We need to find the new index of the change output in
-	// the sorted list.
-	changeIndex, err := findChangeIndex(changeOutput, packet)
+	// sorted, for privacy and standardization. Sorting moves the change
+	// output, so its new index is read back off the output itself rather
+	// than searched for by value.
+	changeIndex, err := sortPacketAndFindChange(
+		packet, authoredTx.ChangeIndex,
+	)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -866,6 +905,14 @@ func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 		)
 	}
 
+	// The structural gate. Everything it rejects would otherwise be
+	// discovered somewhere further in, after the wallet had already acted
+	// on the packet.
+	err := validateFundPacket(intent.Packet)
+	if err != nil {
+		return err
+	}
+
 	// If the PSBT has no inputs (automatic coin selection mode), it must
 	// have at least one output.
 	if len(intent.Packet.UnsignedTx.TxIn) == 0 &&
@@ -881,32 +928,6 @@ func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 	}
 
 	return nil
-}
-
-// findChangeIndex finds the new index of the change output after the PSBT has
-// been sorted.
-func findChangeIndex(changeOutput *wire.TxOut,
-	packet *psbt.Packet) (int32, error) {
-
-	if changeOutput == nil {
-		return -1, nil
-	}
-
-	for i, txOut := range packet.UnsignedTx.TxOut {
-		if i > math.MaxInt32 {
-			return 0, ErrChangeIndexOutOfRange
-		}
-
-		if psbt.TxOutsEqual(changeOutput, txOut) {
-			// The above check ensures that the conversion to int32
-			// is safe.
-			//
-			//nolint:gosec
-			return int32(i), nil
-		}
-	}
-
-	return -1, nil
 }
 
 // createTxIntent creates a TxIntent from a FundIntent. This helper function
