@@ -45,14 +45,36 @@ var _ db.NewDerivedAddressOps = newDerivedAddressOps{}
 func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 	key db.AccountLookupKey) (db.DerivedAddressAccount, error) {
 
-	row, err := o.q.GetAccountByWalletScopeAndName(
-		ctx, sqlc.GetAccountByWalletScopeAndNameParams{
-			WalletID:    key.WalletID,
-			Purpose:     key.Purpose,
-			CoinType:    key.CoinType,
-			AccountName: key.AccountName,
-		},
+	// A numbered selector is resolved under the same transaction as the
+	// counter update; renaming the account cannot redirect allocation.
+	var (
+		row sqlc.GetAccountByWalletScopeAndNameRow
+		err error
 	)
+	if key.AccountNumber != nil {
+		var numbered sqlc.GetAccountByWalletScopeAndNumberRow
+
+		numbered, err = o.q.GetAccountByWalletScopeAndNumber(
+			ctx, sqlc.GetAccountByWalletScopeAndNumberParams{
+				WalletID:      key.WalletID,
+				Purpose:       key.Purpose,
+				CoinType:      key.CoinType,
+				AccountNumber: db.NullableUint32ToSQLInt64(key.AccountNumber),
+			},
+		)
+
+		row = sqlc.GetAccountByWalletScopeAndNameRow(numbered)
+	} else {
+		row, err = o.q.GetAccountByWalletScopeAndName(
+			ctx, sqlc.GetAccountByWalletScopeAndNameParams{
+				WalletID:    key.WalletID,
+				Purpose:     key.Purpose,
+				CoinType:    key.CoinType,
+				AccountName: key.AccountName,
+			},
+		)
+	}
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.DerivedAddressAccount{}, db.ErrAccountNotFound
 	}
