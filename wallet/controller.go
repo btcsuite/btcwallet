@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
@@ -334,17 +335,22 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 		return err
 	}
 
-	// Fail fast on store connectivity by reading the wallet's accounts
-	// before entering the main loop. The result is intentionally discarded:
-	// the read itself surfaces a broken or unreachable store as a startup
-	// error rather than a mid-scan failure.
-	_, err = w.cache.ListAccounts(
+	// Read accounts before admission so SQL startup can restore watches for
+	// rows committed before a prior instance completed registration.
+	accounts, err := w.cache.ListAccounts(
 		startCtx, db.ListAccountsQuery{
 			WalletID: w.id,
 		},
 	)
 	if err != nil {
 		return fmt.Errorf("list accounts: %w", err)
+	}
+
+	if w.addrStore == nil {
+		err = w.watchStoredAddresses(startCtx, accounts)
+		if err != nil {
+			return fmt.Errorf("watch stored addresses: %w", err)
+		}
 	}
 
 	// Cleanup any expired output locks.
@@ -913,6 +919,13 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 		log.Errorf("Unable to sanity check wallet birthday block: %v", err)
 
 		return fmt.Errorf("get wallet birthday: %w", err)
+	}
+
+	// SQL replay can start Neutrino history before syncer initialization.
+	// Install the persisted birthday first so replay cannot start at genesis.
+	client, ok := w.cfg.Chain.(*chain.NeutrinoClient)
+	if ok && w.addrStore == nil {
+		client.SetStartTime(walletInfo.Birthday)
 	}
 
 	// If the birthday block has already been verified, we initialize the

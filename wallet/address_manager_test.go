@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -1891,6 +1893,118 @@ func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
 				require.ErrorIs(t, reuseErr, watchErr)
 				require.Nil(t, reused)
 			}
+		})
+	}
+}
+
+// TestNewBulkAddressesReplaysCommittedBatch verifies fresh startup watches
+// destinations committed before failed delivery, using a reopened SQLite Store.
+func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{
+			name: "failed registration",
+		},
+		{
+			name:   "canceled delivery",
+			cancel: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Use a real Store with a strict chain boundary. The first
+			// watch captures destinations that fresh startup must replay.
+			path := filepath.Join(t.TempDir(), "reopen.sqlite")
+			chainMock := &bwmock.Chain{}
+			openManager := func() *Manager {
+				m, err := NewManager(t.Context(), ManagerConfig{
+					Backend:     DBBackendSQLite,
+					DataSource:  path,
+					ChainParams: chainParams,
+					ChainSource: chainMock,
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = m.Close() })
+
+				return m
+			}
+			m := openManager()
+			params := sqliteCreateParams(t)
+			w, err := m.Create(params)
+			require.NoError(t, err)
+			startLoadedWalletForTest(t, w)
+			require.NoError(t, w.keyVault.Unlock(t.Context(),
+				params.PrivatePassphrase))
+			w.state.toUnlocked()
+			_, err = w.NewAccount(t.Context(), NewAccountParams{
+				Scope: waddrmgr.KeyScopeBIP0084,
+				Name:  "batch",
+			})
+			require.NoError(t, err)
+			require.NoError(t, w.store.UpdateWallet(t.Context(),
+				db.UpdateWalletParams{
+					WalletID: w.id,
+					BirthdayBlock: &db.Block{
+						Hash:      *chainParams.GenesisHash,
+						Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+					},
+				}))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			watchErr := errDBMock
+
+			wantErr := errDBMock
+			if tc.cancel {
+				watchErr = nil
+				wantErr = context.Canceled
+			}
+
+			var committed []address.Address
+			chainMock.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+				Run(func(args mock.Arguments) {
+					addrs, ok := args.Get(1).([]address.Address)
+					require.True(t, ok)
+
+					committed = addrs
+
+					if tc.cancel {
+						cancel()
+					}
+				}).Return(watchErr).Once()
+			chainMock.On("WatchAddrsFromTip", t.Context(), mock.Anything).
+				Run(func(args mock.Arguments) {
+					require.Equal(t, committed, args.Get(1))
+				}).Return(nil).Once()
+
+			// Act: Fail public delivery, shut down its request loop, close the
+			// database, and run synchronous startup on a freshly loaded wallet.
+			batch, deliveryErr := w.NewBulkAddresses(ctx,
+				NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+				false, 2,
+			)
+			require.NoError(t, w.Stop(t.Context()))
+			require.NoError(t, m.Close())
+
+			fresh, err := openManager().Load(LoadWalletParams{
+				Name: params.Name,
+			})
+			require.NoError(t, err)
+			err = fresh.performRuntimeSetup(t.Context())
+
+			// Assert: Delivery exposed no batch but both committed addresses
+			// survived closing the database and were watched by fresh startup.
+			require.ErrorIs(t, deliveryErr, wantErr)
+			require.Nil(t, batch)
+			require.Len(t, committed, 2)
+			require.NoError(t, err)
+			chainMock.AssertExpectations(t)
 		})
 	}
 }

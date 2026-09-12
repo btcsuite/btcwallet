@@ -877,6 +877,56 @@ func (w *Wallet) newAddress(ctx context.Context, accountName string,
 	return addr, nil
 }
 
+// watchStoredAddresses restores SQL receive watches before request admission.
+// The snapshot cannot race this Wallet's allocations; later admitted batches
+// add their own watches. Raw imports use the existing accountless query shape.
+func (w *Wallet) watchStoredAddresses(ctx context.Context,
+	accounts []db.AccountInfo) error {
+
+	page, err := addressPageRequest()
+	if err != nil {
+		return err
+	}
+
+	queries := []db.ListAddressesQuery{{WalletID: w.id, Page: page}}
+	for _, account := range accounts {
+		if account.NoChainSync || keylessImportedAccount(account) {
+			continue
+		}
+
+		queries = append(queries, db.ListAddressesQuery{
+			WalletID: w.id, Page: page,
+			AccountName: &account.AccountName, Scope: &account.KeyScope,
+		})
+	}
+
+	// Include both branches and custom scopes; the history scan's separate
+	// address filter deliberately omits some external rows needed for watches.
+	var addrs []address.Address
+	for _, query := range queries {
+		for info, err := range w.store.IterAddresses(ctx, query) {
+			if err != nil {
+				return err
+			}
+
+			addr := extractAddrFromPKScript(
+				info.ScriptPubKey, w.cfg.ChainParams,
+			)
+			if addr == nil {
+				return ErrUnableToExtractAddress
+			}
+
+			addrs = append(addrs, addr)
+		}
+	}
+
+	if len(addrs) == 0 {
+		return nil
+	}
+
+	return w.cfg.Chain.WatchAddrsFromTip(ctx, addrs)
+}
+
 // GetUnusedAddress returns the first, oldest, unused address by scanning
 // forward from the start of the derivation path. The address is considered
 // "unused" if the wallet has not recorded it as used. For accounts that track
@@ -995,8 +1045,8 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 			return
 		}
 
-		unusedAddr, ok, err := nextUnusedStoreAddress(
-			storeAddr, r.change, w.cfg.ChainParams,
+		unusedAddr, ok, err := w.nextUnusedStoreAddress(
+			storeAddr, r.change,
 		)
 		if err != nil {
 			r.respChan <- addressResp{err: err}
@@ -1006,19 +1056,6 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 
 		if !ok {
 			continue
-		}
-
-		// A prior allocation may have committed before registration failed.
-		// Re-register stored SQL rows before exposing them through reuse.
-		if w.addrStore == nil {
-			err := w.cfg.Chain.WatchAddrsFromTip(
-				w.lifetimeCtx, []address.Address{unusedAddr},
-			)
-			if err != nil {
-				r.respChan <- addressResp{err: err}
-
-				return
-			}
 		}
 
 		r.respChan <- addressResp{addr: unusedAddr}
@@ -1035,9 +1072,9 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 
 // nextUnusedStoreAddress returns the unused address candidate represented by a
 // store record, if it matches the requested branch and is not already used.
-func nextUnusedStoreAddress(storeAddr db.AddressInfo,
-	change bool,
-	chainParams *chaincfg.Params) (address.Address, bool, error) {
+// SQL candidates are registered before return so callers can safely reuse them.
+func (w *Wallet) nextUnusedStoreAddress(storeAddr db.AddressInfo,
+	change bool) (address.Address, bool, error) {
 
 	if !storeAddr.HasDerivationPath {
 		return nil, false, nil
@@ -1051,10 +1088,21 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 		return nil, false, nil
 	}
 
-	addr := extractAddrFromPKScript(storeAddr.ScriptPubKey, chainParams)
+	addr := extractAddrFromPKScript(storeAddr.ScriptPubKey, w.cfg.ChainParams)
 	if addr == nil {
 		return nil, false, fmt.Errorf("%w: from pkscript %x",
 			ErrUnableToExtractAddress, storeAddr.ScriptPubKey)
+	}
+
+	// A prior allocation may have committed before registration failed.
+	// Re-register stored SQL rows before exposing them through reuse.
+	if w.addrStore == nil {
+		err := w.cfg.Chain.WatchAddrsFromTip(
+			w.lifetimeCtx, []address.Address{addr},
+		)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
 	return addr, true, nil
