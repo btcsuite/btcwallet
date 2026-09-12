@@ -198,7 +198,7 @@ func createDerivedAddress(ctx context.Context,
 		return nil, err
 	}
 
-	row, err := ops.CreateDerivedAddress(ctx, CreateDerivedAddressRequest{
+	return insertDerivedAddress(ctx, CreateDerivedAddressRequest{
 		WalletID:     int64(params.WalletID),
 		AccountID:    account.AccountID,
 		AddrType:     addrType,
@@ -206,7 +206,17 @@ func createDerivedAddress(ctx context.Context,
 		Index:        index,
 		ScriptPubKey: scriptPubKey,
 		PubKey:       pubKey,
-	})
+	}, accountNumber, account.WalletWatchOnly, ops)
+}
+
+// insertDerivedAddress stores a derived child and assembles its result.
+// Keeping insertion separate lets a batch finish deriving before writing rows,
+// while retaining the same identity conversions as count-one allocation.
+func insertDerivedAddress(ctx context.Context, req CreateDerivedAddressRequest,
+	accountNumber *uint32, watchOnly bool,
+	ops NewDerivedAddressOps) (*AddressInfo, error) {
+
+	row, err := ops.CreateDerivedAddress(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("create address: %w", err)
 	}
@@ -216,7 +226,7 @@ func createDerivedAddress(ctx context.Context,
 		return nil, err
 	}
 
-	convertedAcctID, err := optionalAccountID(account.AccountID)
+	convertedAcctID, err := optionalAccountID(req.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -225,14 +235,14 @@ func createDerivedAddress(ctx context.Context,
 		ID:                id,
 		AccountID:         convertedAcctID,
 		AccountNumber:     accountNumber,
-		AddrType:          addrType,
+		AddrType:          req.AddrType,
 		CreatedAt:         row.CreatedAt,
 		HasDerivationPath: true,
-		Branch:            branch,
-		Index:             index,
-		ScriptPubKey:      scriptPubKey,
-		PubKey:            pubKey,
-		IsWatchOnly:       account.WalletWatchOnly,
+		Branch:            req.Branch,
+		Index:             req.Index,
+		ScriptPubKey:      req.ScriptPubKey,
+		PubKey:            req.PubKey,
+		IsWatchOnly:       watchOnly,
 	}, nil
 }
 
