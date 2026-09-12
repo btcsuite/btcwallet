@@ -3409,3 +3409,121 @@ func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	)
 	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
 }
+
+// TestNewDerivedAddressesDurableBatches checks complete ordered concurrent
+// batches and durable next-child progress after closing each SQL backend.
+func TestNewDerivedAddressesDurableBatches(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		count  uint32
+		change bool
+	}{
+		{
+			name:  "single external",
+			count: 1,
+		},
+		{
+			name:   "maximum internal",
+			count:  100,
+			change: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Share one account/branch across independent Store calls.
+			// Retain the configuration for a fresh pool to read durable facts.
+			store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+			id := newWallet(t, store, "bulk")
+			createDerivedAccount(
+				t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+			)
+			params := db.NewDerivedAddressParams{
+				WalletID:         id,
+				Scope:            db.KeyScopeBIP0084,
+				AccountName:      derivedAccountName,
+				Change:           tc.change,
+				RequireChainSync: true,
+			}
+
+			const workers = 3
+
+			type result struct {
+				batch []db.AddressInfo
+				err   error
+			}
+
+			results := make(chan result, workers)
+
+			var wg sync.WaitGroup
+
+			// Act: Race whole transactions and join them, then reopen the pool
+			// before reading rows and requesting another fresh batch.
+			for range workers {
+				wg.Go(func() {
+					batch, err := store.NewDerivedAddresses(
+						t.Context(), params, tc.count,
+					)
+					results <- result{
+						batch: batch,
+						err:   err,
+					}
+				})
+			}
+
+			wg.Wait()
+			close(results)
+			require.NoError(t, store.Close())
+			store = reopen()
+			next, err := store.NewDerivedAddresses(t.Context(), params, 1)
+
+			// Assert: Every transaction returns a complete ordered batch.
+			// Sorted batches are disjoint, and reopening never resets progress.
+			require.NoError(t, err)
+			require.Len(t, next, 1)
+			require.Equal(t, workers*tc.count, next[0].Index)
+
+			var batches [][]db.AddressInfo
+			for result := range results {
+				require.NoError(t, result.err)
+				require.Len(t, result.batch, int(tc.count))
+				batches = append(batches, result.batch)
+			}
+
+			sort.Slice(batches, func(i, j int) bool {
+				return batches[i][0].Index < batches[j][0].Index
+			})
+
+			var expected uint32
+			for _, batch := range batches {
+				for _, info := range batch {
+					require.Equal(t, expected, info.Index)
+					require.Equal(t, tc.change, info.Branch == 1)
+
+					expected++
+				}
+			}
+
+			pageReq, err := page.NewRequest[uint32](100)
+			require.NoError(t, err)
+
+			query := db.ListAddressesQuery{
+				WalletID:    id,
+				Scope:       &params.Scope,
+				AccountName: &params.AccountName,
+				Page:        pageReq,
+			}
+
+			var persisted int
+			for _, err := range store.IterAddresses(t.Context(), query) {
+				require.NoError(t, err)
+
+				persisted++
+			}
+
+			require.Equal(t, int(workers*tc.count)+1, persisted)
+		})
+	}
+}
