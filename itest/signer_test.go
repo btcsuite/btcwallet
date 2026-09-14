@@ -7,8 +7,13 @@
 package itest
 
 import (
+	"testing"
+
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -927,4 +932,221 @@ func testUnsafeSignerRejectWatchOnly(h *bwtest.HarnessTest) {
 
 	addrKeyIsNil := addrKey == nil
 	require.True(h, addrKeyIsNil, "expected no address key")
+}
+
+// createSignerPath builds a signing selector from public address metadata,
+// retaining the account number and child rather than assuming address index 0.
+func createSignerPath(derivation *wallet.AddressDerivation) wallet.BIP32Path {
+	// Follow wallet.BIP32Path: use the public account number for lookup
+	// and harden only the BIP32 account child.
+	account := hdkeychain.HardenedKeyStart + derivation.Account
+
+	return wallet.BIP32Path{
+		KeyScope: derivation.KeyScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount:      derivation.Account,
+			Account:              account,
+			Branch:               derivation.Branch,
+			Index:                derivation.Index,
+			MasterKeyFingerprint: derivation.MasterKeyFingerprint,
+		},
+	}
+}
+
+// testSignerSignDigestECDSA verifies a persistent Wallet signs for its public
+// child key, and that the signature authenticates the requested digest only.
+func testSignerSignDigestECDSA(h *bwtest.HarnessTest) {
+	// Arrange: The harness materializes the account on every backend. Only
+	// public address metadata is retained as the independent signing oracle.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer digest"))
+	intent := &wallet.SignDigestIntent{
+		Digest:  digest,
+		SigType: wallet.SigTypeECDSA,
+	}
+
+	// Act: Sign the fixed digest through the public Wallet entry point.
+	result, err := w.SignDigest(
+		h.Context(), createSignerPath(info.Derivation), intent,
+	)
+
+	// Assert: Check the public result type and verify against the address's
+	// public key. A changed digest must fail the same verifier.
+	require.NoError(h, err)
+
+	sig, ok := result.(wallet.ECDSASignature)
+	require.True(h, ok, "expected ECDSA signature")
+	require.True(h, sig.Verify(digest, info.PubKey))
+	digest[0] ^= 1
+	require.False(h, sig.Verify(digest, info.PubKey))
+}
+
+// testSignerSignDigestCompact verifies recoverable ECDSA preserves the
+// expected compressed public key without exporting Wallet private material.
+func testSignerSignDigestCompact(h *bwtest.HarnessTest) {
+	// Arrange: Resolve the public child before requesting the compact format,
+	// so recovery is checked against a key independent of the returned bytes.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer compact digest"))
+	intent := &wallet.SignDigestIntent{
+		Digest:     digest,
+		SigType:    wallet.SigTypeECDSA,
+		CompactSig: true,
+	}
+
+	// Act: Request a compact signature for the same public address path.
+	result, err := w.SignDigest(
+		h.Context(), createSignerPath(info.Derivation), intent,
+	)
+
+	// Assert: Recovery verifies the signature and exposes the key and
+	// compression marker encoded by the public compact-signature contract.
+	require.NoError(h, err)
+
+	sig, ok := result.(wallet.CompactSignature)
+	require.True(h, ok, "expected compact signature")
+
+	pubKey, compressed, err := ecdsa.RecoverCompact(sig, digest)
+	require.NoError(h, err)
+	require.True(h, compressed)
+	require.True(h, pubKey.IsEqual(info.PubKey))
+}
+
+// testSignerSignDigestSchnorr verifies untweaked, BIP86, and script-root
+// signatures against independently calculated public output keys.
+func testSignerSignDigestSchnorr(h *bwtest.HarnessTest) {
+	// Arrange: Nil means no tweak, while an empty non-nil slice requests the
+	// BIP86 tweak. Public point arithmetic supplies the expected key for each.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer schnorr digest"))
+	root := chainhash.HashB([]byte("signer script root"))
+	tests := []struct {
+		name   string
+		tweak  []byte
+		pubKey *btcec.PublicKey
+	}{
+		{
+			name:   "untweaked",
+			pubKey: info.PubKey,
+		},
+		{
+			name:   "bip86",
+			tweak:  []byte{},
+			pubKey: txscript.ComputeTaprootOutputKey(info.PubKey, nil),
+		},
+		{
+			name:   "script root",
+			tweak:  root,
+			pubKey: txscript.ComputeTaprootOutputKey(info.PubKey, root),
+		},
+	}
+
+	// Each row keeps the same signing and verification contract; only the
+	// requested tweak and its expected public key change.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Bind this row's tweak to the fixed digest and path.
+			intent := &wallet.SignDigestIntent{
+				Digest:       digest,
+				SigType:      wallet.SigTypeSchnorr,
+				TaprootTweak: tc.tweak,
+			}
+
+			// Act: Let the real Wallet resolve and sign with its key.
+			result, err := w.SignDigest(
+				t.Context(), createSignerPath(info.Derivation), intent,
+			)
+
+			// Assert: Verify the Schnorr result against the public output
+			// key, without obtaining or independently signing with a secret.
+			require.NoError(t, err)
+
+			sig, ok := result.(wallet.SchnorrSignature)
+			require.True(t, ok, "expected Schnorr signature")
+			require.True(t, sig.Verify(digest, tc.pubKey))
+		})
+	}
+}
+
+// testSignerRejectDigestIntent verifies public validation identities on a
+// signing-capable Wallet, so lock-state rejection cannot mask invalid input.
+func testSignerRejectDigestIntent(h *bwtest.HarnessTest) {
+	// Arrange: A real, unlocked key path is valid for every row. Digest sizes
+	// straddle the supported 32-byte boundary covered by successful cases.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer rejected digest"))
+	tests := []struct {
+		name   string
+		intent *wallet.SignDigestIntent
+		want   error
+	}{
+		{
+			name: "nil intent",
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "short digest",
+			intent: &wallet.SignDigestIntent{
+				Digest: digest[:31],
+			},
+			want: wallet.ErrInvalidDigestSize,
+		},
+		{
+			name: "long digest",
+			intent: &wallet.SignDigestIntent{
+				Digest: append(digest, 0),
+			},
+			want: wallet.ErrInvalidDigestSize,
+		},
+		{
+			name: "ecdsa taproot tweak",
+			intent: &wallet.SignDigestIntent{
+				Digest:       digest,
+				TaprootTweak: []byte{},
+			},
+			want: wallet.ErrInvalidSignParam,
+		},
+		{
+			name: "compact schnorr",
+			intent: &wallet.SignDigestIntent{
+				Digest:     digest,
+				SigType:    wallet.SigTypeSchnorr,
+				CompactSig: true,
+			},
+			want: wallet.ErrInvalidSignParam,
+		},
+	}
+
+	// Validation rows share the same Wallet and independent request values;
+	// no row mutates the wallet or depends on another rejection.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Keep the known public derivation valid for this row.
+			path := createSignerPath(info.Derivation)
+
+			// Act: Submit the invalid intent through the public method.
+			result, err := w.SignDigest(t.Context(), path, tc.intent)
+
+			// Assert: Callers can match the same stable error on every
+			// backend, and a rejected request returns no signature.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, result)
+		})
+	}
 }
