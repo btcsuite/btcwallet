@@ -6,6 +6,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -1703,6 +1704,79 @@ func TestControllerInfoExactSyncStatus(t *testing.T) {
 	}
 }
 
+// TestControllerInfoSyncWorkerBackoff verifies that a real sync worker error
+// clears readiness during retry backoff even when both tips still match.
+func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Use the real worker with the existing Wallet fixture.
+		w, deps := createTestWalletWithMocks(t)
+		w.sync = newSyncer(
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		)
+		w.state = newWalletState(w.sync)
+
+		tip := &db.Block{
+			Hash:      chainhash.Hash{100},
+			Height:    100,
+			Timestamp: time.Unix(1710003700, 0),
+		}
+		deps.store.On("GetWallet", mock.Anything, "").Return(
+			&db.WalletInfo{SyncedTo: tip}, nil,
+		).Times(4)
+		expectMatchingRollbackBatch(deps.store, deps.chain)
+		deps.chain.On("IsCurrent").Return(true).Once()
+		deps.chain.On("NotifyBlocks").Return(nil).Once()
+		deps.chain.On("GetBestBlock").Return(
+			&tip.Hash, int32(tip.Height), nil,
+		).Times(3)
+		deps.chain.On("BackEnd").Return("mock").Twice()
+
+		// Hold maintenance after advanceChainSync marks the worker
+		// ready, then release a real Store error without changing tips.
+		failWorker := make(chan struct{})
+		deps.store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID:    w.id,
+			UnminedOnly: true,
+		}).Run(func(mock.Arguments) {
+			select {
+			case <-failWorker:
+			case <-w.lifetimeCtx.Done():
+			}
+		}).Return(nil, errDBMock).Once()
+
+		startLoadedWalletForTest(t, w)
+		w.wg.Go(w.runSyncLoop)
+
+		synctest.Wait()
+
+		// Verify the worker reached the blocked maintenance call before
+		// reading Info and releasing the failure. Cleanup's Once check
+		// only verifies the final count, not this checkpoint.
+		deps.store.AssertNumberOfCalls(t, "ListTxns", 1)
+		before, err := w.Info(t.Context())
+		require.NoError(t, err)
+		require.True(t, before.Synced)
+
+		// Act: Drain error handling into the real retry timer. Wait
+		// returns only once the worker is durably blocked; fake time
+		// stays frozen, so backoff cannot race the public Info call.
+		close(failWorker)
+		synctest.Wait()
+
+		after, err := w.Info(t.Context())
+
+		// Assert: The stopped worker is not ready, but its committed
+		// tip remains intact. No retry has run or elapsed.
+		require.NoError(t, err)
+		require.Equal(t, before.SyncedTo, after.SyncedTo)
+		require.False(t, after.Synced)
+	})
+}
+
 // TestControllerInfoChainTipError verifies that Info cannot report a
 // successful snapshot when the observed chain tip is unavailable.
 func TestControllerInfoChainTipError(t *testing.T) {
@@ -1729,9 +1803,9 @@ func TestControllerInfoChainTipError(t *testing.T) {
 	require.ErrorIs(t, err, errBestBlock)
 }
 
-// TestControllerInfoSmallGapReportsUnsynced verifies that Info remains exact
-// while the wallet's committed tip trails the observed tip by one block.
-func TestControllerInfoSmallGapReportsUnsynced(t *testing.T) {
+// TestControllerSmallGapAllowsRescan verifies that scan admission remains
+// available while Info reports the wallet one block behind the source.
+func TestControllerSmallGapAllowsRescan(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Keep the live delivery state ready while the persisted Wallet
@@ -1746,18 +1820,33 @@ func TestControllerInfoSmallGapReportsUnsynced(t *testing.T) {
 			Hash: walletHash, Height: 99,
 		}}, nil,
 	).Once()
-	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.syncer.On("syncState").Return(syncStateSynced).Twice()
 	deps.chain.On("GetBestBlock").Return(
 		&bestHash, int32(100), nil,
-	).Once()
-	deps.chain.On("BackEnd").Return("mock")
+	).Twice()
+	deps.chain.On("BackEnd").Return("mock").Once()
 
-	// Act: Read the public snapshot without changing admission state.
+	targets := []waddrmgr.AccountScope{{
+		Scope: waddrmgr.KeyScopeBIP0084,
+	}}
+	deps.syncer.On("requestScan", mock.Anything, &scanReq{
+		typ:        scanTypeTargeted,
+		startBlock: waddrmgr.BlockStamp{Height: 50},
+		targets:    targets,
+	}).Return(nil).Once()
+
+	// Establish that exact public status is false before exercising the
+	// operation's real admission and request-dispatch path.
 	info, err := w.Info(t.Context())
-
-	// Assert: Info does not conflate admission readiness with exact sync.
 	require.NoError(t, err)
 	require.False(t, info.Synced)
+
+	// Act: Submit a scan while the live delivery state is still ready.
+	err = w.Rescan(t.Context(), 50, targets)
+
+	// Assert: The public call succeeds and reaches the syncer mailbox
+	// boundary despite the one-block gap reported by Info.
+	require.NoError(t, err)
 }
 
 // TestControllerResync verifies the Resync method.

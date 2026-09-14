@@ -100,8 +100,8 @@ const (
 	// chain backend to finish syncing.
 	syncStateBackendSyncing syncState = iota
 
-	// syncStateSyncing indicates the wallet is running but catching up to
-	// the chain tip (or rewinding).
+	// syncStateSyncing indicates live processing is not ready while the
+	// wallet catches up, rewinds, or waits to retry a failed sync worker.
 	syncStateSyncing
 
 	// syncStateSynced indicates the wallet is running and synced to the
@@ -683,6 +683,8 @@ func (s *syncer) run(ctx context.Context) error {
 
 				return nil
 			}
+
+			s.state.Store(uint32(syncStateSyncing))
 
 			return err
 		}
