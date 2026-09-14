@@ -315,6 +315,19 @@ var allTestCases = []*testCase{
 		Name:     "signer reject raw sig",
 		TestFunc: testSignerRejectRawSig,
 	},
+	// Exercise key availability and durable identity through real Wallets.
+	{
+		Name:     "signer reject locked",
+		TestFunc: testSignerRejectLocked,
+	},
+	{
+		Name:     "signer reject watchonly",
+		TestFunc: testSignerRejectWatchOnly,
+	},
+	{
+		Name:     "signer sign after reload",
+		TestFunc: testSignerSignAfterReload,
+	},
 	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
