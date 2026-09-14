@@ -1650,3 +1650,248 @@ func testSignerRejectRawSig(h *bwtest.HarnessTest) {
 		})
 	}
 }
+
+// testSignerRejectLocked verifies all three public signing methods refuse a
+// locked Wallet even when the address, path, and transaction are otherwise
+// valid.
+func testSignerRejectLocked(h *bwtest.HarnessTest) {
+	// Arrange: Address preparation restores the initially locked state. The
+	// owned legacy output would be signable with these inputs after
+	// unlocking.
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.PubKeyHash)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	path := createSignerPath(info.Derivation)
+	digest := &wallet.SignDigestIntent{
+		Digest: chainhash.HashB([]byte("signer locked digest")),
+	}
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+	}
+	rawParams := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      path,
+		Details:   wallet.LegacySpendDetails{},
+	}
+
+	// Act: Exercise the shared key-availability boundary through each
+	// method, keeping the Wallet locked throughout all requests.
+	sig, digestErr := w.SignDigest(h.Context(), path, digest)
+	unlocking, unlockErr := w.ComputeUnlockingScript(
+		h.Context(), unlockParams,
+	)
+	rawSig, rawErr := w.ComputeRawSig(h.Context(), rawParams)
+
+	// Assert: Every method must preserve the public state error and return
+	// no signing material; accepting any one would breach the lock
+	// contract.
+	require.ErrorIs(h, digestErr, wallet.ErrStateForbidden)
+	require.Nil(h, sig)
+	require.ErrorIs(h, unlockErr, wallet.ErrStateForbidden)
+	require.Nil(h, unlocking)
+	require.ErrorIs(h, rawErr, wallet.ErrStateForbidden)
+	require.Nil(h, rawSig)
+}
+
+// testSignerRejectWatchOnly verifies a watch-only Wallet with an owned
+// address refuses all public signing entry points.
+func testSignerRejectWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: Import the shared account fixture's public material so its
+	// scope, address type, fingerprint, and network encoding stay together.
+	const accountName = "signer watchonly account"
+
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		InitialAccounts: []wallet.WatchOnlyAccount{
+			{
+				Scope:                keys.scope,
+				XPub:                 keys.accountKey,
+				Name:                 accountName,
+				AddrType:             keys.addrType,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+			},
+		},
+	})
+	require.True(h, w.IsWatchOnly())
+
+	addr, err := w.NewAddress(
+		ctx, accountName, keys.addrType, false,
+	)
+	require.NoError(h, err)
+
+	info, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	// Segwit raw signing uses the P2PKH scriptCode for this public key,
+	// while the previous output retains the Wallet's witness program.
+	keyAddr, err := address.NewAddressPubKeyHash(
+		address.Hash160(info.PubKey.SerializeCompressed()), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	scriptCode, err := txscript.PayToAddrScript(keyAddr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+
+	// Imported XPubs have no portable account number. Numeric signing
+	// requests test Wallet admission only; unlocking targets the owned
+	// output above. None of these requests claims a numeric account lookup.
+	path := wallet.BIP32Path{KeyScope: keys.scope}
+	digest := &wallet.SignDigestIntent{
+		Digest: chainhash.HashB([]byte("signer watch-only digest")),
+	}
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+	}
+	rawParams := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      path,
+		Details: wallet.SegwitV0SpendDetails{
+			WitnessScript: scriptCode,
+		},
+	}
+
+	// Act: Ask each signing method to handle an otherwise well-formed
+	// request on the watch-only Wallet, without selecting a backend-
+	// specific route.
+	sig, digestErr := w.SignDigest(h.Context(), path, digest)
+	unlocking, unlockErr := w.ComputeUnlockingScript(
+		h.Context(), unlockParams,
+	)
+	rawSig, rawErr := w.ComputeRawSig(h.Context(), rawParams)
+
+	// Assert: Public material is available, but signing remains forbidden.
+	// Rootless kvdb Wallets cannot unlock, so the shared contract ends at
+	// admission rather than requiring a backend-specific secret lookup.
+	require.ErrorIs(h, digestErr, wallet.ErrStateForbidden)
+	require.Nil(h, sig)
+	require.ErrorIs(h, unlockErr, wallet.ErrStateForbidden)
+	require.Nil(h, unlocking)
+	require.ErrorIs(h, rawErr, wallet.ErrStateForbidden)
+	require.Nil(h, rawSig)
+}
+
+// testSignerSignAfterReload verifies persisted key identity remains usable by
+// all public signing methods after the Wallet and its Manager are reopened.
+func testSignerSignAfterReload(h *bwtest.HarnessTest) {
+	// Arrange: Retain the public key, path, and previous output from the
+	// first Wallet generation. These values must still verify the reloaded
+	// signer; consulting only its new metadata could conceal a changed key
+	// identity.
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	keyAddr, err := address.NewAddressPubKeyHash(
+		address.Hash160(info.PubKey.SerializeCompressed()), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	scriptCode, err := txscript.PayToAddrScript(keyAddr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	rawTx := tx.Copy()
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	path := createSignerPath(info.Derivation)
+	digest := chainhash.HashB([]byte("signer durable digest"))
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+	}
+	rawParams := &wallet.RawSigParams{
+		Tx:        rawTx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      path,
+		Details: wallet.SegwitV0SpendDetails{
+			WitnessScript: scriptCode,
+		},
+	}
+
+	// Act: Cross the actual store-close boundary, unlock the fresh Wallet,
+	// and request all three results using the retained inputs.
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	sig, digestErr := w.SignDigest(
+		h.Context(), path, &wallet.SignDigestIntent{
+			Digest: digest,
+		},
+	)
+	unlocking, unlockErr := w.ComputeUnlockingScript(
+		h.Context(), unlockParams,
+	)
+	rawSig, rawErr := w.ComputeRawSig(h.Context(), rawParams)
+
+	// Assert: Verify the digest against the original public key, not one
+	// obtained after reload. Both spending results must then execute
+	// against the original output independently, without re-signing either
+	// result.
+	require.NoError(h, digestErr)
+	require.NoError(h, unlockErr)
+	require.NoError(h, rawErr)
+
+	ecdsaSig, ok := sig.(wallet.ECDSASignature)
+	require.True(h, ok, "expected ECDSA signature after reload")
+	require.True(h, ecdsaSig.Verify(digest, info.PubKey))
+
+	tx.TxIn[0].Witness = unlocking.Witness
+	tx.TxIn[0].SignatureScript = unlocking.SigScript
+
+	engine, err := txscript.NewEngine(
+		pkScript, tx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+
+	// Raw Segwit signatures need the caller's hash byte and public key. Use
+	// a separate transaction so the unlocking-script result cannot mask it.
+	rawTx.TxIn[0].Witness = wire.TxWitness{
+		append(rawSig, byte(rawParams.HashType)),
+		info.PubKey.SerializeCompressed(),
+	}
+	engine, err = txscript.NewEngine(
+		pkScript, rawTx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+}
