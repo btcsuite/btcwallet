@@ -1,0 +1,288 @@
+// Copyright (c) 2025 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package wallet
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"slices"
+
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+)
+
+var (
+	// ErrConflictingInputMetadata is returned when a caller's own input
+	// metadata contradicts what the wallet knows about the same outpoint.
+	ErrConflictingInputMetadata = errors.New(
+		"psbt input metadata conflicts with wallet data",
+	)
+)
+
+// callerInput is one input record as the caller handed it over, keyed away
+// from the transaction it arrived in.
+type callerInput struct {
+	// sequence is the sequence number the caller set on this input.
+	sequence uint32
+
+	// pInput is the caller's own metadata for this input.
+	pInput psbt.PInput
+}
+
+// indexCallerInputs keys a caller's input records by the outpoint each one
+// spends.
+//
+// Position cannot be used: authoring rebuilds the input list and sorting
+// reorders it, so only the outpoint survives both. That is also why the
+// validator refuses a packet spending one outpoint twice, which would leave
+// this index having to drop one of two records.
+func indexCallerInputs(packet *psbt.Packet) map[wire.OutPoint]callerInput {
+	txIns := packet.UnsignedTx.TxIn
+
+	index := make(map[wire.OutPoint]callerInput, len(txIns))
+	for i, txIn := range txIns {
+		index[txIn.PreviousOutPoint] = callerInput{
+			sequence: txIn.Sequence,
+			pInput:   packet.Inputs[i],
+		}
+	}
+
+	return index
+}
+
+// restoreInputMetadata puts a caller's own input metadata back onto a packet
+// whose inputs the wallet has just decorated, and refuses the packet if the
+// two disagree.
+//
+// Every field is either the wallet's to state or the caller's to keep. The
+// wallet states what is being spent and which key spends it, since it looks
+// those up rather than accepting them, so a caller that says otherwise is
+// refused. Everything else is carried across untouched.
+func restoreInputMetadata(packet *psbt.Packet,
+	callerInputs map[wire.OutPoint]callerInput) error {
+
+	for i, txIn := range packet.UnsignedTx.TxIn {
+		caller, ok := callerInputs[txIn.PreviousOutPoint]
+		if !ok {
+			// An input the wallet selected itself. There is no
+			// caller metadata for it to keep.
+			continue
+		}
+
+		err := mergeCallerInput(&packet.Inputs[i], &caller.pInput, i)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// mergeCallerInput merges one caller input record into the wallet's decorated
+// record, in place, following the authority rule described on
+// restoreInputMetadata.
+func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
+	err := checkCallerInputAgrees(decorated, caller, idx)
+	if err != nil {
+		return err
+	}
+
+	if len(decorated.RedeemScript) == 0 {
+		decorated.RedeemScript = caller.RedeemScript
+	}
+
+	// The wallet only records a parent transaction for segwit v0 inputs,
+	// so a taproot input decorated by the wallet carries none at all. The
+	// validator has already established that the caller's parent hashes to
+	// the outpoint being spent, so keeping it costs nothing and dropping
+	// it would lose a record the caller is entitled to have back.
+	if decorated.NonWitnessUtxo == nil {
+		decorated.NonWitnessUtxo = caller.NonWitnessUtxo
+	}
+
+	decorated.Bip32Derivation, err = reconcileBip32(
+		decorated.Bip32Derivation, caller.Bip32Derivation, idx,
+	)
+	if err != nil {
+		return err
+	}
+
+	decorated.TaprootBip32Derivation, err = reconcileTaproot(
+		decorated.TaprootBip32Derivation,
+		caller.TaprootBip32Derivation, idx,
+	)
+	if err != nil {
+		return err
+	}
+
+	// The caller's own fields, which the wallet never derives and
+	// therefore never has an opinion on.
+	decorated.WitnessScript = caller.WitnessScript
+	decorated.TaprootLeafScript = caller.TaprootLeafScript
+	decorated.TaprootMerkleRoot = caller.TaprootMerkleRoot
+
+	if len(caller.TaprootInternalKey) > 0 {
+		decorated.TaprootInternalKey = caller.TaprootInternalKey
+	}
+
+	// The wallet writes a default sighash type, so an explicit request
+	// from the caller wins over it. SigHashDefault is zero and so cannot
+	// be told apart from an absent field, which is the same thing the
+	// wallet would have written for a taproot input anyway.
+	if caller.SighashType != 0 {
+		decorated.SighashType = caller.SighashType
+	}
+
+	return nil
+}
+
+// checkCallerInputAgrees reports whether the caller's records for an input can
+// stand alongside the ones the wallet derived for it.
+//
+// Only the fields the wallet states for itself are compared. Where the caller
+// says something different about the wallet's own coin or its own keys, that
+// is a contradiction rather than an override, and funding refuses instead of
+// silently picking one of the two answers.
+func checkCallerInputAgrees(decorated, caller *psbt.PInput, idx int) error {
+	if caller.WitnessUtxo != nil && decorated.WitnessUtxo != nil &&
+		!psbt.TxOutsEqual(caller.WitnessUtxo, decorated.WitnessUtxo) {
+
+		return fmt.Errorf("%w: input %d witness utxo",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	// The non-witness UTXO needs no comparison. The validator has already
+	// established that the caller's parent transaction hashes to the
+	// outpoint being spent, and the wallet looked its own parent up by
+	// that same outpoint, so the two are the same transaction.
+
+	err := checkDerivationFamily(decorated, caller, idx)
+	if err != nil {
+		return err
+	}
+
+	if len(caller.RedeemScript) > 0 && len(decorated.RedeemScript) > 0 &&
+		!bytes.Equal(caller.RedeemScript, decorated.RedeemScript) {
+
+		return fmt.Errorf("%w: input %d redeem script",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	return nil
+}
+
+// checkDerivationFamily reports whether a caller and the wallet agree on what
+// kind of input this is.
+func checkDerivationFamily(decorated, caller *psbt.PInput, idx int) error {
+	callerTaproot := len(caller.TaprootBip32Derivation) > 0
+	callerBip32 := len(caller.Bip32Derivation) > 0
+	walletTaproot := len(decorated.TaprootBip32Derivation) > 0
+	walletBip32 := len(decorated.Bip32Derivation) > 0
+
+	if (callerTaproot && walletBip32) || (callerBip32 && walletTaproot) {
+		return fmt.Errorf("%w: input %d derivation kind",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	return nil
+}
+
+// reconcileBip32 merges the derivation the wallet derived for its own key into
+// the set the caller supplied.
+//
+// The wallet derives one record, for the one key it holds. A caller can carry
+// several, one per cosigner on a multisig input, and those are metadata
+// funding has to preserve rather than a disagreement. So only the record
+// naming the wallet's own key is the wallet's to state: it must match if the
+// caller supplied it, and is added if the caller did not. Every other record
+// is carried untouched.
+func reconcileBip32(wallet, caller []*psbt.Bip32Derivation,
+	idx int) ([]*psbt.Bip32Derivation, error) {
+
+	if len(caller) == 0 {
+		return wallet, nil
+	}
+
+	merged := slices.Clone(caller)
+	for _, w := range wallet {
+		at := slices.IndexFunc(merged,
+			func(c *psbt.Bip32Derivation) bool {
+				return bytes.Equal(c.PubKey, w.PubKey)
+			},
+		)
+		if at < 0 {
+			merged = append(merged, w)
+
+			continue
+		}
+
+		if !bip32DerivationEqual(merged[at], w) {
+			return nil, fmt.Errorf("%w: input %d bip32 derivation",
+				ErrConflictingInputMetadata, idx)
+		}
+	}
+
+	return merged, nil
+}
+
+// reconcileTaproot is reconcileBip32 for taproot derivations, matching records
+// by their x-only key.
+//
+// Where both name the wallet's key the caller's record is the one kept, since
+// it carries the leaf hashes the wallet does not derive and agrees with the
+// wallet's on everything else.
+func reconcileTaproot(wallet, caller []*psbt.TaprootBip32Derivation,
+	idx int) ([]*psbt.TaprootBip32Derivation, error) {
+
+	if len(caller) == 0 {
+		return wallet, nil
+	}
+
+	merged := slices.Clone(caller)
+	for _, w := range wallet {
+		at := slices.IndexFunc(merged,
+			func(c *psbt.TaprootBip32Derivation) bool {
+				return bytes.Equal(c.XOnlyPubKey, w.XOnlyPubKey)
+			},
+		)
+		if at < 0 {
+			merged = append(merged, w)
+
+			continue
+		}
+
+		if !taprootDerivationAgrees(merged[at], w) {
+			return nil, fmt.Errorf("%w: input %d taproot bip32 "+
+				"derivation", ErrConflictingInputMetadata, idx)
+		}
+	}
+
+	return merged, nil
+}
+
+// bip32DerivationEqual compares two BIP32 derivation records, treating a pair
+// of absent records as equal.
+func bip32DerivationEqual(a, b *psbt.Bip32Derivation) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return bytes.Equal(a.PubKey, b.PubKey) &&
+		a.MasterKeyFingerprint == b.MasterKeyFingerprint &&
+		slices.Equal(a.Bip32Path, b.Bip32Path)
+}
+
+// taprootDerivationAgrees compares the wallet-stated fields of two taproot
+// BIP32 derivation records, treating a pair of absent records as agreeing.
+func taprootDerivationAgrees(a, b *psbt.TaprootBip32Derivation) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return bytes.Equal(a.XOnlyPubKey, b.XOnlyPubKey) &&
+		a.MasterKeyFingerprint == b.MasterKeyFingerprint &&
+		slices.Equal(a.Bip32Path, b.Bip32Path)
+}
