@@ -1857,7 +1857,28 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 	// Handle synchronous rescan or resync requests submitted via the
 	// controller.
 	case job := <-s.scanReqChan:
-		return s.handleScanReq(ctx, job)
+		err := s.handleScanReq(ctx, job)
+		if err == nil {
+			return nil
+		}
+
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, ErrWalletShuttingDown) {
+
+			return err
+		}
+
+		if job.typ == scanTypeTargeted {
+			// Rescan returns once the request is queued, so this
+			// execution failure cannot reach its caller. For now,
+			// it is visible only in the logs; swallow it here to
+			// keep live notification processing running.
+			log.Errorf("Targeted rescan failed: %v", err)
+
+			return nil
+		}
+
+		return err
 
 	// Exit gracefully if the context is canceled or the wallet is shutting
 	// down.

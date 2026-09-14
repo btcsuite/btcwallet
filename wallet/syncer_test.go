@@ -3702,6 +3702,96 @@ func TestWaitForEvent(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestWaitForEventTargetedScanResults verifies successful mailbox scans and
+// propagation of wrapped shutdown errors after scan state restoration.
+func TestWaitForEventTargetedScanResults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "scan succeeds"},
+		{name: "scan canceled", err: context.Canceled},
+		{name: "wallet shuts down", err: ErrWalletShuttingDown},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Load real targets, then return the result at
+			// the tip query while the private state is rescanning.
+			s, _, _ := newStoreScanSyncer(t)
+			s.state.Store(uint32(syncStateSynced))
+
+			mockChain := &bwmock.Chain{}
+			s.cfg.Chain = mockChain
+
+			mockChain.On("Notifications").
+				Return((<-chan any)(nil)).Once()
+			mockChain.On("GetBestBlock").Run(func(mock.Arguments) {
+				require.Equal(
+					t, syncStateRescanning, s.syncState(),
+				)
+			}).Return(&chainhash.Hash{}, int32(99), test.err).Once()
+			require.NoError(t, s.requestScan(t.Context(), &scanReq{
+				typ: scanTypeTargeted,
+				startBlock: waddrmgr.BlockStamp{
+					Height: 100,
+				},
+				targets: []waddrmgr.AccountScope{{
+					Scope: waddrmgr.KeyScopeBIP0084,
+				}},
+			}))
+
+			// Act: Consume the scan through the mailbox, not the
+			// direct scan entry point.
+			err := s.waitForEvent(t.Context())
+
+			// Assert: Shutdown errors escape; success continues.
+			require.ErrorIs(t, err, test.err)
+			require.Equal(t, syncStateSynced, s.syncState())
+			mockChain.AssertExpectations(t)
+		})
+	}
+}
+
+// TestWaitForEventRewindFailure verifies that full-rewind failures still
+// escape the mailbox instead of being treated as targeted-scan failures.
+func TestWaitForEventRewindFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Queue a full rewind whose Store write fails.
+	store := &walletmock.Store{}
+	mockChain := &bwmock.Chain{}
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, store, 0)
+	s.state.Store(uint32(syncStateSynced))
+
+	start := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{50},
+		Height:    50,
+		Timestamp: time.Unix(50, 0).UTC(),
+	}
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("RewindWallet", mock.Anything,
+		matchRewindWalletParams(0, start),
+	).Return(errDBMockSync).Once()
+	mockChain.On("Notifications").Return((<-chan any)(nil)).Once()
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{
+		typ:        scanTypeRewind,
+		startBlock: start,
+	}))
+
+	// Act: Process the accepted rewind through the mailbox.
+	err := s.waitForEvent(t.Context())
+
+	// Assert: The worker's caller receives the persistence failure.
+	require.ErrorIs(t, err, errDBMockSync)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
 // TestSyncerFullRun verifies the full run loop coordination.
 func TestSyncerFullRun(t *testing.T) {
 	t.Parallel()
