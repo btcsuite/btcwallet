@@ -268,6 +268,23 @@ var allTestCases = []*testCase{
 		Name:     "unsafe signer reject watchonly",
 		TestFunc: testUnsafeSignerRejectWatchOnly,
 	},
+	// Run the same digest-signing contract on every selected backend.
+	{
+		Name:     "signer sign digest ecdsa",
+		TestFunc: testSignerSignDigestECDSA,
+	},
+	{
+		Name:     "signer sign digest compact",
+		TestFunc: testSignerSignDigestCompact,
+	},
+	{
+		Name:     "signer sign digest schnorr",
+		TestFunc: testSignerSignDigestSchnorr,
+	},
+	{
+		Name:     "signer reject digest intent",
+		TestFunc: testSignerRejectDigestIntent,
+	},
 	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
