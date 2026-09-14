@@ -13,10 +13,12 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -1774,6 +1776,90 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, before.SyncedTo, after.SyncedTo)
 		require.False(t, after.Synced)
+	})
+}
+
+// TestControllerTargetedScanFailureKeepsWorker verifies that a failed mailbox
+// scan leaves the same worker consuming and persisting live notifications.
+func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Start the real worker at a matching tip and fail
+		// account loading only for the queued historical scan.
+		w, deps := createTestWalletWithMocks(t)
+		s := newSyncer(
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		)
+		w.sync = s
+		w.state = newWalletState(s)
+
+		tip := &db.Block{Hash: chainhash.Hash{100}, Height: 100}
+		deps.store.On("GetWallet", mock.Anything, "").Return(
+			&db.WalletInfo{SyncedTo: tip}, nil,
+		).Times(5)
+		expectMatchingRollbackBatch(deps.store, deps.chain)
+		deps.chain.On("IsCurrent").Return(true).Once()
+		deps.chain.On("NotifyBlocks").Return(nil).Once()
+		deps.chain.On("GetBestBlock").Return(
+			&tip.Hash, int32(tip.Height), nil,
+		).Times(3)
+		deps.store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID: w.id, UnminedOnly: true,
+		}).Return(nil, nil).Times(3)
+		deps.store.On("ListAccounts", mock.Anything,
+			db.ListAccountsQuery{
+				WalletID:      w.id,
+				SkipBalance:   true,
+				ChainSyncOnly: true,
+			},
+		).Return(nil, errDBMock).Once()
+
+		notifications := make(chan any, 1)
+		deps.chain.On("Notifications").
+			Return((<-chan any)(notifications)).Times(3)
+
+		block := &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Hash: chainhash.Hash{101}, Height: 101},
+			Time:  time.Unix(1710004300, 0).UTC(),
+		}
+		deps.store.On("ApplyTxBatch", mock.Anything, db.TxBatchParams{
+			WalletID:     w.id,
+			Transactions: []db.CreateTxParams{},
+			SyncedTo: &db.Block{
+				Hash:      block.Hash,
+				Height:    uint32(block.Height),
+				Timestamp: block.Time,
+			},
+		}).Return(nil).Once()
+
+		startLoadedWalletForTest(t, w)
+		w.wg.Go(w.runSyncLoop)
+		synctest.Wait()
+
+		// Act: Finish the failed scan before delivering the next block.
+		require.NoError(t, s.requestScan(t.Context(), &scanReq{
+			typ:        scanTypeTargeted,
+			startBlock: waddrmgr.BlockStamp{Height: 50},
+			targets: []waddrmgr.AccountScope{{
+				Scope: waddrmgr.KeyScopeBIP0084,
+			}},
+		}))
+
+		synctest.Wait()
+
+		// Check that the scan reached account loading before delivering
+		// the live block. Once only verifies the final count at cleanup,
+		// not that the scan ran before the notification was queued.
+		deps.store.AssertNumberOfCalls(t, "ListAccounts", 1)
+
+		notifications <- chain.FilteredBlockConnected{Block: block}
+
+		// Assert: Let the worker settle before cleanup verifies persistence
+		// and the single initialization through the mock expectations.
+		synctest.Wait()
 	})
 }
 
