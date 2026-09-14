@@ -312,8 +312,10 @@ func (c *BitcoindClient) SubmitPackage(txns []*wire.MsgTx,
 	rawTxns := make([]string, 0, len(txns))
 	for _, tx := range txns {
 		buf := bytes.NewBuffer(make([]byte, 0, tx.SerializeSize()))
-		if err := tx.Serialize(buf); err != nil {
-			return nil, fmt.Errorf("%w: %v",
+
+		err := tx.Serialize(buf)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w",
 				rpcclient.ErrInvalidParam, err)
 		}
 
@@ -332,7 +334,9 @@ func (c *BitcoindClient) SubmitPackage(txns []*wire.MsgTx,
 	// btcjson.SubmitPackageResult implements a custom UnmarshalJSON that
 	// maps the raw submitpackage response into higher-level types.
 	var result btcjson.SubmitPackageResult
-	if err := json.Unmarshal(resp, &result); err != nil {
+
+	err = json.Unmarshal(resp, &result)
+	if err != nil {
 		return nil, err
 	}
 

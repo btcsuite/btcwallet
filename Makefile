@@ -157,7 +157,7 @@ tidy-module:
 
 #? tidy-module-check: Run 'go mod tidy' for all modules and check results
 tidy-module-check: tidy-module
-	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
+	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run 'make tidy-module' again!"; git status; exit 1; fi
 
 .PHONY: all \
 	default \
