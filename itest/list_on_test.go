@@ -246,6 +246,27 @@ var allTestCases = []*testCase{
 		Name:     "signer reject unlocking script",
 		TestFunc: testSignerRejectUnlockingScript,
 	},
+	// Raw formats share the backend matrix while retaining caller assembly.
+	{
+		Name:     "signer compute raw sig legacy",
+		TestFunc: testSignerComputeRawSigLegacy,
+	},
+	{
+		Name:     "signer compute raw sig segwit",
+		TestFunc: testSignerComputeRawSigSegwit,
+	},
+	{
+		Name:     "signer compute raw sig taproot",
+		TestFunc: testSignerComputeRawSigTaproot,
+	},
+	{
+		Name:     "signer compute raw sig tapscript",
+		TestFunc: testSignerComputeRawSigTapscript,
+	},
+	{
+		Name:     "signer reject raw sig",
+		TestFunc: testSignerRejectRawSig,
+	},
 	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
