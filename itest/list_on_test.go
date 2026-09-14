@@ -285,6 +285,15 @@ var allTestCases = []*testCase{
 		Name:     "signer reject digest intent",
 		TestFunc: testSignerRejectDigestIntent,
 	},
+	// Keep output ownership and script verification identical across stores.
+	{
+		Name:     "signer compute unlocking script",
+		TestFunc: testSignerComputeUnlockingScript,
+	},
+	{
+		Name:     "signer reject unlocking script",
+		TestFunc: testSignerRejectUnlockingScript,
+	},
 	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,

@@ -7,13 +7,16 @@
 package itest
 
 import (
+	"encoding/hex"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -1147,6 +1150,197 @@ func testSignerRejectDigestIntent(h *bwtest.HarnessTest) {
 			// backend, and a rejected request returns no signature.
 			require.ErrorIs(t, err, tc.want)
 			require.Nil(t, result)
+		})
+	}
+}
+
+// createSignerTx builds a deterministic unsigned spend without chain state.
+// Signing needs the previous output's script and amount, not a mined coin.
+func createSignerTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
+	// One input and one output make SINGLE meaningful, while the lower output
+	// value leaves a fee without involving coin selection or publication.
+	prevOut := wire.NewTxOut(100000, pkScript)
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 0}, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(90000, []byte{txscript.OP_TRUE}))
+
+	return prevOut, tx
+}
+
+// testSignerComputeUnlockingScript verifies the public result spends each
+// supported single-key output under representative signature hash modes.
+func testSignerComputeUnlockingScript(h *bwtest.HarnessTest) {
+	// Arrange: The harness owns one unlocked Wallet. Every row derives its
+	// own address, so its script commits to the key selected by that Wallet.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	tests := []struct {
+		name          string
+		addrType      waddrmgr.AddressType
+		hashType      txscript.SigHashType
+		wantWitness   bool
+		wantSigScript bool
+	}{
+		{
+			name:          "legacy all",
+			addrType:      waddrmgr.PubKeyHash,
+			hashType:      txscript.SigHashAll,
+			wantSigScript: true,
+		},
+		{
+			name:        "witness none",
+			addrType:    waddrmgr.WitnessPubKey,
+			hashType:    txscript.SigHashNone,
+			wantWitness: true,
+		},
+		{
+			name:     "nested single anyonecanpay",
+			addrType: waddrmgr.NestedWitnessPubKey,
+			hashType: txscript.SigHashSingle |
+				txscript.SigHashAnyOneCanPay,
+			wantWitness:   true,
+			wantSigScript: true,
+		},
+		{
+			name:        "taproot default",
+			addrType:    waddrmgr.TaprootPubKey,
+			hashType:    txscript.SigHashDefault,
+			wantWitness: true,
+		},
+		{
+			name:        "taproot all",
+			addrType:    waddrmgr.TaprootPubKey,
+			hashType:    txscript.SigHashAll,
+			wantWitness: true,
+		},
+	}
+
+	// The same caller assembly and engine verification apply to all rows;
+	// only their address, sighash, and expected stack placement differ.
+	for _, tc := range tests {
+		// Keep harness assertions on the parent test's goroutine; the
+		// child uses the resulting address only as public fixture data.
+		addr := h.NewWalletAddressOfType(w, tc.addrType)
+
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Build a fresh transaction and its hash cache from
+			// the exact previous output, without asking the Wallet to sign.
+			pkScript, err := txscript.PayToAddrScript(addr)
+			require.NoError(t, err)
+
+			prevOut, tx := createSignerTx(pkScript)
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				prevOut.PkScript, prevOut.Value,
+			)
+			hashes := txscript.NewTxSigHashes(tx, fetcher)
+			params := &wallet.UnlockingScriptParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				HashType:  tc.hashType,
+			}
+
+			// Act: Request the complete unlocking data for this output.
+			unlocking, err := w.ComputeUnlockingScript(t.Context(), params)
+
+			// Assert: Apply the returned stacks unchanged. The script
+			// engine verifies their signature against the previous output.
+			require.NoError(t, err)
+			require.Equal(t, tc.wantWitness, len(unlocking.Witness) != 0)
+			require.Equal(t, tc.wantSigScript, len(unlocking.SigScript) != 0)
+			tx.TxIn[0].Witness = unlocking.Witness
+			tx.TxIn[0].SignatureScript = unlocking.SigScript
+
+			engine, err := txscript.NewEngine(
+				pkScript, tx, 0, txscript.StandardVerifyFlags,
+				nil, hashes, prevOut.Value, fetcher,
+			)
+			require.NoError(t, err)
+			require.NoError(t, engine.Execute())
+		})
+	}
+}
+
+// testSignerRejectUnlockingScript verifies absent parameters, addressless
+// scripts, and foreign outputs cannot produce unlocking material.
+func testSignerRejectUnlockingScript(h *bwtest.HarnessTest) {
+	// Arrange: An unlocked Wallet reaches parameter and output validation.
+	// The generator's public encoding supplies a foreign address without
+	// constructing or obtaining any private key.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	pubKey, err := hex.DecodeString(
+		"0279be667ef9dcbbac55a06295ce870b070" +
+			"29bfcdb2dce28d959f2815b16f81798",
+	)
+	require.NoError(h, err)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	tests := []struct {
+		name   string
+		params *wallet.UnlockingScriptParams
+		want   error
+	}{
+		{
+			name: "nil params",
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing output",
+			params: &wallet.UnlockingScriptParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "addressless script",
+			params: &wallet.UnlockingScriptParams{
+				Tx: tx,
+				Output: wire.NewTxOut(
+					prevOut.Value, []byte{txscript.OP_RETURN},
+				),
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+			},
+			want: wallet.ErrUnableToExtractAddress,
+		},
+		{
+			name: "foreign output",
+			params: &wallet.UnlockingScriptParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+			},
+			want: wallet.ErrAddressNotFound,
+		},
+	}
+
+	// These requests share a valid spend shape and differ only at the
+	// documented rejection boundary; none changes Wallet state.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Use the row's request without repairing its invalid
+			// field, so the caller-visible validation remains the subject.
+			params := tc.params
+
+			// Act: Try to assemble unlocking data through the public API.
+			unlocking, err := w.ComputeUnlockingScript(t.Context(), params)
+
+			// Assert: Every database must return the same public identity
+			// and no partial witness or scriptSig on rejection.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, unlocking)
 		})
 	}
 }
