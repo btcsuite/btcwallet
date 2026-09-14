@@ -30,6 +30,11 @@ var (
 	// ErrUnclassifiedField is returned when a packet carries a field this
 	// wallet cannot classify, and therefore cannot promise to preserve.
 	ErrUnclassifiedField = errors.New("psbt carries unclassified fields")
+
+	// ErrConflictingUtxo is returned when the UTXO records an input
+	// carries disagree with each other or with the outpoint they claim to
+	// describe.
+	ErrConflictingUtxo = errors.New("conflicting psbt utxo records")
 )
 
 // validatePacket checks that a caller's packet describes one coherent
@@ -252,7 +257,12 @@ func validatePacketInputs(packet *psbt.Packet) error {
 				ErrUnclassifiedField, i, len(pIn.Unknowns))
 		}
 
-		err := validateDerivationRecords(
+		err := validateInputUtxos(pIn, outPoint, i)
+		if err != nil {
+			return err
+		}
+
+		err = validateDerivationRecords(
 			pIn.Bip32Derivation, pIn.TaprootBip32Derivation,
 			"input", i,
 		)
@@ -325,6 +335,54 @@ func validateDerivationRecords(bip32 []*psbt.Bip32Derivation,
 		}
 
 		seen[string(d.XOnlyPubKey)] = struct{}{}
+	}
+
+	return nil
+}
+
+// validateInputUtxos checks that the UTXO records an input carries describe
+// the outpoint that input actually spends, and that they agree with each other
+// where both are present.
+//
+// This is the check that stops a caller from handing the wallet a prevout of
+// its own choosing: every later stage, from fee arithmetic to sighash
+// computation, reads the spent output from these records.
+func validateInputUtxos(pIn *psbt.PInput, outPoint wire.OutPoint,
+	idx int) error {
+
+	var claimed *wire.TxOut
+
+	if pIn.NonWitnessUtxo != nil {
+		// The full parent transaction must be the one this input
+		// names, or it describes some other output entirely.
+		txHash := pIn.NonWitnessUtxo.TxHash()
+		if txHash != outPoint.Hash {
+			return fmt.Errorf("%w: input %d spends %v but carries "+
+				"parent %v", ErrConflictingUtxo, idx,
+				outPoint.Hash, txHash)
+		}
+
+		if uint64(outPoint.Index) >=
+			uint64(len(pIn.NonWitnessUtxo.TxOut)) {
+
+			return fmt.Errorf("%w: input %d spends output %d of a "+
+				"parent with %d outputs", ErrConflictingUtxo,
+				idx, outPoint.Index,
+				len(pIn.NonWitnessUtxo.TxOut))
+		}
+
+		claimed = pIn.NonWitnessUtxo.TxOut[outPoint.Index]
+	}
+
+	// Where a packet carries both views of the spent output, they have to
+	// be the same output. Otherwise the wallet has no way to tell which
+	// one the caller meant.
+	if claimed != nil && pIn.WitnessUtxo != nil &&
+		!psbt.TxOutsEqual(claimed, pIn.WitnessUtxo) {
+
+		return fmt.Errorf("%w: input %d carries a witness utxo that "+
+			"disagrees with its parent transaction",
+			ErrConflictingUtxo, idx)
 	}
 
 	return nil
