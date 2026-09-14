@@ -2561,6 +2561,40 @@ func NewBlockIdentifierFromHash(hash *chainhash.Hash) *BlockIdentifier {
 	return &BlockIdentifier{hash: hash}
 }
 
+// resolveBlockRange resolves block identifiers into the height range used by
+// the transaction store. Hashes are resolved through resolveHash, while
+// height-based identifiers are used directly.
+func resolveBlockRange(startBlock, endBlock *BlockIdentifier,
+	resolveHash func(*chainhash.Hash) (int32, error)) (int32, int32, error) {
+	var start, end int32 = 0, -1
+
+	if startBlock != nil {
+		if startBlock.hash == nil {
+			start = startBlock.height
+		} else if resolveHash != nil {
+			var err error
+			start, err = resolveHash(startBlock.hash)
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+	}
+
+	if endBlock != nil {
+		if endBlock.hash == nil {
+			end = endBlock.height
+		} else if resolveHash != nil {
+			var err error
+			end, err = resolveHash(endBlock.hash)
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+	}
+
+	return start, end, nil
+}
+
 // GetTransactionsResult is the result of the wallet's GetTransactions method.
 // See GetTransactions for more details.
 type GetTransactionsResult struct {
@@ -2581,9 +2615,6 @@ type GetTransactionsResult struct {
 // Block structure which records properties about the block.
 func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 	_ string, cancel <-chan struct{}) (*GetTransactionsResult, error) {
-
-	var start, end int32 = 0, -1
-
 	w.chainClientLock.Lock()
 	chainClient := w.chainClient
 	w.chainClientLock.Unlock()
@@ -2591,71 +2622,36 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 	// TODO: Fetching block heights by their hashes is inherently racy
 	// because not all block headers are saved but when they are for SPV the
 	// db can be queried directly without this.
-	if startBlock != nil {
-		if startBlock.hash == nil {
-			start = startBlock.height
-		} else {
-			if chainClient == nil {
-				return nil, errors.New("no chain server client")
-			}
-			switch client := chainClient.(type) {
-			case *chain.RPCClient:
-				startHeader, err := client.GetBlockHeaderVerbose(
-					startBlock.hash,
-				)
-				if err != nil {
-					return nil, err
-				}
-				start = startHeader.Height
-			case *chain.BitcoindClient:
-				var err error
-				start, err = client.GetBlockHeight(startBlock.hash)
-				if err != nil {
-					return nil, err
-				}
-			case *chain.NeutrinoClient:
-				var err error
-				start, err = client.GetBlockHeight(startBlock.hash)
-				if err != nil {
-					return nil, err
-				}
-			}
+	var resolveHash func(*chainhash.Hash) (int32, error)
+	if (startBlock != nil && startBlock.hash != nil) ||
+		(endBlock != nil && endBlock.hash != nil) {
+		if chainClient == nil {
+			return nil, errors.New("no chain server client")
 		}
-	}
-	if endBlock != nil {
-		if endBlock.hash == nil {
-			end = endBlock.height
-		} else {
-			if chainClient == nil {
-				return nil, errors.New("no chain server client")
+
+		switch client := chainClient.(type) {
+		case *chain.RPCClient:
+			resolveHash = func(hash *chainhash.Hash) (int32, error) {
+				header, err := client.GetBlockHeaderVerbose(hash)
+				if err != nil {
+					return 0, err
+				}
+				return header.Height, nil
 			}
-			switch client := chainClient.(type) {
-			case *chain.RPCClient:
-				endHeader, err := client.GetBlockHeaderVerbose(
-					endBlock.hash,
-				)
-				if err != nil {
-					return nil, err
-				}
-				end = endHeader.Height
-			case *chain.BitcoindClient:
-				var err error
-				start, err = client.GetBlockHeight(endBlock.hash)
-				if err != nil {
-					return nil, err
-				}
-			case *chain.NeutrinoClient:
-				var err error
-				end, err = client.GetBlockHeight(endBlock.hash)
-				if err != nil {
-					return nil, err
-				}
-			}
+		case *chain.BitcoindClient:
+			resolveHash = client.GetBlockHeight
+		case *chain.NeutrinoClient:
+			resolveHash = client.GetBlockHeight
 		}
 	}
 
+	start, end, err := resolveBlockRange(startBlock, endBlock, resolveHash)
+	if err != nil {
+		return nil, err
+	}
+
 	var res GetTransactionsResult
-	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
 		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
