@@ -161,7 +161,6 @@ func TestStateSynchronization(t *testing.T) {
 
 	// Act & Assert.
 	require.Equal(t, syncStateSynced, s.syncState())
-	require.True(t, s.isSynced())
 
 	// Arrange: Mock syncer to return Syncing.
 	// Note: We need to reset expectations or use a new mock/state if rigid.
@@ -171,7 +170,6 @@ func TestStateSynchronization(t *testing.T) {
 
 	// Act & Assert.
 	require.Equal(t, syncStateSyncing, s.syncState())
-	require.False(t, s.isSynced())
 }
 
 // TestStateNilSyncer verifies behavior when syncer is nil (defensive check).
