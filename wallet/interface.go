@@ -226,6 +226,14 @@ type Interface interface {
 	LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 		duration time.Duration) (time.Time, error)
 
+	// LeaseOutputWithOptions locks an output and applies optional persisted
+	// transaction-store lock behavior. Confirmation-controlled leases ignore
+	// the returned wall-clock expiration and require explicit release if no
+	// spend reaches their requested depth.
+	LeaseOutputWithOptions(id wtxmgr.LockID, op wire.OutPoint,
+		duration time.Duration,
+		optFuncs ...wtxmgr.LockOutputOption) (time.Time, error)
+
 	// ReleaseOutput unlocks an output, allowing it to be available for
 	// coin selection if it remains unspent. The ID should match the one
 	// used to originally lock the output.

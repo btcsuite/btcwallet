@@ -1,17 +1,16 @@
 #!/bin/bash
 
-SUBMODULES=$(find . -mindepth 2 -name "go.mod" | cut -d'/' -f2)
-
+set -euo pipefail
 
 # Run 'go mod tidy' for root.
 go mod tidy
 
 # Run 'go mod tidy' for each module.
-for submodule in $SUBMODULES
-do
-  pushd $submodule
-
-  go mod tidy
-
-  popd
-done
+while IFS= read -r -d '' module_file; do
+  module_dir=$(dirname "$module_file")
+  echo "Running 'go mod tidy' in $module_dir"
+  (
+    cd "$module_dir"
+    go mod tidy
+  )
+done < <(find . -mindepth 2 -name "go.mod" -print0)

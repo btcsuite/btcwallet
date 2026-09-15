@@ -1288,43 +1288,76 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, outPointKey []byte,
 	return nil
 }
 
-// serializeLockedOutput serializes the value of a locked output.
-func serializeLockedOutput(id LockID, expiry time.Time) []byte {
-	var v [len(id) + 8]byte
+// serializeLockedOutput serializes the value of a locked output. Values written
+// before spend maturity tracking was introduced remain valid and deserialize
+// with zero maturity and spend height.
+func serializeLockedOutput(id LockID, expiry time.Time,
+	releaseAfterSpendConfs uint32, spendHeight int32) []byte {
+
+	var v [len(id) + 8 + 4 + 4]byte
 	copy(v[:len(id)], id[:])
 	byteOrder.PutUint64(v[len(id):], uint64(expiry.Unix()))
+	byteOrder.PutUint32(v[len(id)+8:], releaseAfterSpendConfs)
+	byteOrder.PutUint32(v[len(id)+12:], uint32(spendHeight))
+
 	return v[:]
 }
 
 // deserializeLockedOutput deserializes the value of a locked output.
-func deserializeLockedOutput(v []byte) (LockID, time.Time) {
+func deserializeLockedOutput(v []byte) (LockID, time.Time, uint32, int32) {
 	var id LockID
 	copy(id[:], v[:len(id)])
 	expiry := time.Unix(int64(byteOrder.Uint64(v[len(id):])), 0)
-	return id, expiry
-}
-
-// isLockedOutput determines whether an output is locked. If it is, its assigned
-// ID is returned, along with its absolute expiration time. If the output lock
-// exists, but its expiration has been met, then the output is considered
-// unlocked.
-func isLockedOutput(ns walletdb.ReadBucket, op wire.OutPoint,
-	timeNow time.Time) (LockID, time.Time, bool) {
-
-	// The bucket may not exist, indicating that no outputs have ever been
-	// locked, so we can just return now.
-	lockedOutputs := ns.NestedReadBucket(bucketLockedOutputs)
-	if lockedOutputs == nil {
-		return LockID{}, time.Time{}, false
+	if len(v) < len(id)+16 {
+		return id, expiry, 0, 0
 	}
 
-	// Retrieve the output lock, if any, and extract the relevant fields.
+	releaseAfterSpendConfs := byteOrder.Uint32(v[len(id)+8:])
+	spendHeight := int32(byteOrder.Uint32(v[len(id)+12:]))
+
+	return id, expiry, releaseAfterSpendConfs, spendHeight
+}
+
+// fetchLockedOutput returns the persisted lock fields without applying expiry
+// semantics. The final result reports whether a record exists.
+func fetchLockedOutput(ns walletdb.ReadBucket,
+	op wire.OutPoint) (LockID, time.Time, uint32, int32, bool) {
+
+	lockedOutputs := ns.NestedReadBucket(bucketLockedOutputs)
+	if lockedOutputs == nil {
+		return LockID{}, time.Time{}, 0, 0, false
+	}
+
 	k := canonicalOutPoint(&op.Hash, op.Index)
 	v := lockedOutputs.Get(k)
 	if v == nil {
+		return LockID{}, time.Time{}, 0, 0, false
+	}
+
+	lockID, expiry, releaseAfterSpendConfs, spendHeight :=
+		deserializeLockedOutput(v)
+
+	return lockID, expiry, releaseAfterSpendConfs, spendHeight, true
+}
+
+// isLockedOutput determines whether an output is locked. If it is, its assigned
+// ID is returned, along with its absolute expiration time. Confirmation-
+// controlled locks ignore that time and remain active until explicit release or
+// spend maturity. Other locks become inactive when their expiration is met.
+func isLockedOutput(ns walletdb.ReadBucket, op wire.OutPoint,
+	timeNow time.Time) (LockID, time.Time, bool) {
+
+	lockID, expiry, releaseAfterSpendConfs, _, exists :=
+		fetchLockedOutput(ns, op)
+	if !exists {
 		return LockID{}, time.Time{}, false
 	}
-	lockID, expiry := deserializeLockedOutput(v)
+
+	// A confirmation-controlled lease uses explicit release or spend maturity
+	// instead of wall-clock expiry for its complete lifetime.
+	if releaseAfterSpendConfs > 0 {
+		return lockID, expiry, true
+	}
 
 	// If the output lock has already expired, delete it now.
 	if !timeNow.Before(expiry) {
@@ -1337,7 +1370,8 @@ func isLockedOutput(ns walletdb.ReadBucket, op wire.OutPoint,
 // lockOutput creates a lock for `duration` over an output assigned to the `id`,
 // preventing it from becoming eligible for coin selection.
 func lockOutput(ns walletdb.ReadWriteBucket, id LockID, op wire.OutPoint,
-	expiry time.Time) error {
+	expiry time.Time, releaseAfterSpendConfs uint32,
+	spendHeight int32) error {
 
 	// Create the corresponding bucket if necessary.
 	lockedOutputs, err := ns.CreateBucketIfNotExists(bucketLockedOutputs)
@@ -1348,7 +1382,9 @@ func lockOutput(ns walletdb.ReadWriteBucket, id LockID, op wire.OutPoint,
 
 	// Store a mapping of outpoint -> (id, expiry).
 	k := canonicalOutPoint(&op.Hash, op.Index)
-	v := serializeLockedOutput(id, expiry)
+	v := serializeLockedOutput(
+		id, expiry, releaseAfterSpendConfs, spendHeight,
+	)
 
 	if err := lockedOutputs.Put(k, v[:]); err != nil {
 		str := fmt.Sprintf("%s: put failed for %v", bucketLockedOutputs,
@@ -1397,7 +1433,7 @@ func forEachLockedOutput(ns walletdb.ReadBucket,
 		if err := readCanonicalOutPoint(k, &op); err != nil {
 			return err
 		}
-		lockID, expiry := deserializeLockedOutput(v)
+		lockID, expiry, _, _ := deserializeLockedOutput(v)
 
 		f(op, lockID, expiry)
 

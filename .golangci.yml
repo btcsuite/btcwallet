@@ -38,6 +38,13 @@ linters:
     # Deprecated - this is replaced by wsl_v5.
     - wsl
 
+    # We can't always wrap our errors as long as we're checking with err == xyz
+    # in some places.
+    - wrapcheck
+
+    # TODO(guggero): remove again after new submodules have been tagged!
+    - gomoddirectives
+
   # All available settings of specific linters.
   settings:
     nlreturn:
