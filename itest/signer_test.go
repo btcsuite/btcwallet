@@ -737,3 +737,194 @@ func testSignerDeriveImportedXPub(h *bwtest.HarnessTest) {
 		"the reopened wallet derived a different imported child",
 	)
 }
+
+// testUnsafeSignerDerivePrivKey checks that extraction matches public
+// derivation for the same created account path.
+func testUnsafeSignerDerivePrivKey(h *bwtest.HarnessTest) {
+	// Arrange: Create one named account through the harness fixture, then
+	// derive an independent public oracle for the same account.
+	const accountName = "unsafe signer account"
+
+	scope, err := signerAddrType.KeyScope()
+	require.NoError(h, err, "failed to resolve the signer key scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, accountName)
+
+	params := wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(
+			scope, accountName,
+		),
+		Index: 7,
+	}
+	want, err := w.DerivePubKey(h.Context(), params)
+	require.NoError(h, err)
+
+	path := wallet.BIP32Path{
+		KeyScope: scope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: uint32(*account.AccountNumber),
+			Branch:          params.Branch,
+			Index:           params.Index,
+		},
+	}
+
+	// Act: Extract the private key for the same account path as the public
+	// oracle so the two results can be compared independently.
+	key, err := w.DerivePrivKey(h.Context(), path)
+
+	// Assert: NotNil reports only nilness on failure, so it guards the public
+	// comparison without including private material in diagnostics.
+	require.NoError(h, err)
+	require.NotNil(h, key, "expected an extracted key")
+	require.Equal(
+		h, want.SerializeCompressed(), key.PubKey().SerializeCompressed(),
+	)
+}
+
+// testUnsafeSignerGetPrivKeyForAddress checks an owned address's extracted key
+// against independent public address metadata.
+func testUnsafeSignerGetPrivKeyForAddress(h *bwtest.HarnessTest) {
+	// Arrange: Use an owned signer address whose public metadata provides an
+	// oracle without calling any private-key extraction method.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, signerAddrType)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	// Act: Resolve the owned address through the wallet to compare the
+	// extracted key with the independent public address metadata.
+	key, err := w.GetPrivKeyForAddress(h.Context(), addr)
+
+	// Assert: NotNil reports only nilness on failure, so it guards the public
+	// comparison without including private material in diagnostics.
+	require.NoError(h, err)
+	require.NotNil(h, key, "expected an extracted key")
+	require.Equal(
+		h, info.PubKey.SerializeCompressed(),
+		key.PubKey().SerializeCompressed(),
+	)
+}
+
+// testUnsafeSignerRejectUnknownPath checks the stable absence error for an
+// uncreated account in an otherwise materialized scope.
+func testUnsafeSignerRejectUnknownPath(h *bwtest.HarnessTest) {
+	// Arrange: Create one account, then request its absent successor while
+	// unlocked so the result exercises absence rather than the signing gate.
+	const accountName = "unsafe signer account"
+
+	scope, err := signerAddrType.KeyScope()
+	require.NoError(h, err, "failed to resolve the signer key scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, accountName)
+
+	path := wallet.BIP32Path{
+		KeyScope: scope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: uint32(*account.AccountNumber) + 1,
+		},
+	}
+
+	// Act: Request a child of the missing account while a valid account
+	// exists in the same scope.
+	key, err := w.DerivePrivKey(h.Context(), path)
+
+	// Assert: Every backend must report the public account-absence identity
+	// and return no key, rather than falling back to the existing account.
+	// Boolean nil checks keep unexpected private values out of diagnostics.
+	require.ErrorIs(h, err, wallet.ErrAccountNotInStore)
+
+	keyIsNil := key == nil
+	require.True(h, keyIsNil, "expected no private key")
+}
+
+// testUnsafeSignerRejectForeignAddress checks that an address not owned by
+// the wallet cannot export a key and reports the public extraction error.
+func testUnsafeSignerRejectForeignAddress(h *bwtest.HarnessTest) {
+	// Arrange: A fresh unlocked wallet does not own the curve generator's
+	// public point. Encoding it through the canonical signer address type
+	// needs no second wallet or private material.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr, err := signerAddrType.AddrFromPubKeyBytes(
+		btcec.Generator().SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err, "failed to encode the foreign address")
+
+	// Act: Query the foreign address through the same extraction entry point
+	// used for owned addresses.
+	key, err := w.GetPrivKeyForAddress(h.Context(), addr)
+
+	// Assert: Absence uses the extraction contract's sentinel on every
+	// backend and must never be accompanied by an exported key.
+	// Boolean nil checks keep unexpected private values out of diagnostics.
+	require.ErrorIs(h, err, wallet.ErrNoAssocPrivateKey)
+
+	keyIsNil := key == nil
+	require.True(h, keyIsNil, "expected no private key")
+}
+
+// testUnsafeSignerRejectLocked checks both extraction entry points reject a
+// locked wallet even when their account and address inputs are valid.
+func testUnsafeSignerRejectLocked(h *bwtest.HarnessTest) {
+	// Arrange: The address fixture restores the zero-value fixture's locked
+	// state after ensuring the default account, leaving valid owned inputs.
+	scope, err := signerAddrType.KeyScope()
+	require.NoError(h, err, "failed to resolve the signer key scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	addr := h.NewWalletAddressOfType(w, signerAddrType)
+	path := wallet.BIP32Path{KeyScope: scope}
+
+	// Act: Exercise both extraction entry points with valid owned inputs
+	// while the wallet remains locked.
+	pathKey, pathErr := w.DerivePrivKey(h.Context(), path)
+	addrKey, addrErr := w.GetPrivKeyForAddress(h.Context(), addr)
+
+	// Assert: Locking forbids both forms of extraction with the same stable
+	// state error, and neither method may deliver a key alongside that error.
+	// Boolean nil checks keep unexpected private values out of diagnostics.
+	require.ErrorIs(h, pathErr, wallet.ErrStateForbidden)
+
+	pathKeyIsNil := pathKey == nil
+	require.True(h, pathKeyIsNil, "expected no path key")
+	require.ErrorIs(h, addrErr, wallet.ErrStateForbidden)
+
+	addrKeyIsNil := addrKey == nil
+	require.True(h, addrKeyIsNil, "expected no address key")
+}
+
+// testUnsafeSignerRejectWatchOnly checks that a rootless watch-only wallet
+// refuses both extraction methods at the existing signing-state boundary.
+func testUnsafeSignerRejectWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: The harness's watch-only shell has no private root. Its signing
+	// gate precedes lookup, so public inputs need no imported-key fixture.
+	scope, err := signerAddrType.KeyScope()
+	require.NoError(h, err, "failed to resolve the signer key scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	require.True(h, w.IsWatchOnly(), "fixture must be watch-only")
+
+	path := wallet.BIP32Path{KeyScope: scope}
+	addr, err := signerAddrType.AddrFromPubKeyBytes(
+		btcec.Generator().SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err, "failed to encode the foreign address")
+
+	// Act: Request both forms of extraction from the watch-only wallet to
+	// verify that neither entry point bypasses the signing-state gate.
+	pathKey, pathErr := w.DerivePrivKey(h.Context(), path)
+	addrKey, addrErr := w.GetPrivKeyForAddress(h.Context(), addr)
+
+	// Assert: The maintained Wallet refuses both requests with its existing
+	// state sentinel and exports no key, independently of the storage backend.
+	// Boolean nil checks keep unexpected private values out of diagnostics.
+	require.ErrorIs(h, pathErr, wallet.ErrStateForbidden)
+
+	pathKeyIsNil := pathKey == nil
+	require.True(h, pathKeyIsNil, "expected no path key")
+	require.ErrorIs(h, addrErr, wallet.ErrStateForbidden)
+
+	addrKeyIsNil := addrKey == nil
+	require.True(h, addrKeyIsNil, "expected no address key")
+}
