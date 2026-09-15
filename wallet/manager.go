@@ -469,12 +469,12 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 			account.XPub, true, &m.config.ChainParams,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrWalletParams, err)
 		}
 
 		_, _, err = keyScopeFromPubKey(account.XPub, &account.AddrType)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrWalletParams, err)
 		}
 	}
 
