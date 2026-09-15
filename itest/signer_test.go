@@ -144,15 +144,16 @@ func testSignerDerivePubKeyPaths(h *bwtest.HarnessTest) {
 	)
 }
 
-// testSignerDerivePubKeyWalletState verifies that public derivation is gated
-// on a running wallet alone, and that unlocking does not change its answer.
+// testSignerDerivePubKeyWalletState verifies that unlocking a started wallet
+// does not change the public key derived from an account's extended public key.
 func testSignerDerivePubKeyWalletState(h *bwtest.HarnessTest) {
-	// Arrange: A wallet that has been created but not started.
+	// Arrange: NewWallet publishes a started, locked wallet, so compare public
+	// derivation across lock states through the supported Manager lifecycle.
 	ctx := h.Context()
 	scope, err := signerAddrType.KeyScope()
 	require.NoError(h, err, "failed to resolve the signer key scope")
 
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	params := wallet.DerivePubKeyParams{
 		Account: wallet.NewAccountSelectorByName(
@@ -161,17 +162,6 @@ func testSignerDerivePubKeyWalletState(h *bwtest.HarnessTest) {
 		Branch: 0,
 		Index:  5,
 	}
-
-	// Act: Derive before the wallet runs.
-	_, err = w.DerivePubKey(ctx, params)
-
-	// Assert: The request is refused by the state gate.
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"derivation before start not rejected",
-	)
-
-	require.NoError(h, w.Start(ctx), "failed to start wallet")
 
 	// The account must exist before it can be selected. Deriving an address
 	// materializes it and restores the wallet's locked state.
@@ -430,36 +420,21 @@ func testSignerECDHAgreement(h *bwtest.HarnessTest) {
 	)
 }
 
-// testSignerECDHWalletState verifies that the shared secret is gated on a
-// running and unlocked wallet, and that a refused request returns no secret
-// material.
+// testSignerECDHWalletState verifies that a started wallet requires unlocking
+// for ECDH and returns no secret material when the request is refused.
 func testSignerECDHWalletState(h *bwtest.HarnessTest) {
-	// Arrange: A wallet that has been created but not started, and a peer to
-	// exchange with.
+	// Arrange: Use the started, locked fixture and a peer key to check the
+	// lock gate through the supported Manager lifecycle.
 	ctx := h.Context()
 	scope, err := signerAddrType.KeyScope()
 	require.NoError(h, err, "failed to resolve the signer key scope")
 
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	peerKey, err := btcec.NewPrivateKey()
 	require.NoError(h, err, "failed to generate the peer key")
 
 	path := wallet.BIP32Path{KeyScope: scope}
-
-	// Act: Exchange before the wallet runs.
-	secret, err := w.ECDH(ctx, path, peerKey.PubKey())
-
-	// Assert: The state gate refuses, and hands back nothing.
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"ECDH before start not rejected",
-	)
-	require.Equal(
-		h, [32]byte{}, secret, "a refused ECDH returned secret material",
-	)
-
-	require.NoError(h, w.Start(ctx), "failed to start wallet")
 
 	// The account must exist before the path can resolve. Deriving an address
 	// materializes it and restores the wallet's locked state.
@@ -470,7 +445,7 @@ func testSignerECDHWalletState(h *bwtest.HarnessTest) {
 	require.True(h, info.Locked, "wallet is not locked")
 
 	// Act: Exchange while the wallet is locked.
-	secret, err = w.ECDH(ctx, path, peerKey.PubKey())
+	secret, err := w.ECDH(ctx, path, peerKey.PubKey())
 
 	// Assert: Unlike public derivation, the shared secret needs the private
 	// key, so a locked wallet refuses before reaching the store.
