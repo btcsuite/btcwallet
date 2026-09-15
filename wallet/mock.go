@@ -16,9 +16,6 @@ type mockChainClient struct {
 	getBestBlockHeight int32
 	getBlockHashFunc   func() (*chainhash.Hash, error)
 	getBlockHeader     *wire.BlockHeader
-	filterBlocksFunc   func(*chain.FilterBlocksRequest) (
-		*chain.FilterBlocksResponse, error)
-	notifyReceivedFunc func([]address.Address) error
 }
 
 var _ chain.Interface = (*mockChainClient)(nil)
@@ -56,12 +53,8 @@ func (m *mockChainClient) IsCurrent() bool {
 	return false
 }
 
-func (m *mockChainClient) FilterBlocks(req *chain.FilterBlocksRequest) (
+func (m *mockChainClient) FilterBlocks(*chain.FilterBlocksRequest) (
 	*chain.FilterBlocksResponse, error) {
-	if m.filterBlocksFunc != nil {
-		return m.filterBlocksFunc(req)
-	}
-
 	return nil, nil
 }
 
@@ -84,11 +77,7 @@ func (m *mockChainClient) Rescan(*chainhash.Hash, []address.Address,
 	return nil
 }
 
-func (m *mockChainClient) NotifyReceived(addrs []address.Address) error {
-	if m.notifyReceivedFunc != nil {
-		return m.notifyReceivedFunc(addrs)
-	}
-
+func (m *mockChainClient) NotifyReceived([]address.Address) error {
 	return nil
 }
 
