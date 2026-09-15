@@ -94,7 +94,9 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 	oldBlock, coinbaseBlock := reorgBlock(1), reorgBlock(2)
 	orphanBlock, spendBlock := reorgBlock(3), reorgBlock(102)
 	leaseID := wtxmgr.LockID{1}
-	outpoint := wire.OutPoint{Hash: coinbase.Hash}
+	// This branch uses duration leases. Lock an unspent canonical output
+	// to verify replay retains its lock without confirmation-lease APIs.
+	outpoint := wire.OutPoint{Hash: coinbase.Hash, Index: 1}
 
 	updateErr := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
@@ -107,8 +109,7 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 			))
 		}
 
-		_, err := w.TxStore.LockOutput(ns, leaseID, outpoint, time.Hour,
-			wtxmgr.WithReleaseAfterSpend(200))
+		_, err := w.TxStore.LockOutput(ns, leaseID, outpoint, time.Hour)
 		require.NoError(t, err)
 		addReorgCredit(t, w, tx, parent, &spendBlock, true)
 		addReorgCredit(t, w, tx, child, &spendBlock, false)
@@ -213,15 +214,15 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, locks, 1)
 		require.Equal(t, leaseID, locks[0].LockID)
-		require.EqualValues(t, 102, locks[0].ConfirmedSpendHeight)
+		require.Equal(t, outpoint, locks[0].Outpoint)
 
 		confirmed, err := w.TxStore.Balance(ns, 1, 200)
 		require.NoError(t, err)
-		require.EqualValues(t, 2000, confirmed)
+		require.EqualValues(t, 1000, confirmed)
 
 		total, err := w.TxStore.Balance(ns, 0, 200)
 		require.NoError(t, err)
-		require.EqualValues(t, 3600, total)
+		require.EqualValues(t, 2600, total)
 
 		return nil
 	}))
