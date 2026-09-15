@@ -242,12 +242,6 @@ func (s *walletState) syncState() syncState {
 	return s.syncer.syncState()
 }
 
-// isSynced returns true if the wallet is fully synchronized with the
-// blockchain.
-func (s *walletState) isSynced() bool {
-	return s.syncState() == syncStateSynced
-}
-
 // isUnlocked returns true if the wallet is currently unlocked.
 func (s *walletState) isUnlocked() bool {
 	return s.unlocked.Load()
