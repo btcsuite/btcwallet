@@ -985,19 +985,16 @@ func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
 		name     string
 		key      *hdkeychain.ExtendedKey
 		addrType waddrmgr.AddressType
-		wantErr  string
 	}{
 		{
 			name:     "wrong network",
 			key:      wrongNetwork,
 			addrType: waddrmgr.WitnessPubKey,
-			wantErr:  "current network",
 		},
 		{
 			name:     "unsupported address type",
 			key:      key,
 			addrType: waddrmgr.PubKeyHash,
-			wantErr:  "unsupported address type",
 		},
 	}
 
@@ -1030,7 +1027,7 @@ func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
 			// still works, and corrected input can use the same Wallet
 			// name, proving no durable candidate was left behind.
 			require.Nil(t, candidate)
-			require.ErrorContains(t, err, tc.wantErr)
+			require.ErrorIs(t, err, ErrWalletParams)
 
 			_, err = existing.ListAccounts(t.Context())
 			require.NoError(t, err)
