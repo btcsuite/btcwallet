@@ -83,6 +83,12 @@ Funding is also available on its own through `(*HarnessTest).FundWallet` and
 `(*HarnessTest).FundWalletOfType`, and addresses through
 `(*HarnessTest).NewWalletAddress` and `(*HarnessTest).NewWalletAddressOfType`.
 
+`(*HarnessTest).CreateTestAccount` creates a named sequential account when
+account creation is fixture setup rather than the behavior under test. The
+wallet must already be started and unlocked. The helper fails the current test
+if creation fails or returns no account number, and it leaves lock state
+unchanged.
+
 Manager-focused tests should continue to create wallets through the Manager API
 directly and register each one with `(*HarnessTest).RegisterWallet(manager, w)`
 before starting it. They may register multiple wallets under one manager. At
