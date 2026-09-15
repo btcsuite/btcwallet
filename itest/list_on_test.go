@@ -194,6 +194,32 @@ var allTestCases = []*testCase{
 		Name:     "signer derive imported xpub",
 		TestFunc: testSignerDeriveImportedXPub,
 	},
+	// Keep raw extraction in separate UnsafeSigner cases so safe signing
+	// scenarios never need private-key results as fixtures or assertions.
+	{
+		Name:     "unsafe signer derive privkey",
+		TestFunc: testUnsafeSignerDerivePrivKey,
+	},
+	{
+		Name:     "unsafe signer get privkey for address",
+		TestFunc: testUnsafeSignerGetPrivKeyForAddress,
+	},
+	{
+		Name:     "unsafe signer reject unknown path",
+		TestFunc: testUnsafeSignerRejectUnknownPath,
+	},
+	{
+		Name:     "unsafe signer reject foreign address",
+		TestFunc: testUnsafeSignerRejectForeignAddress,
+	},
+	{
+		Name:     "unsafe signer reject locked",
+		TestFunc: testUnsafeSignerRejectLocked,
+	},
+	{
+		Name:     "unsafe signer reject watchonly",
+		TestFunc: testUnsafeSignerRejectWatchOnly,
+	},
 	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,

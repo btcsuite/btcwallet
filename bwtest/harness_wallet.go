@@ -120,6 +120,28 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	return w, h.FundWalletOfType(w, fixture.AddrType, fixture.Amounts...)
 }
 
+// CreateTestAccount creates a numbered sequential account as test fixture
+// setup. Use it only when account creation is not the behavior under test. The
+// wallet must already be started and unlocked. The method fails the current
+// test if creation fails or returns no account number, and it leaves the
+// wallet's lock state unchanged.
+func (h *HarnessTest) CreateTestAccount(w *wallet.Wallet,
+	scope waddrmgr.KeyScope, name string) *wallet.AccountInfo {
+
+	h.Helper()
+
+	// Use the public wallet operation so every backend constructs the same
+	// account fixture without duplicating account creation assertions.
+	account, err := w.NewAccount(h.Context(), wallet.NewAccountParams{
+		Scope: scope,
+		Name:  name,
+	})
+	require.NoError(h, err, "failed to create test account %q", name)
+	require.NotNil(h, account.AccountNumber, "created account has no number")
+
+	return account
+}
+
 // ReloadWallet consumes current after shutting it down and returns a fresh
 // registered, started, and locked replacement loaded from the same store.
 // The current wallet must be the Manager's only registered wallet because
