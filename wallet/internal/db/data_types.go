@@ -1407,6 +1407,20 @@ type DeleteTxParams struct {
 	Txid chainhash.Hash
 }
 
+// DeleteUnminedTxParams contains the parameters for removing one wallet-owned
+// unmined transaction branch.
+type DeleteUnminedTxParams struct {
+	// WalletID is the ID of the wallet containing the transaction.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Txid is the hash of the unmined transaction to remove, together with
+	// every recorded transaction that depends on it.
+	Txid chainhash.Hash
+}
+
 // InvalidateUnminedTxParams contains the parameters for invalidating one
 // wallet-owned unmined transaction branch.
 type InvalidateUnminedTxParams struct {

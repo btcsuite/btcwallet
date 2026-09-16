@@ -1289,13 +1289,39 @@ func (s *Store) DeleteTx(ctx context.Context, _ db.DeleteTxParams) error {
 func (s *Store) InvalidateUnminedTx(_ context.Context,
 	params db.InvalidateUnminedTxParams) error {
 
-	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+	err := s.removeUnminedTxBranch(params.Txid, db.ErrInvalidateTx)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.InvalidateUnminedTx: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteUnminedTx removes an unmined tx branch through the legacy wtxmgr path.
+func (s *Store) DeleteUnminedTx(_ context.Context,
+	params db.DeleteUnminedTxParams) error {
+
+	err := s.removeUnminedTxBranch(params.Txid, db.ErrDeleteRequiresUnmined)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.DeleteUnminedTx: %w", err)
+	}
+
+	return nil
+}
+
+// removeUnminedTxBranch removes one unmined tx and every tx depending on it.
+// The legacy store keeps no invalid history, so invalidation and deletion
+// differ only in the sentinel a rejected caller sees.
+func (s *Store) removeUnminedTxBranch(txid chainhash.Hash,
+	rejected error) error {
+
+	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		if ns == nil {
 			return errMissingTxmgrNamespace
 		}
 
-		details, err := s.txStore.TxDetails(ns, &params.Txid)
+		details, err := s.txStore.TxDetails(ns, &txid)
 		if err != nil {
 			return fmt.Errorf("lookup transaction details: %w", err)
 		}
@@ -1305,8 +1331,7 @@ func (s *Store) InvalidateUnminedTx(_ context.Context,
 		}
 
 		if details.Block.Height >= 0 {
-			return fmt.Errorf("tx %s is confirmed: %w", params.Txid,
-				db.ErrInvalidateTx)
+			return fmt.Errorf("tx %s is confirmed: %w", txid, rejected)
 		}
 
 		err = s.txStore.RemoveUnminedTx(ns, &details.TxRecord)
@@ -1314,13 +1339,8 @@ func (s *Store) InvalidateUnminedTx(_ context.Context,
 			return err
 		}
 
-		return deleteLegacyTxStatus(ns, params.Txid)
+		return deleteLegacyTxStatus(ns, txid)
 	})
-	if err != nil {
-		return fmt.Errorf("kvdb.Store.InvalidateUnminedTx: %w", err)
-	}
-
-	return nil
 }
 
 // RewindWallet atomically rewinds the single kvdb wallet to the requested

@@ -4223,3 +4223,88 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError(t *testing.T) {
 	require.Equal(t, tipStamp.Hash, addrMgr.SyncedTo().Hash)
 	mockTxStore.AssertExpectations(t)
 }
+
+// TestDeleteUnminedTxRemovesBranch verifies that kvdb.Store removes one unmined
+// transaction together with the descendant that depends on it.
+func TestDeleteUnminedTxRemovesBranch(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	root := &wire.MsgTx{Version: 1}
+	root.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{71},
+	}})
+	root.AddTxOut(&wire.TxOut{Value: 9_000, PkScript: []byte{0x51}})
+	rootRec, err := wtxmgr.NewTxRecordFromMsgTx(root, time.Now())
+	require.NoError(t, err)
+
+	child := &wire.MsgTx{Version: 1}
+	child.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: rootRec.Hash,
+	}})
+	child.AddTxOut(&wire.TxOut{Value: 8_000, PkScript: []byte{0x52}})
+	childRec, err := wtxmgr.NewTxRecordFromMsgTx(child, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		err := txStore.InsertTx(ns, rootRec, nil)
+		if err != nil {
+			return err
+		}
+
+		return txStore.InsertTx(ns, childRec, nil)
+	})
+	require.NoError(t, err)
+
+	err = store.DeleteUnminedTx(
+		t.Context(), db.DeleteUnminedTxParams{
+			WalletID: 0,
+			Txid:     rootRec.Hash,
+		},
+	)
+	require.NoError(t, err)
+
+	// The legacy store keeps no invalid history, so both rows are gone.
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		for _, hash := range []chainhash.Hash{rootRec.Hash, childRec.Hash} {
+			details, err := txStore.TxDetails(ns, &hash)
+			require.NoError(t, err)
+			require.Nil(t, details)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestDeleteUnminedTxRejectsConfirmed verifies that confirmed transactions
+// cannot be removed through the unmined-only kvdb path.
+func TestDeleteUnminedTxRejectsConfirmed(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	rec := insertConfirmedTx(t, dbConn, txStore, 145)
+
+	err := store.DeleteUnminedTx(
+		t.Context(), db.DeleteUnminedTxParams{
+			WalletID: 0,
+			Txid:     rec.Hash,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrDeleteRequiresUnmined)
+}
