@@ -5,7 +5,10 @@
 
 package wtxmgr
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrorCode identifies a category of error.
 type ErrorCode uint8
@@ -49,6 +52,11 @@ const (
 	// but the database version is newer than latest version known to this
 	// software.  This likely indicates an outdated binary.
 	ErrUnknownVersion
+)
+
+var (
+	// ErrUtxoNotFound is returned when a UTXO is not found in the store.
+	ErrUtxoNotFound = errors.New("utxo not found")
 )
 
 var errStrs = [...]string{

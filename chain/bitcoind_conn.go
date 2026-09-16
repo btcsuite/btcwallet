@@ -401,13 +401,29 @@ func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
 // NewBitcoindClient returns a bitcoind client using the current bitcoind
 // connection. This allows us to share the same connection using multiple
 // clients.
-func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
+func (c *BitcoindConn) NewBitcoindClient() (*BitcoindClient, error) {
+	clientCfg := &rpcclient.ConnConfig{
+		Host:                 c.cfg.Host,
+		User:                 c.cfg.User,
+		Pass:                 c.cfg.Pass,
+		DisableAutoReconnect: false,
+		DisableConnectOnNew:  true,
+		DisableTLS:           true,
+		HTTPPostMode:         true,
+	}
+
+	batchClient, err := rpcclient.NewBatch(clientCfg)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create batch client: %w", err)
+	}
+
 	return &BitcoindClient{
 		quit: make(chan struct{}),
 
 		id: atomic.AddUint64(&c.rescanClientCounter, 1),
 
-		chainConn: c,
+		chainConn:   c,
+		batchClient: batchClient,
 
 		watchedAddresses: make(map[string]struct{}),
 		watchedOutPoints: make(map[wire.OutPoint]struct{}),
@@ -419,7 +435,7 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 
 		mempool:        make(map[chainhash.Hash]struct{}),
 		expiredMempool: make(map[int32]map[chainhash.Hash]struct{}),
-	}
+	}, nil
 }
 
 // AddClient adds a client to the set of active rescan clients of the current

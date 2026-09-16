@@ -129,46 +129,16 @@ type TxRecord struct {
 // LockedOutput is a type that contains an outpoint of an UTXO and its lock
 // lease information.
 type LockedOutput struct {
-	Outpoint wire.OutPoint
-	LockID   LockID
-
-	// Expiration controls a wall-clock lease. Confirmation-controlled leases
-	// retain this value for storage compatibility but do not apply it.
+	Outpoint   wire.OutPoint
+	LockID     LockID
 	Expiration time.Time
-
-	// ReleaseAfterSpendConfs is the confirmation depth that controls release
-	// instead of Expiration. A value of zero selects wall-clock expiry.
-	ReleaseAfterSpendConfs uint32
-
-	// ConfirmedSpendHeight records spend confirmation progress. Zero means
-	// no confirmed spend has been observed, -1 means an observed spend was
-	// disconnected, and a positive value is its current confirmation
-	// height.
-	ConfirmedSpendHeight int32
 }
 
-// LockOutputOption configures the lifetime of an output lock.
-type LockOutputOption func(*lockOutputOptions)
-
-type lockOutputOptions struct {
-	releaseAfterSpendConfs    uint32
-	releaseAfterSpendConfsSet bool
-}
-
-// WithReleaseAfterSpend keeps an output locked until its spend reaches the
-// requested confirmation count or the owner explicitly releases it. A
-// confirmation-controlled lease ignores wall-clock expiry, including before its
-// first confirmed spend. A reorganization that disconnects the spend resets its
-// confirmation progress and keeps the lock active. A zero confirmation count
-// selects normal wall-clock expiry. Older software reads the record as a
-// time-only lease, so do not downgrade while a confirmation-controlled lease is
-// active. On an active same-owner renewal, omitting this option preserves the
-// existing depth; passing it replaces that depth.
-func WithReleaseAfterSpend(confirmations uint32) LockOutputOption {
-	return func(opts *lockOutputOptions) {
-		opts.releaseAfterSpendConfs = confirmations
-		opts.releaseAfterSpendConfsSet = true
-	}
+// CreditEntry specifies a transaction output that should be recorded as a
+// credit (spendable output) for the wallet.
+type CreditEntry struct {
+	Index  uint32
+	Change bool
 }
 
 // NewTxRecord creates a new transaction record that may be inserted into the
@@ -217,6 +187,9 @@ type Credit struct {
 	PkScript     []byte
 	Received     time.Time
 	FromCoinBase bool
+
+	// Locked indicates whether the output is locked by the wallet.
+	Locked bool
 }
 
 // LockID represents a unique context-specific ID assigned to an output lock.
@@ -234,6 +207,10 @@ type Store struct {
 	// caller.
 	NotifyUnspent func(hash *chainhash.Hash, index uint32)
 }
+
+// A compile-time assertion to ensure that Store implements the TxStore
+// interface.
+var _ TxStore = (*Store)(nil)
 
 // Open opens the wallet transaction store from a walletdb namespace.  If the
 // store does not exist, ErrNoExist is returned. `lockDuration` represents how
@@ -422,6 +399,50 @@ func (s *Store) InsertTxCheckIfExists(ns walletdb.ReadWriteBucket,
 	return false, err
 }
 
+// InsertConfirmedTx records a mined transaction and its associated credits in
+// a single operation. This is more efficient than calling InsertTx followed by
+// AddCredit for each output.
+func (s *Store) InsertConfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta, credits []CreditEntry) error {
+
+	if err := s.insertMinedTx(ns, rec, block); err != nil && err != ErrDuplicateTx {
+		return err
+	}
+
+	for _, c := range credits {
+		isNew, err := s.addCredit(ns, rec, block, c.Index, c.Change)
+		if err != nil {
+			return err
+		}
+		if isNew && s.NotifyUnspent != nil {
+			s.NotifyUnspent(&rec.Hash, c.Index)
+		}
+	}
+	return nil
+}
+
+// InsertUnconfirmedTx records an unmined transaction and its associated credits
+// in a single operation. This is more efficient than calling InsertTx followed
+// by AddCredit for each output.
+func (s *Store) InsertUnconfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	credits []CreditEntry) error {
+
+	if err := s.insertMemPoolTx(ns, rec); err != nil && err != ErrDuplicateTx {
+		return err
+	}
+
+	for _, c := range credits {
+		isNew, err := s.addCredit(ns, rec, nil, c.Index, c.Change)
+		if err != nil {
+			return err
+		}
+		if isNew && s.NotifyUnspent != nil {
+			s.NotifyUnspent(&rec.Hash, c.Index)
+		}
+	}
+	return nil
+}
+
 // RemoveUnminedTx attempts to remove an unmined transaction from the
 // transaction store. This is to be used in the scenario that a transaction
 // that we attempt to rebroadcast, turns out to double spend one of our
@@ -496,29 +517,15 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		return err
 	}
 
-	// Clear normal output locks after a confirmed spend. Maturity-tracked
-	// locks record the spend height and remain until enough blocks bury it.
+	// Clear any locked outputs since we now have a confirmed spend for
+	// them, making them not eligible for coin selection anyway.
 	for _, txIn := range rec.MsgTx.TxIn {
-		lockID, expiry, releaseAfterSpendConfs, _, exists :=
-			fetchLockedOutput(
-				ns, txIn.PreviousOutPoint,
-			)
-		if exists && releaseAfterSpendConfs > 0 {
-			if err := lockOutput(
-				ns, lockID, txIn.PreviousOutPoint, expiry,
-				releaseAfterSpendConfs, block.Height,
-			); err != nil {
-				return err
-			}
-			continue
-		}
-
 		if err := unlockOutput(ns, txIn.PreviousOutPoint); err != nil {
 			return err
 		}
 	}
 
-	return s.DeleteMaturedLockedOutputs(ns, block.Height)
+	return nil
 }
 
 // AddCredit marks a transaction record as containing a transaction output
@@ -617,10 +624,6 @@ func (s *Store) Rollback(ns walletdb.ReadWriteBucket, height int32) error {
 }
 
 func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
-	if err := resetLockedOutputSpendHeights(ns, height); err != nil {
-		return err
-	}
-
 	minedBalance, err := fetchMinedBalance(ns)
 	if err != nil {
 		return err
@@ -860,6 +863,34 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 	return putMinedBalance(ns, minedBalance)
 }
 
+// TODO(yy): The fetchCredits method suffers from several architectural and
+// performance issues that should be addressed in a future refactoring:
+//
+//  1. **N+1 Query Problem:** The function iterates through all unspent outputs
+//     and performs a separate database lookup (`fetchTxRecord`) for each one to
+//     retrieve its full details. For a wallet with a large number of UTXOs,
+//     this results in an excessive number of database reads, leading to poor
+//     performance.
+//
+//  2. **Inefficient Data Storage:** The root cause of the N+1 problem is that
+//     the `unspent` bucket only stores a reference to the transaction, not the
+//     critical data (Amount, PkScript) itself. The schema should be
+//     denormalized to include this data directly in the `unspent` value, which
+//     would turn the N+1 query into a single, efficient bucket scan.
+//
+//  3. **Code Duplication:** The logic for iterating over mined and unmined
+//     credits is nearly identical, leading to significant code duplication. This
+//     should be consolidated into a more generic helper function.
+//
+//  4. **Leaky Abstraction:** The use of multiple boolean flags
+//     (`includeLocked`, `populateFullDetails`) to control behavior is a sign of
+//     a leaky abstraction. A better API would provide more specific query
+//     functions rather than a single, complex function with many toggles.
+//
+//  5. **Lack of Pagination:** The function loads all results into a single
+//     in-memory slice, which can be memory-intensive for wallets with a large
+//     UTXO set. A more scalable approach would use an iterator pattern.
+//
 // fetchCredits retrieves credits from the store based on the provided filters.
 // It iterates over both mined (unspent) and unmined credits.
 //
@@ -887,12 +918,13 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 				return err
 			}
 
+			// We check if this output is actually locked and set
+			// the Locked field.
+			_, _, isLocked := isLockedOutput(ns, op, now)
+
 			// Check if locked, skip if necessary.
-			if !includeLocked {
-				_, _, isLocked := isLockedOutput(ns, op, now)
-				if isLocked {
-					return nil
-				}
+			if isLocked && !includeLocked {
+				return nil
 			}
 
 			// Check if spent by unmined, skip if necessary.
@@ -924,6 +956,7 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 			cred := Credit{
 				OutPoint: op,
 				PkScript: txOut.PkScript,
+				Locked:   isLocked,
 			}
 
 			// Populate full details if requested.
@@ -973,12 +1006,13 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 				return err
 			}
 
+			// We check if this output is actually locked and set
+			// the Locked field.
+			_, _, isLocked := isLockedOutput(ns, op, now)
+
 			// Check if locked, skip if necessary.
-			if !includeLocked {
-				_, _, isLocked := isLockedOutput(ns, op, now)
-				if isLocked {
-					return nil
-				}
+			if isLocked && !includeLocked {
+				return nil
 			}
 
 			// Check if spent by unmined, skip if necessary.
@@ -1016,6 +1050,7 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 			cred := Credit{
 				OutPoint: op,
 				PkScript: txOut.PkScript,
+				Locked:   isLocked,
 			}
 
 			// Populate full details if requested.
@@ -1287,7 +1322,7 @@ func PutTxLabel(labelBucket walletdb.ReadWriteBucket, txid chainhash.Hash,
 
 // FetchTxLabel reads a transaction label from the tx labels bucket. If a label
 // with 0 length was written, we return an error, since this is unexpected.
-func FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
+func (s *Store) FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
 	labelBucket := ns.NestedReadBucket(bucketTxLabels)
 	if labelBucket == nil {
 		return "", ErrNoLabelBucket
@@ -1329,10 +1364,9 @@ func isKnownOutput(ns walletdb.ReadWriteBucket, op wire.OutPoint) bool {
 }
 
 // LockOutput locks an output to the given ID, preventing it from being
-// available for coin selection. It returns the absolute wall-clock expiration.
-// Successive calls can extend that time. A confirmation-controlled lock stores
-// the time for compatibility but ignores it until the owner explicitly releases
-// the lock or its spend reaches the requested depth.
+// available for coin selection. The absolute time of the lock's expiration is
+// returned. The expiration of the lock can be extended by successive
+// invocations of this call.
 //
 // Outputs can be unlocked before their expiration through `UnlockOutput`.
 // Otherwise, they are unlocked lazily through calls which iterate through all
@@ -1342,13 +1376,7 @@ func isKnownOutput(ns walletdb.ReadWriteBucket, op wire.OutPoint) bool {
 // already been locked to a different ID, then ErrOutputAlreadyLocked is
 // returned.
 func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
-	op wire.OutPoint, duration time.Duration,
-	optFuncs ...LockOutputOption) (time.Time, error) {
-
-	var opts lockOutputOptions
-	for _, optFunc := range optFuncs {
-		optFunc(&opts)
-	}
+	op wire.OutPoint, duration time.Duration) (time.Time, error) {
 
 	// Make sure the output is known.
 	if !isKnownOutput(ns, op) {
@@ -1361,28 +1389,8 @@ func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 		return time.Time{}, ErrOutputAlreadyLocked
 	}
 
-	// A renewal by the same owner must not discard confirmation progress.
-	// Preserve its release depth as well unless the caller explicitly
-	// replaces it.
-	var (
-		releaseAfterSpendConfs = opts.releaseAfterSpendConfs
-		spendHeight            int32
-	)
-
-	if isLocked && lockedID == id {
-		_, _, existingReleaseConfs, existingSpendHeight, _ :=
-			fetchLockedOutput(ns, op)
-		spendHeight = existingSpendHeight
-
-		if !opts.releaseAfterSpendConfsSet {
-			releaseAfterSpendConfs = existingReleaseConfs
-		}
-	}
-
 	expiry := s.clock.Now().Add(duration)
-	if err := lockOutput(
-		ns, id, op, expiry, releaseAfterSpendConfs, spendHeight,
-	); err != nil {
+	if err := lockOutput(ns, id, op, expiry); err != nil {
 		return time.Time{}, err
 	}
 
@@ -1395,18 +1403,14 @@ func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 func (s *Store) UnlockOutput(ns walletdb.ReadWriteBucket, id LockID,
 	op wire.OutPoint) error {
 
-	// Retained locks can outlive the confirmed spend of their output. Read
-	// the lock before checking whether the output is currently known so the
-	// owner can explicitly release it while it is spent.
-	lockedID, expiry, releaseAfterSpendConfs, _, exists :=
-		fetchLockedOutput(ns, op)
-	isLocked := exists && (s.clock.Now().Before(expiry) ||
-		releaseAfterSpendConfs > 0)
-	if !isLocked {
-		if !isKnownOutput(ns, op) {
-			return ErrUnknownOutput
-		}
+	// Make sure the output is known.
+	if !isKnownOutput(ns, op) {
+		return ErrUnknownOutput
+	}
 
+	// If the output has already been unlocked, we can return now.
+	lockedID, _, isLocked := isLockedOutput(ns, op, s.clock.Now())
+	if !isLocked {
 		return nil
 	}
 
@@ -1427,12 +1431,6 @@ func (s *Store) DeleteExpiredLockedOutputs(ns walletdb.ReadWriteBucket) error {
 	var expiredOutputs []wire.OutPoint
 	err := forEachLockedOutput(
 		ns, func(op wire.OutPoint, _ LockID, expiration time.Time) {
-			_, _, releaseAfterSpendConfs, _, _ :=
-				fetchLockedOutput(ns, op)
-			if releaseAfterSpendConfs > 0 {
-				return
-			}
-
 			if !s.clock.Now().Before(expiration) {
 				expiredOutputs = append(expiredOutputs, op)
 			}
@@ -1451,109 +1449,6 @@ func (s *Store) DeleteExpiredLockedOutputs(ns walletdb.ReadWriteBucket) error {
 	return nil
 }
 
-// DeleteMaturedLockedOutputs removes confirmation-controlled leases whose
-// spending transaction has reached its requested release depth. These leases
-// ignore wall-clock expiration throughout their lifetime and otherwise require
-// explicit release.
-func (s *Store) DeleteMaturedLockedOutputs(ns walletdb.ReadWriteBucket,
-	chainHeight int32) error {
-
-	var maturedOutputs []wire.OutPoint
-	lockedOutputs := ns.NestedReadBucket(bucketLockedOutputs)
-	if lockedOutputs == nil {
-		return nil
-	}
-
-	err := lockedOutputs.ForEach(func(k, v []byte) error {
-		_, _, releaseAfterSpendConfs, spendHeight :=
-			deserializeLockedOutput(v)
-		if releaseAfterSpendConfs == 0 || spendHeight <= 0 ||
-			chainHeight < spendHeight {
-
-			return nil
-		}
-
-		confirmations := uint32(chainHeight-spendHeight) + 1
-		if confirmations < releaseAfterSpendConfs {
-			return nil
-		}
-
-		var op wire.OutPoint
-		if err := readCanonicalOutPoint(k, &op); err != nil {
-			return err
-		}
-		maturedOutputs = append(maturedOutputs, op)
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, op := range maturedOutputs {
-		if err := unlockOutput(ns, op); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// resetLockedOutputSpendHeights clears confirmation progress for spends in a
-// block being disconnected by a rollback. A negative height records that a
-// spend has already been observed and is waiting to confirm again.
-func resetLockedOutputSpendHeights(ns walletdb.ReadWriteBucket,
-	rollbackHeight int32) error {
-
-	type lockToReset struct {
-		op                     wire.OutPoint
-		id                     LockID
-		expiry                 time.Time
-		releaseAfterSpendConfs uint32
-	}
-
-	var locks []lockToReset
-	lockedOutputs := ns.NestedReadBucket(bucketLockedOutputs)
-	if lockedOutputs == nil {
-		return nil
-	}
-
-	err := lockedOutputs.ForEach(func(k, v []byte) error {
-		id, expiry, releaseAfterSpendConfs, spendHeight :=
-			deserializeLockedOutput(v)
-		if spendHeight == 0 || spendHeight < rollbackHeight {
-			return nil
-		}
-
-		var op wire.OutPoint
-		if err := readCanonicalOutPoint(k, &op); err != nil {
-			return err
-		}
-		locks = append(locks, lockToReset{
-			op:                     op,
-			id:                     id,
-			expiry:                 expiry,
-			releaseAfterSpendConfs: releaseAfterSpendConfs,
-		})
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, lock := range locks {
-		if err := lockOutput(
-			ns, lock.id, lock.op, lock.expiry,
-			lock.releaseAfterSpendConfs, -1,
-		); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 // ListLockedOutputs returns a list of objects representing the currently locked
 // utxos.
 func (s *Store) ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput,
@@ -1562,23 +1457,16 @@ func (s *Store) ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput,
 	var outputs []*LockedOutput
 	err := forEachLockedOutput(
 		ns, func(op wire.OutPoint, id LockID, expiration time.Time) {
-			_, _, releaseAfterSpendConfs, spendHeight, _ :=
-				fetchLockedOutput(ns, op)
-
-			// Skip expired wall-clock leases. Confirmation-controlled
-			// leases remain visible until maturity or explicit release.
-			if !s.clock.Now().Before(expiration) &&
-				releaseAfterSpendConfs == 0 {
-
+			// Skip expired leases. They will be cleaned up with the
+			// next call to DeleteExpiredLockedOutputs.
+			if !s.clock.Now().Before(expiration) {
 				return
 			}
 
 			outputs = append(outputs, &LockedOutput{
-				Outpoint:               op,
-				LockID:                 id,
-				Expiration:             expiration,
-				ReleaseAfterSpendConfs: releaseAfterSpendConfs,
-				ConfirmedSpendHeight:   spendHeight,
+				Outpoint:   op,
+				LockID:     id,
+				Expiration: expiration,
 			})
 		},
 	)

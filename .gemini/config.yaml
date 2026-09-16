@@ -33,4 +33,4 @@ code_review:
 
 # List of glob patterns to ignore (files and directories).
 # Type: array of string, default: [].
-ignore_patterns: []
+ignore_patterns: ["deprecated.go"]

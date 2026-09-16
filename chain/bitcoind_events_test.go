@@ -2,73 +2,110 @@ package chain
 
 import (
 	"fmt"
-	"math/rand"
 	"os/exec"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/stretchr/testify/require"
 )
 
-// TestBitcoindEvents ensures that the BitcoindClient correctly delivers tx and
-// block notifications for both the case where a ZMQ subscription is used and
-// for the case where RPC polling is used.
-func TestBitcoindEvents(t *testing.T) {
+const (
+	// defaultTestTimeout is the default timeout used for tests in this
+	// file. It is set to 30 seconds to allow for slow test environments.
+	defaultTestTimeout = 30 * time.Second
+)
+
+// TestBitcoindEventsZMQ runs all bitcoind event tests using ZMQ subscriptions.
+//
+// We cannot run these tests in parallel as it involves running multiple
+// bitcoind servers and btcd servers in the background. While running multiple
+// bitcoind servers is fine, the current integration test setup in `btcd`
+// doesn't allow it as the created RPC client will share the same ports.
+//
+//nolint:paralleltest
+func TestBitcoindEventsZMQ(t *testing.T) {
+	runBitcoindEventsTests(t, false)
+}
+
+// TestBitcoindEventsRPC runs all bitcoind event tests using RPC polling.
+//
+// We cannot run these tests in parallel as it involves running multiple
+// bitcoind servers and btcd servers in the background. While running multiple
+// bitcoind servers is fine, the current integration test setup in `btcd`
+// doesn't allow it as the created RPC client will share the same ports.
+//
+//nolint:paralleltest
+func TestBitcoindEventsRPC(t *testing.T) {
+	runBitcoindEventsTests(t, true)
+}
+
+// runBitcoindEventsTests runs the suite of bitcoind event tests with the
+// specified polling mode.
+func runBitcoindEventsTests(t *testing.T, rpcPolling bool) {
+	t.Helper()
+
 	tests := []struct {
-		name       string
-		rpcPolling bool
+		name   string
+		testFn func(*testing.T, *rpctest.Harness, *BitcoindClient)
 	}{
 		{
-			name:       "Events via ZMQ subscriptions",
-			rpcPolling: false,
+			name:   "Reorg",
+			testFn: testReorg,
 		},
 		{
-			name:       "Events via RPC Polling",
-			rpcPolling: true,
+			name:   "NotifyBlocks",
+			testFn: testNotifyBlocks,
+		},
+		{
+			name:   "NotifyTx",
+			testFn: testNotifyTx,
+		},
+		{
+			name:   "NotifySpentMempool",
+			testFn: testNotifySpentMempool,
+		},
+		{
+			name:   "LookupInputMempoolSpend",
+			testFn: testLookupInputMempoolSpend,
+		},
+		{
+			name:   "GetCFilter",
+			testFn: testBitcoindClientGetCFilter,
+		},
+		{
+			name: "Batch RPCs",
+			testFn: func(t *testing.T, h *rpctest.Harness,
+				bc *BitcoindClient) {
+
+				t.Helper()
+				testInterfaceBatchMethods(t, h, bc)
+			},
 		},
 	}
 
 	for _, test := range tests {
 		test := test
-
-		// Set up 2 btcd miners.
-		miner1, miner2 := setupMiners(t)
-		addr := miner1.P2PAddress()
-
 		t.Run(test.name, func(t *testing.T) {
-			// Set up a bitcoind node and connect it to miner 1.
-			btcClient := setupBitcoind(t, addr, test.rpcPolling)
+			// Initialize a fresh miner for the test case.
+			miner1 := setupMiner(t)
+			addr := miner1.P2PAddress()
 
-			// Test that the correct block `Connect` and
-			// `Disconnect` notifications are received during a
-			// re-org.
-			testReorg(t, miner1, miner2, btcClient)
+			// Initialize a fresh bitcoind client for EVERY test
+			// case.
+			btcClient := setupBitcoind(t, addr, rpcPolling)
 
-			// Test that the expected block notifications are
-			// received.
-			btcClient = setupBitcoind(t, addr, test.rpcPolling)
-			testNotifyBlocks(t, miner1, btcClient)
-
-			// Test that the expected tx notifications are
-			// received.
-			btcClient = setupBitcoind(t, addr, test.rpcPolling)
-			testNotifyTx(t, miner1, btcClient)
-
-			// Test notifications for inputs already found in
-			// mempool.
-			btcClient = setupBitcoind(t, addr, test.rpcPolling)
-			testNotifySpentMempool(t, miner1, btcClient)
-
-			// Test looking up mempool for input spent.
-			testLookupInputMempoolSpend(t, miner1, btcClient)
+			test.testFn(t, miner1, btcClient)
 		})
 	}
 }
@@ -91,31 +128,21 @@ func testNotifyTx(t *testing.T, miner *rpctest.Harness, client *BitcoindClient) 
 	err = client.NotifyTx([]chainhash.Hash{hash})
 	require.NoError(err)
 
-	_, err = client.SendRawTransaction(tx, true)
-	require.NoError(err)
+	// Send the transaction. This might fail if the bitcoind node hasn't
+	// synced the inputs yet, so we'll retry until it succeeds.
+	require.Eventually(func() bool {
+		_, err = client.SendRawTransaction(tx, true)
+		return err == nil
+	}, defaultTestTimeout, 100*time.Millisecond,
+		"SendRawTransaction failed")
 
 	ntfns := client.Notifications()
 
 	// We expect to get a ClientConnected notification.
-	select {
-	case ntfn := <-ntfns:
-		_, ok := ntfn.(ClientConnected)
-		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
-
-	case <-time.After(time.Second):
-		require.Fail("timed out for ClientConnected notification")
-	}
+	waitForClientConnected(t, ntfns)
 
 	// We expect to get a RelevantTx notification.
-	select {
-	case ntfn := <-ntfns:
-		tx, ok := ntfn.(RelevantTx)
-		require.Truef(ok, "Expected type RelevantTx, got %T", ntfn)
-		require.True(tx.TxRecord.Hash.IsEqual(&hash))
-
-	case <-time.After(time.Second):
-		require.Fail("timed out waiting for RelevantTx notification")
-	}
+	waitForRelevantTx(t, ntfns, &hash)
 }
 
 // testNotifyBlocks tests that the correct notifications are received for
@@ -134,14 +161,7 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	miner.Client.Generate(1)
 
 	// We expect to get a ClientConnected notification.
-	select {
-	case ntfn := <-ntfns:
-		_, ok := ntfn.(ClientConnected)
-		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
-
-	case <-time.After(time.Second):
-		require.Fail("timed out for ClientConnected notification")
-	}
+	waitForClientConnected(t, ntfns)
 
 	// We expect to get a FilteredBlockConnected notification.
 	select {
@@ -150,7 +170,7 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 		require.Truef(ok, "Expected type FilteredBlockConnected, "+
 			"got %T", ntfn)
 
-	case <-time.After(time.Second):
+	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for FilteredBlockConnected " +
 			"notification")
 	}
@@ -161,7 +181,7 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 		_, ok := ntfn.(BlockConnected)
 		require.Truef(ok, "Expected type BlockConnected, got %T", ntfn)
 
-	case <-time.After(time.Second):
+	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for BlockConnected notification")
 	}
 }
@@ -195,25 +215,10 @@ func testNotifySpentMempool(t *testing.T, miner *rpctest.Harness,
 	ntfns := client.Notifications()
 
 	// We expect to get a ClientConnected notification.
-	select {
-	case ntfn := <-ntfns:
-		_, ok := ntfn.(ClientConnected)
-		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
-
-	case <-time.After(time.Second):
-		require.Fail("timed out for ClientConnected notification")
-	}
+	waitForClientConnected(t, ntfns)
 
 	// We expect to get a RelevantTx notification.
-	select {
-	case ntfn := <-ntfns:
-		tx, ok := ntfn.(RelevantTx)
-		require.Truef(ok, "Expected type RelevantTx, got %T", ntfn)
-		require.True(tx.TxRecord.Hash.IsEqual(&txid))
-
-	case <-time.After(time.Second):
-		require.Fail("timed out waiting for RelevantTx notification")
-	}
+	waitForRelevantTx(t, ntfns, &txid)
 }
 
 // testLookupInputMempoolSpend tests that LookupInputMempoolSpend returns the
@@ -250,7 +255,7 @@ func testLookupInputMempoolSpend(t *testing.T, miner *rpctest.Harness,
 	rt.Eventually(func() bool {
 		txid, found = client.LookupInputMempoolSpend(op)
 		return found
-	}, 5*time.Second, 100*time.Millisecond)
+	}, defaultTestTimeout, 100*time.Millisecond)
 
 	// Check the expected txid is returned.
 	rt.Equal(tx.TxHash(), txid)
@@ -258,8 +263,10 @@ func testLookupInputMempoolSpend(t *testing.T, miner *rpctest.Harness,
 
 // testReorg tests that the given BitcoindClient correctly responds to a chain
 // re-org.
-func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
-	client *BitcoindClient) {
+func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
+	t.Helper()
+
+	miner2 := setupReorgMiner(t, miner1)
 
 	require := require.New(t)
 
@@ -281,7 +288,7 @@ func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
 		_, ok := ntfn.(ClientConnected)
 		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
 
-	case <-time.After(time.Second):
+	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for ClientConnected notification")
 	}
 
@@ -370,7 +377,7 @@ func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
 func waitForBlockNtfn(t *testing.T, ntfns <-chan interface{},
 	expectedHeight int32, connected bool) chainhash.Hash {
 
-	timer := time.NewTimer(2 * time.Second)
+	timer := time.NewTimer(defaultTestTimeout)
 	for {
 		select {
 		case nftn := <-ntfns:
@@ -414,21 +421,47 @@ func waitForBlockNtfn(t *testing.T, ntfns <-chan interface{},
 	}
 }
 
-// setUpMiners sets up two miners that can be used for a re-org test.
-func setupMiners(t *testing.T) (*rpctest.Harness, *rpctest.Harness) {
-	trickle := fmt.Sprintf("--trickleinterval=%v", 10*time.Millisecond)
-	args := []string{trickle}
+// setUpMiner sets up a single miner.
+func setupMiner(t *testing.T) *rpctest.Harness {
+	t.Helper()
 
-	miner1, err := rpctest.New(
-		&chaincfg.RegressionNetParams, nil, args, "",
-	)
+	args := []string{
+		fmt.Sprintf("--trickleinterval=%v", 10*time.Millisecond),
+		// TODO(yy): We should uncomment the following to allow setting
+		// up ports here in the test. However, this cannot work without
+		// modifying the rpcclient in the `btcd` first, as the ports
+		// are overwritten there.
+		//
+		// fmt.Sprintf("--listen=%v", port.NextAvailablePort()),
+		// fmt.Sprintf("--rpclisten=%v", port.NextAvailablePort()),
+	}
+
+	miner, err := rpctest.New(&chaincfg.RegressionNetParams, nil, args, "")
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		miner1.TearDown()
+		require.NoError(t, miner.TearDown())
 	})
 
-	require.NoError(t, miner1.SetUp(true, 1))
+	require.NoError(t, miner.SetUp(true, 101))
+
+	return miner
+}
+
+// setupReorgMiner sets up a second miner that can be used for a re-org test.
+func setupReorgMiner(t *testing.T, miner1 *rpctest.Harness) *rpctest.Harness {
+	t.Helper()
+
+	args := []string{
+		fmt.Sprintf("--trickleinterval=%v", 10*time.Millisecond),
+		// TODO(yy): We should uncomment the following to allow setting
+		// up ports here in the test. However, this cannot work without
+		// modifying the rpcclient in the `btcd` first, as the ports
+		// are overwritten there.
+		//
+		// fmt.Sprintf("--listen=%v", port.NextAvailablePort()),
+		// fmt.Sprintf("--rpclisten=%v", port.NextAvailablePort()),
+	}
 
 	miner2, err := rpctest.New(
 		&chaincfg.RegressionNetParams, nil, args, "",
@@ -449,7 +482,7 @@ func setupMiners(t *testing.T) (*rpctest.Harness, *rpctest.Harness) {
 	)
 	require.NoError(t, err)
 
-	return miner1, miner2
+	return miner2
 }
 
 // setupBitcoind starts up a bitcoind node with either a zmq connection or
@@ -460,10 +493,14 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	// Start a bitcoind instance and connect it to miner1.
 	tempBitcoindDir := t.TempDir()
 
-	zmqBlockHost := "ipc:///" + tempBitcoindDir + "/blocks.socket"
-	zmqTxHost := "ipc:///" + tempBitcoindDir + "/tx.socket"
+	zmqBlockPort := port.NextAvailablePort()
+	zmqTxPort := port.NextAvailablePort()
 
-	rpcPort := rand.Int()%(65536-1024) + 1024
+	zmqBlockHost := fmt.Sprintf("tcp://127.0.0.1:%d", zmqBlockPort)
+	zmqTxHost := fmt.Sprintf("tcp://127.0.0.1:%d", zmqTxPort)
+
+	rpcPort := port.NextAvailablePort()
+	p2pPort := port.NextAvailablePort()
 	bitcoind := exec.Command(
 		"bitcoind",
 		"-datadir="+tempBitcoindDir,
@@ -474,9 +511,11 @@ func setupBitcoind(t *testing.T, minerAddr string,
 			"d$507c670e800a95284294edb5773b05544b"+
 			"220110063096c221be9933c82d38e1",
 		fmt.Sprintf("-rpcport=%d", rpcPort),
+		fmt.Sprintf("-port=%d", p2pPort),
 		"-disablewallet",
 		"-zmqpubrawblock="+zmqBlockHost,
 		"-zmqpubrawtx="+zmqTxHost,
+		"-blockfilterindex=1",
 	)
 	require.NoError(t, bitcoind.Start())
 
@@ -523,12 +562,19 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	})
 
 	// Create a bitcoind client.
-	btcClient := chainConn.NewBitcoindClient()
+	btcClient, err := chainConn.NewBitcoindClient()
+	require.NoError(t, err)
 	require.NoError(t, btcClient.Start(t.Context()))
 
 	t.Cleanup(func() {
 		btcClient.Stop()
 	})
+
+	// Wait for bitcoind to sync with the miner.
+	require.Eventually(t, func() bool {
+		_, height, err := btcClient.GetBestBlock()
+		return err == nil && height >= 101
+	}, defaultTestTimeout, 100*time.Millisecond)
 
 	return btcClient
 }
@@ -556,4 +602,107 @@ func randPubKeyHashScript() ([]byte, *btcec.PrivateKey, error) {
 	}
 
 	return pkScript, privKey, nil
+}
+
+// testBitcoindClientGetCFilter verifies the BitcoindClient's GetCFilter
+// implementation by interacting with a live bitcoind node.
+func testBitcoindClientGetCFilter(t *testing.T, miner *rpctest.Harness,
+	client *BitcoindClient) {
+
+	t.Helper()
+
+	require := require.New(t)
+
+	// Generate a block to have something to query a filter for.
+	hashes, err := miner.Client.Generate(1)
+	require.NoError(err)
+
+	blockHash := hashes[0]
+
+	// Get the CFilter using the BitcoindClient. This might take a few
+	// attempts as the filter index might not be immediately available.
+	var gcsFilter *gcs.Filter
+	require.Eventually(func() bool {
+		gcsFilter, err = client.GetCFilter(
+			blockHash, wire.GCSFilterRegular,
+		)
+
+		return err == nil
+	}, defaultTestTimeout, 100*time.Millisecond,
+		"GetCFilter should succeed")
+	require.NotNil(gcsFilter, "GCS filter should not be nil")
+	require.IsType(&gcs.Filter{}, gcsFilter)
+
+	// Verify the filter matches the block data.
+	block, err := client.GetBlock(blockHash)
+	require.NoError(err)
+
+	// Use the first transaction's first output script.
+	script := block.Transactions[0].TxOut[0].PkScript
+
+	// Derive the filter key.
+	key := builder.DeriveKey(blockHash)
+
+	// Check match.
+	matched, err := gcsFilter.Match(key, script)
+	require.NoError(err)
+	require.True(matched, "Filter should match script from block")
+
+	// Test with an unsupported filter type.
+	_, err = client.GetCFilter(blockHash, wire.FilterType(99))
+	require.ErrorContains(err, "only basic filters are supported",
+		"Unsupported filter type should return an error")
+
+	// Test GetCFilter for a non-existent block.
+	dummyHash := &chainhash.Hash{0x01, 0x02, 0x03}
+	_, err = client.GetCFilter(dummyHash, wire.GCSFilterRegular)
+	require.ErrorContains(err, "Block not found",
+		"Non-existent block should return an error")
+}
+
+// waitForClientConnected waits for a ClientConnected notification on the passed
+// channel. Any other notifications received while waiting are ignored.
+func waitForClientConnected(t *testing.T, ntfns <-chan any) {
+	t.Helper()
+
+	timer := time.NewTimer(defaultTestTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ntfn := <-ntfns:
+			if _, ok := ntfn.(ClientConnected); ok {
+				return
+			}
+
+		case <-timer.C:
+			require.FailNow(t, "timed out for ClientConnected "+
+				"notification")
+		}
+	}
+}
+
+// waitForRelevantTx waits for a RelevantTx notification for the passed tx
+// hash on the passed channel. Any other notifications received while waiting
+// are ignored.
+func waitForRelevantTx(t *testing.T, ntfns <-chan any, hash *chainhash.Hash) {
+	t.Helper()
+
+	timer := time.NewTimer(defaultTestTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ntfn := <-ntfns:
+			if tx, ok := ntfn.(RelevantTx); ok {
+				if tx.TxRecord.Hash.IsEqual(hash) {
+					return
+				}
+			}
+
+		case <-timer.C:
+			require.FailNow(t, "timed out waiting for RelevantTx "+
+				"notification")
+		}
+	}
 }
