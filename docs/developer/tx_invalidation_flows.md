@@ -1,3 +1,5 @@
+| `InvalidateUnminedTx` | `failed` | `failed` | Publisher-side cleanup rejects one local unmined branch. |
+| `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed tx it knows will never confirm. |
 # Transaction Invalidation Flows
 
 This document defines how the SQL wallet store applies invalidation-related
@@ -20,6 +22,8 @@ From the wallet's point of view, a small set of events can change tx history:
   block/status fields without rewriting graph edges.
 - invalidation of an unmined branch, e.g. when publisher-side cleanup fails
   one local spend and its dependent descendants.
+- removal of an unmined branch, e.g. when a caller drops a local spend and its
+  dependent descendants.
 - rollback of confirmed history at a block boundary, e.g. when a reorg
   disconnects blocks and rewinds formerly confirmed wallet history.
 
@@ -49,8 +53,10 @@ invariants.
   any spend references that would otherwise keep invalid UTXO relationships
   alive.
 - **Retained invalid history:** Invalid, replaced, failed, or orphaned rows
-  remain part of the wallet's historical view. The workflow rewrites state; it
-  does not erase audit history.
+  remain part of the wallet's historical view. An invalidation workflow
+  rewrites state; it does not erase audit history. Caller-requested removal is
+  the exception: it erases an active unmined branch, never a row the wallet
+  itself made terminal.
 - **Event-owned graph mutation:** Row-local patching must stay row-local.
   Descendant traversal, spend-edge cleanup, replacement tracking, and rollback
   orphaning belong only to the workflows that own those mutations.
