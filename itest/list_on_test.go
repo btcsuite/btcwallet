@@ -358,4 +358,20 @@ var allTestCases = []*testCase{
 		Name:     "txwriter wallet state",
 		TestFunc: testLabelTxWalletState,
 	},
+	{
+		Name:     "txwriter delete unconfirmed transaction",
+		TestFunc: testDeleteUnconfirmedTx,
+	},
+	{
+		Name:     "txwriter reject confirmed removal",
+		TestFunc: testDeleteUnconfirmedTxRejectsConfirmed,
+	},
+	{
+		Name:     "txwriter reject unknown removal",
+		TestFunc: testDeleteUnconfirmedTxRejectsUnknown,
+	},
+	{
+		Name:     "txwriter removed transaction rediscovery",
+		TestFunc: testDeleteUnconfirmedTxRediscovery,
+	},
 }
