@@ -5,6 +5,8 @@
 package wallet
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -134,5 +136,110 @@ func TestLabelTxNotFound(t *testing.T) {
 
 	// Assert: Check that the correct error is returned.
 	require.ErrorIs(t, err, ErrTxNotFound)
+	mocks.store.AssertExpectations(t)
+}
+
+// TestDeleteUnconfirmedTxSuccess tests that DeleteUnconfirmedTx hands the Store
+// only the wallet ID and tx hash.
+func TestDeleteUnconfirmedTxSuccess(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+
+	mocks.store.On("DeleteUnminedTx", mock.Anything,
+		db.DeleteUnminedTxParams{
+			WalletID: w.id,
+			Txid:     *TstTxHash,
+		}).Return(nil).Once()
+
+	err := w.DeleteUnconfirmedTx(t.Context(), *TstTxHash)
+
+	require.NoError(t, err)
+	mocks.store.AssertExpectations(t)
+}
+
+// TestDeleteUnconfirmedTxStoreErrors tests that Store rejections reach the
+// caller as wallet identities without leaking the internal db sentinels, and
+// that a canceled Store call keeps the caller's context identity.
+func TestDeleteUnconfirmedTxStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		storeErr error
+		wantErr  error
+	}{
+		{
+			name: "missing tx",
+			storeErr: fmt.Errorf("tx %v: %w", *TstTxHash,
+				db.ErrTxNotFound),
+			wantErr: ErrTxNotFound,
+		},
+		{
+			name: "confirmed tx",
+			storeErr: fmt.Errorf("tx %v is confirmed: %w", *TstTxHash,
+				db.ErrDeleteRequiresUnmined),
+			wantErr: ErrTxNotUnconfirmed,
+		},
+		{
+			name: "canceled store call",
+			storeErr: fmt.Errorf("list unmined delete txns: %w",
+				context.Canceled),
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+
+			mocks.store.On("DeleteUnminedTx", mock.Anything,
+				mock.Anything).Return(tc.storeErr).Once()
+
+			err := w.DeleteUnconfirmedTx(t.Context(), *TstTxHash)
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.NotErrorIs(t, err, db.ErrTxNotFound)
+			require.NotErrorIs(t, err, db.ErrDeleteRequiresUnmined)
+			mocks.store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestDeleteUnconfirmedTxNotStarted tests that a wallet that has not started
+// rejects the removal before the request reaches the Store.
+func TestDeleteUnconfirmedTxNotStarted(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+
+	err := w.DeleteUnconfirmedTx(t.Context(), *TstTxHash)
+
+	require.ErrorIs(t, err, ErrStateForbidden)
+	mocks.store.AssertExpectations(t)
+}
+
+// TestDeleteUnconfirmedTxCanceledBeforeAdmission tests that a caller canceled
+// before the wallet accepts its request gets the context error and no Store
+// write.
+func TestDeleteUnconfirmedTxCanceledBeforeAdmission(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Mark the wallet started without running its request loop, so
+	// only cancellation can end the send.
+	w, mocks := createTestWalletWithMocks(t)
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: Remove with the already canceled context.
+	err := w.DeleteUnconfirmedTx(ctx, *TstTxHash)
+
+	// Assert: The send reports cancellation and the Store is never reached.
+	require.ErrorIs(t, err, context.Canceled)
 	mocks.store.AssertExpectations(t)
 }
