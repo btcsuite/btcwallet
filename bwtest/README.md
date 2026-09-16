@@ -55,6 +55,11 @@ func testFoo(t *bwtest.HarnessTest) {
 unlock, and whether to leave the wallet unstarted. Its zero value returns a
 started, locked wallet. `WatchOnly` creates a rootless `ModeShell` watch-only
 wallet.
+`Seed` supplies a known seed for spendable wallets; nil and empty retain random
+seed generation. It cannot be combined with watch-only setup.
+`h.SeedFromTestName()` returns a test-name-derived seed without creating a
+wallet. Repeated calls within a test return the same seed; different test names
+use different seeds to avoid sharing funded addresses on the same chain.
 `InitialAccounts` seeds a watch-only shell wallet; a non-empty slice implies
 watch-only even when `WatchOnly` is false, and nil and empty slices are
 equivalent. A case that selects funded coins derives its key scope from the
