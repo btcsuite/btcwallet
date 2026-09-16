@@ -2,6 +2,7 @@ package bwtest
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"strings"
 	"time"
 
@@ -54,6 +55,14 @@ func (h *HarnessTest) TestWalletParams() wallet.CreateWalletParams {
 	return params
 }
 
+// SeedFromTestName returns a test-name-derived seed for WalletFixture.Seed.
+// Repeated calls in one test return the same seed; distinct test names avoid
+// sharing funded addresses on the same chain.
+func (h *HarnessTest) SeedFromTestName() []byte {
+	seed := sha256.Sum256([]byte(h.Name()))
+	return seed[:]
+}
+
 // WalletFixture describes the wallet a test case needs. It is the harness's
 // parameterized wallet preparation request, so a component test states what it
 // needs instead of growing its own creation, funding and lock policy.
@@ -68,6 +77,10 @@ type WalletFixture struct {
 	// Amounts funds the wallet with one confirmed output per amount, in the
 	// order given.
 	Amounts []btcutil.Amount
+
+	// Seed imports a known root for spendable fixtures. Nil and empty retain
+	// random seed generation; it cannot be combined with watch-only setup.
+	Seed []byte
 
 	// WatchOnly creates a rootless watch-only shell wallet when
 	// InitialAccounts is empty.
@@ -95,7 +108,15 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	h.Helper()
 
 	params := h.TestWalletParams()
+	if len(fixture.Seed) != 0 {
+		params.Mode, params.Seed = wallet.ModeImportSeed, fixture.Seed
+	}
+
 	if fixture.WatchOnly || len(fixture.InitialAccounts) != 0 {
+		require.Empty(
+			h, fixture.Seed, "seeded wallet cannot be watch-only",
+		)
+
 		params.Mode, params.WatchOnly = wallet.ModeShell, true
 		params.InitialAccounts = fixture.InitialAccounts
 	}
