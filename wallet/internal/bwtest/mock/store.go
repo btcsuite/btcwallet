@@ -517,6 +517,14 @@ func (m *Store) DeleteTx(ctx context.Context,
 	return args.Error(0)
 }
 
+// DeleteUnminedTx implements the db.TxStore interface.
+func (m *Store) DeleteUnminedTx(ctx context.Context,
+	params db.DeleteUnminedTxParams) error {
+
+	args := m.Called(ctx, params)
+	return args.Error(0)
+}
+
 // InvalidateUnminedTx implements the db.TxStore interface.
 func (m *Store) InvalidateUnminedTx(ctx context.Context,
 	params db.InvalidateUnminedTxParams) error {

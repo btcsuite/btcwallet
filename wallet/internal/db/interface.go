@@ -499,6 +499,16 @@ type TxStore interface {
 	InvalidateUnminedTx(ctx context.Context,
 		params InvalidateUnminedTxParams) error
 
+	// DeleteUnminedTx removes one unmined transaction branch as a single
+	// atomic wallet event. Unlike InvalidateUnminedTx it retains no
+	// history.
+	//
+	// Implementations must remove the root, its descendants and the outputs
+	// they created, and restore the outputs the branch spent, inside one
+	// database transaction.
+	DeleteUnminedTx(ctx context.Context,
+		params DeleteUnminedTxParams) error
+
 	// RollbackToBlock removes all blocks at and after a given height,
 	// moving any transactions within those blocks back to the unconfirmed
 	// pool. This operation is performed as a single, atomic database
