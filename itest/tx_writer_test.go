@@ -7,6 +7,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -358,4 +360,190 @@ func testLabelTxWalletState(h *bwtest.HarnessTest) {
 		h, err, wallet.ErrWalletStopped,
 		"labeling after stop not rejected",
 	)
+}
+
+// testDeleteUnconfirmedTx verifies that removing an unconfirmed transaction
+// takes the unconfirmed transactions that depend on it along, and hands back
+// the coin the branch spent, leaving the wallet as if it had never recorded
+// the branch at all.
+func testDeleteUnconfirmedTx(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		Unlocked: true,
+	})
+
+	// The second coin is never named by the branch, so it tells "this coin
+	// came back" apart from "the wallet lost sight of its coins".
+	spent, untouched := funding.WalletOutpoints[0], funding.WalletOutpoints[1]
+
+	addr := h.NewWalletAddressOfType(w, txWriterFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	root := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{spent},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	err = w.Broadcast(h.Context(), root, "")
+	require.NoError(h, err, "failed to broadcast the root transaction")
+
+	rootOutput := wire.OutPoint{Hash: root.TxHash(), Index: 0}
+
+	// The child spends the root's unconfirmed output, making this a branch.
+	child := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{rootOutput},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - 2*spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	err = w.Broadcast(h.Context(), child, "")
+	require.NoError(h, err, "failed to broadcast the child transaction")
+
+	// The branch tip is an unspent wallet coin until the branch goes. A
+	// spent output would read as absent either way.
+	branchOutput := wire.OutPoint{Hash: child.TxHash(), Index: 0}
+
+	_, err = w.GetUtxo(h.Context(), branchOutput)
+	require.NoError(h, err, "branch output did not become a wallet coin")
+
+	err = w.DeleteUnconfirmedTx(h.Context(), root.TxHash())
+	require.NoError(h, err, "failed to remove the unconfirmed transaction")
+
+	// Neither the root nor the transaction that depended on it is kept.
+	for _, tx := range []*wire.MsgTx{root, child} {
+		_, err = w.GetTx(h.Context(), tx.TxHash())
+		require.ErrorIs(
+			h, err, wallet.ErrTxNotFound,
+			"removed transaction is still recorded",
+		)
+	}
+
+	// The coin the branch spent is the wallet's to spend again.
+	restored, err := w.GetUtxo(h.Context(), spent)
+	require.NoError(h, err, "removal did not restore the spent coin")
+	require.True(h, restored.Spendable, "restored coin is not spendable")
+
+	// The outputs the branch created left with it.
+	_, err = w.GetUtxo(h.Context(), branchOutput)
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"removed branch left an output in the wallet",
+	)
+
+	// The coin the branch never named is untouched.
+	_, err = w.GetUtxo(h.Context(), untouched)
+	require.NoError(h, err, "removal consumed an unrelated coin")
+
+	// The network still holds both txns. Mine them to leave the miner as
+	// this case found it.
+	h.MineBlocksAndAssertNumTxns(1, 2)
+}
+
+// testDeleteUnconfirmedTxRejectsConfirmed verifies that a confirmed
+// transaction cannot be removed. The chain has settled it, so the caller's
+// opinion no longer decides.
+func testDeleteUnconfirmedTxRejectsConfirmed(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	confirmed := funding.WalletOutpoints[0]
+
+	err := w.DeleteUnconfirmedTx(h.Context(), confirmed.Hash)
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotUnconfirmed,
+		"confirmed transaction was removed",
+	)
+
+	_, err = w.GetTx(h.Context(), confirmed.Hash)
+	require.NoError(h, err, "refused removal dropped the transaction")
+
+	_, err = w.GetUtxo(h.Context(), confirmed)
+	require.NoError(h, err, "refused removal took the coin")
+}
+
+// testDeleteUnconfirmedTxRejectsUnknown verifies that a hash the wallet never
+// recorded is reported as missing rather than accepted as a no-op.
+func testDeleteUnconfirmedTxRejectsUnknown(h *bwtest.HarnessTest) {
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	err := w.DeleteUnconfirmedTx(h.Context(), unknownOutpoint().Hash)
+
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound,
+		"unknown transaction was not rejected",
+	)
+}
+
+// testDeleteUnconfirmedTxRediscovery verifies that when the chain confirms a
+// removed transaction after all, synchronization records it again.
+func testDeleteUnconfirmedTxRediscovery(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	spent := funding.WalletOutpoints[0]
+
+	addr := h.NewWalletAddressOfType(w, txWriterFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{spent},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	err = w.Broadcast(h.Context(), tx, "")
+	require.NoError(h, err, "failed to broadcast transaction")
+
+	txid := tx.TxHash()
+
+	err = w.DeleteUnconfirmedTx(h.Context(), txid)
+	require.NoError(h, err, "failed to remove the unconfirmed transaction")
+
+	_, err = w.GetTx(h.Context(), txid)
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound, "removed transaction is still recorded",
+	)
+
+	// The network never agreed to forget it, so it confirms as usual.
+	h.MineBlockWithTx(tx)
+
+	// The wallet records it again from the chain, with its block.
+	recovered, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "confirmed transaction was not recorded again")
+	require.NotNil(h, recovered.Block, "recovered transaction has no block")
+	require.Equal(
+		h, int32(1), recovered.Confirmations,
+		"recovered transaction reports unexpected confirmations",
+	)
+
+	// Its coins are in the wallet's view again.
+	_, err = w.GetUtxo(h.Context(), spent)
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"recovered transaction did not reclaim its input",
+	)
+
+	created, err := w.GetUtxo(h.Context(), wire.OutPoint{Hash: txid, Index: 0})
+	require.NoError(h, err, "recovered output is not a wallet coin")
+	require.True(h, created.Spendable, "recovered output is not spendable")
 }
