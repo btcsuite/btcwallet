@@ -804,6 +804,9 @@ func (w *Wallet) handleReq(req any) {
 	case labelTxReq:
 		w.handleLabelTx(r)
 
+	case deleteUnconfirmedTxReq:
+		w.handleDeleteUnconfirmedTx(r)
+
 	case createTransactionReq:
 		w.handleCreateTransaction(r)
 
