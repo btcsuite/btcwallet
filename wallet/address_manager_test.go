@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -20,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -1937,5 +1940,110 @@ func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
 			require.ErrorIs(t, err, wantErr)
 			require.Nil(t, batch)
 		})
+	}
+}
+
+// TestNewBulkAddressesReplaysCommittedBatch verifies fresh startup watches
+// destinations committed before failed delivery, using a reopened SQLite Store.
+func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the first backend non-current so only the public batch
+	// call registers; its failure captures the committed destinations.
+	path := filepath.Join(t.TempDir(), "reopen.sqlite")
+	chainMock := createTestChain(t)
+	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+
+	openManager := func(chainSource chain.Interface) *Manager {
+		m, err := NewManager(t.Context(), ManagerConfig{
+			Backend:     DBBackendSQLite,
+			DataSource:  path,
+			ChainParams: chainParams,
+			ChainSource: chainSource,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = m.Stop() })
+
+		return m
+	}
+	m := openManager(chainMock)
+	_, err := m.Start(t.Context())
+	require.NoError(t, err)
+
+	params := sqliteCreateParams(t)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, w.keyVault.Unlock(
+		t.Context(), params.PrivatePassphrase,
+	))
+	w.state.toUnlocked()
+	_, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "batch",
+	})
+	require.NoError(t, err)
+	require.NoError(t, w.store.UpdateWallet(
+		t.Context(), db.UpdateWalletParams{
+			WalletID: w.id,
+			BirthdayBlock: &db.Block{
+				Hash:      *chainParams.GenesisHash,
+				Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+			},
+		},
+	))
+
+	var committed []address.Address
+	chainMock.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+		Run(func(args mock.Arguments) {
+			addrs, _ := args.Get(1).([]address.Address)
+
+			committed = addrs
+		}).Return(errDBMock).Once()
+	// The fresh worker owns this capture. Publish it after registration
+	// finishes so the test can join replay without racing its writes.
+	var restored []address.Address
+
+	replayed := make(chan []address.Address, 1)
+
+	freshChain := createTestChain(t)
+	freshChain.On("IsCurrent").Unset()
+	freshChain.On("IsCurrent").Return(true).Maybe()
+	freshChain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	freshChain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			restored, _ = args.Get(1).([]address.Address)
+		}).Return(nil).Once()
+	freshChain.On("NotifyBlocks").Run(func(mock.Arguments) {
+		replayed <- restored
+	}).Return(nil).Once()
+	freshChain.On("Notifications").Return((<-chan any)(nil)).Maybe()
+
+	// Act: Fail public delivery, stop the owning Manager to drain the
+	// request loop and close storage, then reopen all durable Wallets.
+	batch, deliveryErr := w.NewBulkAddresses(
+		t.Context(),
+		NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "batch"),
+		false, 2,
+	)
+
+	require.NoError(t, m.Stop())
+
+	fresh, err := openManager(freshChain).Start(t.Context())
+	require.NoError(t, err)
+
+	// Assert: Delivery exposed no batch but both committed addresses
+	// survived closing the database and were replayed by sync initialization.
+	// Start itself need not join replay; bound the wait for the fresh worker.
+	require.ErrorIs(t, deliveryErr, errDBMock)
+	require.Nil(t, batch)
+	require.Len(t, committed, 2)
+	require.Len(t, fresh, 1)
+
+	select {
+	case got := <-replayed:
+		require.Equal(t, committed, got)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("committed batch was not replayed after reopening")
 	}
 }
