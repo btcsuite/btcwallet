@@ -149,7 +149,9 @@ func TestValidateInvalidateUnminedTxTarget(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateUnminedTxTarget(test.target)
+			err := validateUnminedTxTarget(
+				test.target, ErrInvalidateTx,
+			)
 			require.ErrorIs(t, err, test.wantErr)
 		})
 	}
