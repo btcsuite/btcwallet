@@ -127,6 +127,9 @@ func createTestChain(tb testing.TB) *bwmock.Chain {
 
 	chain := &bwmock.Chain{}
 
+	// Info reports the chain name without selecting any sync behavior.
+	chain.On("BackEnd").Return("mock").Maybe()
+
 	// Sync initialization and committed batches register the watch set.
 	// Tests that inspect registration replace these defaults.
 	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).

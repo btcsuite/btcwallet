@@ -26,6 +26,14 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerLiveWatchReplay,
 	},
 	{
+		Name:     "manager live watch recovered spend",
+		TestFunc: testManagerLiveWatchRecoveredSpend,
+	},
+	{
+		Name:     "manager live watch recovered address",
+		TestFunc: testManagerLiveWatchRecoveredAddress,
+	},
+	{
 		Name:     "manager create wallet",
 		TestFunc: testCreateWallet,
 	},
