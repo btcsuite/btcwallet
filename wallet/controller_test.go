@@ -1806,7 +1806,7 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		t.Helper()
 
 		// Arrange: Start the real worker at a matching tip and fail
-		// account loading only for the queued historical scan.
+		// the batch commit only for the queued historical scan.
 		w, deps := createTestWalletWithMocks(t)
 		s := newSyncer(
 			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
@@ -1823,34 +1823,41 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		deps.chain.On("NotifyBlocks").Return(nil).Once()
 		deps.chain.On("GetBestBlock").Return(
 			&tip.Hash, int32(tip.Height), nil,
-		).Times(3)
+		).Times(4)
 		deps.store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
 			WalletID: w.id, UnminedOnly: true,
 		}).Return(nil, nil).Times(3)
 
-		// Let initial registration succeed before the queued scan's
-		// account lookup fails, preserving the failure's subject.
+		// Keep both startup and the imported-address scan empty so the
+		// rescan reaches its commit without unrelated derivation setup.
 		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
 			WalletID:      w.id,
 			SkipBalance:   true,
 			ChainSyncOnly: true,
-		}).Return([]db.AccountInfo(nil), nil).Once()
+		}).Return([]db.AccountInfo(nil), nil).Times(3)
 		expectImportedScanAddressPage(
 			deps.store, w.id, page.Result[db.AddressInfo, uint32]{},
 		)
 		deps.store.On("ListOutputsToWatch", mock.Anything, w.id).
-			Return([]db.UtxoInfo(nil), nil).Once()
+			Return([]db.UtxoInfo(nil), nil).Twice()
 		deps.chain.On(
 			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 		).Return(nil).Once()
 
-		deps.store.On("ListAccounts", mock.Anything,
-			db.ListAccountsQuery{
-				WalletID:      w.id,
-				SkipBalance:   true,
-				ChainSyncOnly: true,
-			},
-		).Return(nil, errDBMock).Once()
+		expectImportedScanAddressPage(
+			deps.store, w.id, page.Result[db.AddressInfo, uint32]{},
+		)
+
+		// Fail after scanning one historical block but before a commit,
+		// where missing live watches must not trigger worker backoff.
+		deps.chain.On("GetBlockHashes", int64(100), int64(100)).
+			Return([]chainhash.Hash{tip.Hash}, nil).Once()
+		deps.chain.On("GetBlockHeaders", []chainhash.Hash{tip.Hash}).
+			Return([]*wire.BlockHeader{{}}, nil).Once()
+		deps.store.On("ApplyScanBatch", mock.Anything, db.ScanBatchParams{
+			WalletID: w.id,
+			Horizons: []db.ScanHorizon{},
+		}).Return(errDBMock).Once()
 
 		notifications := make(chan any, 1)
 		deps.chain.On("Notifications").
@@ -1877,18 +1884,16 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		// Act: Finish the failed scan before delivering the next block.
 		require.NoError(t, s.requestScan(t.Context(), &scanReq{
 			typ:        scanTypeTargeted,
-			startBlock: waddrmgr.BlockStamp{Height: 50},
-			targets: []waddrmgr.AccountScope{{
-				Scope: waddrmgr.KeyScopeBIP0084,
-			}},
+			startBlock: waddrmgr.BlockStamp{Height: 100},
+			targets: []waddrmgr.AccountScope{
+				{
+					Scope:   waddrmgr.KeyScopeBIP0084,
+					Account: waddrmgr.ImportedAddrAccount,
+				},
+			},
 		}))
 
 		synctest.Wait()
-
-		// Check that the scan reached account loading before delivering
-		// the live block. Once only verifies the final count at cleanup,
-		// not that the scan ran before the notification was queued.
-		deps.store.AssertNumberOfCalls(t, "ListAccounts", 2)
 
 		notifications <- chain.FilteredBlockConnected{Block: block}
 

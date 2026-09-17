@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -1014,9 +1015,26 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 		return err
 	}
 
+	// Cover the commit boundary as well as registration: Info treats an
+	// ordinary rescan as live-ready even when both tips match.
+	s.state.Store(uint32(syncStateSyncing))
+
 	err = s.store.ApplyScanBatch(ctx, params)
 	if err != nil {
+		// An unknown commit outcome may have persisted new watches. Keep
+		// readiness revoked so initialization rereads them; only definite
+		// write failures can restore readiness without registration.
+		if !errors.Is(err, dbruntime.ErrAmbiguousTxCommit) {
+			s.state.Store(uint32(syncStateRescanning))
+		}
+
 		return fmt.Errorf("apply targeted scan batch: %w", err)
+	}
+
+	// Targeted scans can also store new addresses and outputs. Register
+	// them after the commit using the scan worker's lifetime context.
+	if len(params.Horizons) > 0 || len(params.Transactions) > 0 {
+		return s.refreshLiveWatches(ctx)
 	}
 
 	return nil
@@ -1927,7 +1945,11 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 			return err
 		}
 
-		if job.typ == scanTypeTargeted {
+		// A committed scan can leave live watches unregistered. Let that
+		// failure restart initialization instead of bypassing its retry.
+		if job.typ == scanTypeTargeted &&
+			s.syncState() != syncStateSyncing {
+
 			// Rescan returns once the request is queued, so this
 			// execution failure cannot reach its caller. For now,
 			// it is visible only in the logs; swallow it here to
@@ -1987,7 +2009,10 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	}
 
 	s.state.Store(uint32(syncStateRescanning))
-	defer s.state.Store(uint32(syncStateSynced))
+	// Failed registration keeps readiness revoked until initialization retries.
+	defer s.state.CompareAndSwap(
+		uint32(syncStateRescanning), uint32(syncStateSynced),
+	)
 
 	startHeight := req.startBlock.Height
 
@@ -2023,11 +2048,13 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 				"0 results", ErrScanBatchEmpty)
 		}
 
-		// Process results (update DB).
+		// Persist the scan while rescanning still blocks transaction creation.
 		err = s.putTargetedBatch(ctx, scanState, results)
 		if err != nil {
 			return err
 		}
+
+		s.state.Store(uint32(syncStateRescanning))
 
 		// Advance startHeight.
 		//nolint:gosec // batch size is bounded.
