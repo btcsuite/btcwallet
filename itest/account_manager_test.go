@@ -35,6 +35,147 @@ func canonicalAccountKey(h *bwtest.HarnessTest, key []byte) []byte {
 	return []byte(normalized.String())
 }
 
+// testAccountManagerQueryListEmpty checks a rootless wallet with no imports
+// reports a successful empty inventory rather than a not-found error.
+func testAccountManagerQueryListEmpty(h *bwtest.HarnessTest) {
+	// Arrange: create a rootless wallet with no imported accounts.
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+
+	// Act: list the empty inventory.
+	got, err := w.ListAccounts(h.Context())
+
+	// Assert: an empty wallet returns a successful empty result.
+	require.NoError(h, err)
+	require.Empty(h, got)
+}
+
+// testAccountManagerQueryMissingName checks empty, absent, differently cased,
+// partial, and whitespace-altered names are not treated as a wildcard or a
+// normalized match. A name-only control rules out an empty fixture.
+func testAccountManagerQueryMissingName(h *bwtest.HarnessTest) {
+	// Arrange: populate the same name in two scopes so misses cannot pass
+	// merely because the wallet contains no accounts.
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	_, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	_, err = w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.NestedWitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	control, err := w.ListAccountsByName(ctx, "query shared")
+	require.NoError(h, err)
+	require.Len(h, control, 2)
+
+	for _, account := range control {
+		require.Equal(h, "query shared", account.AccountName)
+	}
+
+	missingNames := []string{
+		"", "query absent", "QUERY SHARED", "query share", " query shared",
+		"query shared ",
+	}
+
+	for _, name := range missingNames {
+		// Act: query an absent or non-exact name.
+		got, err := w.ListAccountsByName(ctx, name)
+
+		// Assert: wildcard or normalized matching must not find a hit.
+		require.NoError(h, err, "name %q", name)
+		require.Empty(h, got, "name %q", name)
+	}
+}
+
+// testAccountManagerQueryMissingScope checks both purpose and coin participate
+// in scope selection, even when a populated purpose or coin matches alone.
+func testAccountManagerQueryMissingScope(h *bwtest.HarnessTest) {
+	// Arrange: populate one scope and vary purpose and coin independently.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	scope := waddrmgr.KeyScopeBIP0084
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	control, err := w.ListAccountsByScope(ctx, scope)
+	require.NoError(h, err)
+	require.NotEmpty(h, control)
+
+	missingScopes := []waddrmgr.KeyScope{
+		{},
+		{Purpose: 1017, Coin: scope.Coin},
+		{Purpose: scope.Purpose, Coin: scope.Coin + 1},
+	}
+
+	for _, missing := range missingScopes {
+		// Act: query a scope that does not exist.
+		got, err := w.ListAccountsByScope(ctx, missing)
+
+		// Assert: a partial scope match must not return accounts.
+		require.NoError(h, err, "scope %v", missing)
+		require.Empty(h, got, "scope %v", missing)
+	}
+}
+
+// testAccountManagerQueryMissingAccount distinguishes missing names, missing
+// scopes, and an existing name in the wrong existing scope. All must expose
+// the same wallet-owned not-found identity, never a Store sentinel.
+func testAccountManagerQueryMissingAccount(h *bwtest.HarnessTest) {
+	// Arrange: populate distinct scope/name pairs to distinguish missing
+	// identities from existing names requested in the wrong scope.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	accounts := []wallet.NewAccountParams{
+		{Scope: waddrmgr.KeyScopeBIP0084, Name: "query shared"},
+		{Scope: waddrmgr.KeyScopeBIP0044, Name: "query other"},
+	}
+	for _, account := range accounts {
+		_, err := w.NewAccount(ctx, account)
+		require.NoError(h, err)
+	}
+
+	control, err := w.GetAccount(
+		ctx, waddrmgr.KeyScopeBIP0084, "query shared",
+	)
+	require.NoError(h, err)
+	require.Equal(h, "query shared", control.AccountName)
+
+	missingQueries := []struct {
+		scope waddrmgr.KeyScope
+		name  string
+	}{
+		{waddrmgr.KeyScopeBIP0084, "query absent"},
+		{waddrmgr.KeyScopeBIP0084, ""},
+		{waddrmgr.KeyScopeBIP0084, "QUERY SHARED"},
+		{waddrmgr.KeyScopeBIP0044, "query shared"},
+		{waddrmgr.KeyScope{Purpose: 1017, Coin: 0}, "query shared"},
+		{waddrmgr.KeyScope{Purpose: 84, Coin: 1}, "query shared"},
+	}
+
+	for _, query := range missingQueries {
+		// Act: look up a missing scope/name pair.
+		got, err := w.GetAccount(ctx, query.scope, query.name)
+
+		// Assert: every miss exposes the same public not-found error.
+		require.ErrorIs(
+			h, err, wallet.ErrAccountNotFound, "scope %v name %q",
+			query.scope, query.name,
+		)
+		require.Nil(h, got)
+	}
+}
+
 // testAccountManagerCreateAccount verifies that a new derived account's
 // returned view matches an immediate read and survives a wallet reload.
 func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
