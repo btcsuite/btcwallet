@@ -6,6 +6,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"sync"
 
@@ -186,6 +187,12 @@ func (c *MempoolChain) Rescan(*chainhash.Hash, []address.Address,
 
 // NotifyReceived implements the chain.Interface interface.
 func (c *MempoolChain) NotifyReceived([]address.Address) error { return nil }
+
+// NotifySpent returns an unsupported error because MempoolChain does not
+// provide transaction notifications.
+func (c *MempoolChain) NotifySpent(_ []*wire.OutPoint) error {
+	return errors.ErrUnsupported
+}
 
 // WatchAddrsFromTip implements chain.Interface for the deterministic mempool
 // fake. It has no notification filter, but still preserves caller cancellation.

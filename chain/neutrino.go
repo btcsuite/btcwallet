@@ -586,6 +586,12 @@ func (s *NeutrinoClient) NotifyReceived(addrs []address.Address) error {
 	return nil
 }
 
+// NotifySpent is a no-op because SPV does not supply mempool spend events.
+// Confirmed spends remain covered by block scanning and Rescan input watches.
+func (s *NeutrinoClient) NotifySpent(_ []*wire.OutPoint) error {
+	return nil
+}
+
 // WatchAddrsFromTip temporarily routes address registration through the
 // existing Neutrino notification rescan after honoring pre-call cancellation.
 func (s *NeutrinoClient) WatchAddrsFromTip(ctx context.Context,
