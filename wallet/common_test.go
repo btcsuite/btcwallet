@@ -126,6 +126,12 @@ func createTestChain(tb testing.TB) *bwmock.Chain {
 	tb.Helper()
 
 	chain := &bwmock.Chain{}
+
+	// Sync initialization and committed batches register the watch set.
+	// Tests that inspect registration replace these defaults.
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Maybe()
+	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
 	chain.On("IsCurrent").Return(false).Maybe()
 	chain.On("GetBestBlock").Return(
 		chainParams.GenesisHash, int32(0), nil,

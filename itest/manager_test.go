@@ -3,10 +3,16 @@
 package itest
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
@@ -272,4 +278,190 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 		h, reloaded.IsWatchOnly(),
 		"reloaded wallet lost its watch-only state",
 	)
+}
+
+// testManagerLiveWatchReplay proves a fresh client restores both persisted
+// address and outpoint watches for payments and external mempool spends.
+func testManagerLiveWatchReplay(h *bwtest.HarnessTest) {
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("SPV does not deliver mempool transactions")
+	}
+
+	// Arrange: Persist an unused address and a funded output so reopening
+	// must restore both kinds of watch from the store.
+	manager := h.NewWalletManager()
+
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start manager")
+
+	w, err := manager.Create(h.TestWalletParams())
+	require.NoError(h, err, "failed to create wallet")
+	h.RegisterWallet(manager, w)
+
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+
+	// A key-path witness cannot reconstruct the receiving address, so
+	// bitcoind must match this spend through its persisted outpoint watch.
+	funding := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+
+	// Discard the source as well as the Manager: retained in-memory filters
+	// would let this test pass without restoring persisted watches.
+	require.NoError(h, manager.Stop(), "failed to stop initial manager")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+	h.ChainClient.Stop()
+
+	client, cleanup, err := h.Backend.NewChainClient(h.Context())
+	require.NoError(h, err, "failed to create fresh chain client")
+	h.Cleanup(cleanup)
+	h.ChainClient = client
+
+	manager = h.NewWalletManager()
+	wallets, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to reopen manager")
+	require.Len(h, wallets, 1, "unexpected reopened wallet count")
+
+	w = wallets[0]
+	h.RegisterWallet(manager, w)
+	h.AssertWalletSynced(w)
+	h.UnlockWallet(w)
+
+	// Keep outputs external as well, so only the outpoint watch can deliver
+	// this spend. Sign locally, but broadcast outside the Wallet.
+	external, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), h.NetParams(),
+	)
+	require.NoError(h, err, "failed to construct external address")
+
+	script, err := txscript.PayToAddrScript(external)
+	require.NoError(h, err, "failed to construct external script")
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: funding.WalletOutpoints,
+		Outputs: []wire.TxOut{
+			{
+				Value:    oneBTC - spendFee,
+				PkScript: script,
+			},
+		},
+	})
+
+	paymentScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to construct payment script")
+
+	// Act: Pay the persisted address and broadcast the external spend after
+	// reopening. Neither transaction can be discovered by a mined block yet.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: paymentScript,
+	}, bwtest.MinerFeeRate)
+
+	_, err = h.ChainClient.SendRawTransaction(tx, false)
+	require.NoError(h, err, "failed to broadcast external spend")
+
+	// Assert: Wait for asynchronous live delivery, then inspect the public
+	// transaction state to prove both restored watches work before mining.
+	err = wait.NoError(func() error {
+		_, err := w.GetTx(h.Context(), *payment)
+		return err
+	}, pollTimeout)
+	require.NoError(h, err, "persisted address missed unmined payment")
+
+	received, err := w.GetTx(h.Context(), *payment)
+	require.NoError(h, err, "failed to read received payment")
+	require.Nil(h, received.Block, "payment was already confirmed")
+
+	err = wait.NoError(func() error {
+		_, err := w.GetTx(h.Context(), tx.TxHash())
+		return err
+	}, pollTimeout)
+	require.NoError(h, err, "persisted outpoint missed unmined spend")
+
+	spent, err := w.GetTx(h.Context(), tx.TxHash())
+	require.NoError(h, err, "failed to read external spend")
+	require.Nil(h, spent.Block, "spend was already confirmed")
+	require.Negative(h, spent.Value, "external spend did not debit wallet")
+
+	// Empty the shared miner's mempool so later cases start without these
+	// transactions; confirmation behavior is covered by transaction tests.
+	h.MineBlocksAndAssertNumTxns(1, 2)
+}
+
+// testManagerNeutrinoWatchReplay verifies that a fresh SPV notification client
+// retains persisted address watches when processing new confirmed payments.
+func testManagerNeutrinoWatchReplay(h *bwtest.HarnessTest) {
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); !ok {
+		h.Skip("requires the SPV notification rescan")
+	}
+
+	// Arrange: Persist an unused address, then discard both consumers so
+	// the reopened wallet cannot inherit an in-memory notification filter.
+	manager := h.NewWalletManager()
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start manager")
+
+	w, err := manager.Create(h.TestWalletParams())
+	require.NoError(h, err, "failed to create wallet")
+	h.RegisterWallet(manager, w)
+
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+
+	require.NoError(h, manager.Stop(), "failed to stop initial manager")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+	h.ChainClient.Stop()
+
+	client, cleanup, err := h.Backend.NewChainClient(h.Context())
+	require.NoError(h, err, "failed to create fresh chain client")
+	h.Cleanup(cleanup)
+	h.ChainClient = client
+
+	manager = h.NewWalletManager()
+	wallets, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to reopen manager")
+	require.Len(h, wallets, 1, "unexpected reopened wallet count")
+
+	w = wallets[0]
+	h.RegisterWallet(manager, w)
+	h.AssertWalletSynced(w)
+
+	// Join notification delivery for a new empty block as well as wallet
+	// catch-up. Otherwise queued historical events could let catch-up find
+	// the later payment and hide an empty notification filter.
+	h.MineBlocks(1)
+	tip, _ := h.GetBestBlock()
+	source, ok := client.(*chain.NeutrinoClient)
+	require.True(h, ok, "replacement client is not Neutrino")
+
+	err = wait.NoError(func() error {
+		stamp, err := source.BlockStamp()
+		if err != nil {
+			return err
+		}
+
+		if stamp.Hash != *tip {
+			return fmt.Errorf("notification tip %v, want %v",
+				stamp.Hash, tip)
+		}
+
+		return nil
+	}, pollTimeout)
+	require.NoError(h, err, "notification rescan missed preparation block")
+
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to construct payment script")
+
+	// Act: Confirm a payment to the persisted address while the wallet is
+	// already at the tip and relies on its normal block notification path.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: script,
+	}, bwtest.MinerFeeRate)
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+
+	// Assert: Mining joined wallet synchronization, so the confirmed payment
+	// must already be visible; retrying this read could mask a skipped block.
+	got, err := w.GetTx(h.Context(), *payment)
+	require.NoError(h, err, "persisted address missed confirmed payment")
+	require.NotNil(h, got.Block, "payment was not recorded as confirmed")
 }
