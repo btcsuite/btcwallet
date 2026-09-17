@@ -26,6 +26,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -1990,7 +1991,7 @@ func TestPutTargetedBatchStore(t *testing.T) {
 
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, &mockTxPublisher{},
+		Config{Chain: createTestChain(t)}, nil, nil, &mockTxPublisher{},
 		store, walletID,
 	)
 	fixture := newStoreScanBatchFixture(t)
@@ -2001,6 +2002,19 @@ func TestPutTargetedBatchStore(t *testing.T) {
 		"ApplyScanBatch", mock.Anything,
 		matchStoreScanBatch(walletID, fixture, false),
 	).Return(nil).Once()
+
+	// The committed scan refreshes the Store's current watch set. This
+	// fixture tests the batch shape; watch contents have separate coverage.
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, walletID).
+		Return([]db.UtxoInfo(nil), nil).Once()
 
 	// Act: Apply a targeted scan batch.
 	err := s.putTargetedBatch(
@@ -5026,8 +5040,13 @@ func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
 		name       string
 		advanceTip bool
 	}{
-		{name: "unchanged tip"},
-		{name: "source advances during rescan", advanceTip: true},
+		{
+			name: "unchanged tip",
+		},
+		{
+			name:       "source advances during rescan",
+			advanceTip: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -5054,6 +5073,7 @@ func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
 			bestBlock := mockChain.On("GetBestBlock").Return(
 				&syncedToBefore.Hash, syncedToBefore.Height, nil,
 			)
+			// Info reports the chain name independently of scanning.
 			mockChain.On("BackEnd").Return("mock")
 
 			wallets := make([]*Wallet, 0, 2)
@@ -7057,6 +7077,119 @@ func TestLiveWatchSyncBatchCancellation(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
+// TestLiveWatchTargetedBatchCancellation verifies readiness is revoked at the
+// commit boundary and watch registration remains cancellable during shutdown.
+func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Cancel the worker context as its scan commits,
+	// matching shutdown before watch registration begins.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	w, deps := createTestWalletWithMocks(t)
+	store, client := deps.store, deps.chain
+	s := newSyncer(w.cfg, nil, nil, nil, store, w.id)
+	w.sync = s
+	w.state = newWalletState(s)
+	s.state.Store(uint32(syncStateRescanning))
+	startLoadedWalletForTest(t, w)
+
+	// Matching tips would report live readiness during rescanning. Read
+	// Info inside the commit, before watch registration can mask a gap.
+	store.On("GetWallet", mock.Anything, "").
+		Return(&db.WalletInfo{
+			SyncedTo: &db.Block{},
+		}, nil).Once()
+	client.On("GetBestBlock").
+		Return(&chainhash.Hash{}, int32(0), nil).Once()
+	client.On("BackEnd").Return("mock").Once()
+
+	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
+
+	var committing *Info
+	store.On("ApplyScanBatch", ctx, mock.Anything).
+		Run(func(mock.Arguments) {
+			var err error
+			committing, err = w.Info(t.Context())
+			require.NoError(t, err)
+			cancel()
+		}).Return(nil).Once()
+
+	// Store reads may finish despite cancellation, but both
+	// reads and registration must retain the shutdown signal.
+	canceled := mock.MatchedBy(func(ctx context.Context) bool {
+		return errors.Is(ctx.Err(), context.Canceled)
+	})
+	store.On("ListAccounts", canceled, db.ListAccountsQuery{
+		WalletID:      0,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, 0, page.Result[db.AddressInfo, uint32]{},
+	)
+	client.On(
+		"WatchAddrsFromTip", canceled, []address.Address(nil),
+	).Return(context.Canceled).Once()
+
+	// Act: Commit the batch and attempt its watch registration
+	// using the same context that the sync worker receives.
+	err := s.putTargetedBatch(
+		ctx, scanState, []scanResult{fixture.result},
+	)
+
+	// Assert: Readiness is already false at the commit, cancellation reaches
+	// registration, and shared mock cleanup rejects outpoint registration.
+	require.False(t, committing.Synced)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestLiveWatchTargetedCommitUncertainty keeps readiness revoked when the
+// Store cannot determine whether a scan's new watch obligations committed.
+func TestLiveWatchTargetedCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start with matching tips and a targeted scan's live-ready
+	// state, then make its Store write report an unknown commit outcome.
+	w, deps := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, nil, nil, nil, deps.store, w.id)
+	w.sync = s
+	w.state = newWalletState(s)
+	s.state.Store(uint32(syncStateRescanning))
+	startLoadedWalletForTest(t, w)
+
+	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
+	deps.store.On("ApplyScanBatch", mock.Anything, mock.Anything).
+		Return(&dbruntime.AmbiguousTxCommitError{
+			Err: errDBMock,
+		}).Once()
+
+	// Equal tips isolate live readiness from the independent height check.
+	deps.store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
+		SyncedTo: &db.Block{},
+	}, nil).Once()
+	deps.chain.On("GetBestBlock").
+		Return(&chainhash.Hash{}, int32(0), nil).Once()
+	deps.chain.On("BackEnd").Return("mock").Once()
+
+	// Act: Attempt the targeted write without retrying an uncertain commit.
+	err := s.putTargetedBatch(
+		t.Context(), scanState, []scanResult{fixture.result},
+	)
+
+	// Assert: Preserve the classified failure for the worker and keep public
+	// readiness false until initialization rereads the durable watch set.
+	require.ErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+	info, err := w.Info(t.Context())
+	require.NoError(t, err)
+	require.False(t, info.Synced)
+}
+
 // newLiveWatchManager creates a SQLite wallet with mocked chain notifications
 // so tests can control registration and block delivery.
 func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet) {
@@ -7226,4 +7359,104 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	require.True(t, info.Synced)
 	require.NoError(t, manager.Stop())
 	publisher.AssertExpectations(t)
+}
+
+// TestLiveWatchTargetedScanFailure keeps readiness revoked when registration
+// fails after a targeted scan commits a previously unknown wallet output.
+func TestLiveWatchTargetedScanFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the worker waiting for backend readiness and prepare a
+	// historical payment that only the explicitly driven rescan discovers.
+	_, client, w := newLiveWatchManager(t)
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), waddrmgr.DefaultAccountName,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+		Hash: chainhash.Hash{7},
+	}, nil, nil))
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: script})
+	block := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: *chainParams.GenesisHash,
+		Timestamp: time.Now(),
+	})
+	require.NoError(t, block.AddTransaction(tx))
+	hash := block.BlockHash()
+
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	s.cfg.SyncMethod = SyncMethodFullBlocks
+
+	// Seed the already-scanned tip without the payment, as when its address
+	// was imported later. Targeted recovery must preserve this live tip.
+	require.NoError(t, s.store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: w.id,
+		SyncedBlocks: []db.Block{
+			{
+				Hash:      hash,
+				Height:    1,
+				Timestamp: block.Header.Timestamp,
+			},
+		},
+	}))
+	client.On("GetBestBlock").Unset()
+	client.On("GetBestBlock").Return(&hash, int32(1), nil)
+
+	finished, err := s.advanceChainSync(t.Context())
+	require.NoError(t, err)
+	require.True(t, finished)
+
+	client.On("GetBlockHashes", int64(1), int64(1)).
+		Return([]chainhash.Hash{hash}, nil).Once()
+	client.On("GetBlocks", []chainhash.Hash{hash}).
+		Return([]*wire.MsgBlock{block}, nil).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+
+	// Capture public readiness inside the synchronous registration call,
+	// before returning its error; no extra worker or timing gate is needed.
+	var pending *Info
+	client.On("NotifySpent", []*wire.OutPoint{{Hash: tx.TxHash()}}).
+		Run(func(mock.Arguments) {
+			var err error
+			pending, err = w.Info(t.Context())
+			require.NoError(t, err)
+		}).Return(errChainMock).Once()
+
+	// Queue the scan through the worker mailbox so a registration failure
+	// cannot be swallowed as an ordinary targeted-scan execution failure.
+	client.On("Notifications").Return((<-chan any)(nil)).Once()
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{
+		typ:        scanTypeTargeted,
+		startBlock: waddrmgr.BlockStamp{Height: 1},
+		targets: []waddrmgr.AccountScope{
+			{
+				Scope:   waddrmgr.KeyScopeBIP0084,
+				Account: waddrmgr.DefaultAccountNum,
+			},
+		},
+	}))
+
+	// Act: Consume the queued scan through the live worker's event handler.
+	err = s.waitForEvent(t.Context())
+
+	// Assert: The registration error escapes for retry, and neither pending
+	// registration nor cleanup can report readiness or admit transactions.
+	require.ErrorIs(t, err, errChainMock)
+	require.False(t, pending.Synced)
+	info, err := w.Info(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, hash, info.SyncedTo.Hash)
+	require.False(t, info.Synced)
+	_, err = w.CreateTransaction(t.Context(), &TxIntent{})
+	require.ErrorIs(t, err, ErrStateForbidden)
 }
