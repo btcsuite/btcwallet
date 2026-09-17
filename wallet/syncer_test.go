@@ -393,7 +393,21 @@ func TestInitChainSync(t *testing.T) {
 	// Mock backend synchronization check.
 	mockChain.On("IsCurrent").Return(true).Once()
 
-	// Registration enables block notifications.
+	// Registration reads an empty watch set before enabling blocks.
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      0,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, 0, page.Result[db.AddressInfo, uint32]{},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
+		Return([]db.UtxoInfo(nil), nil).Once()
+	mockChain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+	).Return(nil).Once()
+
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
 	// The synced tip read at the start of the rollback check. A height of 0
@@ -3819,6 +3833,21 @@ func TestSyncerFullRun(t *testing.T) {
 	// across the scanned batch, so no rollback occurs.
 	expectMatchingRollbackBatch(store, mockChain)
 
+	// Registration reads an empty watch set before enabling blocks.
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      0,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, 0, page.Result[db.AddressInfo, uint32]{},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
+		Return([]db.UtxoInfo(nil), nil).Once()
+	mockChain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+	).Return(nil).Once()
+
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
 	// Mock advancement to the current best block.
@@ -4247,6 +4276,22 @@ func TestInitChainSync_Errors(t *testing.T) {
 
 		mockChain.On("IsCurrent").Return(true).Maybe()
 		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
+
+		// Registration reads an empty watch set before enabling blocks.
+		store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+			WalletID:      0,
+			SkipBalance:   true,
+			ChainSyncOnly: true,
+		}).Return([]db.AccountInfo(nil), nil).Once()
+		expectImportedScanAddressPage(
+			store, 0, page.Result[db.AddressInfo, uint32]{},
+		)
+		store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
+			Return([]db.UtxoInfo(nil), nil).Once()
+		mockChain.On(
+			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+		).Return(nil).Once()
+
 		mockChain.On("NotifyBlocks").Return(errNotify).Once()
 
 		// Act: Attempt initialization.
@@ -4782,6 +4827,22 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	)
 
 	mockChain.On("IsCurrent").Return(true).Once()
+
+	// Registration reads an empty watch set before enabling blocks.
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      0,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, 0, page.Result[db.AddressInfo, uint32]{},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
+		Return([]db.UtxoInfo(nil), nil).Once()
+	mockChain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+	).Return(nil).Once()
+
 	mockChain.On("NotifyBlocks").Return(errNotify).Once()
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
