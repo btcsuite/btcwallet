@@ -3331,12 +3331,12 @@ func TestNewDerivedAddressBranchCounters(t *testing.T) {
 	require.Equal(t, uint32(1), account.InternalKeyCount)
 }
 
-// TestNewDerivedAddressMaxIndex verifies that addresses can be created
-// up to the maximum index (math.MaxUint32), but the next address creation
-// fails due to overflow.
+// TestNewDerivedAddressMaxIndex verifies that the singular allocator returns
+// the last normal child once and rejects the exhausted external branch.
 func TestNewDerivedAddressMaxIndex(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Place the branch counter at its last non-hardened child.
 	store := NewTestStore(t)
 	queries := store.Queries()
 	dbConn := store.DB()
@@ -3346,20 +3346,23 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	accountID := GetAccountID(t, queries, scopeID, "max-acct")
 
-	// Insert address at MaxUint32 - 1
-	CreateAddressWithIndex(t, queries, walletID, accountID, 0, math.MaxUint32-1)
+	// Preserve a preceding child while positioning the counter at the last
+	// normal leaf, so exhaustion cannot be mistaken for an empty account.
+	CreateAddressWithIndex(
+		t, queries, walletID, accountID, 0, db.MaxAddressIndex-1,
+	)
+	UpdateAccountNextExternalIndex(t, dbConn, accountID, db.MaxAddressIndex)
 
-	// Set the counter to MaxUint32 so the next allocation gives us MaxUint32
-	UpdateAccountNextExternalIndex(t, dbConn, accountID, math.MaxUint32)
-
-	// This should succeed with address index = MaxUint32.
+	// Act: Allocate the last normal child through the singular wrapper.
 	info := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "max-acct", false,
 	)
-	require.Equal(t, uint32(math.MaxUint32), info.Index)
 
-	// This should fail; the next allocation would overflow
-	// uint32.
+	// Assert: The boundary child is available exactly once.
+	require.Equal(t, db.MaxAddressIndex, info.Index)
+
+	// Act: Try the exhausted branch again; the index must not cross into
+	// hardened derivation.
 	_, err := store.NewDerivedAddress(
 		t.Context(), db.NewDerivedAddressParams{
 			WalletID:    walletID,
@@ -3368,15 +3371,17 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 			Change:      false,
 		},
 	)
+
+	// Assert: Both branches expose the same durable exhaustion sentinel.
 	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
 }
 
-// TestNewDerivedAddressMaxIndexInternal verifies that internal addresses can be
-// created up to the maximum index (math.MaxUint32), but the next address
-// creation fails due to overflow.
+// TestNewDerivedAddressMaxIndexInternal verifies that the singular allocator
+// returns the last normal child once and rejects the exhausted internal branch.
 func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Place the branch counter at its last non-hardened child.
 	store := NewTestStore(t)
 	queries := store.Queries()
 	dbConn := store.DB()
@@ -3386,20 +3391,22 @@ func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	accountID := GetAccountID(t, queries, scopeID, "max-acct")
 
-	// Insert address at MaxUint32 - 1 in the internal branch.
-	CreateAddressWithIndex(t, queries, walletID, accountID, 1, math.MaxUint32-1)
+	// Preserve the preceding internal child while positioning its independent
+	// counter at the last normal leaf.
+	CreateAddressWithIndex(
+		t, queries, walletID, accountID, 1, db.MaxAddressIndex-1,
+	)
+	UpdateAccountNextInternalIndex(t, dbConn, accountID, db.MaxAddressIndex)
 
-	// Set the internal counter to MaxUint32 so the next allocation gives us
-	// MaxUint32.
-	UpdateAccountNextInternalIndex(t, dbConn, accountID, math.MaxUint32)
-
-	// This should succeed with address index = MaxUint32.
+	// Act: Allocate the last normal child through the singular wrapper.
 	info := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "max-acct", true,
 	)
-	require.Equal(t, uint32(math.MaxUint32), info.Index)
 
-	// This should fail; the next allocation would overflow uint32.
+	// Assert: The boundary child is available exactly once.
+	require.Equal(t, db.MaxAddressIndex, info.Index)
+
+	// Act: Try the exhausted branch again without allowing a hardened child.
 	_, err := store.NewDerivedAddress(
 		t.Context(), db.NewDerivedAddressParams{
 			WalletID:    walletID,
@@ -3408,6 +3415,8 @@ func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 			Change:      true,
 		},
 	)
+
+	// Assert: Both branches expose the same durable exhaustion sentinel.
 	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
 }
 
@@ -3523,13 +3532,13 @@ func TestNewDerivedAddressesSurvivesReopen(t *testing.T) {
 func TestNewDerivedAddressesSkipsInvalidChildren(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Reject one leaf through the existing derivation seam. Return
+	// Arrange: Reject two leaves through the existing derivation seam. Return
 	// the ordinary deterministic derivation for every other child.
 	derive := mockDeriveFunc()
 	store := NewTestStoreWithDerive(t, func(ctx context.Context,
 		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
-		if params.Index == 1 {
+		if params.Index == 1 || params.Index == 3 {
 			return nil, db.ErrAddressChildUnavailable
 		}
 
@@ -3546,19 +3555,19 @@ func TestNewDerivedAddressesSkipsInvalidChildren(t *testing.T) {
 		RequireChainSync: true,
 	}
 
-	// Act: Fill a batch across the invalid child, then allocate again to
-	// verify the next request starts after the consumed index.
+	// Act: Fill a batch across the invalid child, then allocate one child
+	// across another invalid leaf through the singular wrapper.
 	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
-	next, nextErr := store.NewDerivedAddresses(t.Context(), params, 1)
+	next, nextErr := store.NewDerivedAddress(t.Context(), params)
 
-	// Assert: Both requested children are returned in order, and the
-	// next allocation starts after both the skipped and returned children.
+	// Assert: Both requested children are returned in order, and the next
+	// allocation skips the unavailable child through the singular API.
 	require.NoError(t, err)
 	require.Len(t, batch, 2)
 	require.Equal(t, uint32(0), batch[0].Index)
 	require.Equal(t, uint32(2), batch[1].Index)
 	require.NoError(t, nextErr)
-	require.Equal(t, uint32(3), next[0].Index)
+	require.Equal(t, uint32(4), next.Index)
 }
 
 // TestNewDerivedAddressesRollsBackFailure checks that a definite derivation
@@ -3648,16 +3657,24 @@ func TestNewDerivedAddressesPreservesRawOwnership(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Act: Fill a batch beyond the collision, then reload the original raw
-	// row and its secret to detect an ownership rewrite or accidental upsert.
-	batch, err := store.NewDerivedAddresses(
-		t.Context(), db.NewDerivedAddressParams{
-			WalletID:         id,
-			AccountName:      derivedAccountName,
-			Scope:            db.KeyScopeBIP0084,
-			RequireChainSync: true,
-		}, 2,
-	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		AccountName:      derivedAccountName,
+		Scope:            db.KeyScopeBIP0084,
+		RequireChainSync: true,
+	}
+
+	// Act: Allocate one child across the imported script collision. The
+	// singular API must skip it instead of failing forever at the same index.
+	first, err := store.NewDerivedAddress(t.Context(), params)
+
+	// Assert: Child zero remains imported; the first new child is index one.
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), first.Index)
+
+	// Act: Continue through the plural API, then reload imported ownership
+	// and its secret to detect any overwrite by the singular allocation.
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
 	rows := rawImportedAddresses(t, store, id, 10)
 	storedSecret, secretErr := store.GetAddressSecret(
 		t.Context(), db.GetAddressSecretQuery{
@@ -3666,12 +3683,12 @@ func TestNewDerivedAddressesPreservesRawOwnership(t *testing.T) {
 		},
 	)
 
-	// Assert: The complete batch skips child zero while the imported row
+	// Assert: The batch follows the singular child while the imported row
 	// retains its identity, accountless ownership, path, and encrypted secret.
 	require.NoError(t, err)
 	require.Len(t, batch, 2)
-	require.Equal(t, uint32(1), batch[0].Index)
-	require.Equal(t, uint32(2), batch[1].Index)
+	require.Equal(t, uint32(2), batch[0].Index)
+	require.Equal(t, uint32(3), batch[1].Index)
 	require.Len(t, rows, 1)
 	require.Equal(t, raw.ID, rows[0].ID)
 	require.Nil(t, rows[0].AccountID)

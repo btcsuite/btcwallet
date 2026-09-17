@@ -14,22 +14,14 @@ import (
 func (s *Store) NewDerivedAddress(ctx context.Context,
 	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
 
-	var info *db.AddressInfo
-
-	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		var err error
-
-		info, err = db.NewDerivedAddressWithOps(
-			ctx, params, newDerivedAddressOps{q: qtx}, s.deriveAddress,
-		)
-
-		return err
-	})
+	// Reuse the durable allocator so a single request also skips unavailable
+	// children and preserves terminal counter progress.
+	addresses, err := s.NewDerivedAddresses(ctx, params, 1)
 	if err != nil {
 		return nil, err
 	}
 
-	return info, nil
+	return &addresses[0], nil
 }
 
 // NewDerivedAddresses commits batches under the counter lock, skipping owned
