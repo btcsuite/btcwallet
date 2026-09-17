@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -17,6 +18,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -1737,6 +1739,22 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 		).Times(3)
 		deps.chain.On("BackEnd").Return("mock").Twice()
 
+		// Complete startup registration with no stored watches so the
+		// worker reaches the maintenance failure exercised below.
+		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+			WalletID:      w.id,
+			SkipBalance:   true,
+			ChainSyncOnly: true,
+		}).Return([]db.AccountInfo(nil), nil).Once()
+		expectImportedScanAddressPage(
+			deps.store, w.id, page.Result[db.AddressInfo, uint32]{},
+		)
+		deps.store.On("ListOutputsToWatch", mock.Anything, w.id).
+			Return([]db.UtxoInfo(nil), nil).Once()
+		deps.chain.On(
+			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+		).Return(nil).Once()
+
 		// Hold maintenance after advanceChainSync marks the worker
 		// ready, then release a real Store error without changing tips.
 		failWorker := make(chan struct{})
@@ -1809,6 +1827,23 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		deps.store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
 			WalletID: w.id, UnminedOnly: true,
 		}).Return(nil, nil).Times(3)
+
+		// Let initial registration succeed before the queued scan's
+		// account lookup fails, preserving the failure's subject.
+		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+			WalletID:      w.id,
+			SkipBalance:   true,
+			ChainSyncOnly: true,
+		}).Return([]db.AccountInfo(nil), nil).Once()
+		expectImportedScanAddressPage(
+			deps.store, w.id, page.Result[db.AddressInfo, uint32]{},
+		)
+		deps.store.On("ListOutputsToWatch", mock.Anything, w.id).
+			Return([]db.UtxoInfo(nil), nil).Once()
+		deps.chain.On(
+			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+		).Return(nil).Once()
+
 		deps.store.On("ListAccounts", mock.Anything,
 			db.ListAccountsQuery{
 				WalletID:      w.id,
@@ -1853,7 +1888,7 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		// Check that the scan reached account loading before delivering
 		// the live block. Once only verifies the final count at cleanup,
 		// not that the scan ran before the notification was queued.
-		deps.store.AssertNumberOfCalls(t, "ListAccounts", 1)
+		deps.store.AssertNumberOfCalls(t, "ListAccounts", 2)
 
 		notifications <- chain.FilteredBlockConnected{Block: block}
 
