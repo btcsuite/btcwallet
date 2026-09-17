@@ -68,6 +68,9 @@ type AccountLookupKey struct {
 	Purpose     int64
 	CoinType    int64
 	AccountName string
+
+	// AccountNumber takes precedence over the mutable name when supplied.
+	AccountNumber *uint32
 }
 
 // AccountKeyFromParams extracts account lookup fields from params.
@@ -77,6 +80,8 @@ func AccountKeyFromParams(params NewDerivedAddressParams) AccountLookupKey {
 		Purpose:     int64(params.Scope.Purpose),
 		CoinType:    int64(params.Scope.Coin),
 		AccountName: params.AccountName,
+
+		AccountNumber: params.AccountNumber,
 	}
 }
 
