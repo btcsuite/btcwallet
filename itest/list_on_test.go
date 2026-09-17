@@ -36,6 +36,22 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerCreateWatchOnly,
 	},
 	{
+		Name:     "account manager query list empty",
+		TestFunc: testAccountManagerQueryListEmpty,
+	},
+	{
+		Name:     "account manager query missing name",
+		TestFunc: testAccountManagerQueryMissingName,
+	},
+	{
+		Name:     "account manager query missing scope",
+		TestFunc: testAccountManagerQueryMissingScope,
+	},
+	{
+		Name:     "account manager query missing account",
+		TestFunc: testAccountManagerQueryMissingAccount,
+	},
+	{
 		Name:     "account manager create account",
 		TestFunc: testAccountManagerCreateAccount,
 	},
