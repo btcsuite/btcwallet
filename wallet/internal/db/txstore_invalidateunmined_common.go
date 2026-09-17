@@ -69,21 +69,22 @@ type InvalidateUnminedTxOps interface {
 }
 
 // validateUnminedTxTarget checks that the requested root is a current
-// unmined non-coinbase transaction.
-func validateUnminedTxTarget(target InvalidateUnminedTxTarget) error {
+// unmined non-coinbase transaction. The caller supplies the sentinel it
+// reports.
+func validateUnminedTxTarget(target InvalidateUnminedTxTarget,
+	rejected error) error {
+
 	if target.HasBlock {
-		return fmt.Errorf("tx %s is confirmed: %w", target.TxHash,
-			ErrInvalidateTx)
+		return fmt.Errorf("tx %s is confirmed: %w", target.TxHash, rejected)
 	}
 
 	if target.IsCoinbase {
-		return fmt.Errorf("tx %s is coinbase: %w", target.TxHash,
-			ErrInvalidateTx)
+		return fmt.Errorf("tx %s is coinbase: %w", target.TxHash, rejected)
 	}
 
 	if !IsUnminedStatus(target.Status) {
-		return fmt.Errorf("tx %s has status %d: %w", target.TxHash,
-			target.Status, ErrInvalidateTx)
+		return fmt.Errorf("tx %s has status %s: %w", target.TxHash,
+			target.Status, rejected)
 	}
 
 	return nil
@@ -105,7 +106,7 @@ func InvalidateUnminedTxWithOps(ctx context.Context,
 		return fmt.Errorf("load invalidate tx target: %w", err)
 	}
 
-	err = validateUnminedTxTarget(target)
+	err = validateUnminedTxTarget(target, ErrInvalidateTx)
 	if err != nil {
 		return err
 	}
