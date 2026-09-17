@@ -1083,6 +1083,11 @@ func testWallet(t *testing.T) *Wallet {
 		&waddrmgr.BlockStamp{Height: testBlockHeight}, nil,
 	).Maybe()
 	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+
+	// Maintained address benchmarks register already-stored unused children.
+	chainClient.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Maybe()
+
 	chainClient.On("Stop").Return().Maybe()
 	chainClient.On("WaitForShutdown").Return().Maybe()
 	chainClient.On("GetBestBlock").Return(
