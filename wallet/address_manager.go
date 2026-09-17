@@ -847,6 +847,17 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 			continue
 		}
 
+		// A scan may have just stored this child. Register it before
+		// returning, even if the scan's registration is still pending.
+		err = w.cfg.Chain.WatchAddrsFromTip(
+			context.WithoutCancel(r.ctx), []address.Address{unusedAddr},
+		)
+		if err != nil {
+			r.respChan <- addressResp{err: err}
+
+			return
+		}
+
 		r.respChan <- addressResp{addr: unusedAddr}
 
 		return
