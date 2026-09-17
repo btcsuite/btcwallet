@@ -676,7 +676,7 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	// Arrange: supply stored derivation records so selection can use their
 	// branch and local use metadata directly. Strict mocks permit no account
-	// lookup or watch registration when an existing address is returned.
+	// lookup; each selected child must be registered before it is returned.
 	w, deps := createStartedWalletWithMocks(t)
 
 	firstAddr, _ := address.NewAddressWitnessPubKeyHash(
@@ -700,6 +700,10 @@ func TestGetUnusedAddress(t *testing.T) {
 		t, firstAddr, db.WitnessPubKey, defaultName, scope, false, 0, 0,
 		nil,
 	))).Once()
+
+	deps.chain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{firstAddr},
+	).Return(nil).Once()
 
 	// Act: select the oldest external address not locally recorded as used.
 	unusedAddr, err := w.GetUnusedAddress(
@@ -735,6 +739,10 @@ func TestGetUnusedAddress(t *testing.T) {
 			Page:        req,
 		},
 	).Return(addressIter(*importedXpubInfo)).Once()
+
+	deps.chain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{importedXpubAddr},
+	).Return(nil).Once()
 
 	// Act: select a receiving address from the imported xpub account.
 	unusedImportedAddr, err := w.GetUnusedAddress(
@@ -798,6 +806,10 @@ func TestGetUnusedAddress(t *testing.T) {
 		0, nil,
 	))).Once()
 
+	deps.chain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{changeAddrVal},
+	).Return(nil).Once()
+
 	// Act: request the unused child on the change branch of the same account.
 	unusedChangeAddr, err := w.GetUnusedAddress(
 		t.Context(), defaultName, waddrmgr.WitnessPubKey, true,
@@ -807,8 +819,42 @@ func TestGetUnusedAddress(t *testing.T) {
 	// expected scan, fallback allocation, and notification occurred.
 	require.NoError(t, err)
 	require.Equal(t, changeAddrVal.String(), unusedChangeAddr.String())
-	deps.store.AssertExpectations(t)
-	deps.chain.AssertExpectations(t)
+}
+
+// TestLiveWatchUnusedAddressError verifies that failed registration returns
+// an error without exposing the selected receiving address.
+func TestLiveWatchUnusedAddressError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Select a stored child but reject its live registration. The
+	// shared fixture owns mock assertions and Wallet shutdown.
+	w, deps := createStartedWalletWithMocks(t)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+	deps.store.On("IterAddresses", mock.Anything, mock.Anything).
+		Return(addressIter(*derivedAddressInfoFromAddr(
+			t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
+			waddrmgr.KeyScopeBIP0084, false, 1, 0, nil,
+		))).Once()
+
+	deps.chain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr},
+	).Return(errDBMock).Once()
+
+	// Act: Request the stored child through the receiving API so its
+	// registration failure is observed by the caller.
+	got, err := w.GetUnusedAddress(
+		t.Context(), waddrmgr.DefaultAccountName,
+		waddrmgr.WitnessPubKey, false,
+	)
+
+	// Assert: The registration error rejects the receiving result rather
+	// than returning an address whose live watch was not installed.
+	require.ErrorIs(t, err, errDBMock)
+	require.Nil(t, got)
 }
 
 // TestGetUnusedAddressNoChainSync verifies receiving rejection both when a
