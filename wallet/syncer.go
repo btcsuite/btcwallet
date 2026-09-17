@@ -977,6 +977,13 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 		return err
 	}
 
+	refreshWatches := len(params.Horizons) > 0 || len(params.Transactions) > 0
+	if refreshWatches {
+		// Clear readiness before publishing the tip. Normal catch-up
+		// restores it only after watch registration succeeds.
+		s.state.Store(uint32(syncStateSyncing))
+	}
+
 	// ApplyScanBatch persists the batch's synced blocks and advances the
 	// wallet's synced tip. advanceChainSync reads the next batch's start
 	// height back through s.syncedTo, which is Store-backed here, so the
@@ -985,6 +992,12 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	err = s.store.ApplyScanBatch(ctx, params)
 	if err != nil {
 		return fmt.Errorf("apply sync scan batch: %w", err)
+	}
+
+	// A committed horizon or credit can introduce watches after startup;
+	// finish registration before catch-up reports this batch complete.
+	if refreshWatches {
+		return s.refreshLiveWatches(ctx)
 	}
 
 	return nil
@@ -1706,8 +1719,8 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	gap := bestHeight - syncedTo.Height
 
 	// If the gap is large (> 6 blocks), we treat it as a major event
-	// requiring Syncing state protection. Smaller gaps are handled
-	// silently to avoid disrupting user operations like CreateTx.
+	// requiring Syncing state protection. Smaller gaps keep requests available
+	// until putSyncBatch clears readiness for watch registration at commit.
 	isLargeGap := gap > syncStateSwitchThreshold
 
 	if isLargeGap {

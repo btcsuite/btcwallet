@@ -1945,7 +1945,7 @@ func TestPutSyncBatchStore(t *testing.T) {
 
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, &mockTxPublisher{},
+		Config{Chain: createTestChain(t)}, nil, nil, &mockTxPublisher{},
 		store, walletID,
 	)
 	fixture := newStoreScanBatchFixture(t)
@@ -1956,6 +1956,19 @@ func TestPutSyncBatchStore(t *testing.T) {
 		"ApplyScanBatch", mock.Anything,
 		matchStoreScanBatch(walletID, fixture, true),
 	).Return(nil).Once()
+
+	// The committed scan refreshes the Store's current watch set. This
+	// fixture tests the batch shape; watch contents have separate coverage.
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, walletID).
+		Return([]db.UtxoInfo(nil), nil).Once()
 
 	// Act: Apply a normal sync scan batch.
 	err := s.putSyncBatch(
@@ -2732,6 +2745,8 @@ func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager,
 	store := kvdb.NewStore(dbConn, txStore, mgr)
 	s := newSyncer(
 		Config{
+			// Scans register their stored results through this chain mock.
+			Chain:       createTestChain(t),
 			DB:          dbConn,
 			ChainParams: &chaincfg.SimNetParams,
 		}, mgr,
@@ -6896,4 +6911,229 @@ func TestScanWithRewindStoreSyncedTip(t *testing.T) {
 			t, "RollbackToBlock", mock.Anything, mock.Anything,
 		)
 	})
+}
+
+// TestLiveWatchSyncBatchCancellation verifies that registration after
+// a committed sync batch remains cancellable when the wallet shuts down.
+func TestLiveWatchSyncBatchCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Cancel the worker context as its scan commits,
+	// matching shutdown before watch registration begins.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	store := &walletmock.Store{}
+	client := &bwmock.Chain{}
+	s := newSyncer(
+		Config{Chain: client}, nil, nil, nil, store, 0,
+	)
+	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
+
+	store.On("ApplyScanBatch", ctx, mock.Anything).
+		Run(func(mock.Arguments) {
+			cancel()
+		}).Return(nil).Once()
+
+	// Store reads may finish despite cancellation, but both
+	// reads and registration must retain the shutdown signal.
+	canceled := mock.MatchedBy(func(ctx context.Context) bool {
+		return errors.Is(ctx.Err(), context.Canceled)
+	})
+	store.On("ListAccounts", canceled, db.ListAccountsQuery{
+		WalletID:      0,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, 0, page.Result[db.AddressInfo, uint32]{},
+	)
+	client.On(
+		"WatchAddrsFromTip", canceled, []address.Address(nil),
+	).Return(context.Canceled).Once()
+
+	// Act: Commit the batch and attempt its watch registration
+	// using the same context that the sync worker receives.
+	err := s.putSyncBatch(
+		ctx, scanState, []scanResult{fixture.result},
+	)
+
+	// Assert: Cancellation reaches the caller after the commit,
+	// and strict mocks permit no outpoint registration afterward.
+	require.ErrorIs(t, err, context.Canceled)
+	store.AssertExpectations(t)
+	client.AssertExpectations(t)
+}
+
+// newLiveWatchManager creates a SQLite wallet with mocked chain notifications
+// so tests can control registration and block delivery.
+func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet) {
+	t.Helper()
+	manager := testSQLiteManager(t)
+	client := createTestChain(t)
+	manager.config.ChainSource = client
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	client.On("NotifySpent", mock.Anything).Unset()
+
+	params := sqliteCreateParams(t)
+	w, err := manager.Create(params)
+	require.NoError(t, err)
+
+	// SQL creation persists the root but no receiving account. Prepare one
+	// through the maintained API before exercising address commits.
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+	}))
+	_, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  waddrmgr.DefaultAccountName,
+	})
+	require.NoError(t, err)
+
+	return manager, client, w
+}
+
+// TestLiveWatchScanRetry restores a watch whose registration failed after its
+// funding block committed, without reporting readiness before registration.
+func TestLiveWatchScanRetry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the real sync worker waiting for backend readiness while
+	// preparing one funding block and an external spend of its only credit.
+	manager, client, w := newLiveWatchManager(t)
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), waddrmgr.DefaultAccountName,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	funding := wire.NewMsgTx(2)
+	funding.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+		Hash: chainhash.Hash{6},
+	}, nil, nil))
+	funding.AddTxOut(&wire.TxOut{Value: 1000, PkScript: script})
+	block := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: *chainParams.GenesisHash,
+		Timestamp: time.Now(),
+	})
+	require.NoError(t, block.AddTransaction(funding))
+	hash := block.BlockHash()
+	point := wire.OutPoint{Hash: funding.TxHash()}
+	external, err := address.NewAddressWitnessPubKeyHash(
+		bytes.Repeat([]byte{9}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	externalScript, err := txscript.PayToAddrScript(external)
+	require.NoError(t, err)
+
+	spend := wire.NewMsgTx(2)
+	spend.AddTxIn(wire.NewTxIn(&point, nil, nil))
+	spend.AddTxOut(&wire.TxOut{Value: 900, PkScript: externalScript})
+	record, err := wtxmgr.NewTxRecordFromMsgTx(spend, time.Now())
+	require.NoError(t, err)
+
+	// Hold registration after the new tip commits so Info can observe the
+	// gap before its failure and retry. Cleanup releases a failed assertion.
+	registering := make(chan struct{})
+
+	release := make(chan struct{})
+	defer close(release)
+
+	// Registration rejects the committed credit once. Only its successful
+	// replay admits the spend notification; no receiving output can match it.
+	notifications := make(chan interface{}, 1)
+	client.On("Notifications").Return((<-chan interface{})(notifications))
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Times(3)
+	client.On("NotifyBlocks").Return(nil).Twice()
+	client.On("NotifySpent", []*wire.OutPoint{&point}).
+		Run(func(mock.Arguments) {
+			close(registering)
+			<-release
+		}).Return(errors.New("registration rejected")).Once()
+	client.On("NotifySpent", []*wire.OutPoint{&point}).
+		Run(func(mock.Arguments) {
+			notifications <- chain.RelevantTx{TxRecord: record}
+		}).Return(nil).Once()
+	client.On("GetBestBlock").Unset()
+	client.On("GetBestBlock").Return(chainParams.GenesisHash, int32(0), nil)
+	client.On("GetBlockHashes", int64(1), int64(1)).
+		Return([]chainhash.Hash{hash}, nil).Once()
+	client.On("GetBlocks", []chainhash.Hash{hash}).
+		Return([]*wire.MsgBlock{block}, nil).Once()
+	client.On("GetBlockHashes", int64(0), int64(1)).
+		Return([]chainhash.Hash{*chainParams.GenesisHash, hash}, nil).Once()
+
+	// Delivery can race Stop before its normal rebroadcast. Keep that
+	// optional call local to the existing publisher mock, without writing
+	// the spend through the Wallet's publish API before the assertion.
+	publisher := &mockTxPublisher{}
+	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
+		func(tx *wire.MsgTx) bool {
+			return tx.TxHash() == record.Hash
+		},
+	), "").Return(nil).Maybe()
+
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	s.cfg.SyncMethod = SyncMethodFullBlocks
+	s.publisher = publisher
+
+	// Declare both readiness calls before releasing the worker; the retry
+	// uses the same already-open gate and the existing backoff path.
+	ready := make(chan struct{})
+
+	client.On("IsCurrent").Unset()
+	client.On("IsCurrent").Run(func(mock.Arguments) {
+		<-ready
+	}).Return(true).Twice()
+
+	// Finish initial synchronization at genesis before introducing the small
+	// gap; a startup-only test would never begin in the ready state.
+	close(ready)
+	require.Eventually(t, func() bool {
+		info, err := w.Info(t.Context())
+		return err == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
+	client.On("GetBestBlock").Unset()
+	client.On("GetBestBlock").Return(&hash, int32(1), nil)
+
+	// Act: Announce one new block and hold registration after its commit.
+	// The small-gap path must revoke readiness despite reaching the new tip.
+	notifications <- chain.BlockConnected{}
+
+	<-registering
+
+	// Assert: Matching tips do not imply live readiness while the new watch
+	// is pending. Release the failed registration to exercise normal retry.
+	info, err := w.Info(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, hash, info.SyncedTo.Hash)
+	require.False(t, info.Synced)
+
+	release <- struct{}{}
+
+	// The public transaction view eventually receives the unmined
+	// external spend through replay. Stop joins the worker before the shared
+	// fixture checks expectations, including the single historical block read.
+	require.Eventually(t, func() bool {
+		_, err := w.GetTx(t.Context(), record.Hash)
+		return err == nil
+	}, 5*time.Second, time.Millisecond)
+	got, err := w.GetTx(t.Context(), record.Hash)
+	require.NoError(t, err)
+	require.Nil(t, got.Block)
+	info, err = w.Info(t.Context())
+	require.NoError(t, err)
+	require.True(t, info.Synced)
+	require.NoError(t, manager.Stop())
+	publisher.AssertExpectations(t)
 }
