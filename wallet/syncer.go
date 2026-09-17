@@ -1017,6 +1017,12 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 		return fmt.Errorf("apply targeted scan batch: %w", err)
 	}
 
+	// Targeted scans can also store new addresses and outputs. Register
+	// them after the commit using the scan worker's lifetime context.
+	if len(params.Horizons) > 0 || len(params.Transactions) > 0 {
+		return s.refreshLiveWatches(ctx)
+	}
+
 	return nil
 }
 
@@ -1964,7 +1970,10 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	}
 
 	s.state.Store(uint32(syncStateRescanning))
-	defer s.state.Store(uint32(syncStateSynced))
+	// A failed batch leaves readiness revoked until initialization retries.
+	defer s.state.CompareAndSwap(
+		uint32(syncStateRescanning), uint32(syncStateSynced),
+	)
 
 	startHeight := req.startBlock.Height
 
@@ -2000,11 +2009,16 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 				"0 results", ErrScanBatchEmpty)
 		}
 
-		// Process results (update DB).
+		// Revoke readiness before new watches commit, and retain that state
+		// if registration fails instead of restoring it in deferred cleanup.
+		s.state.Store(uint32(syncStateSyncing))
+
 		err = s.putTargetedBatch(ctx, scanState, results)
 		if err != nil {
 			return err
 		}
+
+		s.state.Store(uint32(syncStateRescanning))
 
 		// Advance startHeight.
 		//nolint:gosec // batch size is bounded.
