@@ -5,6 +5,7 @@
 package kvdb
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -79,6 +80,59 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	require.Equal(t, *info, result.Items[0])
 }
 
+// TestAddressStoreNewDerivedAddressByNumber verifies that resolved numeric
+// selectors allocate on both branches without needing a mutable account name.
+func TestAddressStoreNewDerivedAddressByNumber(t *testing.T) {
+	t.Parallel()
+
+	for _, internal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("internal %v", internal), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Create a real legacy account, then address it only by
+			// number so the test cannot succeed through a name lookup.
+			dbConn, cleanup := newTestDB(t)
+			t.Cleanup(cleanup)
+			addrStore := newSpendableAddrMgr(t, dbConn)
+			store := NewStore(dbConn, nil, addrStore)
+			scope := waddrmgr.KeyScopeBIP0084
+			props := createLegacyAccount(t, dbConn, addrStore, scope, "keys")
+			params := db.NewDerivedAddressParams{
+				Scope:         db.KeyScope(scope),
+				AccountNumber: &props.AccountNumber,
+				Change:        internal,
+			}
+
+			// Act: Allocate a fresh child using the same transaction as
+			// ordinary named allocation, then read the persisted row.
+			info, err := store.NewDerivedAddress(t.Context(), params)
+			require.NoError(t, err)
+			got, err := store.GetAddress(t.Context(), db.GetAddressQuery{
+				ScriptPubKey: info.ScriptPubKey,
+			})
+
+			// Assert: Ownership and branch survive persistence; the missing
+			// numeric account below must not silently select the default.
+			require.NoError(t, err)
+			require.Equal(t, info, got)
+			require.Equal(t, props.AccountNumber, *got.AccountNumber)
+			require.Equal(t, db.KeyScope(scope), got.KeyScope)
+			require.Equal(t, internal, got.Branch == 1)
+			require.Zero(t, got.Index)
+
+			// Act: Retry with a number that has no legacy account row.
+			missing := props.AccountNumber + 1
+			params.AccountNumber = &missing
+			info, err = store.NewDerivedAddress(t.Context(), params)
+
+			// Assert: Missing numeric accounts expose the same Store sentinel
+			// as named misses, without returning an unrelated key.
+			require.ErrorIs(t, err, db.ErrAccountNotFound)
+			require.Nil(t, info)
+		})
+	}
+}
+
 // TestAddressStoreImportedXpubChildHasNoAccountNumber verifies that kvdb
 // matches SQL's imported-xpub contract: the address is imported key material,
 // but its account number is not exposed as a wallet-derived BIP44 account
@@ -86,24 +140,39 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 func TestAddressStoreImportedXpubChildHasNoAccountNumber(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Import an xpub that can derive but has no root account number.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
 	addrStore := newSpendableAddrMgr(t, dbConn)
 	store := NewStore(dbConn, nil, addrStore)
 	accountName := "imported-xpub-address"
-	createImportedXpubAccount(
+	accountNumber := createImportedXpubAccount(
 		t, store, waddrmgr.KeyScopeBIP0084, accountName, 0xA5,
 	)
 
-	info, err := store.NewDerivedAddress(
-		t.Context(), db.NewDerivedAddressParams{
-			WalletID:    0,
-			AccountName: accountName,
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
-		},
-	)
+	params := db.NewDerivedAddressParams{
+		WalletID:      0,
+		AccountName:   accountName,
+		Scope:         db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountNumber: &accountNumber,
+	}
+
+	// Act: Try the internal kvdb number as a wallet-derived account selector.
+	info, err := store.NewDerivedAddress(t.Context(), params)
+
+	// Assert: Refusal returns no child; ordinary allocation below must still
+	// receive index zero, proving the legacy manager consumed nothing.
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.Nil(t, info)
+
+	// Act: Select the imported account by name to derive its first child.
+	params.AccountNumber = nil
+	info, err = store.NewDerivedAddress(t.Context(), params)
+
+	// Assert: Existing imported metadata and lookup are preserved.
 	require.NoError(t, err)
+	require.Zero(t, info.Index)
 	require.True(t, info.IsImported)
 	require.Nil(t, info.AccountNumber)
 	require.Equal(t, accountName, info.AccountName)
