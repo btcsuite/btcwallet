@@ -65,6 +65,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// If you change this please run `make lint` to see where else it needs to be
-// updated as well.
-go 1.25.11
+// Minimum supported Go language version. Keep this aligned with the nested
+// modules, README and linter configuration.
+go 1.26.8

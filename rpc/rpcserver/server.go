@@ -756,7 +756,7 @@ func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletReque
 	return &pb.CloseWalletResponse{}, nil
 }
 
-func (s *loaderServer) StartConsensusRpc(ctx context.Context, // nolint:golint
+func (s *loaderServer) StartConsensusRpc(ctx context.Context, //nolint:revive
 	req *pb.StartConsensusRpcRequest) (*pb.StartConsensusRpcResponse,
 	error) {
 
