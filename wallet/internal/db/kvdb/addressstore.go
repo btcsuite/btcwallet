@@ -51,7 +51,7 @@ func (s *Store) NewDerivedAddresses(context.Context,
 }
 
 // NewDerivedAddress creates one derived address through the legacy address-
-// manager path.
+// manager path, selecting an account by number when supplied or by name.
 func (s *Store) NewDerivedAddress(ctx context.Context,
 	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
 
@@ -60,7 +60,7 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 		return nil, err
 	}
 
-	if params.AccountName == "" {
+	if params.AccountName == "" && params.AccountNumber == nil {
 		return nil, db.ErrMissingAccountName
 	}
 
@@ -102,21 +102,42 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 	walletIsWatchOnly bool,
 	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
 
-	account, err := manager.LookupAccount(ns, params.AccountName)
-	if err != nil {
-		if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
-			return nil, db.ErrAccountNotFound
-		}
-
-		return nil, fmt.Errorf("lookup account: %w", err)
+	// Numeric selectors keep account identity independent of names; ordinary
+	// receiving callers continue to use the legacy name lookup.
+	var (
+		account uint32
+		err     error
+	)
+	if params.AccountNumber != nil {
+		account, err = sanitizeAccountNumber(*params.AccountNumber)
+	} else {
+		account, err = manager.LookupAccount(ns, params.AccountName)
 	}
 
-	managedAddr, err := nextAddress(ns, manager, account, params.Change)
 	if err != nil {
+		return nil, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	// Numeric selectors identify wallet-derived accounts, not the internal
+	// numbers kvdb also assigns to imported xpubs. Reject those before
+	// consuming a child; named imported accounts can still allocate.
+	accountImported, err := accountIsImported(ns, manager, account)
+	if err != nil {
+		// Origin lookup wraps legacy failures. Unwrap before translating so
+		// numeric misses expose the same Store identity as named misses.
+		var managerErr waddrmgr.ManagerError
+		if errors.As(err, &managerErr) {
+			return nil, translateAccountErr(managerErr, db.ErrAccountNotFound)
+		}
+
 		return nil, err
 	}
 
-	accountImported, err := accountIsImported(ns, manager, account)
+	if params.AccountNumber != nil && accountImported {
+		return nil, db.ErrAccountNotFound
+	}
+
+	managedAddr, err := nextAddress(ns, manager, account, params.Change)
 	if err != nil {
 		return nil, err
 	}
