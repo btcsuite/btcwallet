@@ -140,6 +140,37 @@ type AddressDerivation struct {
 	MasterKeyFingerprint uint32
 }
 
+// KeyOrigin identifies the wallet-root account from which a key is derived.
+// Child coordinates belong to AllocatedKey so they are not repeated here.
+type KeyOrigin struct {
+	// KeyScope identifies the account's purpose and coin type.
+	KeyScope waddrmgr.KeyScope
+
+	// Account is the wallet-derived BIP44 account number within KeyScope.
+	Account uint32
+
+	// MasterKeyFingerprint preserves the account's stored root fingerprint.
+	MasterKeyFingerprint uint32
+}
+
+// AllocatedKey contains a persisted child key and its position in the account.
+// Imported xpubs retain child coordinates without claiming a wallet-root path.
+type AllocatedKey struct {
+	// PubKey is the public key of the allocated child.
+	PubKey *btcec.PublicKey
+
+	// Branch identifies the external or internal account branch.
+	Branch uint32
+
+	// Index is the allocated child index within Branch.
+	Index uint32
+
+	// Origin is nil for imported accounts without a wallet-root account path.
+	// Callers can use their account selector with Branch and Index to derive
+	// the same child again even when Origin is nil.
+	Origin *KeyOrigin
+}
+
 // OutputScriptInfo captures the address metadata and scripts needed to spend a
 // wallet-controlled output.
 type OutputScriptInfo struct {
@@ -175,6 +206,11 @@ type OutputScriptInfo struct {
 // AddressManager provides an interface for generating and inspecting wallet
 // addresses and scripts.
 type AddressManager interface {
+	// AllocateNextKey creates and persists the next child key and returns
+	// its public key, child coordinates and available wallet-root origin.
+	AllocateNextKey(ctx context.Context, selector AccountSelector,
+		internal bool) (*AllocatedKey, error)
+
 	// NewBulkAddresses force-allocates 1..MaxBulkAddressCount fresh addresses
 	// for the selected account and branch (internal when true). SQL wallets
 	// register the complete committed batch before returning it. Errors return
@@ -498,6 +534,22 @@ func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	return balances, nil
 }
 
+// allocateNextKeyReq keeps key allocation inside existing Wallet admission
+// and reuses the address metadata response without creating a receiving path.
+type allocateNextKeyReq struct {
+	reqCtx
+
+	selector AccountSelector
+	internal bool
+	respChan chan allocateNextKeyResp
+}
+
+// allocateNextKeyResp delivers the committed child even without a root origin.
+type allocateNextKeyResp struct {
+	key *AllocatedKey
+	err error
+}
+
 // newBulkAddressesReq joins allocation and registration to Wallet shutdown.
 type newBulkAddressesReq struct {
 	reqCtx
@@ -697,6 +749,110 @@ func (w *Wallet) NewAddress(ctx context.Context, accountName string,
 	result := <-r.respChan
 
 	return result.addr, result.err
+}
+
+// AllocateNextKey creates and persists the next child key and returns its
+// public key, child coordinates and available wallet-root origin.
+func (w *Wallet) AllocateNextKey(ctx context.Context, selector AccountSelector,
+	internal bool) (*AllocatedKey, error) {
+
+	// Validate the selector and lifecycle before admitting allocation work.
+	err := selector.validate()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidParam, err)
+	}
+
+	err = w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	// Carry the selector into the serialized handler so the Store can resolve
+	// and validate the account inside its allocation transaction.
+	r := allocateNextKeyReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		selector: selector,
+		internal: internal,
+		respChan: make(chan allocateNextKeyResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Join admitted work even after cancellation so shutdown cannot close
+	// the Store before allocation finishes and its outcome is returned.
+	result := <-r.respChan
+
+	if result.err != nil {
+		return nil, allocateNextKeyErr(result.err)
+	}
+
+	return result.key, nil
+}
+
+// allocateNextKeyErr translates native allocator failures into wallet errors.
+func allocateNextKeyErr(err error) error {
+	// Ambiguity wins over cancellation, without exposing the private runtime
+	// identity. Legacy exhaustion uses the same public sentinel as SQL.
+	switch {
+	case errors.Is(err, dbruntime.ErrAmbiguousTxCommit):
+		return fmt.Errorf("%w: %s", ErrIndeterminateCommit, err.Error())
+	case isAddrMgrErr(err, waddrmgr.ErrTooManyAddresses):
+		return publicAccountErr(err, ErrAddressDerivationExhausted)
+	default:
+		return bulkAddressErr(err)
+	}
+}
+
+// handleAllocateNextKey returns a committed child's existing metadata without
+// entering the receiving handler's chain-registration path.
+func (w *Wallet) handleAllocateNextKey(r allocateNextKeyReq) {
+	// Resolve and validate the selector inside the allocator's transaction.
+	params := db.NewDerivedAddressParams{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(r.selector.keyScope),
+		AccountNumber: (*uint32)(r.selector.accountNumber),
+		Change:        r.internal,
+	}
+	if r.selector.accountName != nil {
+		params.AccountName = *r.selector.accountName
+	}
+
+	stored, err := w.store.NewDerivedAddress(r.ctx, params)
+	if err != nil {
+		r.respChan <- allocateNextKeyResp{err: err}
+
+		return
+	}
+
+	// Reuse ordinary lookup conversion for the public key and known root
+	// origin. Imported xpub children still retain their stored coordinates.
+	info, err := addressInfoFromStoreAddress(stored, w.cfg.ChainParams)
+	if err != nil {
+		r.respChan <- allocateNextKeyResp{err: err}
+
+		return
+	}
+
+	key := &AllocatedKey{
+		PubKey: info.PubKey,
+		Branch: stored.Branch,
+		Index:  stored.Index,
+	}
+
+	// Attach only known root-account metadata; a missing origin does not
+	// discard the imported child's committed branch or index.
+	if path := info.Derivation; path != nil {
+		key.Origin = &KeyOrigin{
+			KeyScope:             path.KeyScope,
+			Account:              path.Account,
+			MasterKeyFingerprint: path.MasterKeyFingerprint,
+		}
+	}
+
+	r.respChan <- allocateNextKeyResp{key: key}
 }
 
 // NewBulkAddresses force-allocates fresh addresses instead of reusing unused
