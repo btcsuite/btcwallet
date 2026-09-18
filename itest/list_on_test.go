@@ -52,6 +52,14 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerQueryScopeWatchOnly,
 	},
 	{
+		Name:     "account manager query name spendable",
+		TestFunc: testAccountManagerQueryNameSpendable,
+	},
+	{
+		Name:     "account manager query name watchonly",
+		TestFunc: testAccountManagerQueryNameWatchOnly,
+	},
+	{
 		Name:     "account manager query list empty",
 		TestFunc: testAccountManagerQueryListEmpty,
 	},
