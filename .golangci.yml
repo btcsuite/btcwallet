@@ -1,8 +1,8 @@
 version: "2"
 run:
-  # If you change this please run `make lint` to see where else it needs to be
-  # updated as well.
-  go: "1.25.11"
+  # Target the minimum supported language version. CI and tool containers may
+  # use a newer Go toolchain.
+  go: "1.26.8"
 
   # timeout for analysis
   timeout: 10m
