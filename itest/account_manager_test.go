@@ -215,6 +215,81 @@ func testAccountManagerQueryScopeSpendable(h *bwtest.HarnessTest) {
 	}
 }
 
+// testAccountManagerQueryNameSpendable checks ListAccountsByName against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryNameSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	defaults := prepareQueryDefaults(h, w)
+
+	bip84Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip44Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0044,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared suffix",
+	})
+	require.NoError(h, err)
+
+	nameQueries := []struct {
+		name string
+		want []wallet.AccountInfo
+	}{
+		{
+			waddrmgr.DefaultAccountName,
+			[]wallet.AccountInfo{
+				defaults[waddrmgr.KeyScopeBIP0044],
+				defaults[waddrmgr.KeyScopeBIP0049Plus],
+				defaults[waddrmgr.KeyScopeBIP0084],
+				defaults[waddrmgr.KeyScopeBIP0086],
+			},
+		},
+		{
+			"query shared",
+			[]wallet.AccountInfo{*bip84Shared, *bip44Shared},
+		},
+		{"query shared suffix", []wallet.AccountInfo{*bip84Suffix}},
+	}
+
+	for _, query := range nameQueries {
+		// Act: select the explicit name inventory.
+		accounts, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: only the expected name members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, query := range nameQueries {
+		// Act: repeat name selection after reopening.
+		durable, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: expected membership and account facts survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, durable)
+	}
+}
+
 // testAccountManagerQueryListWatchOnly checks ListAccounts against
 // the explicit watch-only fixture before and after a locked reopen.
 func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
@@ -318,6 +393,65 @@ func testAccountManagerQueryScopeWatchOnly(h *bwtest.HarnessTest) {
 	for _, query := range scopeQueries {
 		// Act: repeat scope selection after reopening.
 		durable, err := w.ListAccountsByScope(ctx, query.scope)
+
+		// Assert: membership and full raw import responses survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, durable)
+	}
+}
+
+// testAccountManagerQueryNameWatchOnly checks ListAccountsByName against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryNameWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	bip84Shared, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.ImportAccount(
+		ctx, "query shared suffix", keys.otherAccountKey, 0,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	bip49Shared, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.NestedWitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	nameQueries := []struct {
+		name string
+		want []wallet.AccountInfo
+	}{
+		{
+			"query shared",
+			[]wallet.AccountInfo{*bip84Shared, *bip49Shared},
+		},
+		{"query shared suffix", []wallet.AccountInfo{*bip84Suffix}},
+	}
+
+	for _, query := range nameQueries {
+		// Act: select the explicit name inventory.
+		accounts, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: only the expected name members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, query := range nameQueries {
+		// Act: repeat name selection after reopening.
+		durable, err := w.ListAccountsByName(ctx, query.name)
 
 		// Assert: membership and full raw import responses survive.
 		require.NoError(h, err)
