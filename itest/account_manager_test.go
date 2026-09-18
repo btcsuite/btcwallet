@@ -185,6 +185,66 @@ func testAccountManagerQueryListSpendable(h *bwtest.HarnessTest) {
 	require.ElementsMatch(h, want, durable)
 }
 
+// testAccountManagerQueryScopeSpendable checks ListAccountsByScope against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryScopeSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	prepareQueryDefaults(h, w)
+
+	defaults := make(map[waddrmgr.KeyScope]wallet.AccountInfo)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+		require.NoError(h, err)
+
+		defaults[scope] = *account
+	}
+
+	named := createSpendableQueryAccounts(h, w)
+
+	wantByScope := make(map[waddrmgr.KeyScope][]wallet.AccountInfo)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		wantByScope[scope] = []wallet.AccountInfo{defaults[scope]}
+	}
+
+	wantByScope[waddrmgr.KeyScopeBIP0044] = append(
+		wantByScope[waddrmgr.KeyScopeBIP0044], named.bip44Shared,
+	)
+	wantByScope[waddrmgr.KeyScopeBIP0084] = append(
+		wantByScope[waddrmgr.KeyScopeBIP0084],
+		named.bip84Shared, named.bip84Suffix,
+	)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: select the explicit scope inventory.
+		accounts, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: only the expected scope members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: repeat scope selection after reopening.
+		durable, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: expected membership and account facts survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], durable)
+	}
+}
+
 // testAccountManagerQueryListWatchOnly checks ListAccounts against
 // the explicit watch-only fixture before and after a locked reopen.
 func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
@@ -215,6 +275,43 @@ func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
 	// Assert: the complete import responses survive.
 	require.NoError(h, err)
 	require.ElementsMatch(h, want, durable)
+}
+
+// testAccountManagerQueryScopeWatchOnly checks ListAccountsByScope against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryScopeWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys)
+
+	wantByScope := map[waddrmgr.KeyScope][]wallet.AccountInfo{
+		waddrmgr.KeyScopeBIP0049Plus: {named.bip49Shared},
+		waddrmgr.KeyScopeBIP0084:     {named.bip84Shared, named.bip84Suffix},
+	}
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: select the explicit scope inventory.
+		accounts, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: only the expected scope members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: repeat scope selection after reopening.
+		durable, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: membership and full raw import responses survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], durable)
+	}
 }
 
 // testAccountManagerQueryListEmpty checks a rootless wallet with no imports
