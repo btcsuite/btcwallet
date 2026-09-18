@@ -118,50 +118,8 @@ type NewDerivedAddressOps interface {
 		req CreateDerivedAddressRequest) (CreateDerivedAddressRow, error)
 }
 
-// NewDerivedAddressWithOps runs the backend-independent derived-address
-// workflow once the caller has opened a backend-specific write transaction.
-//
-// The helper owns the end-to-end sequencing so postgres and sqlite both:
-// reject a nil callback first, load and shape-check the owning account,
-// resolve the account number, select the branch/type and allocate the next
-// index before invoking the derivation callback, insert the address and its
-// path, and finally assemble the AddressInfo with its account metadata.
-func NewDerivedAddressWithOps(ctx context.Context,
-	params NewDerivedAddressParams, ops NewDerivedAddressOps,
-	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
-
-	if deriveFn == nil {
-		return nil, fmt.Errorf("derive address: %w",
-			errNilAddressDerivationFunc)
-	}
-
-	account, accountNumber, err := derivedAddressAccount(ctx, params, ops)
-	if err != nil {
-		return nil, err
-	}
-
-	info, err := createDerivedAddress(
-		ctx, params, account, accountNumber, ops, deriveFn,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	err = ApplyAddressAccountMetadata(
-		info, account.AccountNumber, account.AccountName,
-		account.MasterFingerprint, account.Purpose, account.CoinType,
-		!account.IsDerived,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("apply address account metadata: %w", err)
-	}
-
-	return info, nil
-}
-
-// derivedAddressAccount resolves ownership and receiving policy before either
-// allocation path consumes children. Sharing this preflight preserves the
-// count-one account-shape checks and error context for batches as well.
+// derivedAddressAccount checks ownership and receiving policy before consuming
+// children. Both single and batch requests use this account-shape validation.
 func derivedAddressAccount(ctx context.Context, params NewDerivedAddressParams,
 	ops NewDerivedAddressOps) (DerivedAddressAccount, *uint32, error) {
 
@@ -307,31 +265,6 @@ func derivedAddressCandidates(ctx context.Context,
 	}
 
 	return candidates, len(candidates) < int(count), nil
-}
-
-// createDerivedAddress prepares the derivation inputs, inserts the address
-// through the backend adapter, and assembles the AddressInfo result.
-func createDerivedAddress(ctx context.Context,
-	params NewDerivedAddressParams, account DerivedAddressAccount,
-	accountNumber *uint32, ops NewDerivedAddressOps,
-	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
-
-	addrType, branch, index, scriptPubKey, pubKey, err := derivedAddressInput(
-		ctx, params, account, accountNumber, ops, deriveFn,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return insertDerivedAddress(ctx, CreateDerivedAddressRequest{
-		WalletID:     int64(params.WalletID),
-		AccountID:    account.AccountID,
-		AddrType:     addrType,
-		Branch:       branch,
-		Index:        index,
-		ScriptPubKey: scriptPubKey,
-		PubKey:       pubKey,
-	}, accountNumber, account.WalletWatchOnly, ops)
 }
 
 // insertDerivedAddress stores a derived child and assembles its result.
