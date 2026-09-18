@@ -290,6 +290,73 @@ func testAccountManagerQueryNameSpendable(h *bwtest.HarnessTest) {
 	}
 }
 
+// testAccountManagerQueryGetSpendable checks GetAccount against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryGetSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	defaults := prepareQueryDefaults(h, w)
+
+	bip84Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip44Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0044,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared suffix",
+	})
+	require.NoError(h, err)
+
+	want := []wallet.AccountInfo{
+		defaults[waddrmgr.KeyScopeBIP0044],
+		defaults[waddrmgr.KeyScopeBIP0049Plus],
+		defaults[waddrmgr.KeyScopeBIP0084],
+		defaults[waddrmgr.KeyScopeBIP0086],
+		*bip84Shared, *bip44Shared, *bip84Suffix,
+	}
+
+	for _, account := range want {
+		// Act: look up each scope/name pair individually.
+		result, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: match the full raw setup or creation response.
+		require.NoError(h, err)
+		require.Equal(h, account, *result)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, account := range want {
+		// Act: repeat each point lookup after reopening.
+		durable, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: named creations and default expectations survive.
+		require.NoError(h, err)
+		require.Equal(h, account, *durable)
+	}
+}
+
 // testAccountManagerQueryListWatchOnly checks ListAccounts against
 // the explicit watch-only fixture before and after a locked reopen.
 func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
@@ -456,6 +523,60 @@ func testAccountManagerQueryNameWatchOnly(h *bwtest.HarnessTest) {
 		// Assert: membership and full raw import responses survive.
 		require.NoError(h, err)
 		require.ElementsMatch(h, query.want, durable)
+	}
+}
+
+// testAccountManagerQueryGetWatchOnly checks GetAccount against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryGetWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	bip84Shared, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.ImportAccount(
+		ctx, "query shared suffix", keys.otherAccountKey, 0,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	bip49Shared, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.NestedWitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	want := []wallet.AccountInfo{*bip84Shared, *bip84Suffix, *bip49Shared}
+
+	for _, account := range want {
+		// Act: look up each scope/name pair individually.
+		result, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: match the complete raw import response.
+		require.NoError(h, err)
+		require.Equal(h, account, *result)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, account := range want {
+		// Act: repeat each point lookup after reopening.
+		durable, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: import responses and raw serialization survive.
+		require.NoError(h, err)
+		require.Equal(h, account, *durable)
 	}
 }
 
