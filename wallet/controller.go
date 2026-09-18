@@ -759,6 +759,10 @@ func (w *Wallet) handleReq(req any) {
 	case newBulkAddressesReq:
 		w.handleNewBulkAddresses(r)
 
+	case allocateNextKeyReq:
+		// Keep key allocation joined to the same shutdown drain as receiving.
+		w.handleAllocateNextKey(r)
+
 	case newAddressReq:
 		w.handleNewAddress(r)
 
