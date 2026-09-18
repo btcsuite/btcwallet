@@ -223,6 +223,10 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 		return
 	}
 
+	if details == nil {
+		return
+	}
+
 	// Sanity check: should not be currently coalescing a notification for
 	// mined transactions at the same time that an unmined tx is notified.
 	if s.currentTxNtfn != nil {
@@ -291,6 +295,10 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx,
 		log.Errorf("Cannot query transaction details for "+
 			"notification: %v", err)
 
+		return
+	}
+
+	if details == nil {
 		return
 	}
 
