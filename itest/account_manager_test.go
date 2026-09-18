@@ -35,6 +35,145 @@ func canonicalAccountKey(h *bwtest.HarnessTest, key []byte) []byte {
 	return []byte(normalized.String())
 }
 
+// prepareQueryDefaults materializes all canonical defaults after funding and
+// returns their raw account views keyed by scope. Call it before creating named
+// accounts so the setup inventory contains only defaults.
+func prepareQueryDefaults(h *bwtest.HarnessTest,
+	w *wallet.Wallet) map[waddrmgr.KeyScope]wallet.AccountInfo {
+
+	h.Helper()
+
+	fundedScope, err := accountManagerFundingType.KeyScope()
+	require.NoError(h, err)
+
+	// Funding already materialized its scope. Request an address in every
+	// other scope so lazy defaults exist before capturing the fixture.
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		if scope != fundedScope {
+			h.NewWalletAddressOfType(
+				w, waddrmgr.ScopeAddrMap[scope].ExternalAddrType,
+			)
+		}
+	}
+
+	// Use the setup results directly, as with named creation responses.
+	// Keying by scope lets callers spell out exact query memberships.
+	accounts, err := w.ListAccounts(h.Context())
+	require.NoError(h, err)
+
+	defaults := make(map[waddrmgr.KeyScope]wallet.AccountInfo, len(accounts))
+	for _, account := range accounts {
+		defaults[account.KeyScope] = account
+	}
+
+	return defaults
+}
+
+// testAccountManagerQueryListSpendable checks ListAccounts against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryListSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	defaults := prepareQueryDefaults(h, w)
+
+	bip84Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip44Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0044,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared suffix",
+	})
+	require.NoError(h, err)
+
+	want := []wallet.AccountInfo{
+		defaults[waddrmgr.KeyScopeBIP0044],
+		defaults[waddrmgr.KeyScopeBIP0049Plus],
+		defaults[waddrmgr.KeyScopeBIP0084],
+		defaults[waddrmgr.KeyScopeBIP0086],
+		*bip84Shared, *bip44Shared, *bip84Suffix,
+	}
+
+	// Act: list the complete spendable inventory.
+	got, err := w.ListAccounts(ctx)
+
+	// Assert: match the full raw setup and creation responses.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, got)
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	// Act: list the reopened inventory.
+	durable, err := w.ListAccounts(ctx)
+
+	// Assert: the complete expected inventory survives.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, durable)
+}
+
+// testAccountManagerQueryListWatchOnly checks ListAccounts against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	bip84Shared, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.ImportAccount(
+		ctx, "query shared suffix", keys.otherAccountKey, 0,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	bip49Shared, err := w.ImportAccount(
+		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
+		waddrmgr.NestedWitnessPubKey, false,
+	)
+	require.NoError(h, err)
+
+	want := []wallet.AccountInfo{*bip84Shared, *bip84Suffix, *bip49Shared}
+
+	// Act: list the complete watch-only inventory.
+	got, err := w.ListAccounts(ctx)
+
+	// Assert: match the full raw import responses.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, got)
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	// Act: list the reopened inventory.
+	durable, err := w.ListAccounts(ctx)
+
+	// Assert: the complete import responses survive.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, durable)
+}
+
 // testAccountManagerQueryListEmpty checks a rootless wallet with no imports
 // reports a successful empty inventory rather than a not-found error.
 func testAccountManagerQueryListEmpty(h *bwtest.HarnessTest) {
