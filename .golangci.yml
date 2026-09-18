@@ -24,6 +24,7 @@ linters:
 
     # Allow using default empty values.
     - exhaustruct
+    - exhaustruct_v5
 
     # Allow tests to be put in the same package.
     - testpackage
@@ -37,6 +38,9 @@ linters:
 
     # Deprecated - this is replaced by wsl_v5.
     - wsl
+
+    # Deprecated - this is replaced by gomodguard_v2.
+    - gomodguard
 
     # Would cause a huge churn in many files.
     - err113
