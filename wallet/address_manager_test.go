@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -2282,5 +2283,128 @@ func TestAllocateNextKeyMapsStoreFailure(t *testing.T) {
 		// Assert: The missing account has a public error and consumes no key.
 		require.ErrorIs(t, err, ErrAccountNotFound)
 		require.Nil(t, key)
+	})
+}
+
+// TestAllocateNextKeyKvdbDurability verifies unused children remain consumed
+// across concurrent public calls and a database reopen on both legacy branches.
+func TestAllocateNextKeyKvdbDurability(t *testing.T) {
+	t.Parallel()
+
+	// Keep wallet goroutines and cleanup in one bubble so quiescence covers
+	// the allocation requests as well as their callers.
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Create a real legacy wallet whose ordinary address metadata
+		// leaves the root fingerprint at zero; key allocation must preserve it.
+		dbPath := testKVDBPath(t)
+		manager := testKVDBManagerAt(t, dbPath)
+		params := sqliteCreateParams(t)
+		w, err := manager.Create(params)
+		require.NoError(t, err)
+
+		scope := waddrmgr.KeyScopeBIP0084
+		selectors := []AccountSelector{
+			NewAccountSelectorByName(scope, waddrmgr.DefaultAccountName),
+			NewAccountSelectorByNumber(scope, 0),
+		}
+
+		type allocation struct {
+			key *AllocatedKey
+			err error
+		}
+
+		const perBranch = 3
+
+		results := make([]allocation, 2*perBranch)
+
+		// Act: Allocate unused children concurrently, with one result slot
+		// per caller. Wait for quiescence before reading the results; normal
+		// completion leaves only the idle wallet request loop blocked.
+		for i := range results {
+			go func() {
+				key, err := w.AllocateNextKey(
+					t.Context(), selectors[i%2], i >= perBranch,
+				)
+				results[i] = allocation{
+					key: key,
+					err: err,
+				}
+			}()
+		}
+
+		synctest.Wait()
+
+		// Assert: Every call has a distinct root locator and key, even
+		// though none of the earlier children has been used on chain.
+		seenPaths := make(map[[2]uint32]bool)
+
+		seenKeys := make(map[string]bool)
+		for i, result := range results {
+			require.NoError(t, result.err)
+			require.NotNil(t, result.key.Origin)
+			require.Equal(t, scope, result.key.Origin.KeyScope)
+			require.Zero(t, result.key.Origin.Account)
+			require.Equal(t, uint32(i/perBranch), result.key.Branch)
+			require.Zero(t, result.key.Origin.MasterKeyFingerprint)
+			require.Less(t, result.key.Index, uint32(perBranch))
+			locator := [2]uint32{result.key.Branch, result.key.Index}
+			require.False(t, seenPaths[locator])
+			seenPaths[locator] = true
+			key := string(result.key.PubKey.SerializeCompressed())
+			require.False(t, seenKeys[key])
+			seenKeys[key] = true
+		}
+
+		// Act: Stop the owning Manager to drain its Wallet and close storage,
+		// then reopen so cached counters cannot hide lost writes.
+		require.NoError(t, manager.Stop())
+		reopened, err := NewManager(t.Context(), ManagerConfig{
+			Backend:           DBBackendKVDB,
+			DataSource:        dbPath,
+			ChainParams:       chainParams,
+			ChainSource:       createTestChain(t),
+			KVDBPubPassphrase: params.PubPassphrase,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = reopened.Stop()
+		})
+		wallets, err := reopened.Start(t.Context())
+		require.NoError(t, err)
+		require.Len(t, wallets, 1)
+		w = wallets[0]
+
+		// Assert: Persisted keys remain available through public lookup.
+		// The next allocation follows every previously consumed child.
+		for _, result := range results {
+			addr, err := address.NewAddressWitnessPubKeyHash(
+				address.Hash160(result.key.PubKey.SerializeCompressed()),
+				&chainParams,
+			)
+			require.NoError(t, err)
+			info, err := w.GetAddressInfo(t.Context(), addr)
+			require.NoError(t, err)
+			require.True(t, result.key.PubKey.IsEqual(info.PubKey))
+			require.Equal(t, &AddressDerivation{
+				KeyScope:             result.key.Origin.KeyScope,
+				Account:              result.key.Origin.Account,
+				Branch:               result.key.Branch,
+				Index:                result.key.Index,
+				MasterKeyFingerprint: result.key.Origin.MasterKeyFingerprint,
+			}, info.Derivation)
+		}
+
+		for branch, selector := range selectors {
+			key, err := w.AllocateNextKey(
+				t.Context(), selector, branch == 1,
+			)
+			require.NoError(t, err)
+			require.Equal(t, uint32(perBranch), key.Index)
+			require.Equal(t, uint32(branch), key.Branch)
+			require.Zero(t, key.Origin.MasterKeyFingerprint)
+			require.False(t, seenKeys[string(key.PubKey.SerializeCompressed())])
+		}
 	})
 }
