@@ -2482,7 +2482,8 @@ func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 	require.NoError(t, vm.Execute(), "signature verification failed")
 }
 
-// TestComputeRawSigLegacyP2SH tests the signing of a legacy P2SH input.
+// TestComputeRawSigLegacyP2SH verifies an explicit redeem script supplies
+// the legacy signing preimage without requiring a previous output.
 func TestComputeRawSigLegacyP2SH(t *testing.T) {
 	t.Parallel()
 
@@ -2517,7 +2518,8 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 	// Create a dummy transaction and a previous output to spend.
 	prevOut, tx := createDummyTestTx(pkScript)
 
-	// Prepare the inputs for the signing operation.
+	// Omit Output from the request: the redeem script supplies all script
+	// data for this spend, so missing-output validation must allow it.
 	fetcher := txscript.NewCannedPrevOutputFetcher(
 		prevOut.PkScript, prevOut.Value,
 	)
@@ -2526,7 +2528,6 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 	params := &RawSigParams{
 		Tx:         tx,
 		InputIndex: 0,
-		Output:     prevOut,
 		SigHashes:  sigHashes,
 		HashType:   txscript.SigHashAll,
 		Path:       path,
@@ -2535,12 +2536,22 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 		},
 	}
 
-	// Act: Compute the raw signature using the wallet.
+	// Act: Sign through the Wallet with the explicit script and no Output.
 	rawSig, err := w.ComputeRawSig(t.Context(), params)
 
-	// Assert: Verify that no error occurred and a signature was generated.
+	// Assert: Verify the returned DER signature against the independently
+	// calculated legacy sighash, excluding its trailing sighash byte.
 	require.NoError(t, err)
 	require.NotEmpty(t, rawSig)
+
+	sig, err := ecdsa.ParseDERSignature(rawSig[:len(rawSig)-1])
+	require.NoError(t, err)
+
+	digest, err := txscript.CalcSignatureHash(
+		redeemScript, txscript.SigHashAll, tx, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, sig.Verify(digest, pubKey))
 }
 
 // TestComputeRawSigSegwitV0 tests the successful signing of a SegWit v0 P2WKH

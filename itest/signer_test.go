@@ -1587,7 +1587,7 @@ func testSignerComputeRawSigTapscript(h *bwtest.HarnessTest) {
 	require.NoError(h, engine.Execute())
 }
 
-// testSignerRejectRawSig verifies absent requests/details and unknown Taproot
+// testSignerRejectRawSig verifies missing signing inputs and unknown Taproot
 // spend paths return stable public errors without raw signing material.
 func testSignerRejectRawSig(h *bwtest.HarnessTest) {
 	// Arrange: A real unlocked Taproot path ensures version-specific rejection
@@ -1619,6 +1619,54 @@ func testSignerRejectRawSig(h *bwtest.HarnessTest) {
 				Output:    prevOut,
 				SigHashes: hashes,
 				Path:      createSignerPath(info.Derivation),
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing legacy output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details:   wallet.LegacySpendDetails{},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing segwit output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details:   wallet.SegwitV0SpendDetails{},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing taproot key output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details: wallet.TaprootSpendDetails{
+					SpendPath: wallet.KeyPathSpend,
+				},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing taproot script output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details: wallet.TaprootSpendDetails{
+					SpendPath: wallet.ScriptPathSpend,
+				},
 			},
 			want: wallet.ErrNilArguments,
 		},
