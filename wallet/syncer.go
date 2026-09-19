@@ -266,6 +266,42 @@ type syncer struct {
 	publisher TxPublisher
 }
 
+// A compile-time assertion to ensure that syncer implements chainSyncer.
+var _ chainSyncer = (*syncer)(nil)
+
+// refreshLiveWatches registers stored addresses and outpoints for transaction
+// notifications. The Store selects the addresses and outputs to watch.
+func (s *syncer) refreshLiveWatches(ctx context.Context) error {
+	addrs, err := s.storeScanAddresses(ctx)
+	if err != nil {
+		return fmt.Errorf("read watch addresses: %w", err)
+	}
+
+	// Wallet shutdown must still cancel registration. A later sync
+	// initialization reads the persisted watch set again.
+	err = s.cfg.Chain.WatchAddrsFromTip(ctx, addrs)
+	if err != nil {
+		return fmt.Errorf("register addresses: %w", err)
+	}
+
+	credits, err := s.storeScanUnspent(ctx)
+	if err != nil {
+		return err
+	}
+
+	// ListOutputsToWatch already applies the Store's account policy.
+	outpoints := make([]*wire.OutPoint, 0, len(credits))
+	for _, credit := range credits {
+		outpoints = append(outpoints, &credit.OutPoint)
+	}
+
+	if len(outpoints) == 0 {
+		return nil
+	}
+
+	return s.cfg.Chain.NotifySpent(outpoints)
+}
+
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
 // mandatory: every migrated runtime path reads and writes through the Store,
 // so there is no nil-store fallback.
@@ -325,6 +361,16 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	err = s.checkRollback(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to check for rollback: %w", err)
+	}
+
+	// A retry may follow a committed scan whose registration failed.
+	// Register stored addresses and outpoints even if the tip is current.
+	//
+	// TODO(yy): Avoid rereading and registering the full set on each retry
+	// while preserving registration that failed after a committed scan.
+	err = s.refreshLiveWatches(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Explicitly request connected/disconnected block notifications. Only
@@ -933,6 +979,13 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 		return err
 	}
 
+	refreshWatches := len(params.Horizons) > 0 || len(params.Transactions) > 0
+	if refreshWatches {
+		// Clear readiness before publishing the tip. Normal catch-up
+		// restores it only after watch registration succeeds.
+		s.state.Store(uint32(syncStateSyncing))
+	}
+
 	// ApplyScanBatch persists the batch's synced blocks and advances the
 	// wallet's synced tip. advanceChainSync reads the next batch's start
 	// height back through s.syncedTo, which is Store-backed here, so the
@@ -941,6 +994,12 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	err = s.store.ApplyScanBatch(ctx, params)
 	if err != nil {
 		return fmt.Errorf("apply sync scan batch: %w", err)
+	}
+
+	// A committed horizon or credit can introduce watches after startup;
+	// finish registration before catch-up reports this batch complete.
+	if refreshWatches {
+		return s.refreshLiveWatches(ctx)
 	}
 
 	return nil
@@ -958,6 +1017,12 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 	err = s.store.ApplyScanBatch(ctx, params)
 	if err != nil {
 		return fmt.Errorf("apply targeted scan batch: %w", err)
+	}
+
+	// Targeted scans can also store new addresses and outputs. Register
+	// them after the commit using the scan worker's lifetime context.
+	if len(params.Horizons) > 0 || len(params.Transactions) > 0 {
+		return s.refreshLiveWatches(ctx)
 	}
 
 	return nil
@@ -1662,8 +1727,8 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	gap := bestHeight - syncedTo.Height
 
 	// If the gap is large (> 6 blocks), we treat it as a major event
-	// requiring Syncing state protection. Smaller gaps are handled
-	// silently to avoid disrupting user operations like CreateTx.
+	// requiring Syncing state protection. Smaller gaps keep requests available
+	// until putSyncBatch clears readiness for watch registration at commit.
 	isLargeGap := gap > syncStateSwitchThreshold
 
 	if isLargeGap {
@@ -1928,7 +1993,10 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	}
 
 	s.state.Store(uint32(syncStateRescanning))
-	defer s.state.Store(uint32(syncStateSynced))
+	// A failed batch leaves readiness revoked until initialization retries.
+	defer s.state.CompareAndSwap(
+		uint32(syncStateRescanning), uint32(syncStateSynced),
+	)
 
 	startHeight := req.startBlock.Height
 
@@ -1964,11 +2032,16 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 				"0 results", ErrScanBatchEmpty)
 		}
 
-		// Process results (update DB).
+		// Revoke readiness before new watches commit, and retain that state
+		// if registration fails instead of restoring it in deferred cleanup.
+		s.state.Store(uint32(syncStateSyncing))
+
 		err = s.putTargetedBatch(ctx, scanState, results)
 		if err != nil {
 			return err
 		}
+
+		s.state.Store(uint32(syncStateRescanning))
 
 		// Advance startHeight.
 		//nolint:gosec // batch size is bounded.

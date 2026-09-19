@@ -15,6 +15,24 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
+	// Fresh-client cases prove persisted and recovered watch delivery without
+	// relying on filters retained by an earlier Wallet runtime.
+	{
+		Name:     "manager neutrino watch replay",
+		TestFunc: testManagerNeutrinoWatchReplay,
+	},
+	{
+		Name:     "manager live watch replay",
+		TestFunc: testManagerLiveWatchReplay,
+	},
+	{
+		Name:     "manager live watch recovered spend",
+		TestFunc: testManagerLiveWatchRecoveredSpend,
+	},
+	{
+		Name:     "manager live watch recovered address",
+		TestFunc: testManagerLiveWatchRecoveredAddress,
+	},
 	{
 		Name:     "manager create wallet",
 		TestFunc: testCreateWallet,
