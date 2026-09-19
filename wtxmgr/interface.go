@@ -117,6 +117,11 @@ type TxStore interface {
 	PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
 		label string) error
 
+	// DeleteTxLabel removes any label recorded for the transaction, which
+	// is how this store records a transaction that has none. A transaction
+	// that already has no label is not an error.
+	DeleteTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash) error
+
 	// RangeTransactions runs the function f on all transaction details
 	// between blocks on the best chain over the height range [begin,end].
 	// The special height -1 may be used to also include unmined
@@ -151,6 +156,14 @@ type TxStore interface {
 	// UnspentOutputs returns all unspent received transaction outputs.
 	// The order is undefined.
 	UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error)
+
+	// UnspentOutputsIncludingLocked returns all unspent received
+	// transaction outputs, including outputs currently held by an
+	// active output lease. Callers reporting a wallet balance to
+	// external consumers use this so the balance reflects the
+	// wallet's total UTXO value independent of leasing state.
+	UnspentOutputsIncludingLocked(
+		ns walletdb.ReadBucket) ([]Credit, error)
 
 	// FetchTxLabel reads a transaction label from the tx labels bucket. If
 	// a label with 0 length was written, we return an error, since this is

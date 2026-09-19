@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime/pprof"
 	"strings"
 	"testing"
@@ -24,8 +23,6 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,7 +44,7 @@ const (
 
 // BenchmarkSyncEmpty benchmarks the wallet synchronization performance against
 // empty blocks and an empty wallet by comparing the legacy SynchronizeRPC with
-// the new Controller.Start API across different block depths.
+// the new Manager-owned Wallet startup path across different block depths.
 func BenchmarkSyncEmpty(b *testing.B) {
 	scenarios := []struct {
 		blocks int
@@ -260,23 +257,20 @@ func runNewSync(b *testing.B, miner *rpctest.Harness, method SyncMethod) {
 		// Connect a fresh chain client.
 		chainClient := setupChainClient(b, miner)
 
-		// Configure for the specified sync mode.
-		cfg := defaultWalletConfig(b)
-		cfg.Chain = chainClient
-		cfg.SyncMethod = method
-
 		// Setup a fresh modern wallet.
 		seed, err := hdkeychain.GenerateSeed(hdkeychain.MinSeedBytes)
 		require.NoError(b, err)
-		w := setupNewWallet(b, seed, cfg)
+		manager := setupNewWallet(b, seed, chainClient, method)
 
 		stopProfile := startProfiling(b)
 
 		b.StartTimer()
 
-		// Start modern controller and syncing.
-		err = w.Start(b.Context())
+		// Time aggregate startup of the durable Wallet through its owner.
+		wallets, err := manager.Start(b.Context())
 		require.NoError(b, err)
+
+		w := wallets[0]
 
 		// Poll until the controller reports it is synced.
 		//
@@ -313,20 +307,18 @@ func runNewSyncData(b *testing.B, miner *rpctest.Harness, seed []byte,
 		b.StopTimer()
 
 		chainClient := setupChainClient(b, miner)
-		cfg := defaultWalletConfig(b)
-		cfg.Chain = chainClient
-		cfg.SyncMethod = method
-
-		w := setupNewWallet(b, seed, cfg)
+		manager := setupNewWallet(b, seed, chainClient, method)
 
 		stopProfile := startProfiling(b)
 
 		// Start the timer for the actual synchronization phase.
 		b.StartTimer()
 
-		// Start modern controller and syncing.
-		err := w.Start(b.Context())
+		// Time aggregate startup of the durable Wallet through its owner.
+		wallets, err := manager.Start(b.Context())
 		require.NoError(b, err)
+
+		w := wallets[0]
 
 		// Poll until the controller reports it is synced.
 		for {
@@ -389,35 +381,56 @@ func setupLegacyWallet(tb testing.TB, seed []byte) *Wallet {
 	return w
 }
 
-// setupNewWallet initializes a modern wallet using the Manager API. It accepts
-// a Config which should at least have the Chain client populated. It
-// automatically registers resource cleanup.
-func setupNewWallet(tb testing.TB, seed []byte, cfg Config) *Wallet {
+// setupNewWallet persists a benchmark Wallet and reopens its Manager before
+// startup, allowing the timed phase to measure aggregate loading and sync.
+func setupNewWallet(tb testing.TB, seed []byte, chainSource chain.Interface,
+	method SyncMethod) *Manager {
+
 	tb.Helper()
 
 	privPass := []byte("private")
 	params := CreateWalletParams{
+		Name:              "bench-wallet",
 		Mode:              ModeImportSeed,
 		Seed:              seed,
+		PubPassphrase:     []byte("public"),
 		PrivatePassphrase: privPass,
-		PubPassphrase:     cfg.PubPassphrase,
 		Birthday:          time.Now().Add(-48 * time.Hour),
 	}
 
-	// Create the wallet using the new Manager API. This returns a loaded
-	// but unstarted wallet instance.
-	manager := NewManager()
-	w, err := manager.Create(cfg, params)
+	// The Manager retains every runtime input, including the shared chain
+	// source; the request below carries only durable initialization data.
+	cfg := ManagerConfig{
+		Backend:                 DBBackendKVDB,
+		DataSource:              testKVDBPath(tb),
+		ChainParams:             chaincfg.RegressionNetParams,
+		ChainSource:             chainSource,
+		SyncMethod:              method,
+		WalletSyncRetryInterval: 10 * time.Millisecond,
+		RecoveryWindow:          testRecoveryWindow,
+		KVDBPubPassphrase:       params.PubPassphrase,
+	}
+	manager, err := NewManager(tb.Context(), cfg)
 	require.NoError(tb, err)
-
-	// Register cleanup function to handle the Controller shutdown and close
-	// the database handle after the benchmark subtest.
 	tb.Cleanup(func() {
-		_ = w.Stop(tb.Context())
-		require.NoError(tb, w.cfg.DB.Close())
+		_ = manager.Stop()
 	})
 
-	return w
+	_, err = manager.Start(tb.Context())
+	require.NoError(tb, err)
+
+	_, err = manager.Create(params)
+	require.NoError(tb, err)
+
+	// Startup is one-shot, so a fresh owner is required for the timed run.
+	require.NoError(tb, manager.Stop())
+	reopened, err := NewManager(tb.Context(), cfg)
+	require.NoError(tb, err)
+	tb.Cleanup(func() {
+		_ = reopened.Stop()
+	})
+
+	return reopened
 }
 
 // setupChain prepares a btcd node and generates the required blocks.
@@ -457,13 +470,14 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 	miner := setupChain(tb, 0)
 
 	// 1. Setup a template wallet to extract addresses for the chain.
-	cfg := defaultWalletConfig(tb)
-	cfg.Chain = setupChainClient(tb, miner)
+	templateManager := setupNewWallet(
+		tb, seed, setupChainClient(tb, miner), SyncMethodAuto,
+	)
 
-	templateW := setupNewWallet(tb, seed, cfg)
-
-	err := templateW.Start(tb.Context())
+	wallets, err := templateManager.Start(tb.Context())
 	require.NoError(tb, err)
+
+	templateW := wallets[0]
 
 	// Unlock template wallet to derive addresses.
 	err = templateW.Unlock(tb.Context(), UnlockRequest{
@@ -497,10 +511,8 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 		}
 	}
 
-	// Close the template wallet now that we are done with it. This releases
-	// the database lock and resources.
-	_ = templateW.Stop(tb.Context())
-	require.NoError(tb, templateW.cfg.DB.Close())
+	// Release the template runtime and its database before mining test data.
+	require.NoError(tb, templateManager.Stop())
 
 	// Ensure we selected the correct number of targets.
 	require.Len(tb, targetAddrs, numUTXOs,
@@ -788,25 +800,6 @@ func setupChainClient(tb testing.TB, miner *rpctest.Harness) chain.Interface {
 	}, 30*time.Second, 100*time.Millisecond)
 
 	return btcClient
-}
-
-// defaultWalletConfig returns a Config with standard benchmark settings.
-func defaultWalletConfig(tb testing.TB) Config {
-	tb.Helper()
-
-	dir := tb.TempDir()
-	dbPath := filepath.Join(dir, "wallet.db")
-	db, err := walletdb.Create("bdb", dbPath, true, 10*time.Second, false)
-	require.NoError(tb, err)
-
-	return Config{
-		DB:                      db,
-		ChainParams:             &chaincfg.RegressionNetParams,
-		Name:                    "bench-wallet",
-		PubPassphrase:           []byte("public"),
-		WalletSyncRetryInterval: 10 * time.Millisecond,
-		RecoveryWindow:          testRecoveryWindow,
-	}
 }
 
 // assertUTXOCount verifies the number of unspent outputs in a modern wallet.
