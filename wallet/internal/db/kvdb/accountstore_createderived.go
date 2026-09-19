@@ -51,6 +51,17 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 			return err
 		}
 
+		// Use the read path's scope-specific public key serialization while
+		// still in the creation transaction. Preserve the other fields
+		// returned by the shared workflow.
+		stored, err := loadAccountInfo(
+			ns, ops.scopedMgr, *built.AccountNumber, mgr.WatchOnly(),
+		)
+		if err != nil {
+			return err
+		}
+
+		built.PublicKey = stored.PublicKey
 		info = built
 
 		return nil
