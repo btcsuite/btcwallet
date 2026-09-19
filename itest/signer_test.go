@@ -7,8 +7,17 @@
 package itest
 
 import (
+	"encoding/hex"
+	"testing"
+
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -927,4 +936,1010 @@ func testUnsafeSignerRejectWatchOnly(h *bwtest.HarnessTest) {
 
 	addrKeyIsNil := addrKey == nil
 	require.True(h, addrKeyIsNil, "expected no address key")
+}
+
+// createSignerPath builds a signing selector from public address metadata,
+// retaining the account number and child rather than assuming address index 0.
+func createSignerPath(derivation *wallet.AddressDerivation) wallet.BIP32Path {
+	// Follow wallet.BIP32Path: use the public account number for lookup
+	// and harden only the BIP32 account child.
+	account := hdkeychain.HardenedKeyStart + derivation.Account
+
+	return wallet.BIP32Path{
+		KeyScope: derivation.KeyScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount:      derivation.Account,
+			Account:              account,
+			Branch:               derivation.Branch,
+			Index:                derivation.Index,
+			MasterKeyFingerprint: derivation.MasterKeyFingerprint,
+		},
+	}
+}
+
+// testSignerSignDigestECDSA verifies a persistent Wallet signs for its public
+// child key, and that the signature authenticates the requested digest only.
+func testSignerSignDigestECDSA(h *bwtest.HarnessTest) {
+	// Arrange: The harness materializes the account on every backend. Only
+	// public address metadata is retained as the independent signing oracle.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer digest"))
+	intent := &wallet.SignDigestIntent{
+		Digest:  digest,
+		SigType: wallet.SigTypeECDSA,
+	}
+
+	// Act: Sign the fixed digest through the public Wallet entry point.
+	result, err := w.SignDigest(
+		h.Context(), createSignerPath(info.Derivation), intent,
+	)
+
+	// Assert: Check the public result type and verify against the address's
+	// public key. A changed digest must fail the same verifier.
+	require.NoError(h, err)
+
+	sig, ok := result.(wallet.ECDSASignature)
+	require.True(h, ok, "expected ECDSA signature")
+	require.True(h, sig.Verify(digest, info.PubKey))
+	digest[0] ^= 1
+	require.False(h, sig.Verify(digest, info.PubKey))
+}
+
+// testSignerSignDigestCompact verifies recoverable ECDSA preserves the
+// expected compressed public key without exporting Wallet private material.
+func testSignerSignDigestCompact(h *bwtest.HarnessTest) {
+	// Arrange: Resolve the public child before requesting the compact format,
+	// so recovery is checked against a key independent of the returned bytes.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer compact digest"))
+	intent := &wallet.SignDigestIntent{
+		Digest:     digest,
+		SigType:    wallet.SigTypeECDSA,
+		CompactSig: true,
+	}
+
+	// Act: Request a compact signature for the same public address path.
+	result, err := w.SignDigest(
+		h.Context(), createSignerPath(info.Derivation), intent,
+	)
+
+	// Assert: Recovery verifies the signature and exposes the key and
+	// compression marker encoded by the public compact-signature contract.
+	require.NoError(h, err)
+
+	sig, ok := result.(wallet.CompactSignature)
+	require.True(h, ok, "expected compact signature")
+
+	pubKey, compressed, err := ecdsa.RecoverCompact(sig, digest)
+	require.NoError(h, err)
+	require.True(h, compressed)
+	require.True(h, pubKey.IsEqual(info.PubKey))
+}
+
+// testSignerSignDigestSchnorr verifies untweaked, BIP86, and script-root
+// signatures against independently calculated public output keys.
+func testSignerSignDigestSchnorr(h *bwtest.HarnessTest) {
+	// Arrange: Nil means no tweak, while an empty non-nil slice requests the
+	// BIP86 tweak. Public point arithmetic supplies the expected key for each.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer schnorr digest"))
+	root := chainhash.HashB([]byte("signer script root"))
+	tests := []struct {
+		name   string
+		tweak  []byte
+		pubKey *btcec.PublicKey
+	}{
+		{
+			name:   "untweaked",
+			pubKey: info.PubKey,
+		},
+		{
+			name:   "bip86",
+			tweak:  []byte{},
+			pubKey: txscript.ComputeTaprootOutputKey(info.PubKey, nil),
+		},
+		{
+			name:   "script root",
+			tweak:  root,
+			pubKey: txscript.ComputeTaprootOutputKey(info.PubKey, root),
+		},
+	}
+
+	// Each row keeps the same signing and verification contract; only the
+	// requested tweak and its expected public key change.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Bind this row's tweak to the fixed digest and path.
+			intent := &wallet.SignDigestIntent{
+				Digest:       digest,
+				SigType:      wallet.SigTypeSchnorr,
+				TaprootTweak: tc.tweak,
+			}
+
+			// Act: Let the real Wallet resolve and sign with its key.
+			result, err := w.SignDigest(
+				t.Context(), createSignerPath(info.Derivation), intent,
+			)
+
+			// Assert: Verify the Schnorr result against the public output
+			// key, without obtaining or independently signing with a secret.
+			require.NoError(t, err)
+
+			sig, ok := result.(wallet.SchnorrSignature)
+			require.True(t, ok, "expected Schnorr signature")
+			require.True(t, sig.Verify(digest, tc.pubKey))
+		})
+	}
+}
+
+// testSignerRejectDigestIntent verifies public validation identities on a
+// signing-capable Wallet, so lock-state rejection cannot mask invalid input.
+func testSignerRejectDigestIntent(h *bwtest.HarnessTest) {
+	// Arrange: A real, unlocked key path is valid for every row. Digest sizes
+	// straddle the supported 32-byte boundary covered by successful cases.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	digest := chainhash.HashB([]byte("signer rejected digest"))
+	tests := []struct {
+		name   string
+		intent *wallet.SignDigestIntent
+		want   error
+	}{
+		{
+			name: "nil intent",
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "short digest",
+			intent: &wallet.SignDigestIntent{
+				Digest: digest[:31],
+			},
+			want: wallet.ErrInvalidDigestSize,
+		},
+		{
+			name: "long digest",
+			intent: &wallet.SignDigestIntent{
+				Digest: append(digest, 0),
+			},
+			want: wallet.ErrInvalidDigestSize,
+		},
+		{
+			name: "ecdsa taproot tweak",
+			intent: &wallet.SignDigestIntent{
+				Digest:       digest,
+				TaprootTweak: []byte{},
+			},
+			want: wallet.ErrInvalidSignParam,
+		},
+		{
+			name: "compact schnorr",
+			intent: &wallet.SignDigestIntent{
+				Digest:     digest,
+				SigType:    wallet.SigTypeSchnorr,
+				CompactSig: true,
+			},
+			want: wallet.ErrInvalidSignParam,
+		},
+	}
+
+	// Validation rows share the same Wallet and independent request values;
+	// no row mutates the wallet or depends on another rejection.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Keep the known public derivation valid for this row.
+			path := createSignerPath(info.Derivation)
+
+			// Act: Submit the invalid intent through the public method.
+			result, err := w.SignDigest(t.Context(), path, tc.intent)
+
+			// Assert: Callers can match the same stable error on every
+			// backend, and a rejected request returns no signature.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, result)
+		})
+	}
+}
+
+// createSignerTx builds a deterministic unsigned spend without chain state.
+// Signing needs the previous output's script and amount, not a mined coin.
+func createSignerTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
+	// One input and one output make SINGLE meaningful, while the lower output
+	// value leaves a fee without involving coin selection or publication.
+	prevOut := wire.NewTxOut(100000, pkScript)
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 0}, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(90000, []byte{txscript.OP_TRUE}))
+
+	return prevOut, tx
+}
+
+// testSignerComputeUnlockingScript verifies the public result spends each
+// supported single-key output under representative signature hash modes.
+func testSignerComputeUnlockingScript(h *bwtest.HarnessTest) {
+	// Arrange: The harness owns one unlocked Wallet. Every row derives its
+	// own address, so its script commits to the key selected by that Wallet.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	tests := []struct {
+		name          string
+		addrType      waddrmgr.AddressType
+		hashType      txscript.SigHashType
+		wantWitness   bool
+		wantSigScript bool
+	}{
+		{
+			name:          "legacy all",
+			addrType:      waddrmgr.PubKeyHash,
+			hashType:      txscript.SigHashAll,
+			wantSigScript: true,
+		},
+		{
+			name:        "witness none",
+			addrType:    waddrmgr.WitnessPubKey,
+			hashType:    txscript.SigHashNone,
+			wantWitness: true,
+		},
+		{
+			name:     "nested single anyonecanpay",
+			addrType: waddrmgr.NestedWitnessPubKey,
+			hashType: txscript.SigHashSingle |
+				txscript.SigHashAnyOneCanPay,
+			wantWitness:   true,
+			wantSigScript: true,
+		},
+		{
+			name:        "taproot default",
+			addrType:    waddrmgr.TaprootPubKey,
+			hashType:    txscript.SigHashDefault,
+			wantWitness: true,
+		},
+		{
+			name:        "taproot all",
+			addrType:    waddrmgr.TaprootPubKey,
+			hashType:    txscript.SigHashAll,
+			wantWitness: true,
+		},
+	}
+
+	// The same caller assembly and engine verification apply to all rows;
+	// only their address, sighash, and expected stack placement differ.
+	for _, tc := range tests {
+		// Keep harness assertions on the parent test's goroutine; the
+		// child uses the resulting address only as public fixture data.
+		addr := h.NewWalletAddressOfType(w, tc.addrType)
+
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Build a fresh transaction and its hash cache from
+			// the exact previous output, without asking the Wallet to sign.
+			pkScript, err := txscript.PayToAddrScript(addr)
+			require.NoError(t, err)
+
+			prevOut, tx := createSignerTx(pkScript)
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				prevOut.PkScript, prevOut.Value,
+			)
+			hashes := txscript.NewTxSigHashes(tx, fetcher)
+			params := &wallet.UnlockingScriptParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				HashType:  tc.hashType,
+			}
+
+			// Act: Request the complete unlocking data for this output.
+			unlocking, err := w.ComputeUnlockingScript(t.Context(), params)
+
+			// Assert: Apply the returned stacks unchanged. The script
+			// engine verifies their signature against the previous output.
+			require.NoError(t, err)
+			require.Equal(t, tc.wantWitness, len(unlocking.Witness) != 0)
+			require.Equal(t, tc.wantSigScript, len(unlocking.SigScript) != 0)
+			tx.TxIn[0].Witness = unlocking.Witness
+			tx.TxIn[0].SignatureScript = unlocking.SigScript
+
+			engine, err := txscript.NewEngine(
+				pkScript, tx, 0, txscript.StandardVerifyFlags,
+				nil, hashes, prevOut.Value, fetcher,
+			)
+			require.NoError(t, err)
+			require.NoError(t, engine.Execute())
+		})
+	}
+}
+
+// testSignerRejectUnlockingScript verifies absent parameters, addressless
+// scripts, and foreign outputs cannot produce unlocking material.
+func testSignerRejectUnlockingScript(h *bwtest.HarnessTest) {
+	// Arrange: An unlocked Wallet reaches parameter and output validation.
+	// The generator's public encoding supplies a foreign address without
+	// constructing or obtaining any private key.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	pubKey, err := hex.DecodeString(
+		"0279be667ef9dcbbac55a06295ce870b070" +
+			"29bfcdb2dce28d959f2815b16f81798",
+	)
+	require.NoError(h, err)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	tests := []struct {
+		name   string
+		params *wallet.UnlockingScriptParams
+		want   error
+	}{
+		{
+			name: "nil params",
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing output",
+			params: &wallet.UnlockingScriptParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "addressless script",
+			params: &wallet.UnlockingScriptParams{
+				Tx: tx,
+				Output: wire.NewTxOut(
+					prevOut.Value, []byte{txscript.OP_RETURN},
+				),
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+			},
+			want: wallet.ErrUnableToExtractAddress,
+		},
+		{
+			name: "foreign output",
+			params: &wallet.UnlockingScriptParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+			},
+			want: wallet.ErrAddressNotFound,
+		},
+	}
+
+	// These requests share a valid spend shape and differ only at the
+	// documented rejection boundary; none changes Wallet state.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Use the row's request without repairing its invalid
+			// field, so the caller-visible validation remains the subject.
+			params := tc.params
+
+			// Act: Try to assemble unlocking data through the public API.
+			unlocking, err := w.ComputeUnlockingScript(t.Context(), params)
+
+			// Assert: Every database must return the same public identity
+			// and no partial witness or scriptSig on rejection.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, unlocking)
+		})
+	}
+}
+
+// testSignerComputeRawSigLegacy verifies a caller can use the returned legacy
+// signature, including its sighash byte, to assemble a valid P2PKH scriptSig.
+func testSignerComputeRawSigLegacy(h *bwtest.HarnessTest) {
+	// Arrange: Derive an owned legacy address and retain its public key and
+	// path. The transaction fixture supplies a fixed previous output amount.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.PubKeyHash)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      createSignerPath(info.Derivation),
+		Details:   wallet.LegacySpendDetails{},
+	}
+
+	// Act: Request the raw signature without asking the Wallet to assemble it.
+	rawSig, err := w.ComputeRawSig(h.Context(), params)
+
+	// Assert: Push the returned bytes and expected public key unchanged. A
+	// missing or incorrect sighash byte makes script execution fail.
+	require.NoError(h, err)
+
+	sigScript, err := txscript.NewScriptBuilder().
+		AddData(rawSig).AddData(info.PubKey.SerializeCompressed()).Script()
+	require.NoError(h, err)
+
+	tx.TxIn[0].SignatureScript = sigScript
+
+	engine, err := txscript.NewEngine(
+		pkScript, tx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+}
+
+// testSignerComputeRawSigSegwit verifies raw Segwit v0 signatures omit the
+// sighash byte and authenticate the previous output using the P2PKH scriptCode.
+func testSignerComputeRawSigSegwit(h *bwtest.HarnessTest) {
+	// Arrange: Construct the scriptCode from the expected public key, rather
+	// than obtaining it or a completed witness from another Wallet signer.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	keyAddr, err := address.NewAddressPubKeyHash(
+		address.Hash160(info.PubKey.SerializeCompressed()), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	scriptCode, err := txscript.PayToAddrScript(keyAddr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      createSignerPath(info.Derivation),
+		Details: wallet.SegwitV0SpendDetails{
+			WitnessScript: scriptCode,
+		},
+	}
+
+	// Act: Sign through the public raw-signature entry point.
+	rawSig, err := w.ComputeRawSig(h.Context(), params)
+
+	// Assert: Append the caller's sighash byte before constructing the
+	// witness. The engine proves the signature fits the public key and amount.
+	require.NoError(h, err)
+
+	tx.TxIn[0].Witness = wire.TxWitness{
+		append(rawSig, byte(params.HashType)),
+		info.PubKey.SerializeCompressed(),
+	}
+
+	engine, err := txscript.NewEngine(
+		pkScript, tx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+}
+
+// testSignerComputeRawSigTaproot verifies key-path signatures commit to the
+// requested script root and preserve default versus explicit sighash encoding.
+func testSignerComputeRawSigTaproot(h *bwtest.HarnessTest) {
+	// Arrange: Public point arithmetic builds an output with a script-root
+	// tweak. Raw signing takes a key path, so this output need not be imported.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.TaprootPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	root := chainhash.HashB([]byte("signer raw taproot root"))
+	outputKey := txscript.ComputeTaprootOutputKey(info.PubKey, root)
+	outputAddr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(outputAddr)
+	require.NoError(h, err)
+
+	tests := []struct {
+		name     string
+		hashType txscript.SigHashType
+		size     int
+	}{
+		{
+			name:     "default",
+			hashType: txscript.SigHashDefault,
+			size:     schnorr.SignatureSize,
+		},
+		{
+			name:     "all",
+			hashType: txscript.SigHashAll,
+			size:     schnorr.SignatureSize + 1,
+		},
+	}
+
+	// Each encoding must produce a valid spend of the same tweaked output.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Arrange: Each row gets an unsigned input and a fresh cache,
+			// so a previous witness cannot affect the requested signature.
+			prevOut, tx := createSignerTx(pkScript)
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				pkScript, prevOut.Value,
+			)
+			hashes := txscript.NewTxSigHashes(tx, fetcher)
+			params := &wallet.RawSigParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				HashType:  tc.hashType,
+				Path:      createSignerPath(info.Derivation),
+				Details: wallet.TaprootSpendDetails{
+					SpendPath: wallet.KeyPathSpend,
+					Tweak:     root,
+				},
+			}
+
+			// Act: Sign for the caller-constructed Taproot output.
+			rawSig, err := w.ComputeRawSig(t.Context(), params)
+
+			// Assert: Use the returned encoding without adding a sighash
+			// byte; the engine checks the tweak and hash mode together.
+			require.NoError(t, err)
+			require.Len(t, rawSig, tc.size)
+			tx.TxIn[0].Witness = wire.TxWitness{rawSig}
+
+			engine, err := txscript.NewEngine(
+				pkScript, tx, 0, txscript.StandardVerifyFlags,
+				nil, hashes, prevOut.Value, fetcher,
+			)
+			require.NoError(t, err)
+			require.NoError(t, engine.Execute())
+		})
+	}
+}
+
+// testSignerComputeRawSigTapscript verifies a caller can spend a CHECKSIG leaf
+// with the raw signature and a publicly constructed script-tree proof.
+func testSignerComputeRawSigTapscript(h *bwtest.HarnessTest) {
+	// Arrange: The public key defines both the CHECKSIG leaf and internal
+	// key. Only txscript's public tree operations construct the control block.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.TaprootPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	script, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(info.PubKey)).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(h, err)
+
+	tree := txscript.AssembleTaprootScriptTree(txscript.NewBaseTapLeaf(script))
+	root := tree.RootNode.TapHash()
+	outputKey := txscript.ComputeTaprootOutputKey(info.PubKey, root[:])
+	outputAddr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(outputAddr)
+	require.NoError(h, err)
+
+	control := tree.LeafMerkleProofs[0].ToControlBlock(info.PubKey)
+	controlBytes, err := control.ToBytes()
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashDefault,
+		Path:      createSignerPath(info.Derivation),
+		Details: wallet.TaprootSpendDetails{
+			SpendPath:     wallet.ScriptPathSpend,
+			WitnessScript: script,
+		},
+	}
+
+	// Act: Request a raw signature for the caller's script-path intent.
+	rawSig, err := w.ComputeRawSig(h.Context(), params)
+
+	// Assert: Script execution checks the signature, leaf commitment, and
+	// control block independently of the Wallet's signing implementation.
+	require.NoError(h, err)
+
+	tx.TxIn[0].Witness = wire.TxWitness{rawSig, script, controlBytes}
+
+	engine, err := txscript.NewEngine(
+		pkScript, tx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+}
+
+// testSignerRejectRawSig verifies missing signing inputs and unknown Taproot
+// spend paths return stable public errors without raw signing material.
+func testSignerRejectRawSig(h *bwtest.HarnessTest) {
+	// Arrange: A real unlocked Taproot path ensures version-specific rejection
+	// is reached without depending on a missing account or unavailable key.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.TaprootPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	tests := []struct {
+		name   string
+		params *wallet.RawSigParams
+		want   error
+	}{
+		{
+			name: "nil params",
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing details",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				Path:      createSignerPath(info.Derivation),
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing legacy output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details:   wallet.LegacySpendDetails{},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing segwit output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details:   wallet.SegwitV0SpendDetails{},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing taproot key output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details: wallet.TaprootSpendDetails{
+					SpendPath: wallet.KeyPathSpend,
+				},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "missing taproot script output",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				SigHashes: hashes,
+				HashType:  txscript.SigHashAll,
+				Path:      createSignerPath(info.Derivation),
+				Details: wallet.TaprootSpendDetails{
+					SpendPath: wallet.ScriptPathSpend,
+				},
+			},
+			want: wallet.ErrNilArguments,
+		},
+		{
+			name: "unknown spend path",
+			params: &wallet.RawSigParams{
+				Tx:        tx,
+				Output:    prevOut,
+				SigHashes: hashes,
+				Path:      createSignerPath(info.Derivation),
+				Details: wallet.TaprootSpendDetails{
+					SpendPath: wallet.ScriptPathSpend + 1,
+				},
+			},
+			want: wallet.ErrUnknownSignMethod,
+		},
+	}
+
+	// Arrange is complete for every independent rejection row. No backend
+	// branch or alternative successful result weakens their public contract.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			// Act: Submit the row's unsupported request through the Wallet.
+			rawSig, err := w.ComputeRawSig(t.Context(), tc.params)
+
+			// Assert: Preserve error identity and return no usable bytes.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, rawSig)
+		})
+	}
+}
+
+// testSignerRejectLocked verifies all three public signing methods refuse a
+// locked Wallet even when the address, path, and transaction are otherwise
+// valid.
+func testSignerRejectLocked(h *bwtest.HarnessTest) {
+	// Arrange: Address preparation restores the initially locked state. The
+	// owned legacy output would be signable with these inputs after
+	// unlocking.
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.PubKeyHash)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	path := createSignerPath(info.Derivation)
+	digest := &wallet.SignDigestIntent{
+		Digest: chainhash.HashB([]byte("signer locked digest")),
+	}
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+	}
+	rawParams := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      path,
+		Details:   wallet.LegacySpendDetails{},
+	}
+
+	// Act: Exercise the shared key-availability boundary through each
+	// method, keeping the Wallet locked throughout all requests.
+	sig, digestErr := w.SignDigest(h.Context(), path, digest)
+	unlocking, unlockErr := w.ComputeUnlockingScript(
+		h.Context(), unlockParams,
+	)
+	rawSig, rawErr := w.ComputeRawSig(h.Context(), rawParams)
+
+	// Assert: Every method must preserve the public state error and return
+	// no signing material; accepting any one would breach the lock
+	// contract.
+	require.ErrorIs(h, digestErr, wallet.ErrStateForbidden)
+	require.Nil(h, sig)
+	require.ErrorIs(h, unlockErr, wallet.ErrStateForbidden)
+	require.Nil(h, unlocking)
+	require.ErrorIs(h, rawErr, wallet.ErrStateForbidden)
+	require.Nil(h, rawSig)
+}
+
+// testSignerRejectWatchOnly verifies a watch-only Wallet with an owned
+// address refuses all public signing entry points.
+func testSignerRejectWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: Import the shared account fixture's public material so its
+	// scope, address type, fingerprint, and network encoding stay together.
+	const accountName = "signer watchonly account"
+
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		InitialAccounts: []wallet.WatchOnlyAccount{
+			{
+				Scope:                keys.scope,
+				XPub:                 keys.accountKey,
+				Name:                 accountName,
+				AddrType:             keys.addrType,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+			},
+		},
+	})
+	require.True(h, w.IsWatchOnly())
+
+	addr, err := w.NewAddress(
+		ctx, accountName, keys.addrType, false,
+	)
+	require.NoError(h, err)
+
+	info, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	// Segwit raw signing uses the P2PKH scriptCode for this public key,
+	// while the previous output retains the Wallet's witness program.
+	keyAddr, err := address.NewAddressPubKeyHash(
+		address.Hash160(info.PubKey.SerializeCompressed()), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	scriptCode, err := txscript.PayToAddrScript(keyAddr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+
+	// Imported XPubs have no portable account number. Numeric signing
+	// requests test Wallet admission only; unlocking targets the owned
+	// output above. None of these requests claims a numeric account lookup.
+	path := wallet.BIP32Path{KeyScope: keys.scope}
+	digest := &wallet.SignDigestIntent{
+		Digest: chainhash.HashB([]byte("signer watch-only digest")),
+	}
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+	}
+	rawParams := &wallet.RawSigParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      path,
+		Details: wallet.SegwitV0SpendDetails{
+			WitnessScript: scriptCode,
+		},
+	}
+
+	// Act: Ask each signing method to handle an otherwise well-formed
+	// request on the watch-only Wallet, without selecting a backend-
+	// specific route.
+	sig, digestErr := w.SignDigest(h.Context(), path, digest)
+	unlocking, unlockErr := w.ComputeUnlockingScript(
+		h.Context(), unlockParams,
+	)
+	rawSig, rawErr := w.ComputeRawSig(h.Context(), rawParams)
+
+	// Assert: Public material is available, but signing remains forbidden.
+	// Rootless kvdb Wallets cannot unlock, so the shared contract ends at
+	// admission rather than requiring a backend-specific secret lookup.
+	require.ErrorIs(h, digestErr, wallet.ErrStateForbidden)
+	require.Nil(h, sig)
+	require.ErrorIs(h, unlockErr, wallet.ErrStateForbidden)
+	require.Nil(h, unlocking)
+	require.ErrorIs(h, rawErr, wallet.ErrStateForbidden)
+	require.Nil(h, rawSig)
+}
+
+// testSignerSignAfterReload verifies persisted key identity remains usable by
+// all public signing methods after the Wallet and its Manager are reopened.
+func testSignerSignAfterReload(h *bwtest.HarnessTest) {
+	// Arrange: Retain the public key, path, and previous output from the
+	// first Wallet generation. These values must still verify the reloaded
+	// signer; consulting only its new metadata could conceal a changed key
+	// identity.
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	keyAddr, err := address.NewAddressPubKeyHash(
+		address.Hash160(info.PubKey.SerializeCompressed()), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	scriptCode, err := txscript.PayToAddrScript(keyAddr)
+	require.NoError(h, err)
+
+	prevOut, tx := createSignerTx(pkScript)
+	rawTx := tx.Copy()
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	path := createSignerPath(info.Derivation)
+	digest := chainhash.HashB([]byte("signer durable digest"))
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+	}
+	rawParams := &wallet.RawSigParams{
+		Tx:        rawTx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
+		Path:      path,
+		Details: wallet.SegwitV0SpendDetails{
+			WitnessScript: scriptCode,
+		},
+	}
+
+	// Act: Cross the actual store-close boundary, unlock the fresh Wallet,
+	// and request all three results using the retained inputs.
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	sig, digestErr := w.SignDigest(
+		h.Context(), path, &wallet.SignDigestIntent{
+			Digest: digest,
+		},
+	)
+	unlocking, unlockErr := w.ComputeUnlockingScript(
+		h.Context(), unlockParams,
+	)
+	rawSig, rawErr := w.ComputeRawSig(h.Context(), rawParams)
+
+	// Assert: Verify the digest against the original public key, not one
+	// obtained after reload. Both spending results must then execute
+	// against the original output independently, without re-signing either
+	// result.
+	require.NoError(h, digestErr)
+	require.NoError(h, unlockErr)
+	require.NoError(h, rawErr)
+
+	ecdsaSig, ok := sig.(wallet.ECDSASignature)
+	require.True(h, ok, "expected ECDSA signature after reload")
+	require.True(h, ecdsaSig.Verify(digest, info.PubKey))
+
+	tx.TxIn[0].Witness = unlocking.Witness
+	tx.TxIn[0].SignatureScript = unlocking.SigScript
+
+	engine, err := txscript.NewEngine(
+		pkScript, tx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+
+	// Raw Segwit signatures need the caller's hash byte and public key. Use
+	// a separate transaction so the unlocking-script result cannot mask it.
+	rawTx.TxIn[0].Witness = wire.TxWitness{
+		append(rawSig, byte(rawParams.HashType)),
+		info.PubKey.SerializeCompressed(),
+	}
+	engine, err = txscript.NewEngine(
+		pkScript, rawTx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
 }

@@ -220,6 +220,66 @@ var allTestCases = []*testCase{
 		Name:     "unsafe signer reject watchonly",
 		TestFunc: testUnsafeSignerRejectWatchOnly,
 	},
+	// Run the same digest-signing contract on every selected backend.
+	{
+		Name:     "signer sign digest ecdsa",
+		TestFunc: testSignerSignDigestECDSA,
+	},
+	{
+		Name:     "signer sign digest compact",
+		TestFunc: testSignerSignDigestCompact,
+	},
+	{
+		Name:     "signer sign digest schnorr",
+		TestFunc: testSignerSignDigestSchnorr,
+	},
+	{
+		Name:     "signer reject digest intent",
+		TestFunc: testSignerRejectDigestIntent,
+	},
+	// Keep output ownership and script verification identical across stores.
+	{
+		Name:     "signer compute unlocking script",
+		TestFunc: testSignerComputeUnlockingScript,
+	},
+	{
+		Name:     "signer reject unlocking script",
+		TestFunc: testSignerRejectUnlockingScript,
+	},
+	// Raw formats share the backend matrix while retaining caller assembly.
+	{
+		Name:     "signer compute raw sig legacy",
+		TestFunc: testSignerComputeRawSigLegacy,
+	},
+	{
+		Name:     "signer compute raw sig segwit",
+		TestFunc: testSignerComputeRawSigSegwit,
+	},
+	{
+		Name:     "signer compute raw sig taproot",
+		TestFunc: testSignerComputeRawSigTaproot,
+	},
+	{
+		Name:     "signer compute raw sig tapscript",
+		TestFunc: testSignerComputeRawSigTapscript,
+	},
+	{
+		Name:     "signer reject raw sig",
+		TestFunc: testSignerRejectRawSig,
+	},
+	// Exercise key availability and durable identity through real Wallets.
+	{
+		Name:     "signer reject locked",
+		TestFunc: testSignerRejectLocked,
+	},
+	{
+		Name:     "signer reject watchonly",
+		TestFunc: testSignerRejectWatchOnly,
+	},
+	{
+		Name:     "signer sign after reload",
+		TestFunc: testSignerSignAfterReload,
+	},
 	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,

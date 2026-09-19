@@ -113,7 +113,8 @@ type Signer interface {
 	// final witness is created. For most common, single-signature spends,
 	// ComputeUnlockingScript should be used instead.
 	//
-	// Nil params, or params with no Details, return ErrNilArguments.
+	// Nil params, missing Details, or a missing Output required by the spend
+	// details return ErrNilArguments.
 	ComputeRawSig(ctx context.Context, params *RawSigParams) (
 		RawSignature, error)
 }
@@ -151,6 +152,9 @@ type BIP32Path struct {
 	KeyScope waddrmgr.KeyScope
 
 	// DerivationPath specifies the full derivation path within the scope.
+	// Wallet interprets InternalAccount as the unhardened BIP44 account
+	// number, not a backend account ID. Account is the hardened BIP32 child;
+	// Branch and Index select the key within that account.
 	DerivationPath waddrmgr.DerivationPath
 }
 
@@ -302,7 +306,8 @@ type RawSigParams struct {
 	// InputIndex is the index of the input to be signed.
 	InputIndex int
 
-	// Output is the previous output that is being spent.
+	// Output is the previous output that is being spent. It is required
+	// except for legacy signing with an explicit RedeemScript.
 	Output *wire.TxOut
 
 	// SigHashes is the sighash cache for the transaction.
@@ -368,6 +373,13 @@ func (l LegacySpendDetails) Sign(params *RawSigParams,
 	// of the output is used.
 	script := l.RedeemScript
 	if script == nil {
+		// P2PKH needs the output script; an explicit redeem script already
+		// supplies the legacy signing preimage without an output.
+		if params.Output == nil {
+			return nil, fmt.Errorf("%w: missing legacy output",
+				ErrNilArguments)
+		}
+
 		script = params.Output.PkScript
 	}
 
@@ -395,6 +407,12 @@ type SegwitV0SpendDetails struct {
 // Sign performs the version-specific signing operation for a SegWit v0 input.
 func (s SegwitV0SpendDetails) Sign(params *RawSigParams,
 	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	// Segwit commits to the previous output value, even when the caller
+	// supplies a witness script. Reject its absence before dereferencing it.
+	if params.Output == nil {
+		return nil, fmt.Errorf("%w: missing segwit output", ErrNilArguments)
+	}
 
 	sig, err := txscript.RawTxInWitnessSignature(
 		params.Tx, params.SigHashes, params.InputIndex,
@@ -435,6 +453,14 @@ type TaprootSpendDetails struct {
 // Sign performs the version-specific signing operation for a Taproot input.
 func (t TaprootSpendDetails) Sign(params *RawSigParams,
 	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	// Both supported Taproot paths commit to the previous output. Keep
+	// unknown-path rejection with the existing dispatch below.
+	if params.Output == nil &&
+		(t.SpendPath == KeyPathSpend || t.SpendPath == ScriptPathSpend) {
+
+		return nil, fmt.Errorf("%w: missing taproot output", ErrNilArguments)
+	}
 
 	var (
 		rawSig []byte
