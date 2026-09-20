@@ -20,6 +20,11 @@ var allTestCases = []*testCase{
 		Name:     "address manager allocate key",
 		TestFunc: testAddressManagerAllocateKey,
 	},
+	// Unused custom-scope children must stay consumed across callers/reload.
+	{
+		Name:     "address manager allocate key concurrent",
+		TestFunc: testAddressManagerAllocateKeyConcurrent,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
