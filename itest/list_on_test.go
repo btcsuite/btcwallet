@@ -20,6 +20,11 @@ var allTestCases = []*testCase{
 		Name:     "address manager allocate batch",
 		TestFunc: testAddressManagerAllocateBatch,
 	},
+	// Invalid counts and excluded accounts must expose no partial mutation.
+	{
+		Name:     "address manager reject sql batch",
+		TestFunc: testAddressManagerRejectSQLBatch,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{

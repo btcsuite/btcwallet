@@ -192,3 +192,122 @@ func testAddressManagerAllocateBatch(h *bwtest.HarnessTest) {
 		})
 	}
 }
+
+// testAddressManagerRejectSQLBatch proves invalid counts precede receiving
+// policy checks and every rejected request leaves public state unchanged.
+func testAddressManagerRejectSQLBatch(h *bwtest.HarnessTest) {
+	// Excluded accounts are SQL-only; kvdb refusal has its own fixture.
+	//nolint:staticcheck // This guard intentionally selects legacy kvdb.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("excluded account batch checks require SQL")
+	}
+
+	// Invalid counts must retain their identity even when the account would
+	// refuse a valid receiving request because chain synchronization is off.
+	tests := []struct {
+		name        string
+		count       uint32
+		noChainSync bool
+		wantErr     error
+	}{
+		{
+			name:    "ordinary zero",
+			count:   0,
+			wantErr: wallet.ErrInvalidParam,
+		},
+		{
+			name:    "ordinary over maximum",
+			count:   wallet.MaxBulkAddressCount + 1,
+			wantErr: wallet.ErrInvalidParam,
+		},
+		{
+			name:        "excluded zero",
+			count:       0,
+			noChainSync: true,
+			wantErr:     wallet.ErrInvalidParam,
+		},
+		{
+			name:        "excluded over maximum",
+			count:       wallet.MaxBulkAddressCount + 1,
+			noChainSync: true,
+			wantErr:     wallet.ErrInvalidParam,
+		},
+		{
+			name:        "excluded valid count",
+			count:       1,
+			noChainSync: true,
+			wantErr:     wallet.ErrAccountOperationUnsupported,
+		},
+	}
+
+	// Row-local harnesses prevent one rejection from masking another's writes.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: exact selection activates either policy through the
+			// same public request shape, with an independently known child.
+			const accountName = "rejected batch account"
+
+			ctx := h.Context()
+			scope := waddrmgr.KeyScopeBIP0084
+			number := wallet.AccountNumber(7)
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+				Scope:         scope,
+				Name:          accountName,
+				AccountNumber: &number,
+				NoChainSync:   tc.noChainSync,
+			})
+			require.NoError(h, err)
+
+			before, err := w.GetAccount(ctx, scope, accountName)
+			require.NoError(h, err)
+			require.Equal(h, tc.noChainSync, before.NoChainSync)
+			require.Zero(h, before.ExternalKeyCount)
+			require.Zero(h, before.InternalKeyCount)
+
+			want := createTestAddressInfos(h, before, false, 1)[0]
+			_, err = w.GetAddressInfo(ctx, want.Addr)
+			require.ErrorIs(h, err, wallet.ErrAddressNotFound)
+
+			listed, err := w.ListAddresses(
+				ctx, accountName, waddrmgr.WitnessPubKey,
+			)
+			require.NoError(h, err)
+			require.Empty(h, listed)
+
+			// Act: submit the count against the persisted receiving policy.
+			batch, err := w.NewBulkAddresses(
+				ctx, wallet.NewAccountSelectorByName(scope, accountName),
+				false, tc.count,
+			)
+
+			// Assert: the stable refusal exposes no partial batch, and direct
+			// reads must prove the account and address set were not mutated.
+			require.ErrorIs(h, err, tc.wantErr)
+			require.Nil(h, batch)
+
+			// Reopening excludes an in-memory-only rollback illusion. No
+			// allocation API is valid for the excluded account postcondition.
+			for _, reopen := range []bool{false, true} {
+				if reopen {
+					w = h.ReloadWallet(w)
+				}
+
+				_, err := w.GetAddressInfo(ctx, want.Addr)
+				require.ErrorIs(h, err, wallet.ErrAddressNotFound)
+
+				listed, err := w.ListAddresses(
+					ctx, accountName, waddrmgr.WitnessPubKey,
+				)
+				require.NoError(h, err)
+				require.Empty(h, listed)
+
+				after, err := w.GetAccount(ctx, scope, accountName)
+				require.NoError(h, err)
+				require.Equal(h, before, after)
+			}
+		})
+	}
+}
