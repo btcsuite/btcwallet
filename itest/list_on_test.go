@@ -15,6 +15,11 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
+	// Key-only allocation must retain ownership without receiving activity.
+	{
+		Name:     "address manager allocate key",
+		TestFunc: testAddressManagerAllocateKey,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
