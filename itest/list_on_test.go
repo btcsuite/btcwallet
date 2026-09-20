@@ -25,6 +25,11 @@ var allTestCases = []*testCase{
 		Name:     "address manager reject sql batch",
 		TestFunc: testAddressManagerRejectSQLBatch,
 	},
+	// Kvdb rejects batches without consuming its count-one allocation cursor.
+	{
+		Name:     "address manager reject kvdb batch",
+		TestFunc: testAddressManagerRejectKVDBBatch,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{

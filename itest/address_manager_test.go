@@ -311,3 +311,110 @@ func testAddressManagerRejectSQLBatch(h *bwtest.HarnessTest) {
 		})
 	}
 }
+
+// testAddressManagerRejectKVDBBatch proves unsupported batches preserve the
+// legacy branch cursor while invalid counts take precedence over capability.
+func testAddressManagerRejectKVDBBatch(h *bwtest.HarnessTest) {
+	// Modern kvdb has no batch mutation; SQL success is covered separately.
+	//nolint:staticcheck // This guard intentionally selects legacy kvdb.
+	if *dbBackend != string(wallet.DBBackendKVDB) {
+		h.Skip("batch capability refusal requires kvdb")
+	}
+
+	// The valid boundary distinguishes capability refusal from validation.
+	tests := []struct {
+		name    string
+		count   uint32
+		wantErr error
+	}{
+		{
+			name:    "zero",
+			count:   0,
+			wantErr: wallet.ErrInvalidParam,
+		},
+		{
+			name:    "over maximum",
+			count:   wallet.MaxBulkAddressCount + 1,
+			wantErr: wallet.ErrInvalidParam,
+		},
+		{
+			name:    "valid count",
+			count:   1,
+			wantErr: wallet.ErrAccountOperationUnsupported,
+		},
+	}
+
+	// A separate database per row makes each cursor postcondition independent.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: snapshot a newly created account through the read API
+			// and derive child zero before submitting any receiving request.
+			const accountName = "rejected batch account"
+
+			ctx := h.Context()
+			scope := waddrmgr.KeyScopeBIP0084
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+				Scope: scope,
+				Name:  accountName,
+			})
+			require.NoError(h, err)
+
+			before, err := w.GetAccount(ctx, scope, accountName)
+			require.NoError(h, err)
+			require.Zero(h, before.ExternalKeyCount)
+			require.Zero(h, before.InternalKeyCount)
+
+			want := createTestAddressInfos(h, before, false, 1)[0]
+			_, err = w.GetAddressInfo(ctx, want.Addr)
+			require.ErrorIs(h, err, wallet.ErrAddressNotFound)
+
+			listed, err := w.ListAddresses(
+				ctx, accountName, waddrmgr.WitnessPubKey,
+			)
+			require.NoError(h, err)
+			require.Empty(h, listed)
+
+			// Act: use the public batch API even though this backend cannot
+			// satisfy its atomic mutation and delivery contract.
+			batch, err := w.NewBulkAddresses(
+				ctx, wallet.NewAccountSelectorByName(scope, accountName),
+				false, tc.count,
+			)
+
+			// Assert: require the error identity and no partial result, then
+			// verify both live and reopened views expose no address change.
+			require.ErrorIs(h, err, tc.wantErr)
+			require.Nil(h, batch)
+
+			for _, reopen := range []bool{false, true} {
+				if reopen {
+					w = h.ReloadWallet(w)
+				}
+
+				_, err := w.GetAddressInfo(ctx, want.Addr)
+				require.ErrorIs(h, err, wallet.ErrAddressNotFound)
+
+				listed, err := w.ListAddresses(
+					ctx, accountName, waddrmgr.WitnessPubKey,
+				)
+				require.NoError(h, err)
+				require.Empty(h, listed)
+
+				after, err := w.GetAccount(ctx, scope, accountName)
+				require.NoError(h, err)
+				require.Equal(h, before, after)
+			}
+
+			// Kvdb still supports count-one allocation. Child zero after
+			// reopen proves rejection did not silently consume its cursor.
+			next, err := w.NewAddress(
+				ctx, accountName, waddrmgr.WitnessPubKey, false,
+			)
+			require.NoError(h, err)
+			require.Equal(h, want.Addr, next)
+		})
+	}
+}
