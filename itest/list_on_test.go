@@ -25,6 +25,11 @@ var allTestCases = []*testCase{
 		Name:     "address manager allocate key concurrent",
 		TestFunc: testAddressManagerAllocateKeyConcurrent,
 	},
+	// Batch delivery must expose complete, durable public address results.
+	{
+		Name:     "address manager allocate batch",
+		TestFunc: testAddressManagerAllocateBatch,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
