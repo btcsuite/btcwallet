@@ -142,10 +142,10 @@ func ownedAddrsResult(scripts ...[]byte) map[string]*db.AddressInfo {
 	return owned
 }
 
-// matchInvalidateUnminedTxParams returns a matcher for Store invalidation
+// matchDeleteUnminedTxParams returns a matcher for Store removal
 // requests.
-func matchInvalidateUnminedTxParams(walletID uint32, txid chainhash.Hash) any {
-	return mock.MatchedBy(func(params db.InvalidateUnminedTxParams) bool {
+func matchDeleteUnminedTxParams(walletID uint32, txid chainhash.Hash) any {
+	return mock.MatchedBy(func(params db.DeleteUnminedTxParams) bool {
 		return params.WalletID == walletID && params.Txid == txid
 	})
 }
@@ -891,7 +891,7 @@ func TestAddTxToWallet(t *testing.T) {
 
 		// A sweep pays no wallet-owned outputs but spends a wallet
 		// UTXO, so it must still be recorded (with an empty credit
-		// set) so it can be tracked and later invalidated.
+		// set) so it can be tracked and later removed.
 		m.store.On("ResolveOwnedAddresses", mock.Anything,
 			matchResolveOwnedAddressesQuery(w.id, ownedScript, unownedScript),
 		).Return(ownedAddrsResult(), nil).Once()
@@ -988,9 +988,9 @@ func mustPayToAddrScript(addr address.Address) []byte {
 	return pkScript
 }
 
-// TestInvalidateUnminedTx tests the invalidateUnminedTx method to ensure it
+// TestDeleteUnminedTx tests the deleteUnminedTx method to ensure it
 // correctly marks a transaction failed in the unconfirmed store.
-func TestInvalidateUnminedTx(t *testing.T) {
+func TestDeleteUnminedTx(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createStartedWalletWithMocks(t)
@@ -1005,12 +1005,12 @@ func TestInvalidateUnminedTx(t *testing.T) {
 
 	txid := tx.TxHash()
 	mocks.store.On(
-		"InvalidateUnminedTx", mock.Anything,
-		matchInvalidateUnminedTxParams(w.id, txid),
+		"DeleteUnminedTx", mock.Anything,
+		matchDeleteUnminedTxParams(w.id, txid),
 	).Return(nil).Once()
 
 	// Call the method under test.
-	err := w.invalidateUnminedTx(t.Context(), tx)
+	err := w.deleteUnminedTx(t.Context(), tx)
 	require.NoError(t, err)
 }
 
@@ -1213,7 +1213,7 @@ func TestBroadcastSuccess(t *testing.T) {
 
 // TestBroadcastAlreadyBroadcastedAtPublish tests that Broadcast treats an
 // already-known or already-confirmed SendRawTransaction error as a successful
-// publish: it returns nil and must not invalidate the recorded tx. This guards
+// publish: it returns nil and must not remove the recorded tx. This guards
 // the path where mempool acceptance is unavailable, so the duplicate is only
 // detected at publish time.
 func TestBroadcastAlreadyBroadcastedAtPublish(t *testing.T) {
@@ -1287,9 +1287,9 @@ func TestBroadcastAlreadyBroadcastedAtPublish(t *testing.T) {
 			err = w.Broadcast(t.Context(), tx, label)
 
 			// The already-broadcast tx must be treated as a
-			// success and kept tracked, never invalidated.
+			// success and kept tracked, never removed.
 			require.NoError(t, err)
-			m.store.AssertNotCalled(t, "InvalidateUnminedTx",
+			m.store.AssertNotCalled(t, "DeleteUnminedTx",
 				mock.Anything, mock.Anything)
 		})
 	}
@@ -1359,18 +1359,18 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, errPublish)
 
-	m.store.On("InvalidateUnminedTx", mock.Anything,
-		matchInvalidateUnminedTxParams(w.id, tx.TxHash()),
+	m.store.On("DeleteUnminedTx", mock.Anything,
+		matchDeleteUnminedTxParams(w.id, tx.TxHash()),
 	).Return(nil).Once()
 
 	err = w.Broadcast(t.Context(), tx, label)
 	require.ErrorIs(t, err, errPublish)
 }
 
-// TestBroadcastSweepPublishFailsInvalidateSucceeds tests that a sweep tx (no
+// TestBroadcastSweepPublishFailsRemoveSucceeds tests that a sweep tx (no
 // owned outputs but an owned input) is recorded, and that when publishing fails
-// the recorded tx is invalidated rather than hitting ErrTxNotFound.
-func TestBroadcastSweepPublishFailsInvalidateSucceeds(t *testing.T) {
+// the recorded tx is removed rather than hitting ErrTxNotFound.
+func TestBroadcastSweepPublishFailsRemoveSucceeds(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
@@ -1422,21 +1422,21 @@ func TestBroadcastSweepPublishFailsInvalidateSucceeds(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, errPublish)
 
-	// The recorded sweep can be invalidated because a row exists.
-	m.store.On("InvalidateUnminedTx", mock.Anything,
-		matchInvalidateUnminedTxParams(w.id, tx.TxHash()),
+	// The recorded sweep can be removed because a row exists.
+	m.store.On("DeleteUnminedTx", mock.Anything,
+		matchDeleteUnminedTxParams(w.id, tx.TxHash()),
 	).Return(nil).Once()
 
 	err = w.Broadcast(t.Context(), tx, label)
 	require.ErrorIs(t, err, errPublish)
 }
 
-// TestBroadcastUnrelatedPublishFailsNoInvalidate tests that when a
+// TestBroadcastUnrelatedPublishFailsNoRemove tests that when a
 // wallet-unrelated tx (no owned outputs and no owned inputs) fails to publish,
-// Broadcast does not attempt to invalidate it and returns the original publish
-// error unchanged. Invalidating a never-recorded tx would surface
+// Broadcast does not attempt to remove it and returns the original publish
+// error unchanged. Removing a never-recorded tx would surface
 // db.ErrTxNotFound and clobber the real broadcast error.
-func TestBroadcastUnrelatedPublishFailsNoInvalidate(t *testing.T) {
+func TestBroadcastUnrelatedPublishFailsNoRemove(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
@@ -1490,7 +1490,7 @@ func TestBroadcastUnrelatedPublishFailsNoInvalidate(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, errPublish)
 
-	// We deliberately register no InvalidateUnminedTx expectation: it must
+	// We deliberately register no DeleteUnminedTx expectation: it must
 	// not be called for a never-recorded tx.
 
 	err = w.Broadcast(t.Context(), tx, label)
@@ -1500,8 +1500,8 @@ func TestBroadcastUnrelatedPublishFailsNoInvalidate(t *testing.T) {
 	require.ErrorIs(t, err, errPublish)
 	require.NotErrorIs(t, err, db.ErrTxNotFound)
 
-	// No invalidation must have been attempted for the unrecorded tx.
-	m.store.AssertNotCalled(t, "InvalidateUnminedTx", mock.Anything,
+	// No removal must have been attempted for the unrecorded tx.
+	m.store.AssertNotCalled(t, "DeleteUnminedTx", mock.Anything,
 		mock.Anything)
 }
 
@@ -1548,8 +1548,8 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, errPublish)
 
-	m.store.On("InvalidateUnminedTx", mock.Anything,
-		matchInvalidateUnminedTxParams(w.id, tx.TxHash()),
+	m.store.On("DeleteUnminedTx", mock.Anything,
+		matchDeleteUnminedTxParams(w.id, tx.TxHash()),
 	).Return(errRemove).Once()
 
 	err = w.Broadcast(t.Context(), tx, label)
@@ -1571,13 +1571,11 @@ func TestBroadcastNilTx(t *testing.T) {
 }
 
 // TestBroadcastRetryRetainedInvalidDoesNotPublish verifies the retained-invalid
-// guard added in "wallet: route tx recording and ownership filtering through
-// store": when a prior Broadcast recorded a tx, its publish failed, and cleanup
-// invalidated the row, a later retry with the same tx hash hits
-// ErrTxAlreadyExists in CreateTx. Because the only stored row is now in a
-// terminal failed state, Broadcast must refuse to report the record step a
-// success and must NOT publish the tx. The store's retained failed row is the
-// source of truth; SendRawTransaction is never reached.
+// guard: when the stored row for a tx hash is terminal, left by conflict
+// handling or a reorg, a retry hits ErrTxAlreadyExists in CreateTx and
+// Broadcast must refuse to report the record step a success and must NOT
+// publish the tx. The retained row is the source of truth;
+// SendRawTransaction is never reached.
 func TestBroadcastRetryRetainedInvalidDoesNotPublish(t *testing.T) {
 	t.Parallel()
 
@@ -1618,8 +1616,8 @@ func TestBroadcastRetryRetainedInvalidDoesNotPublish(t *testing.T) {
 		}),
 	).Return(db.ErrTxAlreadyExists).Once()
 
-	// The retained row was invalidated by the prior cleanup and is now
-	// failed, so the record step must refuse the duplicate.
+	// The retained row is terminal, so the record step must refuse the
+	// duplicate.
 	m.store.On("GetTx", mock.Anything,
 		db.GetTxQuery{WalletID: w.id, Txid: txid},
 	).Return(&db.TxInfo{Hash: txid, Status: db.TxStatusFailed}, nil).Once()

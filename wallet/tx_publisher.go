@@ -213,11 +213,11 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// First, we'll attempt to add the tx to our wallet's DB. This will
 	// allow us to track the tx's confirmation status, and also
 	// re-broadcast it upon startup. If any of the subsequent steps fail,
-	// this tx is invalidated via InvalidateUnminedTx.
+	// this tx is removed via DeleteUnminedTx.
 	//
 	// recorded reports whether a tx row was actually written; it gates the
-	// invalidation below so a wallet-unrelated tx (never recorded) is not
-	// invalidated, which would clobber the publish error with ErrTxNotFound.
+	// removal below so a wallet-unrelated tx (never recorded) is not
+	// removed, which would clobber the publish error with ErrTxNotFound.
 	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
 	if err != nil {
 		r.respErrChan <- err
@@ -226,7 +226,7 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	}
 
 	// Now, we'll attempt to publish the tx. On successful attempt, we
-	// return immediately. On any failures, we invalidate it in the tx store
+	// return immediately. On any failures, we remove it from the tx store
 	// to prevent subsequent attempts with stale transaction data.
 	err = w.publishTx(r.tx, ourAddrs)
 	if err == nil {
@@ -239,7 +239,7 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	log.Errorf("%v: broadcast failed: %v", txid, err)
 
 	// If we never recorded this tx (it is wallet-unrelated), there is
-	// nothing to invalidate, so we return the original publish error as-is
+	// nothing to remove, so we return the original publish error as-is
 	// rather than overwriting it with cleanup context.
 	if !recorded {
 		r.respErrChan <- err
@@ -247,17 +247,17 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		return
 	}
 
-	// If the tx was rejected for any other reason, then we'll invalidate it
-	// from the tx store, as otherwise, we'll attempt to continually
-	// re-broadcast it, and the UTXO state of the wallet won't be accurate.
-	removeErr := w.invalidateUnminedTx(r.ctx, r.tx)
+	// If the tx was rejected for any other reason, then we'll remove it from
+	// the tx store, as otherwise, we'll attempt to continually re-broadcast
+	// it, and the UTXO state of the wallet won't be accurate.
+	removeErr := w.deleteUnminedTx(r.ctx, r.tx)
 	if removeErr != nil {
-		log.Warnf("Unable to invalidate tx %v after broadcast failed: %v",
+		log.Warnf("Unable to remove tx %v after broadcast failed: %v",
 			txid, removeErr)
 
 		// Return a wrapped error to give the caller full context.
 		r.respErrChan <- fmt.Errorf("broadcast failed: %w; and failed to "+
-			"invalidate in wallet: %v", err, removeErr)
+			"remove from wallet: %v", err, removeErr)
 
 		return
 	}
@@ -392,7 +392,7 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 
 	// If the transaction has no outputs relevant to us, it may still be a
 	// sweep that spends our own coins. We check the input side before
-	// giving up so the tx is still tracked (and can later be invalidated).
+	// giving up so the tx is still tracked (and can later be removed).
 	if len(ownedAddrs) == 0 {
 		spendsOurs, err := w.spendsWalletOutput(ctx, tx)
 		if err != nil {
@@ -401,7 +401,7 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 
 		// Neither outputs nor inputs are wallet-relevant, so we can
 		// safely exit without recording anything. recorded is false so
-		// the caller does not invalidate a tx that was never written.
+		// the caller does not remove a tx that was never written.
 		if !spendsOurs {
 			return nil, false, nil
 		}
@@ -508,16 +508,12 @@ func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
 }
 
 // handleExistingTx reconciles a record-before-publish duplicate for txHash
-// against the stored row's status. Failed and replaced rows are now RETAINED
-// (not deleted) by InvalidateUnminedTx, so a hash collision here no longer
-// implies the stored row is still a live, tracked transaction. If a prior
-// Broadcast recorded this tx, publishTx failed, and cleanup invalidated the row
-// (now TxStatusFailed/TxStatusReplaced, with its wallet-owned spend edges
-// already cleared), treating the duplicate as an idempotent success would let
-// the caller publish a tx whose only stored row is invalid and untracked,
-// leaving the live tx unrebroadcast and its spend edges unclaimed. The
-// record-before-publish step is therefore authoritative: only treat the
-// duplicate as success when the row is still live for the publish flow.
+// against the stored row's status. Publication cleanup removes its rows, so a
+// duplicate here is normally a live, tracked tx. A terminal row can still
+// exist, left by conflict handling or a reorg, and reviving it would need the
+// spend edges those events cleared to be re-claimed as a graph-affecting
+// lifecycle change. Only treat the duplicate as success when the row is still
+// live for the publish flow.
 func (w *Wallet) handleExistingTx(ctx context.Context, txHash chainhash.Hash,
 	label string) error {
 
@@ -530,9 +526,9 @@ func (w *Wallet) handleExistingTx(ctx context.Context, txHash chainhash.Hash,
 	}
 
 	// A retained-invalid row cannot be safely revived through this path: the
-	// spend edges InvalidateUnminedTx cleared would need to be re-claimed as a
-	// graph-affecting lifecycle change. Return a clear error before publishing
-	// against a stale, untracked row.
+	// spend edges its invalidating event cleared would need to be re-claimed
+	// as a graph-affecting lifecycle change. Return a clear error before
+	// publishing against a stale, untracked row.
 	if !db.IsUnminedStatus(existing.Status) {
 		return fmt.Errorf("%w: tx %v exists with status %v",
 			ErrTxRetainedInvalid, txHash, existing.Status)
@@ -818,7 +814,7 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 		// The tx is already known, confirmed, or in the mempool, so it
 		// was accepted by the network. Treat this as a successful
 		// publish so the recorded tx keeps being tracked rather than
-		// invalidated by the caller.
+		// removed by the caller.
 		log.Infof("%v: tx already known/confirmed/in mempool", txid)
 
 		return nil
@@ -830,24 +826,26 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	}
 }
 
-// invalidateUnminedTx marks a tx as failed in the unconfirmed store.
-func (w *Wallet) invalidateUnminedTx(ctx context.Context,
+// deleteUnminedTx removes a tx and its recorded descendants from the
+// unconfirmed store. A publication error does not prove the tx can never
+// confirm, so cleanup leaves no history the chain would later contradict.
+func (w *Wallet) deleteUnminedTx(ctx context.Context,
 	tx *wire.MsgTx) error {
 
 	txHash := tx.TxHash()
 
-	dbErr := w.store.InvalidateUnminedTx(ctx, db.InvalidateUnminedTxParams{
+	dbErr := w.store.DeleteUnminedTx(ctx, db.DeleteUnminedTxParams{
 		WalletID: w.id,
 		Txid:     txHash,
 	})
 	if dbErr != nil {
-		log.Warnf("Unable to invalidate invalid tx %v: %v", txHash,
+		log.Warnf("Unable to remove invalid tx %v: %v", txHash,
 			dbErr)
 
 		return dbErr
 	}
 
-	log.Infof("Invalidated invalid tx: %v", txHash)
+	log.Infof("Removed invalid tx: %v", txHash)
 
 	// The serialized tx is for logging only, don't fail on the error.
 	var txRaw bytes.Buffer
@@ -857,12 +855,12 @@ func (w *Wallet) invalidateUnminedTx(ctx context.Context,
 	// Optionally log the tx in debug when the size is manageable.
 	const maxTxSizeForLog = 1_000_000
 	if txRaw.Len() < maxTxSizeForLog {
-		log.Debugf("Invalidated invalid tx: %v \n hex=%x",
+		log.Debugf("Removed invalid tx: %v \n hex=%x",
 			newLogClosure(func() string {
 				return spew.Sdump(tx)
 			}), txRaw.Bytes())
 	} else {
-		log.Debugf("Invalidated invalid tx %v due to its size "+
+		log.Debugf("Removed invalid tx %v due to its size "+
 			"being too large", txHash)
 	}
 
