@@ -36,6 +36,54 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerCreateWatchOnly,
 	},
 	{
+		Name:     "account manager query list spendable",
+		TestFunc: testAccountManagerQueryListSpendable,
+	},
+	{
+		Name:     "account manager query list watchonly",
+		TestFunc: testAccountManagerQueryListWatchOnly,
+	},
+	{
+		Name:     "account manager query scope spendable",
+		TestFunc: testAccountManagerQueryScopeSpendable,
+	},
+	{
+		Name:     "account manager query scope watchonly",
+		TestFunc: testAccountManagerQueryScopeWatchOnly,
+	},
+	{
+		Name:     "account manager query name spendable",
+		TestFunc: testAccountManagerQueryNameSpendable,
+	},
+	{
+		Name:     "account manager query name watchonly",
+		TestFunc: testAccountManagerQueryNameWatchOnly,
+	},
+	{
+		Name:     "account manager query get spendable",
+		TestFunc: testAccountManagerQueryGetSpendable,
+	},
+	{
+		Name:     "account manager query get watchonly",
+		TestFunc: testAccountManagerQueryGetWatchOnly,
+	},
+	{
+		Name:     "account manager query list empty",
+		TestFunc: testAccountManagerQueryListEmpty,
+	},
+	{
+		Name:     "account manager query missing name",
+		TestFunc: testAccountManagerQueryMissingName,
+	},
+	{
+		Name:     "account manager query missing scope",
+		TestFunc: testAccountManagerQueryMissingScope,
+	},
+	{
+		Name:     "account manager query missing account",
+		TestFunc: testAccountManagerQueryMissingAccount,
+	},
+	{
 		Name:     "account manager create account",
 		TestFunc: testAccountManagerCreateAccount,
 	},
