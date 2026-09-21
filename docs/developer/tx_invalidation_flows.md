@@ -1,5 +1,3 @@
-| `InvalidateUnminedTx` | `failed` | `failed` | Publisher-side cleanup rejects one local unmined branch. |
-| `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed tx it knows will never confirm. |
 # Transaction Invalidation Flows
 
 This document defines how the SQL wallet store applies invalidation-related
@@ -121,6 +119,7 @@ depends on which wallet event started the flow.
 | Wallet event | Root outcome | Descendant outcome | Example |
 | --- | --- | --- | --- |
 | `InvalidateUnminedTx` | `failed` | `failed` | Publisher-side cleanup rejects one local unmined branch. |
+| `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed tx it knows will never confirm. |
 | `CreateTx` conflict handling | direct conflict roots become `replaced` | dependent descendants become `failed` | A newly confirmed winner claims wallet-owned inputs already spent by an unmined branch. |
 | `RollbackToBlock` | disconnected coinbase roots become `orphaned` | dependent descendants become `failed` | A reorg disconnects the confirming block for the root branch. |
 
