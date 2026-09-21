@@ -18,10 +18,11 @@ From the wallet's point of view, a small set of events can change tx history:
   confirmed tx.
 - row-local metadata patching, e.g. when `UpdateTx` changes a label or
   block/status fields without rewriting graph edges.
-- invalidation of an unmined branch, e.g. when publisher-side cleanup fails
-  one local spend and its dependent descendants.
-- removal of an unmined branch, e.g. when a caller drops a local spend and its
-  dependent descendants.
+- invalidation of an unmined branch, e.g. when a confirmed conflict or a reorg
+  invalidates one local spend and its dependent descendants.
+- removal of an unmined branch, e.g. when a caller drops a local spend, or
+  publication cleanup drops one it could not publish, with its dependent
+  descendants.
 - rollback of confirmed history at a block boundary, e.g. when a reorg
   disconnects blocks and rewinds formerly confirmed wallet history.
 
@@ -118,8 +119,8 @@ depends on which wallet event started the flow.
 
 | Wallet event | Root outcome | Descendant outcome | Example |
 | --- | --- | --- | --- |
-| `InvalidateUnminedTx` | `failed` | `failed` | Publisher-side cleanup rejects one local unmined branch. |
-| `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed tx it knows will never confirm. |
+| `InvalidateUnminedTx` | `failed` | `failed` | The wallet has evidence one local unmined branch is invalid. |
+| `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed tx, or publication cleanup drops one it could not publish. |
 | `CreateTx` conflict handling | direct conflict roots become `replaced` | dependent descendants become `failed` | A newly confirmed winner claims wallet-owned inputs already spent by an unmined branch. |
 | `RollbackToBlock` | disconnected coinbase roots become `orphaned` | dependent descendants become `failed` | A reorg disconnects the confirming block for the root branch. |
 
