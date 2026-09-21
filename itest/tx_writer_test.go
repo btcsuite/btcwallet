@@ -487,8 +487,9 @@ func testDeleteUnconfirmedTxRejectsUnknown(h *bwtest.HarnessTest) {
 	)
 }
 
-// testDeleteUnconfirmedTxRediscovery verifies that when the chain confirms a
-// removed transaction after all, synchronization records it again.
+// testDeleteUnconfirmedTxRediscovery verifies that removing a branch survives
+// a wallet reload, and that when the chain confirms the removed transactions
+// after all, synchronization records them again.
 func testDeleteUnconfirmedTxRediscovery(h *bwtest.HarnessTest) {
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txWriterFundingType,
@@ -503,7 +504,7 @@ func testDeleteUnconfirmedTxRediscovery(h *bwtest.HarnessTest) {
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(h, err, "failed to create payment pkscript")
 
-	tx := h.SignSpend(w, bwtest.SpendFixture{
+	root := h.SignSpend(w, bwtest.SpendFixture{
 		Inputs: []wire.OutPoint{spent},
 		Outputs: []wire.TxOut{{
 			Value:    oneBTC - spendFee,
@@ -511,39 +512,75 @@ func testDeleteUnconfirmedTxRediscovery(h *bwtest.HarnessTest) {
 		}},
 	})
 
-	err = w.Broadcast(h.Context(), tx, "")
-	require.NoError(h, err, "failed to broadcast transaction")
+	err = w.Broadcast(h.Context(), root, "")
+	require.NoError(h, err, "failed to broadcast the root transaction")
 
-	txid := tx.TxHash()
+	rootTxid := root.TxHash()
 
-	err = w.DeleteUnconfirmedTx(h.Context(), txid)
-	require.NoError(h, err, "failed to remove the unconfirmed transaction")
+	const childValue = oneBTC - 2*spendFee
 
-	_, err = w.GetTx(h.Context(), txid)
-	require.ErrorIs(
-		h, err, wallet.ErrTxNotFound, "removed transaction is still recorded",
-	)
+	// The child spends the root's unconfirmed output, so removing the root
+	// takes the child with it.
+	child := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{{Hash: rootTxid, Index: 0}},
+		Outputs: []wire.TxOut{{
+			Value:    childValue,
+			PkScript: pkScript,
+		}},
+	})
 
-	// The network never agreed to forget it, so it confirms as usual.
-	h.MineBlockWithTx(tx)
+	err = w.Broadcast(h.Context(), child, "")
+	require.NoError(h, err, "failed to broadcast the child transaction")
 
-	// The wallet records it again from the chain, with its block.
-	recovered, err := w.GetTx(h.Context(), txid)
-	require.NoError(h, err, "confirmed transaction was not recorded again")
-	require.NotNil(h, recovered.Block, "recovered transaction has no block")
-	require.Equal(
-		h, int32(1), recovered.Confirmations,
-		"recovered transaction reports unexpected confirmations",
-	)
+	childTxid := child.TxHash()
+	branch := []chainhash.Hash{rootTxid, childTxid}
 
-	// Its coins are in the wallet's view again.
+	err = w.DeleteUnconfirmedTx(h.Context(), rootTxid)
+	require.NoError(h, err, "failed to remove the unconfirmed branch")
+
+	for _, txid := range branch {
+		_, err = w.GetTx(h.Context(), txid)
+		require.ErrorIs(
+			h, err, wallet.ErrTxNotFound,
+			"removed transaction is still recorded",
+		)
+	}
+
+	// Reopen the wallet so rediscovery runs on a freshly started one.
+	w = h.ReloadWallet(w)
+
+	// The network never agreed to forget them, so both confirm as usual.
+	h.MineBlocksAndAssertNumTxns(1, 2)
+
+	// The wallet records both again from the chain, with their block.
+	for _, txid := range branch {
+		recovered, err := w.GetTx(h.Context(), txid)
+		require.NoError(
+			h, err, "confirmed transaction was not recorded again",
+		)
+		require.NotNil(
+			h, recovered.Block, "recovered transaction has no block",
+		)
+		require.Equal(
+			h, int32(1), recovered.Confirmations,
+			"recovered transaction reports unexpected confirmations",
+		)
+	}
+
+	// The input the branch spent is claimed again.
 	_, err = w.GetUtxo(h.Context(), spent)
 	require.ErrorIs(
 		h, err, wallet.ErrUnknownOutput,
-		"recovered transaction did not reclaim its input",
+		"recovered branch did not reclaim its input",
 	)
 
-	created, err := w.GetUtxo(h.Context(), wire.OutPoint{Hash: txid, Index: 0})
+	// The coin the branch tip created is back in the wallet's view.
+	created, err := w.GetUtxo(h.Context(), wire.OutPoint{
+		Hash: childTxid, Index: 0,
+	})
 	require.NoError(h, err, "recovered output is not a wallet coin")
-	require.True(h, created.Spendable, "recovered output is not spendable")
+	require.Equal(
+		h, btcutil.Amount(childValue), created.Amount,
+		"recovered output has an unexpected value",
+	)
 }
