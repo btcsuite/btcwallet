@@ -83,7 +83,7 @@ func TestDeleteUnminedTxWithOps(t *testing.T) {
 	ops := &mockDeleteUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("LoadInvalidateTarget", mock.Anything, uint32(7), rootHash).Return(
+	ops.On("LoadUnminedTxTarget", mock.Anything, uint32(7), rootHash).Return(
 		UnminedTxTarget{
 			ID:     1,
 			TxHash: rootHash,
@@ -148,7 +148,7 @@ func TestDeleteUnminedTxWithOpsRejectsConfirmed(t *testing.T) {
 	ops := &mockDeleteUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("LoadInvalidateTarget", mock.Anything, uint32(9), rootHash).Return(
+	ops.On("LoadUnminedTxTarget", mock.Anything, uint32(9), rootHash).Return(
 		UnminedTxTarget{
 			ID:       5,
 			TxHash:   rootHash,
@@ -177,7 +177,7 @@ func TestDeleteUnminedTxWithOpsMissingRow(t *testing.T) {
 	ops := &mockDeleteUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("LoadInvalidateTarget", mock.Anything, uint32(3), rootHash).Return(
+	ops.On("LoadUnminedTxTarget", mock.Anything, uint32(3), rootHash).Return(
 		UnminedTxTarget{
 			ID:     8,
 			TxHash: rootHash,

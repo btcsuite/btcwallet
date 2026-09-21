@@ -18,18 +18,7 @@ type UnminedTxTarget = InvalidateUnminedTxTarget
 // workflow needs. Discovery is shared with the invalidation workflow and row
 // removal with the leaf DeleteTx flow.
 type DeleteUnminedTxOps interface {
-	// LoadInvalidateTarget loads the wallet-scoped root tx metadata.
-	LoadInvalidateTarget(ctx context.Context, walletID uint32,
-		txHash chainhash.Hash) (UnminedTxTarget, error)
-
-	// ListUnminedTxRecords loads the wallet's active unmined transaction rows
-	// in the normalized shape the descendant walk expects.
-	ListUnminedTxRecords(ctx context.Context, walletID int64) (
-		[]UnminedTxRecord, error)
-
-	// ClearSpentUtxos restores any wallet-owned parent outputs spent by the
-	// given transaction row.
-	ClearSpentUtxos(ctx context.Context, walletID int64, txID int64) error
+	UnminedBranchOps
 
 	// DeleteCreatedUtxos removes the wallet-owned outputs the given
 	// transaction row created.
@@ -47,7 +36,7 @@ type DeleteUnminedTxOps interface {
 func DeleteUnminedTxWithOps(ctx context.Context, params DeleteUnminedTxParams,
 	ops DeleteUnminedTxOps) error {
 
-	target, err := ops.LoadInvalidateTarget(ctx, params.WalletID, params.Txid)
+	target, err := ops.LoadUnminedTxTarget(ctx, params.WalletID, params.Txid)
 	if err != nil {
 		return fmt.Errorf("load delete tx target: %w", err)
 	}

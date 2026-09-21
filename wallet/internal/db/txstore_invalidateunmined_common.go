@@ -14,10 +14,10 @@ var (
 	ErrInvalidateTx = errors.New("invalidate tx")
 )
 
-// InvalidateUnminedTxTarget is the normalized metadata the shared invalidation
-// workflow needs for the root transaction.
+// InvalidateUnminedTxTarget is the normalized metadata the shared unmined
+// branch workflows need for the root transaction.
 type InvalidateUnminedTxTarget struct {
-	// ID is the backend row ID for the transaction being invalidated.
+	// ID is the backend row ID for the root transaction.
 	ID int64
 
 	// TxHash is the network transaction hash used for descendant discovery.
@@ -33,8 +33,26 @@ type InvalidateUnminedTxTarget struct {
 	IsCoinbase bool
 }
 
+// UnminedBranchOps is the branch discovery the unmined branch workflows share:
+// it loads the requested root, loads the rows the descendant walk considers,
+// and clears one row's wallet-owned spend edges.
+type UnminedBranchOps interface {
+	// LoadUnminedTxTarget loads the wallet-scoped root tx metadata.
+	LoadUnminedTxTarget(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) (UnminedTxTarget, error)
+
+	// ListUnminedTxRecords loads the wallet's active unmined transaction rows
+	// in the normalized shape the descendant walk expects.
+	ListUnminedTxRecords(ctx context.Context, walletID int64) (
+		[]UnminedTxRecord, error)
+
+	// ClearSpentUtxos restores any wallet-owned parent outputs spent by the
+	// given transaction row.
+	ClearSpentUtxos(ctx context.Context, walletID int64, txID int64) error
+}
+
 // InvalidateUnminedTxOps is the small backend adapter the shared
-// InvalidateUnminedTx workflow needs.
+// InvalidateUnminedTx workflow needs on top of branch discovery.
 //
 // The shared invalidation algorithm is intentionally ordered:
 //   - load and validate the requested root transaction first
@@ -50,19 +68,7 @@ type InvalidateUnminedTxTarget struct {
 // fails. The backend adapters only supply query wiring and row-shape
 // conversions.
 type InvalidateUnminedTxOps interface {
-	// LoadInvalidateTarget loads the wallet-scoped root tx metadata.
-	LoadInvalidateTarget(ctx context.Context, walletID uint32,
-		txHash chainhash.Hash) (
-		InvalidateUnminedTxTarget, error)
-
-	// ListUnminedTxRecords loads the wallet's active unmined transaction rows
-	// in the normalized shape the descendant walk expects.
-	ListUnminedTxRecords(ctx context.Context, walletID int64) (
-		[]UnminedTxRecord, error)
-
-	// ClearSpentUtxos restores any wallet-owned parent outputs spent by the
-	// given transaction row.
-	ClearSpentUtxos(ctx context.Context, walletID int64, txID int64) error
+	UnminedBranchOps
 
 	// MarkTxnsFailed batch-marks the provided tx rows as failed.
 	MarkTxnsFailed(ctx context.Context, walletID int64, txIDs []int64) error
@@ -101,7 +107,7 @@ func validateUnminedTxTarget(target InvalidateUnminedTxTarget,
 func InvalidateUnminedTxWithOps(ctx context.Context,
 	params InvalidateUnminedTxParams, ops InvalidateUnminedTxOps) error {
 
-	target, err := ops.LoadInvalidateTarget(ctx, params.WalletID, params.Txid)
+	target, err := ops.LoadUnminedTxTarget(ctx, params.WalletID, params.Txid)
 	if err != nil {
 		return fmt.Errorf("load invalidate tx target: %w", err)
 	}

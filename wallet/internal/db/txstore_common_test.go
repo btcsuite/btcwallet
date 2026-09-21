@@ -1154,8 +1154,8 @@ func (m *mockCreateTxOps) ListConflictTxns(ctx context.Context,
 	return txIDs, hashes, args.Error(2)
 }
 
-// LoadInvalidateTarget implements InvalidateUnminedTxOps.
-func (m *mockCreateTxOps) LoadInvalidateTarget(ctx context.Context,
+// LoadUnminedTxTarget implements UnminedBranchOps.
+func (m *mockCreateTxOps) LoadUnminedTxTarget(ctx context.Context,
 	walletID uint32,
 	txHash chainhash.Hash) (InvalidateUnminedTxTarget, error) {
 
@@ -1168,7 +1168,7 @@ func (m *mockCreateTxOps) LoadInvalidateTarget(ctx context.Context,
 
 	target, ok := args.Get(0).(InvalidateUnminedTxTarget)
 	if !ok {
-		return zeroTarget, mockTypeError("LoadInvalidateTarget result")
+		return zeroTarget, mockTypeError("LoadUnminedTxTarget result")
 	}
 
 	return target, args.Error(1)

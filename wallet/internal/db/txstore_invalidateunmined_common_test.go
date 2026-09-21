@@ -14,8 +14,8 @@ import (
 var (
 	errInvalidateCommonTest = errors.New("invalidate common test")
 
-	errInvalidateMockLoadInvalidateTargetType = errors.New(
-		"LoadInvalidateTarget result is not InvalidateUnminedTxTarget",
+	errInvalidateMockLoadTargetType = errors.New(
+		"LoadUnminedTxTarget result is not UnminedTxTarget",
 	)
 
 	errInvalidateMockListUnminedType = errors.New(
@@ -29,8 +29,8 @@ type mockInvalidateUnminedTxOps struct {
 	mock.Mock
 }
 
-// LoadInvalidateTarget implements InvalidateUnminedTxOps.
-func (m *mockInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
+// LoadUnminedTxTarget implements UnminedBranchOps.
+func (m *mockInvalidateUnminedTxOps) LoadUnminedTxTarget(ctx context.Context,
 	walletID uint32,
 	txHash chainhash.Hash) (InvalidateUnminedTxTarget, error) {
 
@@ -42,7 +42,7 @@ func (m *mockInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	target, ok := args.Get(0).(InvalidateUnminedTxTarget)
 	if !ok {
 		return InvalidateUnminedTxTarget{},
-			errInvalidateMockLoadInvalidateTargetType
+			errInvalidateMockLoadTargetType
 	}
 
 	return target, args.Error(1)
@@ -188,7 +188,7 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 	ops := &mockInvalidateUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("LoadInvalidateTarget", mock.Anything, uint32(7), rootHash).Return(
+	ops.On("LoadUnminedTxTarget", mock.Anything, uint32(7), rootHash).Return(
 		InvalidateUnminedTxTarget{
 			ID:     1,
 			TxHash: rootHash,
@@ -256,7 +256,7 @@ func TestInvalidateUnminedTxWithOpsNoDescendants(t *testing.T) {
 	ops := &mockInvalidateUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("LoadInvalidateTarget",
+	ops.On("LoadUnminedTxTarget",
 		mock.Anything, uint32(8), chainhash.Hash{9},
 	).Return(
 		InvalidateUnminedTxTarget{
@@ -305,7 +305,7 @@ func TestInvalidateUnminedTxWithOpsErrors(t *testing.T) {
 		ops := &mockInvalidateUnminedTxOps{}
 		t.Cleanup(func() { ops.AssertExpectations(t) })
 
-		ops.On("LoadInvalidateTarget",
+		ops.On("LoadUnminedTxTarget",
 			mock.Anything, uint32(8), chainhash.Hash{1}).Return(
 			nil, errInvalidateCommonTest).Once()
 
@@ -327,7 +327,7 @@ func TestInvalidateUnminedTxWithOpsErrors(t *testing.T) {
 		ops := &mockInvalidateUnminedTxOps{}
 		t.Cleanup(func() { ops.AssertExpectations(t) })
 
-		ops.On("LoadInvalidateTarget",
+		ops.On("LoadUnminedTxTarget",
 			mock.Anything, uint32(8), chainhash.Hash{2}).Return(
 			InvalidateUnminedTxTarget{
 				ID:     5,
