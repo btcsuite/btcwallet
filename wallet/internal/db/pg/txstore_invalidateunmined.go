@@ -31,11 +31,11 @@ type invalidateUnminedTxOps struct {
 
 var _ db.InvalidateUnminedTxOps = (*invalidateUnminedTxOps)(nil)
 
-// LoadInvalidateTarget loads the root tx metadata used by the shared
-// invalidation workflow.
-func (o invalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
+// LoadUnminedTxTarget loads the root tx metadata used by the shared unmined
+// branch workflows.
+func (o invalidateUnminedTxOps) LoadUnminedTxTarget(ctx context.Context,
 	walletID uint32,
-	txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
+	txHash chainhash.Hash) (db.UnminedTxTarget, error) {
 
 	row, err := o.qtx.GetTransactionMetaByHash(
 		ctx, sqlc.GetTransactionMetaByHashParams{
@@ -45,21 +45,21 @@ func (o invalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return db.InvalidateUnminedTxTarget{}, fmt.Errorf(
+			return db.UnminedTxTarget{}, fmt.Errorf(
 				"tx %s: %w", txHash, db.ErrTxNotFound,
 			)
 		}
 
-		return db.InvalidateUnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
+		return db.UnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
 			err)
 	}
 
 	status, err := db.ParseTxStatus(int64(row.TxStatus))
 	if err != nil {
-		return db.InvalidateUnminedTxTarget{}, err
+		return db.UnminedTxTarget{}, err
 	}
 
-	return db.InvalidateUnminedTxTarget{
+	return db.UnminedTxTarget{
 		ID:         row.ID,
 		TxHash:     txHash,
 		Status:     status,
