@@ -491,11 +491,11 @@ type TxStore interface {
 	// InvalidateUnminedTx invalidates one unmined transaction branch as a
 	// single atomic wallet event.
 	//
-	// This method is intended for system-driven cleanup when a wallet-owned
-	// unmined transaction is no longer valid, for example after publisher-side
-	// rejection or conflict handling. Implementations must invalidate the root
-	// transaction and reconcile any dependent descendant state inside one
-	// database transaction.
+	// This method is intended for system-driven cleanup when the wallet has
+	// authoritative evidence a wallet-owned unmined transaction is no longer
+	// valid, which today only conflict handling and rollback produce.
+	// Implementations must invalidate the root transaction and reconcile any
+	// dependent descendant state inside one database transaction.
 	InvalidateUnminedTx(ctx context.Context,
 		params InvalidateUnminedTxParams) error
 
