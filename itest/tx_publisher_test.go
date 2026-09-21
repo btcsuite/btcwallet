@@ -387,17 +387,18 @@ func testBroadcastRejected(h *bwtest.HarnessTest) {
 	// The refusal published nothing.
 	h.AssertTxNotInMempool(tx.TxHash())
 
+	// It left no record either. A backend that answers the acceptance check
+	// refuses before Broadcast records anything, while neutrino has no
+	// answer to refuse with, so it records, publishes, and removes the
+	// branch once its peer rejects. Both end with the wallet holding no row.
+	_, err = w.GetTx(h.Context(), tx.TxHash())
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound,
+		"refused transaction is still recorded",
+	)
+
 	// It claimed no coin either. Neither output became one, which both of
 	// them would have, since both pay the wallet.
-	//
-	// Whether the transaction was recorded at all is deliberately not
-	// asserted, because it differs by backend and the difference is not
-	// this task's to define. A backend that answers the acceptance check
-	// refuses before Broadcast records anything, while neutrino has no
-	// answer to refuse with, so it records, publishes, and invalidates the
-	// row once its peer rejects. Both leave the coin view below identical;
-	// what the store keeps for an invalidated transaction belongs to the
-	// invalidation task.
 	for i := range tx.TxOut {
 		_, err = w.GetUtxo(h.Context(), wire.OutPoint{
 			Hash:  tx.TxHash(),
