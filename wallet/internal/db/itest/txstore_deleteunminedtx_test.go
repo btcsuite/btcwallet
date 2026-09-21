@@ -293,3 +293,185 @@ func TestDeleteUnminedTxRemovesInvalidatedDescendant(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+// TestDeleteUnminedTxClearsLeaseAndReplacement verifies that removing a branch
+// takes the lease and replacement rows that depend on it, rather than failing
+// on them or leaving them behind.
+func TestDeleteUnminedTxClearsLeaseAndReplacement(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-unmined-dependents")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	block := CreateBlockFixture(t, store.Queries(), 460)
+
+	funding := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
+	)
+	err := store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       funding,
+			Received: time.Unix(1710004500, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	root := newRegularTx(
+		[]wire.OutPoint{{Hash: funding.TxHash()}},
+		[]*wire.TxOut{{Value: 8000, PkScript: addr.ScriptPubKey}},
+	)
+
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: root.TxHash()}},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	for i, tx := range []*wire.MsgTx{root, child} {
+		err = store.CreateTx(
+			t.Context(),
+			db.CreateTxParams{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: time.Unix(int64(1710004510+i), 0),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		)
+		require.NoError(t, err)
+	}
+
+	// Lease the branch tip, which the removal must drop with its UTXO.
+	tipOutput := wire.OutPoint{Hash: child.TxHash(), Index: 0}
+	_, err = store.LeaseOutput(
+		t.Context(),
+		db.LeaseOutputParams{
+			WalletID: walletID,
+			ID:       [32]byte{9},
+			OutPoint: tipOutput,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	// Record a replacement edge between two branch members, which the
+	// removal must drop with their rows.
+	rootID, ok := txIDByHash(t, store, walletID, root.TxHash())
+	require.True(t, ok)
+	childID, ok := txIDByHash(t, store, walletID, child.TxHash())
+	require.True(t, ok)
+	insertReplacementEdge(t, store, walletID, rootID, childID)
+
+	require.True(t, walletUtxoExists(t, store, walletID, tipOutput))
+	require.NotZero(t, leaseRows(t, store, walletID))
+	require.NotZero(t, replacementRows(t, store, walletID))
+
+	err = store.DeleteUnminedTx(
+		t.Context(),
+		db.DeleteUnminedTxParams{
+			WalletID: walletID,
+			Txid:     root.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+
+	require.Zero(t, leaseRows(t, store, walletID))
+	require.Zero(t, replacementRows(t, store, walletID))
+	require.False(t, walletUtxoExists(t, store, walletID, tipOutput))
+}
+
+// TestDeleteUnminedTxRollsBackOnFailure verifies that a write which fails
+// partway through leaves the branch exactly as it was, rather than half
+// removed.
+func TestDeleteUnminedTxRollsBackOnFailure(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-unmined-rollback")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	block := CreateBlockFixture(t, store.Queries(), 470)
+
+	funding := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
+	)
+	err := store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       funding,
+			Received: time.Unix(1710004600, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	rootInput := wire.OutPoint{Hash: funding.TxHash()}
+	root := newRegularTx(
+		[]wire.OutPoint{rootInput},
+		[]*wire.TxOut{{Value: 8000, PkScript: addr.ScriptPubKey}},
+	)
+
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: root.TxHash()}},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	for i, tx := range []*wire.MsgTx{root, child} {
+		err = store.CreateTx(
+			t.Context(),
+			db.CreateTxParams{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: time.Unix(int64(1710004610+i), 0),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		)
+		require.NoError(t, err)
+	}
+
+	// The root row is removed last, so aborting it fails the write after the
+	// descendant has already gone inside the same transaction.
+	rejectBranchRowDelete(t, store, root.TxHash())
+
+	err = store.DeleteUnminedTx(
+		t.Context(),
+		db.DeleteUnminedTxParams{
+			WalletID: walletID,
+			Txid:     root.TxHash(),
+		},
+	)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, db.ErrTxNotFound)
+	require.NotErrorIs(t, err, db.ErrDeleteRequiresUnmined)
+
+	// Nothing moved: both rows stand, the branch still claims the funding
+	// output, and the tip it created is still a wallet coin.
+	for _, tx := range []*wire.MsgTx{root, child} {
+		info, err := store.GetTx(
+			t.Context(),
+			db.GetTxQuery{WalletID: walletID, Txid: tx.TxHash()},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusPublished, info.Status)
+	}
+
+	require.True(t, walletUtxoSpent(t, store, walletID, rootInput))
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: child.TxHash(), Index: 0,
+	}))
+}
