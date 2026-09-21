@@ -563,3 +563,82 @@ func clearUtxosSpentByTxID(t *testing.T, store *pg.Store,
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rows)
 }
+
+// insertReplacementEdge records one replacement edge between two wallet-scoped
+// transaction rows.
+func insertReplacementEdge(t *testing.T, store *pg.Store, walletID uint32,
+	replacedID, replacementID int64) {
+
+	t.Helper()
+
+	_, err := store.DB().ExecContext(
+		t.Context(),
+		"INSERT INTO tx_replacements (wallet_id, replaced_tx_id, "+
+			"replacement_tx_id) VALUES ($1, $2, $3)",
+		int64(walletID), replacedID, replacementID,
+	)
+	require.NoError(t, err)
+}
+
+// leaseRows returns the number of lease rows the wallet holds.
+func leaseRows(t *testing.T, store *pg.Store, walletID uint32) int {
+	t.Helper()
+
+	var count int
+
+	err := store.DB().QueryRowContext(
+		t.Context(),
+		"SELECT COUNT(*) FROM utxo_leases WHERE wallet_id = $1",
+		int64(walletID),
+	).Scan(&count)
+	require.NoError(t, err)
+
+	return count
+}
+
+// replacementRows returns the number of replacement edges the wallet holds.
+func replacementRows(t *testing.T, store *pg.Store, walletID uint32) int {
+	t.Helper()
+
+	var count int
+
+	err := store.DB().QueryRowContext(
+		t.Context(),
+		"SELECT COUNT(*) FROM tx_replacements WHERE wallet_id = $1",
+		int64(walletID),
+	).Scan(&count)
+	require.NoError(t, err)
+
+	return count
+}
+
+// rejectBranchRowDelete installs a trigger that aborts the removal of one
+// transaction row, so a test can prove the whole write rolls back. The hash is
+// inlined because CREATE TRIGGER takes no bind parameters.
+func rejectBranchRowDelete(t *testing.T, store *pg.Store,
+	txHash chainhash.Hash) {
+
+	t.Helper()
+
+	_, err := store.DB().ExecContext(
+		t.Context(),
+		`CREATE FUNCTION reject_branch_row_delete() RETURNS TRIGGER AS $$
+		BEGIN
+			RAISE EXCEPTION 'injected delete failure';
+		END;
+		$$ LANGUAGE plpgsql`,
+	)
+	require.NoError(t, err)
+
+	_, err = store.DB().ExecContext(
+		t.Context(),
+		fmt.Sprintf(
+			"CREATE TRIGGER reject_branch_row_delete BEFORE DELETE ON "+
+				"transactions FOR EACH ROW WHEN "+
+				"(old.tx_hash = decode('%x', 'hex')) "+
+				"EXECUTE FUNCTION reject_branch_row_delete()",
+			txHash[:],
+		),
+	)
+	require.NoError(t, err)
+}
