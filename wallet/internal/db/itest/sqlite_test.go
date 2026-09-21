@@ -5,6 +5,7 @@ package itest
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"testing"
@@ -313,4 +314,71 @@ func clearUtxosSpentByTxID(t *testing.T, store *sqlite.Store,
 	)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rows)
+}
+
+// insertReplacementEdge records one replacement edge between two wallet-scoped
+// transaction rows.
+func insertReplacementEdge(t *testing.T, store *sqlite.Store, walletID uint32,
+	replacedID, replacementID int64) {
+
+	t.Helper()
+
+	_, err := store.DB().ExecContext(
+		t.Context(),
+		"INSERT INTO tx_replacements (wallet_id, replaced_tx_id, "+
+			"replacement_tx_id) VALUES (?, ?, ?)",
+		int64(walletID), replacedID, replacementID,
+	)
+	require.NoError(t, err)
+}
+
+// leaseRows returns the number of lease rows the wallet holds.
+func leaseRows(t *testing.T, store *sqlite.Store, walletID uint32) int {
+	t.Helper()
+
+	var count int
+
+	err := store.DB().QueryRowContext(
+		t.Context(),
+		"SELECT COUNT(*) FROM utxo_leases WHERE wallet_id = ?",
+		int64(walletID),
+	).Scan(&count)
+	require.NoError(t, err)
+
+	return count
+}
+
+// replacementRows returns the number of replacement edges the wallet holds.
+func replacementRows(t *testing.T, store *sqlite.Store, walletID uint32) int {
+	t.Helper()
+
+	var count int
+
+	err := store.DB().QueryRowContext(
+		t.Context(),
+		"SELECT COUNT(*) FROM tx_replacements WHERE wallet_id = ?",
+		int64(walletID),
+	).Scan(&count)
+	require.NoError(t, err)
+
+	return count
+}
+
+// rejectBranchRowDelete installs a trigger that aborts the removal of one
+// transaction row, so a test can prove the whole write rolls back.
+func rejectBranchRowDelete(t *testing.T, store *sqlite.Store,
+	txHash chainhash.Hash) {
+
+	t.Helper()
+
+	_, err := store.DB().ExecContext(
+		t.Context(),
+		fmt.Sprintf(
+			"CREATE TRIGGER reject_branch_row_delete BEFORE DELETE ON "+
+				"transactions WHEN old.tx_hash = x'%x' BEGIN "+
+				"SELECT RAISE(ABORT, 'injected delete failure'); END",
+			txHash[:],
+		),
+	)
+	require.NoError(t, err)
 }
