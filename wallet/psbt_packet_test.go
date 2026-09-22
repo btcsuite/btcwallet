@@ -711,6 +711,53 @@ func testKeyPairDescending() ([]byte, []byte) {
 	return first, second
 }
 
+// TestValidatePacketLeavesFinalisedRecordsUnjudged pins where the encoding
+// check stops.
+//
+// An input holding a final script signature or witness has all of its other
+// records left out of the encoding, so reading the packet back judges none of
+// them: a derivation key that could never parse goes unexamined. That is the
+// format's position rather than a gap, since those records are no longer part
+// of a finalized input, and it is safe here because funding refuses such a
+// packet for being signed at all.
+func TestValidatePacketLeavesFinalisedRecordsUnjudged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		finalSig   []byte
+		finalWitns []byte
+	}{{
+		name:     "behind a final script signature",
+		finalSig: []byte{0x51},
+	}, {
+		name:       "behind a final witness",
+		finalWitns: []byte{0x01, 0x01, 0x51},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].Bip32Derivation =
+				[]*psbt.Bip32Derivation{{PubKey: []byte{0x02}}}
+			packet.Inputs[0].FinalScriptSig = tc.finalSig
+			packet.Inputs[0].FinalScriptWitness = tc.finalWitns
+
+			// The structural core has nothing to say about a record
+			// the encoding does not carry.
+			require.NoError(t, validatePacket(packet))
+
+			// Funding refuses the packet regardless, because it is
+			// finalized.
+			require.ErrorIs(
+				t, validateFundPacket(packet), ErrPacketSigned,
+			)
+		})
+	}
+}
+
 // TestValidatePacketNilGlobalUnknown verifies that a nil entry in the global
 // unclassified-field list is refused rather than dereferenced.
 //
