@@ -164,3 +164,36 @@ func attachAccountBalances(accounts []db.AccountInfo,
 		info.UnconfirmedBalance = pair.unconfirmed
 	}
 }
+
+// checkAccountIdentity reads effective account schemas inside the walletdb
+// write before cache publication, preserving name-conflict precedence.
+func checkAccountIdentity(ns walletdb.ReadBucket, mgr waddrmgr.AddrStore,
+	candidate db.AccountInfo) error {
+
+	var (
+		accounts []db.AccountInfo
+		numbers  []uint32
+	)
+
+	for _, scopedMgr := range mgr.ActiveScopedKeyManagers() {
+		err := collectScopedAccounts(
+			ns, scopedMgr, db.ListAccountsQuery{}, mgr.WatchOnly(),
+			&accounts, &numbers,
+		)
+		if err != nil {
+			return fmt.Errorf("list account identities: %w", err)
+		}
+	}
+
+	// Complete the name check across the collected snapshot before allowing
+	// an identity match in another scope to classify the request.
+	for _, account := range accounts {
+		if account.KeyScope == candidate.KeyScope &&
+			account.AccountName == candidate.AccountName {
+
+			return db.ErrAccountNameConflict
+		}
+	}
+
+	return db.CheckAccountIdentity(candidate, accounts)
+}
