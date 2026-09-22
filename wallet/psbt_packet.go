@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -329,14 +327,6 @@ func validatePacketInputs(packet *psbt.Packet) error {
 			return err
 		}
 
-		err = validateDerivationRecords(
-			pIn.Bip32Derivation, pIn.TaprootBip32Derivation,
-			"input", i,
-		)
-		if err != nil {
-			return err
-		}
-
 		err = validateInputSighash(pIn, i)
 		if err != nil {
 			return err
@@ -355,58 +345,6 @@ func validatePacketOutputs(packet *psbt.Packet) error {
 			return fmt.Errorf("%w: output %d carries %d fields",
 				ErrUnclassifiedField, i, len(pOut.Unknowns))
 		}
-
-		err := validateDerivationRecords(
-			pOut.Bip32Derivation, pOut.TaprootBip32Derivation,
-			"output", i,
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// validateDerivationRecords checks that derivation records carry keys the psbt
-// package would accept, and that no key is named twice.
-//
-// A record list is only metadata until something reads it, and what reads it
-// parses the key. A packet carrying a key that does not parse is one the
-// wallet could hand back and the caller could not serialize.
-func validateDerivationRecords(bip32 []*psbt.Bip32Derivation,
-	taproot []*psbt.TaprootBip32Derivation, kind string, idx int) error {
-
-	seen := make(map[string]struct{}, len(bip32)+len(taproot))
-	for i, d := range bip32 {
-		_, err := btcec.ParsePubKey(d.PubKey)
-		if err != nil {
-			return fmt.Errorf("%w: %s %d derivation %d has an "+
-				"unusable key", ErrPacketMalformed, kind, idx, i)
-		}
-
-		if _, ok := seen[string(d.PubKey)]; ok {
-			return fmt.Errorf("%w: %s %d names one derivation key "+
-				"twice", ErrPacketMalformed, kind, idx)
-		}
-
-		seen[string(d.PubKey)] = struct{}{}
-	}
-
-	for i, d := range taproot {
-		_, err := schnorr.ParsePubKey(d.XOnlyPubKey)
-		if err != nil {
-			return fmt.Errorf("%w: %s %d taproot derivation %d "+
-				"has an unusable key", ErrPacketMalformed, kind,
-				idx, i)
-		}
-
-		if _, ok := seen[string(d.XOnlyPubKey)]; ok {
-			return fmt.Errorf("%w: %s %d names one derivation key "+
-				"twice", ErrPacketMalformed, kind, idx)
-		}
-
-		seen[string(d.XOnlyPubKey)] = struct{}{}
 	}
 
 	return nil
