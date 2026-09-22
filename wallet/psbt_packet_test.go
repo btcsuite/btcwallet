@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -469,6 +470,61 @@ func TestValidatePacketEncoding(t *testing.T) {
 			require.ErrorIs(
 				t, validatePacket(packet), ErrPacketMalformed,
 			)
+		})
+	}
+}
+
+// TestValidatePacketMerkleRoot verifies that a taproot merkle root which is
+// not a hash is refused.
+//
+// The psbt package stores this record without inspecting it, so it is the one
+// field parsing a packet back does not judge, and the only reason the wallet
+// still checks a record's contents itself.
+func TestValidatePacketMerkleRoot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		root    []byte
+		wantErr bool
+	}{{
+		name: "absent",
+	}, {
+		name: "a hash",
+		root: bytes.Repeat([]byte{0x07}, chainhash.HashSize),
+	}, {
+		// Present but empty is a root of the wrong size, not an
+		// absent one, which is the nil-versus-empty distinction the
+		// signature fields turn on as well.
+		name:    "empty but present",
+		root:    []byte{},
+		wantErr: true,
+	}, {
+		name:    "one byte",
+		root:    []byte{0x07},
+		wantErr: true,
+	}, {
+		name:    "one byte too long",
+		root:    bytes.Repeat([]byte{0x07}, chainhash.HashSize+1),
+		wantErr: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].TaprootMerkleRoot = tc.root
+
+			err := validatePacket(packet)
+
+			if !tc.wantErr {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, ErrPacketMalformed)
 		})
 	}
 }
