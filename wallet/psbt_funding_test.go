@@ -212,30 +212,71 @@ func TestIndexCallerInputs(t *testing.T) {
 	)
 }
 
-// TestRestoreInputMetadataKeepsCallerFields verifies that the fields the
-// wallet never derives survive funding, which is the whole point of keying the
-// caller's records by outpoint in the first place.
-func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
+// TestRestoreInputMetadataKeepsWitnessScript verifies that a caller's witness
+// script survives on a spend that has a script to reveal.
+func TestRestoreInputMetadataKeepsWitnessScript(t *testing.T) {
 	t.Parallel()
 
 	outPoint := wire.OutPoint{Index: 3}
+	witnessScript := []byte{0x53, 0x54}
 
-	caller := psbt.PInput{
-		WitnessScript:     []byte{0x53, 0x54},
-		TaprootMerkleRoot: bytes.Repeat([]byte{0x09}, 32),
-		TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
-			ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
-			Script:       []byte{0x51},
-			LeafVersion:  txscript.BaseLeafVersion,
-		}},
-		TaprootInternalKey: bytes.Repeat([]byte{0x02}, 32),
+	decorated := testDecoratedInput()
+	decorated.WitnessUtxo = &wire.TxOut{
+		Value:    100000,
+		PkScript: testP2WSHScript(witnessScript),
 	}
 
 	packet := &psbt.Packet{
 		UnsignedTx: &wire.MsgTx{
 			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
 		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
+		Inputs: []psbt.PInput{decorated},
+	}
+
+	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
+		outPoint: {pInput: psbt.PInput{WitnessScript: witnessScript}},
+	})
+	require.NoError(t, err)
+
+	restored := packet.Inputs[0]
+	require.Equal(t, witnessScript, restored.WitnessScript)
+
+	// The wallet's own facts about the coin stay the wallet's.
+	require.Equal(t, decorated.WitnessUtxo, restored.WitnessUtxo)
+	require.Equal(t, testWalletDerivation(), restored.Bip32Derivation)
+}
+
+// TestRestoreInputMetadataKeepsTaprootFields verifies that the records only a
+// taproot spend can carry survive on a taproot input.
+func TestRestoreInputMetadataKeepsTaprootFields(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Index: 3}
+
+	decorated := psbt.PInput{
+		WitnessUtxo: &wire.TxOut{
+			Value:    100000,
+			PkScript: testP2TRScript(1),
+		},
+		SighashType:            txscript.SigHashDefault,
+		TaprootBip32Derivation: testWalletTaprootDerivation(),
+	}
+
+	caller := psbt.PInput{
+		TaprootMerkleRoot: bytes.Repeat([]byte{0x09}, 32),
+		TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
+			ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
+			Script:       []byte{0x51},
+			LeafVersion:  txscript.BaseLeafVersion,
+		}},
+		TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
+	}
+
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+		},
+		Inputs: []psbt.PInput{decorated},
 	}
 
 	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
@@ -244,18 +285,89 @@ func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
 	require.NoError(t, err)
 
 	restored := packet.Inputs[0]
-
-	// The caller's own fields come back untouched.
-	require.Equal(t, caller.WitnessScript, restored.WitnessScript)
 	require.Equal(t, caller.TaprootMerkleRoot, restored.TaprootMerkleRoot)
 	require.Equal(t, caller.TaprootLeafScript, restored.TaprootLeafScript)
 	require.Equal(
 		t, caller.TaprootInternalKey, restored.TaprootInternalKey,
 	)
+	require.Equal(t, decorated.WitnessUtxo, restored.WitnessUtxo)
+}
 
-	// The wallet's own facts about the coin stay the wallet's.
-	require.Equal(t, testWalletUtxo(), restored.WitnessUtxo)
-	require.Equal(t, testWalletDerivation(), restored.Bip32Derivation)
+// TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse verifies that a
+// record the spend has no use for is refused rather than carried.
+//
+// Preserving one would hand back a packet describing a spend that cannot
+// happen: a taproot leaf script on a segwit v0 input, or a witness script on a
+// spend that reveals no script.
+func TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		utxo   *wire.TxOut
+		caller psbt.PInput
+	}{{
+		name: "a taproot leaf script on a witness key spend",
+		utxo: &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		caller: psbt.PInput{
+			TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
+				ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
+				Script:       []byte{0x51},
+				LeafVersion:  txscript.BaseLeafVersion,
+			}},
+		},
+	}, {
+		name: "a taproot internal key on a witness key spend",
+		utxo: &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		caller: psbt.PInput{
+			TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
+		},
+	}, {
+		name: "a taproot merkle root on a witness script spend",
+		utxo: &wire.TxOut{PkScript: testP2WSHScript([]byte{0x51})},
+		caller: psbt.PInput{
+			TaprootMerkleRoot: bytes.Repeat([]byte{0x09}, 32),
+		},
+	}, {
+		name:   "a witness script on a witness key spend",
+		utxo:   &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		caller: psbt.PInput{WitnessScript: []byte{0x53}},
+	}, {
+		name:   "a witness script on a taproot spend",
+		utxo:   &wire.TxOut{PkScript: testP2TRScript(1)},
+		caller: psbt.PInput{WitnessScript: []byte{0x53}},
+	}, {
+		name:   "a redeem script on a taproot spend",
+		utxo:   &wire.TxOut{PkScript: testP2TRScript(1)},
+		caller: psbt.PInput{RedeemScript: []byte{0x53}},
+	}, {
+		name:   "a redeem script on a witness key spend",
+		utxo:   &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		caller: psbt.PInput{RedeemScript: []byte{0x53}},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{{WitnessUtxo: tc.utxo}},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
+	}
 }
 
 // TestRestoreInputMetadataRejectsConflicts verifies that a caller telling the
