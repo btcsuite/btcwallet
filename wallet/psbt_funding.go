@@ -148,7 +148,14 @@ func classifySpend(decorated *psbt.PInput) spendKind {
 // record, in place, following the authority rule described on
 // restoreInputMetadata.
 func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
-	err := checkCallerInputAgrees(decorated, caller, idx)
+	spend := classifySpend(decorated)
+
+	err := checkFieldsFitSpend(caller, spend, idx)
+	if err != nil {
+		return err
+	}
+
+	err = checkCallerInputAgrees(decorated, caller, idx)
 	if err != nil {
 		return err
 	}
@@ -200,6 +207,106 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 	}
 
 	return nil
+}
+
+// checkFieldsFitSpend reports whether the caller's records could belong to the
+// output this input spends.
+//
+// Funding carries the caller's own fields across without forming an opinion on
+// their contents, but a field that the spend cannot use at all is not metadata
+// worth preserving: a taproot leaf script on a segwit v0 input, or a witness
+// script on a spend that has no script to reveal. Carrying it would hand back
+// a packet describing a spend that cannot happen.
+//
+// An unclassified spend is left alone. The wallet has no view on it, so it has
+// no grounds to refuse anything either.
+func checkFieldsFitSpend(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	if spend == spendUnknown {
+		return nil
+	}
+
+	if spend == spendTaproot {
+		return checkTaprootFields(caller, spend, idx)
+	}
+
+	return checkWitnessFields(caller, spend, idx)
+}
+
+// checkTaprootFields refuses the segwit v0 scripts on a taproot spend, which
+// reveals neither.
+func checkTaprootFields(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	if len(caller.WitnessScript) > 0 {
+		return fieldFitError("witness script", spend, idx)
+	}
+
+	if len(caller.RedeemScript) > 0 {
+		return fieldFitError("redeem script", spend, idx)
+	}
+
+	return nil
+}
+
+// checkWitnessFields refuses the taproot records on a segwit v0 spend, and the
+// scripts that spend has nothing to reveal for.
+func checkWitnessFields(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	switch {
+	case len(caller.TaprootLeafScript) > 0:
+		return fieldFitError("taproot leaf script", spend, idx)
+
+	case len(caller.TaprootInternalKey) > 0:
+		return fieldFitError("taproot internal key", spend, idx)
+
+	case len(caller.TaprootMerkleRoot) > 0:
+		return fieldFitError("taproot merkle root", spend, idx)
+	}
+
+	// A single-key spend reveals no script, so there is nothing for a
+	// witness script to be.
+	if spend == spendWitnessKey && len(caller.WitnessScript) > 0 {
+		return fieldFitError("witness script", spend, idx)
+	}
+
+	// Only a P2SH spend has a redeem script to reveal.
+	if spend != spendNested && len(caller.RedeemScript) > 0 {
+		return fieldFitError("redeem script", spend, idx)
+	}
+
+	return nil
+}
+
+// fieldFitError names the field and the spend that cannot carry it.
+func fieldFitError(field string, spend spendKind, idx int) error {
+	return fmt.Errorf("%w: input %d carries a %s, which a %s spend cannot "+
+		"use", ErrConflictingInputMetadata, idx, field, spend)
+}
+
+// String names a spend kind for an error message.
+func (k spendKind) String() string {
+	switch k {
+	case spendUnknown:
+		return "unclassified"
+
+	case spendWitnessKey:
+		return "witness key"
+
+	case spendWitnessScript:
+		return "witness script"
+
+	case spendNested:
+		return "nested witness"
+
+	case spendTaproot:
+		return "taproot"
+
+	default:
+		return "unclassified"
+	}
 }
 
 // checkCallerInputAgrees reports whether the caller's records for an input can
