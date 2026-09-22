@@ -486,13 +486,15 @@ func validateFundPacket(packet *psbt.Packet) error {
 // inputIsSigned reports whether an input carries any signature material, in
 // any of the forms a PSBT can hold it.
 //
-// The final fields are tested for presence rather than length, because that is
-// what marks an input finalized: psbt.isFinalized asks whether either is
-// non-nil, so an empty but present record is finalized too.
+// The fields holding a single record are tested for presence rather than
+// length, because presence is what the record means. psbt.isFinalized asks
+// only whether the final fields are non-nil, and an empty key spend signature
+// is a record the wallet would otherwise drop on the floor. The list-valued
+// fields are different: there, an empty list is the absence of any record.
 func inputIsSigned(pIn *psbt.PInput) bool {
 	return len(pIn.PartialSigs) > 0 ||
-		len(pIn.TaprootKeySpendSig) > 0 ||
 		len(pIn.TaprootScriptSpendSig) > 0 ||
+		pIn.TaprootKeySpendSig != nil ||
 		pIn.FinalScriptSig != nil ||
 		pIn.FinalScriptWitness != nil
 }
