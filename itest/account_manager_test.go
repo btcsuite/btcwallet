@@ -1714,10 +1714,12 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 }
 
 // testAccountManagerRejectAccountImport verifies rejected imports preserve the
-// existing imported account and its scope's account count.
+// account set and occupied names retain their public error on retries.
 func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	const existingName = "account manager existing import"
 
+	// Arrange: seed an imported account and snapshot the public inventory so
+	// each rejected request can be checked for unintended account creation.
 	keys := deterministicImportedAccountKeys(h)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
@@ -1739,35 +1741,51 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 		name        string
 		accountName string
 		accountKey  *hdkeychain.ExtendedKey
+		wantErr     error
+		attempts    int
 	}{
-		// Both rows collide on name only. Rejecting a colliding XPub
-		// under a fresh name is a separate contract the wallet does
-		// not implement yet.
+		// Both occupied-name rows must keep their error identity even when
+		// the XPub also collides. A vacant-name collision has its own case.
 		{
 			name:        "duplicate name, same key",
 			accountName: existingName,
 			accountKey:  keys.accountKey,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+			attempts:    2,
 		},
 		{
 			name:        "duplicate name, other key",
 			accountName: existingName,
 			accountKey:  keys.otherAccountKey,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+			attempts:    2,
 		},
 		{
 			name:        "empty name",
 			accountName: "",
 			accountKey:  keys.otherAccountKey,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
 		},
 	}
 
+	// Act: retry occupied names to prove a previous refusal does not change
+	// their classification; submit the invalid name only once.
 	for _, tc := range testCases {
-		_, err := w.ImportAccount(
-			ctx, tc.accountName, tc.accountKey, keys.masterKeyFingerprint,
-			keys.addrType, false,
-		)
+		for range tc.attempts {
+			info, err := w.ImportAccount(
+				ctx, tc.accountName, tc.accountKey,
+				keys.masterKeyFingerprint, keys.addrType, false,
+			)
 
-		require.Error(h, err, "%s was accepted", tc.name)
+			// Assert: each failure keeps its public error and returns no
+			// account, including the second occupied-name attempt.
+			require.ErrorIs(h, err, tc.wantErr, tc.name)
+			require.Nil(h, info, "%s returned an account", tc.name)
+		}
 
+		// Assert: neither the initial refusal nor its retry can add an
+		// account or disturb the seeded inventory.
 		gotAccounts, err := w.ListAccounts(ctx)
 		require.NoError(h, err, "failed to list accounts after rejection")
 		require.ElementsMatch(
@@ -1866,4 +1884,44 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 	accounts, err = w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts after rejection")
 	require.Len(h, accounts, wantCount, "rejection changed account count")
+}
+
+// testAccountManagerRejectAccountIdentity verifies a vacant-name XPub
+// collision returns the wallet-owned error without adding an account.
+func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
+	// Arrange: import one childless account into a started watch-only wallet
+	// and snapshot its inventory through the public API.
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	_, err := w.ImportAccount(
+		ctx, "owner", keys.accountKey, keys.masterKeyFingerprint,
+		keys.addrType, false,
+	)
+	require.NoError(h, err)
+
+	before, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+
+	// Act: request the same XPub under a vacant name without deriving any
+	// children. The import must fail at account admission.
+	info, err := w.ImportAccount(
+		ctx, "candidate", keys.accountKey, keys.masterKeyFingerprint+1,
+		keys.addrType, false,
+	)
+
+	// Assert: the caller sees the wallet sentinel and no candidate account.
+	require.ErrorIs(h, err, wallet.ErrAccountIdentityCollision)
+	require.Nil(h, info)
+
+	// Assert: the collision leaves the public inventory and child counts
+	// intact.
+	after, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+	require.Equal(h, before, after)
+
+	owner, err := w.GetAccount(ctx, keys.scope, "owner")
+	require.NoError(h, err)
+	require.Zero(h, owner.ExternalKeyCount)
+	require.Zero(h, owner.InternalKeyCount)
 }
