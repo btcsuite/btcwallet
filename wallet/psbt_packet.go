@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -59,6 +60,18 @@ const sighashBaseMask = txscript.SigHashType(0x1f)
 //
 // It does not refuse unclassified fields; validateFundPacket does.
 func validatePacket(packet *psbt.Packet) error {
+	err := validatePacketShape(packet)
+	if err != nil {
+		return err
+	}
+
+	return validatePacketContents(packet)
+}
+
+// validatePacketShape checks that a packet can be read at all: it is present,
+// its record lists match its transaction, nothing in it is nil, and the
+// transaction is unsigned.
+func validatePacketShape(packet *psbt.Packet) error {
 	if packet == nil || packet.UnsignedTx == nil {
 		return ErrPacketNil
 	}
@@ -88,12 +101,68 @@ func validatePacket(packet *psbt.Packet) error {
 		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
 	}
 
+	return nil
+}
+
+// validatePacketContents checks the records a well-shaped packet carries.
+func validatePacketContents(packet *psbt.Packet) error {
+	err := validatePacketEncoding(packet)
+	if err != nil {
+		return err
+	}
+
 	err = validatePacketInputs(packet)
 	if err != nil {
 		return err
 	}
 
 	return validatePacketOutputs(packet)
+}
+
+// validatePacketEncoding checks that a packet is one the psbt package itself
+// would accept, by writing it out and reading it back.
+//
+// The record contents a PSBT can carry are the psbt package's to define, and
+// it already refuses the ones that are unusable: keys that do not parse,
+// signatures that are not signatures, control blocks of the wrong shape,
+// global extended keys whose depth disagrees with their path. A packet the
+// wallet admitted but that package would not is one the wallet could hand back
+// and the caller could not serialize.
+//
+// Asking it directly is also the only way to stay current: a record type the
+// psbt package learns to validate is covered here without the wallet keeping
+// its own list of what to look at.
+//
+// It reaches what the encoding carries, and no further. An input holding a
+// final script signature or witness has all of its other records left out of
+// the encoding entirely, so none of them are judged here. That is the format's
+// own position rather than a gap to work around: once an input is finalized
+// those records are no longer part of it. Whether an operation may accept a
+// finalized input at all is that operation's question, and for funding the
+// answer is no.
+//
+// This runs after the pointer sweep, because serializing reads through every
+// entry the packet holds.
+func validatePacketEncoding(packet *psbt.Packet) error {
+	// Serializing is not read-only: the psbt package sorts an input's and
+	// an output's record lists in place as it writes them. Those slices
+	// belong to the caller, so the probe has to be a copy, or validating a
+	// packet would reorder the one the caller still holds.
+	probe := clonePacket(packet)
+
+	var raw bytes.Buffer
+
+	err := probe.Serialize(&raw)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	_, err = psbt.NewFromRawBytes(&raw, false)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	return nil
 }
 
 // validatePacketPointers checks that nothing the wallet will read through is
@@ -121,8 +190,13 @@ func validatePacketPointers(packet *psbt.Packet) error {
 		}
 	}
 
+	err := validateGlobalPointers(packet)
+	if err != nil {
+		return err
+	}
+
 	for i := range packet.Inputs {
-		err := validateInputPointers(&packet.Inputs[i], i)
+		err = validateInputPointers(&packet.Inputs[i], i)
 		if err != nil {
 			return err
 		}
@@ -131,12 +205,28 @@ func validatePacketPointers(packet *psbt.Packet) error {
 	for i := range packet.Outputs {
 		pOut := &packet.Outputs[i]
 
-		err := validateRecordPointers(
+		err = validateRecordPointers(
 			"output", i, pOut.Bip32Derivation,
 			pOut.TaprootBip32Derivation, pOut.Unknowns,
 		)
 		if err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// validateGlobalPointers checks the packet-level record lists.
+//
+// Nothing reaches a nil here today, since an unclassified field is refused
+// before anything reads one, but serializing the packet walks this list and a
+// nil in it would be a panic rather than a rejection.
+func validateGlobalPointers(packet *psbt.Packet) error {
+	for i, u := range packet.Unknowns {
+		if u == nil {
+			return fmt.Errorf("%w: global unknown field %d is nil",
+				ErrPacketMalformed, i)
 		}
 	}
 
@@ -439,14 +529,23 @@ func validateInputSighash(pIn *psbt.PInput, idx int) error {
 // and reordering everything. That is why an existing signature is refused
 // rather than silently invalidated, and why SIGHASH_SINGLE cannot be honoured:
 // it commits an input to the output at its own index. Fields the wallet cannot
-// classify are refused because funding cannot promise to preserve them.
+// classify are refused because funding cannot promise to preserve them, and
+// are refused before the packet's records are read back.
 func validateFundPacket(packet *psbt.Packet) error {
-	err := validatePacket(packet)
+	err := validatePacketShape(packet)
 	if err != nil {
 		return err
 	}
 
+	// Before the records are read back: a field keyed with a type the psbt
+	// package knows is parsed as that type, so the encoding check would
+	// report it as malformed rather than unclassified.
 	err = validateNoUnknowns(packet)
+	if err != nil {
+		return err
+	}
+
+	err = validatePacketContents(packet)
 	if err != nil {
 		return err
 	}
@@ -504,10 +603,10 @@ func validateNoUnknowns(packet *psbt.Packet) error {
 // any of the forms a PSBT can hold it.
 //
 // The fields holding a single record are tested for presence rather than
-// length, because presence is what the record means. psbt.isFinalized asks
-// only whether the final fields are non-nil, and an empty key spend signature
-// is a record the wallet would otherwise drop on the floor. The list-valued
-// fields are different: there, an empty list is the absence of any record.
+// length, because presence is what the record means: psbt.isFinalized asks
+// only whether the final fields are non-nil. For list-valued fields an empty
+// list is the absence of a record. Funding never reaches this with an empty
+// key spend signature, which the encoding check refuses as malformed.
 func inputIsSigned(pIn *psbt.PInput) bool {
 	return len(pIn.PartialSigs) > 0 ||
 		len(pIn.TaprootScriptSpendSig) > 0 ||
