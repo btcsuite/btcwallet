@@ -36,12 +36,7 @@ type DeleteUnminedTxOps interface {
 func DeleteUnminedTxWithOps(ctx context.Context, params DeleteUnminedTxParams,
 	ops DeleteUnminedTxOps) error {
 
-	target, err := ops.LoadUnminedTxTarget(ctx, params.WalletID, params.Txid)
-	if err != nil {
-		return fmt.Errorf("load delete tx target: %w", err)
-	}
-
-	err = validateUnminedTxTarget(target, ErrDeleteRequiresUnmined)
+	target, err := loadDeletableRoot(ctx, params, ops)
 	if err != nil {
 		return err
 	}
@@ -81,6 +76,33 @@ func DeleteUnminedTxWithOps(ctx context.Context, params DeleteUnminedTxParams,
 	return deleteUnminedBranchMember(
 		ctx, params.WalletID, target.ID, target.TxHash, ops,
 	)
+}
+
+// loadDeletableRoot loads the requested root and admits it for removal.
+//
+// A row the wallet already made terminal is reported missing rather than
+// invalid: kvdb keeps no such row, so both backends answer alike.
+func loadDeletableRoot(ctx context.Context, params DeleteUnminedTxParams,
+	ops DeleteUnminedTxOps) (UnminedTxTarget, error) {
+
+	target, err := ops.LoadUnminedTxTarget(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return UnminedTxTarget{}, fmt.Errorf("load delete tx target: %w", err)
+	}
+
+	if !target.HasBlock && !target.IsCoinbase &&
+		!IsUnminedStatus(target.Status) {
+
+		return UnminedTxTarget{}, fmt.Errorf("tx %s: %w", target.TxHash,
+			ErrTxNotFound)
+	}
+
+	err = validateUnminedTxTarget(target, ErrDeleteRequiresUnmined)
+	if err != nil {
+		return UnminedTxTarget{}, err
+	}
+
+	return target, nil
 }
 
 // deleteUnminedBranchMember removes one member of an unmined branch. Its spend
