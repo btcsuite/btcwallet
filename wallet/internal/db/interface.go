@@ -506,7 +506,8 @@ type TxStore interface {
 	// Implementations must remove the root, its descendants and the outputs
 	// they created, and restore the outputs the branch spent, inside one
 	// database transaction. Descendants an earlier event already made
-	// terminal are removed with the branch.
+	// terminal are removed with the branch, while a root the wallet already
+	// made terminal is reported with ErrTxNotFound.
 	DeleteUnminedTx(ctx context.Context,
 		params DeleteUnminedTxParams) error
 
