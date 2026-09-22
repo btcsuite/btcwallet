@@ -155,6 +155,11 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 		return err
 	}
 
+	err = checkDerivationCount(caller, spend, idx)
+	if err != nil {
+		return err
+	}
+
 	err = checkCallerInputAgrees(decorated, caller, idx)
 	if err != nil {
 		return err
@@ -204,6 +209,35 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 	// wallet would have written for a taproot input anyway.
 	if caller.SighashType != 0 {
 		decorated.SighashType = caller.SighashType
+	}
+
+	return nil
+}
+
+// checkDerivationCount refuses more than one derivation record on a spend that
+// only one key can satisfy.
+//
+// A P2WPKH or key-path taproot output is spent by a single key, so it has no
+// cosigners to describe. A caller naming several keys there is not supplying
+// multisig metadata; it is describing an input that does not exist, and the
+// extra records would follow the packet out of funding.
+//
+// Whether each named key actually participates in a script that does admit
+// several is a question about the witness script, and is left to the task that
+// takes that on.
+func checkDerivationCount(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	if !spend.singleKey() {
+		return nil
+	}
+
+	records := len(caller.Bip32Derivation) +
+		len(caller.TaprootBip32Derivation)
+	if records > 1 {
+		return fmt.Errorf("%w: input %d names %d keys for a %s spend, "+
+			"which one key satisfies",
+			ErrConflictingInputMetadata, idx, records, spend)
 	}
 
 	return nil
