@@ -5362,8 +5362,9 @@ func testMalformedPacket(outPoint wire.OutPoint,
 // TestFundPsbtRejectsMalformedPacket verifies that each admission rule refuses
 // a packet at the public boundary, before the wallet acts on it.
 //
-// No store, chain or key-vault expectation is registered, so a lookup on the
-// way to any of these rejections fails the test rather than passing unnoticed.
+// No dependency expectation is registered at all, not even the syncer's, so
+// anything the wallet consults on the way to one of these rejections fails the
+// test rather than passing unnoticed.
 func TestFundPsbtRejectsMalformedPacket(t *testing.T) {
 	t.Parallel()
 
@@ -5398,8 +5399,6 @@ func TestFundPsbtRejectsMalformedPacket(t *testing.T) {
 			t.Parallel()
 
 			w, mocks := createStartedWalletWithMocks(t)
-			mocks.syncer.On("syncState").
-				Return(syncStateSynced).Once()
 
 			outPoint := wire.OutPoint{Hash: chainhash.Hash{9}}
 			packet := testMalformedPacket(outPoint, tc.mutation)

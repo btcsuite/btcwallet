@@ -679,13 +679,16 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	*psbt.Packet, int32, error) {
 
-	err := w.state.validateSynced()
+	// Judge the packet before anything is consulted on its behalf. The
+	// check reads the intent and nothing else, so a caller handed a
+	// malformed packet back learns that without the wallet having asked
+	// the syncer where it is.
+	err := w.validateFundIntent(intent)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// Validate the packet shape before admitting funding work.
-	err = w.validateFundIntent(intent)
+	err = w.state.validateSynced()
 	if err != nil {
 		return nil, 0, err
 	}
