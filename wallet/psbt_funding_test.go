@@ -21,7 +21,7 @@ import (
 // testWalletUtxo is the output the wallet is taken to have looked up for the
 // input the funding helpers are exercised against.
 func testWalletUtxo() *wire.TxOut {
-	return &wire.TxOut{Value: 100000, PkScript: testP2WPKHScript(1)}
+	return &wire.TxOut{Value: 100000, PkScript: testP2WPKHScript()}
 }
 
 // testP2WPKHScript, testP2WSHScript and testP2TRScript return real scripts of
@@ -29,8 +29,9 @@ func testWalletUtxo() *wire.TxOut {
 //
 // The funding path classifies a spend by the script the wallet looked up, so a
 // fixture carrying filler bytes is nonstandard and exercises none of it.
-func testP2WPKHScript(seed byte) []byte {
-	key := testKey(seed)
+func testP2WPKHScript() []byte {
+	key := testKey(1)
+
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		address.Hash160(key.SerializeCompressed()), &chainParams,
 	)
@@ -52,9 +53,9 @@ func testP2WSHScript(witnessScript []byte) []byte {
 	return mustPayToAddr(addr)
 }
 
-func testP2TRScript(seed byte) []byte {
+func testP2TRScript() []byte {
 	addr, err := address.NewAddressTaproot(
-		schnorr.SerializePubKey(testKey(seed)), &chainParams,
+		schnorr.SerializePubKey(testKey(1)), &chainParams,
 	)
 	if err != nil {
 		panic(err)
@@ -146,7 +147,7 @@ func TestClassifySpend(t *testing.T) {
 		alone bool
 	}{{
 		name:  "a p2wpkh output",
-		utxo:  &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		utxo:  &wire.TxOut{PkScript: testP2WPKHScript()},
 		want:  spendWitnessKey,
 		alone: true,
 	}, {
@@ -155,7 +156,7 @@ func TestClassifySpend(t *testing.T) {
 		want: spendWitnessScript,
 	}, {
 		name:  "a taproot output",
-		utxo:  &wire.TxOut{PkScript: testP2TRScript(1)},
+		utxo:  &wire.TxOut{PkScript: testP2TRScript()},
 		want:  spendTaproot,
 		alone: true,
 	}, {
@@ -268,7 +269,7 @@ func TestRestoreInputMetadataKeepsTaprootFields(t *testing.T) {
 	decorated := psbt.PInput{
 		WitnessUtxo: &wire.TxOut{
 			Value:    100000,
-			PkScript: testP2TRScript(1),
+			PkScript: testP2TRScript(),
 		},
 		SighashType:            txscript.SigHashDefault,
 		TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -320,7 +321,7 @@ func TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse(t *testing.T) {
 		caller psbt.PInput
 	}{{
 		name: "a taproot leaf script on a witness key spend",
-		utxo: &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		utxo: &wire.TxOut{PkScript: testP2WPKHScript()},
 		caller: psbt.PInput{
 			TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
 				ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
@@ -330,7 +331,7 @@ func TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse(t *testing.T) {
 		},
 	}, {
 		name: "a taproot internal key on a witness key spend",
-		utxo: &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		utxo: &wire.TxOut{PkScript: testP2WPKHScript()},
 		caller: psbt.PInput{
 			TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
 		},
@@ -342,19 +343,19 @@ func TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse(t *testing.T) {
 		},
 	}, {
 		name:   "a witness script on a witness key spend",
-		utxo:   &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		utxo:   &wire.TxOut{PkScript: testP2WPKHScript()},
 		caller: psbt.PInput{WitnessScript: []byte{0x53}},
 	}, {
 		name:   "a witness script on a taproot spend",
-		utxo:   &wire.TxOut{PkScript: testP2TRScript(1)},
+		utxo:   &wire.TxOut{PkScript: testP2TRScript()},
 		caller: psbt.PInput{WitnessScript: []byte{0x53}},
 	}, {
 		name:   "a redeem script on a taproot spend",
-		utxo:   &wire.TxOut{PkScript: testP2TRScript(1)},
+		utxo:   &wire.TxOut{PkScript: testP2TRScript()},
 		caller: psbt.PInput{RedeemScript: []byte{0x53}},
 	}, {
 		name:   "a redeem script on a witness key spend",
-		utxo:   &wire.TxOut{PkScript: testP2WPKHScript(1)},
+		utxo:   &wire.TxOut{PkScript: testP2WPKHScript()},
 		caller: psbt.PInput{RedeemScript: []byte{0x53}},
 	}}
 
@@ -748,7 +749,7 @@ func TestRestoreInputMetadataRejectsCosignersOnSingleKeySpend(t *testing.T) {
 		caller psbt.PInput
 	}{{
 		name:   "two bip32 keys on a witness key spend",
-		script: testP2WPKHScript(1),
+		script: testP2WPKHScript(),
 		caller: psbt.PInput{
 			Bip32Derivation: []*psbt.Bip32Derivation{{
 				PubKey: testKey(2).SerializeCompressed(),
@@ -758,7 +759,7 @@ func TestRestoreInputMetadataRejectsCosignersOnSingleKeySpend(t *testing.T) {
 		},
 	}, {
 		name:   "two taproot keys on a taproot spend",
-		script: testP2TRScript(1),
+		script: testP2TRScript(),
 		caller: psbt.PInput{
 			TaprootBip32Derivation: []*psbt.
 				TaprootBip32Derivation{{
@@ -813,7 +814,7 @@ func TestRestoreInputMetadataKeepsOneKeyOnSingleKeySpend(t *testing.T) {
 		},
 		Inputs: []psbt.PInput{{
 			WitnessUtxo: &wire.TxOut{
-				PkScript: testP2WPKHScript(1),
+				PkScript: testP2WPKHScript(),
 			},
 			Bip32Derivation: testWalletDerivation(),
 		}},
@@ -848,7 +849,7 @@ func TestRestoreInputMetadataRejectsImpostorDerivation(t *testing.T) {
 		name: "a bip32 key on the wallet's own path",
 		decorated: psbt.PInput{
 			WitnessUtxo: &wire.TxOut{
-				PkScript: testP2WPKHScript(1),
+				PkScript: testP2WPKHScript(),
 			},
 			Bip32Derivation: testWalletDerivation(),
 		},
@@ -864,7 +865,7 @@ func TestRestoreInputMetadataRejectsImpostorDerivation(t *testing.T) {
 		name: "a taproot key on the wallet's own path",
 		decorated: psbt.PInput{
 			WitnessUtxo: &wire.TxOut{
-				PkScript: testP2TRScript(1),
+				PkScript: testP2TRScript(),
 			},
 			TaprootBip32Derivation: testWalletTaprootDerivation(),
 		},
