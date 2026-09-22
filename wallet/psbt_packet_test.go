@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -49,6 +50,25 @@ func testOtherValidKey() *btcec.PublicKey {
 	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{2}, 32))
 
 	return priv.PubKey()
+}
+
+// testDerSig and testSchnorrSig return real signatures over a fixed digest.
+//
+// The psbt package validates signature material when it parses a packet, so a
+// fixture carrying filler bytes would be refused as malformed rather than
+// exercising whatever the test is actually about.
+func testDerSig() []byte {
+	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{3}, 32))
+	sig := ecdsa.Sign(priv, bytes.Repeat([]byte{9}, 32))
+
+	return append(sig.Serialize(), byte(txscript.SigHashAll))
+}
+
+func testSchnorrSig() []byte {
+	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{3}, 32))
+	sig, _ := schnorr.Sign(priv, bytes.Repeat([]byte{9}, 32))
+
+	return sig.Serialize()
 }
 
 // testPacket returns a packet that passes validatePacket, so that a test can
@@ -392,6 +412,93 @@ func TestValidatePacketAcceptsMultipleDerivations(t *testing.T) {
 	require.NoError(t, validatePacket(packet))
 }
 
+// TestValidatePacketEncoding verifies that a packet the psbt package itself
+// would refuse is refused here.
+//
+// These are records whose contents that package validates when it parses a
+// packet, and which the wallet therefore does not check field by field. A
+// packet admitted with one of them would be one the wallet could hand back
+// and the caller could not serialize.
+func TestValidatePacketEncoding(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input psbt.PInput
+	}{{
+		name: "a control block of the wrong length",
+		input: psbt.PInput{
+			TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
+				ControlBlock: []byte{0x01},
+				Script:       []byte{0x51},
+				LeafVersion:  txscript.BaseLeafVersion,
+			}},
+		},
+	}, {
+		name: "an internal key that is not a key",
+		input: psbt.PInput{
+			TaprootInternalKey: []byte{0x02},
+		},
+	}, {
+		// Empty is not a signature, so this is refused as malformed
+		// rather than reaching funding's question about signatures.
+		name: "an empty key spend signature",
+		input: psbt.PInput{
+			TaprootKeySpendSig: []byte{},
+		},
+	}, {
+		name: "a partial signature that is not a signature",
+		input: psbt.PInput{
+			PartialSigs: []*psbt.PartialSig{{
+				PubKey:    testValidKey().SerializeCompressed(),
+				Signature: []byte{0x30, 0x01},
+			}},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			input := tc.input
+			input.NonWitnessUtxo = packet.Inputs[0].NonWitnessUtxo
+			input.WitnessUtxo = packet.Inputs[0].WitnessUtxo
+			packet.Inputs[0] = input
+
+			require.ErrorIs(
+				t, validatePacket(packet), ErrPacketMalformed,
+			)
+		})
+	}
+}
+
+// TestValidatePacketEncodingAcceptsRichMetadata verifies that a packet
+// carrying real material in every field funding preserves is still admitted,
+// so the encoding check is not refusing what it should be letting through.
+func TestValidatePacketEncodingAcceptsRichMetadata(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.Inputs[0].WitnessScript = []byte{0x51, 0x52}
+	packet.Inputs[0].RedeemScript = []byte{0x53}
+	packet.Inputs[0].TaprootInternalKey = schnorr.SerializePubKey(
+		testValidKey(),
+	)
+	packet.Inputs[0].TaprootMerkleRoot = bytes.Repeat([]byte{0x07}, 32)
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               testValidKey().SerializeCompressed(),
+		MasterKeyFingerprint: 7,
+		Bip32Path:            []uint32{84, 0, 0, 0, 1},
+	}}
+	packet.Outputs[0].WitnessScript = []byte{0x55}
+	packet.Outputs[1].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey: testOtherValidKey().SerializeCompressed(),
+	}}
+
+	require.NoError(t, validatePacket(packet))
+}
+
 // TestValidatePacketSignedTransaction verifies that a transaction carrying its
 // unlocking script inline is refused. A PSBT holds those in its per-input
 // records, so a packet with one inline is not the unsigned template it claims
@@ -553,33 +660,118 @@ func TestValidateInputSighash(t *testing.T) {
 func TestValidatePacketLeavesPacketUnchanged(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a packet carrying something in every field validation
-	// looks at, plus a signature so the funding gate has something to
-	// reject.
+	// Arrange: a packet carrying something in every field validation looks
+	// at, plus a signature so the funding gate has something to reject.
+	// The two derivation records are in descending key order, which is the
+	// order serializing would sort them out of.
+	hi, lo := testKeyPairDescending()
+
 	packet := testPacket(t)
 	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
-		PubKey:    bytes.Repeat([]byte{0x02}, 33),
-		Signature: bytes.Repeat([]byte{0x30}, 71),
+		PubKey:    hi,
+		Signature: testDerSig(),
 	}}
 	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
-		PubKey:               bytes.Repeat([]byte{0x02}, 33),
+		PubKey:               hi,
 		MasterKeyFingerprint: 0x11223344,
 		Bip32Path:            []uint32{84, 0, 0, 0, 1},
+	}, {
+		PubKey:               lo,
+		MasterKeyFingerprint: 0x11223344,
+		Bip32Path:            []uint32{84, 0, 0, 0, 2},
 	}}
 	packet.Outputs[0].WitnessScript = []byte{0x51, 0x52}
 
-	before, err := packet.B64Encode()
-	require.NoError(t, err)
+	// The order is captured directly. Encoding the packet to snapshot it
+	// would sort these lists as a side effect, so a snapshot taken that
+	// way cannot see a reordering afterwards: it has already happened.
+	before := derivationOrder(packet)
 
 	// Act: run both the structural core and the funding gate, which
 	// rejects this packet for its signature.
 	require.NoError(t, validatePacket(packet))
 	require.ErrorIs(t, validateFundPacket(packet), ErrPacketSigned)
 
-	// Assert: neither call altered a byte of it.
-	after, err := packet.B64Encode()
-	require.NoError(t, err)
-	require.Equal(t, before, after)
+	// Assert: neither call reordered or otherwise altered the caller's
+	// records.
+	require.Equal(t, before, derivationOrder(packet))
+}
+
+// derivationOrder lists the derivation keys of every input and output, in the
+// order the packet holds them.
+func derivationOrder(packet *psbt.Packet) [][]byte {
+	var order [][]byte
+
+	for i := range packet.Inputs {
+		for _, d := range packet.Inputs[i].Bip32Derivation {
+			order = append(order, d.PubKey)
+		}
+
+		for _, s := range packet.Inputs[i].PartialSigs {
+			order = append(order, s.PubKey)
+		}
+	}
+
+	for i := range packet.Outputs {
+		for _, d := range packet.Outputs[i].Bip32Derivation {
+			order = append(order, d.PubKey)
+		}
+	}
+
+	return order
+}
+
+// testKeyPairDescending returns two serialized keys, higher first, so a list
+// built from them is in the order serializing would sort it out of.
+func testKeyPairDescending() ([]byte, []byte) {
+	first := testValidKey().SerializeCompressed()
+	second := testOtherValidKey().SerializeCompressed()
+
+	if bytes.Compare(first, second) < 0 {
+		return second, first
+	}
+
+	return first, second
+}
+
+// TestValidatePacketReadsRecordsBehindAFinalScript verifies that an input
+// carrying a final script still has its other records judged.
+//
+// Serializing skips every other record on such an input, so a probe that kept
+// the final fields would write nothing to read back, and an unusable record
+// would pass unexamined.
+func TestValidatePacketReadsRecordsBehindAFinalScript(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		final func(*psbt.PInput)
+	}{{
+		name: "behind a final script signature",
+		final: func(p *psbt.PInput) {
+			p.FinalScriptSig = []byte{0x51}
+		},
+	}, {
+		name: "behind a final witness",
+		final: func(p *psbt.PInput) {
+			p.FinalScriptWitness = []byte{0x01, 0x01, 0x51}
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].Bip32Derivation =
+				[]*psbt.Bip32Derivation{{PubKey: []byte{0x02}}}
+			tc.final(&packet.Inputs[0])
+
+			require.ErrorIs(
+				t, validatePacket(packet), ErrPacketMalformed,
+			)
+		})
+	}
 }
 
 // TestValidateFundPacketAcceptsUnsigned verifies that an ordinary unsigned
@@ -612,13 +804,13 @@ func TestValidateFundPacketRejectsSignatures(t *testing.T) {
 		input: psbt.PInput{
 			PartialSigs: []*psbt.PartialSig{{
 				PubKey:    bytes.Repeat([]byte{0x02}, 33),
-				Signature: bytes.Repeat([]byte{0x30}, 71),
+				Signature: testDerSig(),
 			}},
 		},
 	}, {
 		name: "a taproot key spend signature",
 		input: psbt.PInput{
-			TaprootKeySpendSig: bytes.Repeat([]byte{0x01}, 64),
+			TaprootKeySpendSig: testSchnorrSig(),
 		},
 	}, {
 		name: "a taproot script spend signature",
@@ -626,7 +818,7 @@ func TestValidateFundPacketRejectsSignatures(t *testing.T) {
 			TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
 				XOnlyPubKey: bytes.Repeat([]byte{0x02}, 32),
 				LeafHash:    bytes.Repeat([]byte{0x03}, 32),
-				Signature:   bytes.Repeat([]byte{0x01}, 64),
+				Signature:   testSchnorrSig(),
 			}},
 		},
 	}, {
@@ -650,12 +842,6 @@ func TestValidateFundPacketRejectsSignatures(t *testing.T) {
 		name: "an empty but present witness",
 		input: psbt.PInput{
 			FinalScriptWitness: []byte{},
-		},
-	}, {
-		// Present but empty is still a record funding would drop.
-		name: "an empty but present key spend signature",
-		input: psbt.PInput{
-			TaprootKeySpendSig: []byte{},
 		},
 	}}
 
