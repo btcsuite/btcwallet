@@ -503,3 +503,10 @@ SET
         next_internal_index, sqlc.arg('next_index')
     )
 WHERE id = sqlc.arg('id');
+-- name: GetWalletForAccountCreation :one
+-- Serializes account admission across all scopes of a wallet. NO KEY UPDATE
+-- permits foreign-key checks while holding the lock until the write completes.
+SELECT is_watch_only
+FROM wallets
+WHERE id = $1
+FOR NO KEY UPDATE;

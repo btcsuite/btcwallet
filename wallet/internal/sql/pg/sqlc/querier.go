@@ -288,6 +288,9 @@ type Querier interface {
 	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
+	// Serializes account admission across all scopes of a wallet. NO KEY UPDATE
+	// permits foreign-key checks while holding the lock until the write completes.
+	GetWalletForAccountCreation(ctx context.Context, id int64) (bool, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
 	// Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
 	// transaction is already invalid.
