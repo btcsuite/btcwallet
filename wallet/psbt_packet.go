@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -88,10 +89,16 @@ func validatePacket(packet *psbt.Packet) error {
 
 	// Global fields the wallet cannot classify would be dropped by any
 	// transformation, so refuse them up front rather than silently losing
-	// them.
+	// them. This also has to precede the encoding check, which reads
+	// through every record the packet holds.
 	if len(packet.Unknowns) > 0 {
 		return fmt.Errorf("%w: %d global fields",
 			ErrUnclassifiedField, len(packet.Unknowns))
+	}
+
+	err = validatePacketEncoding(packet)
+	if err != nil {
+		return err
 	}
 
 	err = validatePacketInputs(packet)
@@ -100,6 +107,52 @@ func validatePacket(packet *psbt.Packet) error {
 	}
 
 	return validatePacketOutputs(packet)
+}
+
+// validatePacketEncoding checks that a packet is one the psbt package itself
+// would accept, by writing it out and reading it back.
+//
+// The record contents a PSBT can carry are the psbt package's to define, and
+// it already refuses the ones that are unusable: keys that do not parse,
+// signatures that are not signatures, control blocks of the wrong shape,
+// global extended keys whose depth disagrees with their path. A packet the
+// wallet admitted but that package would not is one the wallet could hand back
+// and the caller could not serialize.
+//
+// Asking it directly is also the only way to stay current: a record type the
+// psbt package learns to validate is covered here without the wallet keeping
+// its own list of what to look at.
+//
+// It reaches what the encoding carries, and no further. An input holding a
+// final script signature or witness has all of its other records left out of
+// the encoding entirely, so none of them are judged here. That is the format's
+// own position rather than a gap to work around: once an input is finalized
+// those records are no longer part of it. Whether an operation may accept a
+// finalized input at all is that operation's question, and for funding the
+// answer is no.
+//
+// This runs after the pointer sweep, because serializing reads through every
+// entry the packet holds.
+func validatePacketEncoding(packet *psbt.Packet) error {
+	// Serializing is not read-only: the psbt package sorts an input's and
+	// an output's record lists in place as it writes them. Those slices
+	// belong to the caller, so the probe has to be a copy, or validating a
+	// packet would reorder the one the caller still holds.
+	probe := clonePacket(packet)
+
+	var raw bytes.Buffer
+
+	err := probe.Serialize(&raw)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	_, err = psbt.NewFromRawBytes(&raw, false)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	return nil
 }
 
 // validatePacketPointers checks that nothing the wallet will read through is
@@ -127,8 +180,13 @@ func validatePacketPointers(packet *psbt.Packet) error {
 		}
 	}
 
+	err := validateGlobalPointers(packet)
+	if err != nil {
+		return err
+	}
+
 	for i := range packet.Inputs {
-		err := validateInputPointers(&packet.Inputs[i], i)
+		err = validateInputPointers(&packet.Inputs[i], i)
 		if err != nil {
 			return err
 		}
@@ -137,12 +195,28 @@ func validatePacketPointers(packet *psbt.Packet) error {
 	for i := range packet.Outputs {
 		pOut := &packet.Outputs[i]
 
-		err := validateRecordPointers(
+		err = validateRecordPointers(
 			"output", i, pOut.Bip32Derivation,
 			pOut.TaprootBip32Derivation, pOut.Unknowns,
 		)
 		if err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// validateGlobalPointers checks the packet-level record lists.
+//
+// Nothing reaches a nil here today, since an unclassified field is refused
+// before anything reads one, but serializing the packet walks this list and a
+// nil in it would be a panic rather than a rejection.
+func validateGlobalPointers(packet *psbt.Packet) error {
+	for i, u := range packet.Unknowns {
+		if u == nil {
+			return fmt.Errorf("%w: global unknown field %d is nil",
+				ErrPacketMalformed, i)
 		}
 	}
 
