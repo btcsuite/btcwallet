@@ -4286,6 +4286,17 @@ func TestDeleteUnminedTxRemovesBranch(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+
+	// Removing the root again finds no row, which is the same identity SQL
+	// now reports for a root it retained as terminal.
+	err = store.DeleteUnminedTx(
+		t.Context(), db.DeleteUnminedTxParams{
+			WalletID: 0,
+			Txid:     rootRec.Hash,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+	require.NotErrorIs(t, err, db.ErrDeleteRequiresUnmined)
 }
 
 // TestDeleteUnminedTxRejectsConfirmed verifies that confirmed transactions

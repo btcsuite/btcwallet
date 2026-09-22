@@ -475,3 +475,80 @@ func TestDeleteUnminedTxRollsBackOnFailure(t *testing.T) {
 		Hash: child.TxHash(), Index: 0,
 	}))
 }
+
+// TestDeleteUnminedTxRejectsTerminalRoot verifies that a root the wallet
+// already made terminal reports the same missing-tx identity every backend
+// gives, rather than a SQL-only invalid-state identity for a row kvdb would
+// not hold at all.
+func TestDeleteUnminedTxRejectsTerminalRoot(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-unmined-terminal")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	block := CreateBlockFixture(t, store.Queries(), 460)
+
+	funding := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
+	)
+	err := store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       funding,
+			Received: time.Unix(1710004500, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	spend := newRegularTx(
+		[]wire.OutPoint{{Hash: funding.TxHash()}},
+		[]*wire.TxOut{{Value: 8000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       spend,
+			Received: time.Unix(1710004510, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	err = store.InvalidateUnminedTx(
+		t.Context(),
+		db.InvalidateUnminedTxParams{
+			WalletID: walletID,
+			Txid:     spend.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+
+	err = store.DeleteUnminedTx(
+		t.Context(),
+		db.DeleteUnminedTxParams{
+			WalletID: walletID,
+			Txid:     spend.TxHash(),
+		},
+	)
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+	require.NotErrorIs(t, err, db.ErrDeleteRequiresUnmined)
+
+	// The retained row is untouched by the refusal.
+	info, err := store.GetTx(
+		t.Context(),
+		db.GetTxQuery{WalletID: walletID, Txid: spend.TxHash()},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusFailed, info.Status)
+}

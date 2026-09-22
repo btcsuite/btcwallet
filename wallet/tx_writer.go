@@ -29,8 +29,8 @@ var (
 	ErrLabelTooLong = errors.New("transaction label exceeds limit")
 
 	// ErrTxNotUnconfirmed is returned when DeleteUnconfirmedTx targets a tx
-	// that is confirmed, coinbase, or already invalid. Callers can match
-	// this error with errors.Is.
+	// that is confirmed or coinbase. Callers can match this error with
+	// errors.Is.
 	ErrTxNotUnconfirmed = errors.New("tx is not an unconfirmed transaction")
 )
 
@@ -44,9 +44,11 @@ type TxWriter interface {
 
 	// DeleteUnconfirmedTx removes an unconfirmed tx and every recorded tx
 	// that spends it, restoring the wallet outputs they spent. It returns
-	// ErrTxNotFound if the wallet has no record of the tx, and
-	// ErrTxNotUnconfirmed if the tx is confirmed, coinbase, or already
-	// invalid. No history is retained.
+	// ErrTxNotFound if the wallet has no active unconfirmed record of the
+	// tx, which includes a tx an earlier event already made terminal, and
+	// ErrTxNotUnconfirmed if the tx is confirmed or coinbase. A terminal tx
+	// reported as not found may still be readable through GetTx. No history
+	// is retained.
 	DeleteUnconfirmedTx(ctx context.Context, hash chainhash.Hash) error
 }
 
@@ -137,8 +139,10 @@ type deleteUnconfirmedTxReq struct {
 // The removal is atomic, and no history is retained: a tx the chain later
 // confirms is recorded again by synchronization.
 //
-// It returns ErrTxNotFound if the wallet has no record of the tx, and
-// ErrTxNotUnconfirmed if the tx is confirmed, coinbase, or already invalid.
+// It returns ErrTxNotFound if the wallet has no active unconfirmed record of
+// the tx, which includes a tx an earlier event already made terminal, and
+// ErrTxNotUnconfirmed if the tx is confirmed or coinbase. A terminal tx
+// reported as not found may still be readable through GetTx.
 //
 // NOTE: This method is part of the TxWriter interface.
 func (w *Wallet) DeleteUnconfirmedTx(ctx context.Context,
