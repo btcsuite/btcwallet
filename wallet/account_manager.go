@@ -37,6 +37,10 @@ var (
 	// an account to its current name reports the same outcome.
 	ErrAccountAlreadyExists = errors.New("account already exists")
 
+	// ErrAccountIdentityCollision reports an account XPub whose public key
+	// and chain code already own an overlapping branch schema in this wallet.
+	ErrAccountIdentityCollision = errors.New("account identity collision")
+
 	// ErrAccountOperationUnsupported is returned when the requested account
 	// operation cannot be served by the wallet in its current mode, such as
 	// deriving a new account on a watch-only wallet or importing an
@@ -124,6 +128,9 @@ func newAccountErr(err error) error {
 		errors.Is(err, db.ErrAccountNumberConflict):
 		publicErr = ErrAccountAlreadyExists
 
+	case errors.Is(err, db.ErrAccountIdentityCollision):
+		publicErr = ErrAccountIdentityCollision
+
 	case errors.Is(err, errWatchOnlyAccountDerivation),
 		errors.Is(err, ErrAccountOperationUnsupported):
 
@@ -173,6 +180,9 @@ func importAccountErr(err error) error {
 	switch {
 	case isAccountNameConflict(err):
 		publicErr = ErrAccountAlreadyExists
+
+	case errors.Is(err, db.ErrAccountIdentityCollision):
+		publicErr = ErrAccountIdentityCollision
 
 	case errors.Is(err, db.ErrSpendableWalletNeedsAccountPrivKey),
 		isAddrMgrErr(err, waddrmgr.ErrWatchingOnly):
@@ -492,6 +502,7 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 // NoChainSync=true excludes automatic synchronization and recovery only with
 // exact SQL selection. Sequential exclusion and exact kvdb requests return
 // ErrAccountOperationUnsupported before preparing secrets.
+// Overlapping XPub identities return ErrAccountIdentityCollision.
 // Failures return no account; ErrIndeterminateCommit means persistence may
 // have succeeded. Once admitted, the call waits for the Store outcome even
 // after cancellation; the Store still receives the caller context.
@@ -1118,6 +1129,9 @@ type importAccountReq struct {
 // extended keys are rejected. The key scope is derived from the version
 // bytes of the extended key. The account name must be unique within the
 // derived scope. Invalid account keys return ErrInvalidAccountKey.
+// An occupied name returns ErrAccountAlreadyExists before identity checks;
+// otherwise shared XPub payloads with overlapping corresponding branch schemas
+// return ErrAccountIdentityCollision, including on dry runs.
 //
 // SQL wallets accept this XPub-only material only when the wallet is
 // watch-only under ADR 0012. The legacy kvdb backend retains its grandfathered
