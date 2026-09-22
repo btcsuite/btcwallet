@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/psbt/v2"
@@ -19,10 +20,33 @@ import (
 // testWalletUtxo is the output the wallet is taken to have looked up for the
 // input the funding helpers are exercised against.
 func testWalletUtxo() *wire.TxOut {
-	return &wire.TxOut{
-		Value:    100000,
-		PkScript: bytes.Repeat([]byte{0x51}, 22),
+	return &wire.TxOut{Value: 100000, PkScript: testFundP2WPKHScript()}
+}
+
+// testFundP2WPKHScript returns a real P2WPKH script.
+//
+// The funding path classifies a spend by the script the wallet looked up, so a
+// fixture carrying filler bytes is nonstandard and exercises none of it.
+func testFundP2WPKHScript() []byte {
+	key := testKey(1)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(key.SerializeCompressed()), &chainParams,
+	)
+	if err != nil {
+		panic(err)
 	}
+
+	return mustPayToAddr(addr)
+}
+
+func mustPayToAddr(addr address.Address) []byte {
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		panic(err)
+	}
+
+	return script
 }
 
 // testWalletDerivation is the derivation the wallet is taken to have derived
