@@ -61,6 +61,10 @@ var (
 	// within a wallet and key scope.
 	ErrAccountNameConflict = errors.New("account name conflict")
 
+	// ErrAccountIdentityCollision reports an XPub payload already owning a
+	// corresponding branch schema anywhere in the wallet.
+	ErrAccountIdentityCollision = errors.New("account identity collision")
+
 	// ErrAccountNumberConflict reports an occupied derived account number
 	// within a key scope, distinct from an occupied name.
 	ErrAccountNumberConflict = errors.New("account number conflict")
@@ -243,6 +247,9 @@ type WalletStore interface {
 }
 
 // AccountStore defines the database actions for managing accounts.
+// Creation rejects overlapping XPub identities wallet-wide without committing
+// rows, allocation, or secrets. Name and supported exact-number conflicts take
+// precedence over ErrAccountIdentityCollision, even before children exist.
 type AccountStore interface {
 	// GetKeyScopeSchema reads the persisted scope schema, independently of
 	// account overrides, or returns ErrKeyScopeNotFound when absent.
