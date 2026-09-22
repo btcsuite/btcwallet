@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -23,7 +24,8 @@ func testWalletUtxo() *wire.TxOut {
 	return &wire.TxOut{Value: 100000, PkScript: testFundP2WPKHScript()}
 }
 
-// testFundP2WPKHScript returns a real P2WPKH script.
+// testFundP2WPKHScript, testFundP2WSHScript and testFundP2TRScript return
+// real scripts of each kind the wallet spends.
 //
 // The funding path classifies a spend by the script the wallet looked up, so a
 // fixture carrying filler bytes is nonstandard and exercises none of it.
@@ -33,6 +35,37 @@ func testFundP2WPKHScript() []byte {
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		address.Hash160(key.SerializeCompressed()), &chainParams,
 	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func testFundP2WSHScript(witnessScript []byte) []byte {
+	addr, err := address.NewAddressWitnessScriptHash(
+		chainhash.HashB(witnessScript), &chainParams,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func testFundP2TRScript() []byte {
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(testKey(1)), &chainParams,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func testFundP2SHScript(redeemScript []byte) []byte {
+	addr, err := address.NewAddressScriptHash(redeemScript, &chainParams)
 	if err != nil {
 		panic(err)
 	}
@@ -85,6 +118,56 @@ func testDecoratedInput() psbt.PInput {
 		WitnessUtxo:     testWalletUtxo(),
 		SighashType:     txscript.SigHashAll,
 		Bip32Derivation: testWalletDerivation(),
+	}
+}
+
+// TestClassifySpend verifies that an input is classified by the script the
+// wallet recorded for the coin, not by anything the caller attached.
+func TestClassifySpend(t *testing.T) {
+	t.Parallel()
+
+	witnessScript := []byte{0x51, 0x52}
+
+	tests := []struct {
+		name  string
+		utxo  *wire.TxOut
+		want  spendKind
+		alone bool
+	}{{
+		name:  "a p2wpkh output",
+		utxo:  &wire.TxOut{PkScript: testFundP2WPKHScript()},
+		want:  spendWitnessKey,
+		alone: true,
+	}, {
+		name: "a p2wsh output",
+		utxo: &wire.TxOut{PkScript: testFundP2WSHScript(witnessScript)},
+		want: spendWitnessScript,
+	}, {
+		name:  "a taproot output",
+		utxo:  &wire.TxOut{PkScript: testFundP2TRScript()},
+		want:  spendTaproot,
+		alone: true,
+	}, {
+		name: "a p2sh output",
+		utxo: &wire.TxOut{PkScript: testFundP2SHScript(witnessScript)},
+		want: spendNested,
+	}, {
+		name: "an output the wallet did not record",
+		want: spendUnknown,
+	}, {
+		name: "an output of no known kind",
+		utxo: &wire.TxOut{PkScript: []byte{0x51, 0x52, 0x53}},
+		want: spendUnknown,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := classifySpend(&psbt.PInput{WitnessUtxo: tc.utxo})
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.alone, got.singleKey())
+		})
 	}
 }
 
