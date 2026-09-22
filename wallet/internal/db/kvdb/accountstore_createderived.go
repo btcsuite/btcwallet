@@ -163,8 +163,25 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 		return db.CreateDerivedAccountRow{}, errScopedMgrUninitialized
 	}
 
+	// Refuse duplicate ownership before PutDerivedAccountWithKeys publishes
+	// its cache entry. The existing write rolls back the allocated number.
+	schema, err := effectiveAddrSchema(o.scopedMgr.AddrSchema(), nil)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, err
+	}
+
+	err = checkAccountIdentity(o.ns, o.mgr, db.AccountInfo{
+		KeyScope:    db.KeyScope(o.scope),
+		AccountName: name,
+		PublicKey:   derived.PublicKey,
+		AddrSchema:  schema,
+	})
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, err
+	}
+
 	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
-	err := o.scopedMgr.PutDerivedAccountWithKeys(
+	err = o.scopedMgr.PutDerivedAccountWithKeys(
 		o.ns, uint32(accountNumber), name,
 		derived.PublicKey, derived.EncryptedPrivateKey,
 	)
