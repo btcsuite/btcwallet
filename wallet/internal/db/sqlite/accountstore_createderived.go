@@ -28,8 +28,12 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		info, err = db.CreateDerivedAccountWithOps(
 			ctx, params, createDerivedAccountOps{q: qtx}, deriveFn,
 		)
+		if err != nil {
+			return err
+		}
 
-		return err
+		// Roll back the row, secrets, and allocation on identity refusal.
+		return checkAccountIdentity(ctx, qtx, params.WalletID, info)
 	})
 	if err != nil {
 		return nil, err
