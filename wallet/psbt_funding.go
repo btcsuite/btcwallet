@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
@@ -80,6 +81,67 @@ func restoreInputMetadata(packet *psbt.Packet,
 	}
 
 	return nil
+}
+
+// spendKind names the shape of the output an input spends, as far as the
+// metadata that output can carry is concerned.
+type spendKind uint8
+
+const (
+	// spendUnknown is an output the wallet cannot classify. It carries no
+	// entitlement either way, so caller metadata is neither admitted nor
+	// refused on the strength of it.
+	spendUnknown spendKind = iota
+
+	// spendWitnessKey is a single-key segwit v0 spend: P2WPKH.
+	spendWitnessKey
+
+	// spendWitnessScript is a script-hash segwit v0 spend: P2WSH.
+	spendWitnessScript
+
+	// spendNested is a segwit v0 spend wrapped in P2SH.
+	spendNested
+
+	// spendTaproot is a segwit v1 spend.
+	spendTaproot
+)
+
+// singleKey reports whether the spend is satisfied by one key, which is to say
+// it admits no cosigner.
+func (k spendKind) singleKey() bool {
+	return k == spendWitnessKey || k == spendTaproot
+}
+
+// classifySpend reports what kind of output an input spends, reading the script
+// from the wallet's own record of the coin rather than from anything the caller
+// supplied.
+//
+// The wallet writes a witness UTXO for every input it decorates, so this is
+// the authoritative answer for an input funding selected. An input it could not
+// decorate classifies as unknown.
+func classifySpend(decorated *psbt.PInput) spendKind {
+	if decorated.WitnessUtxo == nil {
+		return spendUnknown
+	}
+
+	script := decorated.WitnessUtxo.PkScript
+
+	switch {
+	case txscript.IsPayToTaproot(script):
+		return spendTaproot
+
+	case txscript.IsPayToWitnessPubKeyHash(script):
+		return spendWitnessKey
+
+	case txscript.IsPayToWitnessScriptHash(script):
+		return spendWitnessScript
+
+	case txscript.IsPayToScriptHash(script):
+		return spendNested
+
+	default:
+		return spendUnknown
+	}
 }
 
 // mergeCallerInput merges one caller input record into the wallet's decorated
