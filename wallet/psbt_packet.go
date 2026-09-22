@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -331,6 +332,11 @@ func validatePacketInputs(packet *psbt.Packet) error {
 		if err != nil {
 			return err
 		}
+
+		err = validateMerkleRoot(pIn, i)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -345,6 +351,27 @@ func validatePacketOutputs(packet *psbt.Packet) error {
 			return fmt.Errorf("%w: output %d carries %d fields",
 				ErrUnclassifiedField, i, len(pOut.Unknowns))
 		}
+	}
+
+	return nil
+}
+
+// validateMerkleRoot checks that a taproot merkle root is a hash.
+//
+// The psbt package stores this record without inspecting it, so parsing a
+// packet back will not refuse a root of the wrong size. It is not the only
+// record stored raw — an output's tap tree is too — but it is the only one
+// with a fixed size the wallet can assert without parsing anything, which is
+// why it is the only one checked here.
+func validateMerkleRoot(pIn *psbt.PInput, idx int) error {
+	if pIn.TaprootMerkleRoot == nil {
+		return nil
+	}
+
+	if len(pIn.TaprootMerkleRoot) != chainhash.HashSize {
+		return fmt.Errorf("%w: input %d has a %d byte taproot merkle "+
+			"root", ErrPacketMalformed, idx,
+			len(pIn.TaprootMerkleRoot))
 	}
 
 	return nil
