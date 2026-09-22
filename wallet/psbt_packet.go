@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -350,6 +351,32 @@ func validatePacketInputs(packet *psbt.Packet) error {
 		if err != nil {
 			return err
 		}
+
+		err = validateMerkleRoot(pIn, i)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateMerkleRoot checks an input's taproot merkle root, if it has one. The
+// record is optional, so a nil root passes; a present one, empty included,
+// must be exactly 32 bytes.
+//
+// The psbt package stores this record without inspecting it, so parsing a
+// packet back will not refuse a root of the wrong size. An output's tap tree
+// is stored raw too, but the root is the only such record with a fixed size.
+func validateMerkleRoot(pIn *psbt.PInput, idx int) error {
+	if pIn.TaprootMerkleRoot == nil {
+		return nil
+	}
+
+	if len(pIn.TaprootMerkleRoot) != chainhash.HashSize {
+		return fmt.Errorf("%w: input %d has a %d byte taproot merkle "+
+			"root", ErrPacketMalformed, idx,
+			len(pIn.TaprootMerkleRoot))
 	}
 
 	return nil
