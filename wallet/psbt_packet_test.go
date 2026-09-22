@@ -651,6 +651,12 @@ func TestValidateFundPacketRejectsSignatures(t *testing.T) {
 		input: psbt.PInput{
 			FinalScriptWitness: []byte{},
 		},
+	}, {
+		// Present but empty is still a record funding would drop.
+		name: "an empty but present key spend signature",
+		input: psbt.PInput{
+			TaprootKeySpendSig: []byte{},
+		},
 	}}
 
 	for _, tc := range tests {
