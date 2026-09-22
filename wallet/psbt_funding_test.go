@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -19,10 +21,55 @@ import (
 // testWalletUtxo is the output the wallet is taken to have looked up for the
 // input the funding helpers are exercised against.
 func testWalletUtxo() *wire.TxOut {
-	return &wire.TxOut{
-		Value:    100000,
-		PkScript: bytes.Repeat([]byte{0x51}, 22),
+	return &wire.TxOut{Value: 100000, PkScript: testP2WPKHScript(1)}
+}
+
+// testP2WPKHScript, testP2WSHScript and testP2TRScript return real scripts of
+// each kind the wallet spends.
+//
+// The funding path classifies a spend by the script the wallet looked up, so a
+// fixture carrying filler bytes is nonstandard and exercises none of it.
+func testP2WPKHScript(seed byte) []byte {
+	key := testKey(seed)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(key.SerializeCompressed()), &chainParams,
+	)
+	if err != nil {
+		panic(err)
 	}
+
+	return mustPayToAddr(addr)
+}
+
+func testP2WSHScript(witnessScript []byte) []byte {
+	addr, err := address.NewAddressWitnessScriptHash(
+		chainhash.HashB(witnessScript), &chainParams,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func testP2TRScript(seed byte) []byte {
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(testKey(seed)), &chainParams,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func mustPayToAddr(addr address.Address) []byte {
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		panic(err)
+	}
+
+	return script
 }
 
 // testWalletDerivation is the derivation the wallet is taken to have derived
