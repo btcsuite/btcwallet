@@ -1419,6 +1419,7 @@ func TestListAccountsMissingScopeReturnsEmpty(t *testing.T) {
 func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: distinct XPub payloads share the legacy allocation cursor.
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
@@ -1428,11 +1429,15 @@ func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 	masterPub, err := master.Neuter()
 	require.NoError(t, err)
 
+	secondPub, err := masterPub.Derive(1)
+	require.NoError(t, err)
+
 	scope := db.KeyScope{
 		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
 		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
 	}
 
+	// Act: persist two independent identities under different names.
 	first, err := store.CreateImportedAccount(t.Context(),
 		db.CreateImportedAccountParams{
 			Scope:             scope,
@@ -1450,13 +1455,14 @@ func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 			Scope:             scope,
 			Name:              "bob-import",
 			MasterFingerprint: 0xFEEDFACE,
-			PublicKey:         []byte(masterPub.String()),
+			PublicKey:         []byte(secondPub.String()),
 		},
 	)
 	require.NoError(t, err)
 	require.NotNil(t, second)
 	require.Equal(t, "bob-import", second.AccountName)
 
+	// Assert: the second account follows the first without a cursor gap.
 	mgrScope := waddrmgr.KeyScope(scope)
 	scopedMgr, err := store.addrStore.FetchScopedKeyManager(mgrScope)
 	require.NoError(t, err)
@@ -1495,4 +1501,293 @@ func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 	require.Equal(t, "bob-import", got.AccountName)
 	require.NotNil(t, got.MasterKeyFingerprint)
 	require.Equal(t, uint32(0xFEEDFACE), *got.MasterKeyFingerprint)
+}
+
+// TestCreateImportedAccountIdentity checks admission before children exist,
+// including serialization metadata and per-account branch schema overrides.
+func TestCreateImportedAccountIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: keep the derivation payload fixed while varying origin and
+	// version metadata, so only the effective branch schemas decide overlap.
+	master, err := hdkeychain.NewMaster(
+		bytes.Repeat([]byte{0xCC}, 32), &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	key, err := master.Neuter()
+	require.NoError(t, err)
+	pub, err := key.ECPubKey()
+	require.NoError(t, err)
+
+	alias := hdkeychain.NewExtendedKey(
+		chaincfg.MainNetParams.HDPublicKeyID[:], pub.SerializeCompressed(),
+		key.ChainCode(), []byte{1, 2, 3, 4}, 3, 42, false,
+	)
+	strict, err := db.ScopeAddrSchemaFromWaddrmgr(
+		waddrmgr.KeyScopeBIP0049AddrSchema,
+	)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		scope  db.KeyScope
+		schema *db.ScopeAddrSchema
+		dryRun bool
+		want   error
+	}{
+		{
+			name:  "same scope",
+			scope: db.KeyScopeBIP0084,
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "internal overlap across scopes",
+			scope: db.KeyScopeBIP0049Plus,
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:   "strict nested disjoint",
+			scope:  db.KeyScopeBIP0049Plus,
+			schema: &strict,
+		},
+		{
+			name:   "preview collision",
+			scope:  db.KeyScopeBIP0084,
+			dryRun: true,
+			want:   db.ErrAccountIdentityCollision,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: one childless imported account owns this payload;
+			// the snapshot includes all pre-existing derived accounts.
+			store, _, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			params := db.CreateImportedAccountParams{
+				Scope:     db.KeyScopeBIP0084,
+				Name:      "owner",
+				PublicKey: []byte(key.String()),
+			}
+			_, err := store.CreateImportedAccount(t.Context(), params)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{SkipBalance: true}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			params.Scope, params.AddrSchema = tc.scope, tc.schema
+			params.Name, params.DryRun = "candidate", tc.dryRun
+			params.PublicKey = []byte(alias.String())
+			params.MasterFingerprint = 123
+
+			// Act: admit the same payload through the ordinary Store path.
+			info, err := store.CreateImportedAccount(t.Context(), params)
+
+			// Assert: disjoint schemas remain usable; collisions leave the
+			// complete childless inventory unchanged and return no account.
+			require.ErrorIs(t, err, tc.want)
+			after, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			if tc.want != nil {
+				require.Nil(t, info)
+				require.ElementsMatch(t, before, after)
+			} else {
+				require.NotNil(t, info)
+				require.Len(t, after, len(before)+1)
+			}
+
+			// Act: repeat an occupied name with the colliding material.
+			params.Scope, params.AddrSchema = db.KeyScopeBIP0084, nil
+
+			params.Name = "owner"
+			for range 2 {
+				info, err = store.CreateImportedAccount(t.Context(), params)
+
+				// Assert: name occupancy always precedes payload refusal.
+				require.ErrorIs(t, err, db.ErrAccountNameConflict)
+				require.Nil(t, info)
+			}
+		})
+	}
+}
+
+// TestCreateImportedAccountIdentityConcurrent checks that walletdb serializes
+// same-scope and cross-scope conflicting requests without consuming loser IDs.
+func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		scope db.KeyScope
+		other string
+		want  error
+	}{
+		{
+			name:  "same scope",
+			scope: db.KeyScopeBIP0084,
+			other: "second",
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "cross scope",
+			scope: db.KeyScopeBIP0049Plus,
+			other: "second",
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "occupied name",
+			scope: db.KeyScopeBIP0084,
+			other: "first",
+			want:  db.ErrAccountNameConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: both workers wait at a shared start barrier; buffered
+			// outcomes let every worker finish even if an assertion fails.
+			store, _, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			key, err := hdkeychain.NewMaster(
+				bytes.Repeat([]byte{0xCD}, 32), &chaincfg.SimNetParams,
+			)
+			require.NoError(t, err)
+			pub, err := key.Neuter()
+			require.NoError(t, err)
+
+			start := make(chan struct{})
+			results := make(chan error, 2)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+
+			for _, params := range []db.CreateImportedAccountParams{
+				{
+					Scope:     db.KeyScopeBIP0084,
+					Name:      "first",
+					PublicKey: []byte(pub.String()),
+				},
+				{
+					Scope:     tc.scope,
+					Name:      tc.other,
+					PublicKey: []byte(pub.String()),
+				},
+			} {
+				go func() {
+					<-start
+
+					_, err := store.CreateImportedAccount(ctx, params)
+					results <- err
+				}()
+			}
+
+			// Act: release both requests before waiting for either outcome.
+			close(start)
+
+			firstErr, secondErr := <-results, <-results
+
+			// Assert: exactly one request wins and the other is classified.
+			if firstErr != nil {
+				firstErr, secondErr = secondErr, firstErr
+			}
+
+			require.NoError(t, firstErr)
+			require.ErrorIs(t, secondErr, tc.want)
+
+			accounts, err := store.ListAccounts(ctx, db.ListAccountsQuery{
+				SkipBalance: true,
+			})
+			require.NoError(t, err)
+
+			var imported int
+			for _, account := range accounts {
+				if account.IsImported {
+					imported++
+
+					require.Equal(t, uint32(1), *account.AccountID)
+				}
+			}
+
+			require.Equal(t, 1, imported)
+
+			// The sum of scope cursors exposes allocation by either loser.
+			var allocated uint32
+
+			err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+				managers := store.addrStore.ActiveScopedKeyManagers()
+				for _, scoped := range managers {
+					last, err := scoped.LastAccount(
+						tx.ReadBucket(waddrmgr.NamespaceKey),
+					)
+					if err != nil {
+						return err
+					}
+
+					allocated += last
+				}
+
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, uint32(1), allocated)
+		})
+	}
+}
+
+// TestCreateDerivedAccountIdentityRollback verifies a collision cannot persist
+// keys or consume the account number allocated before the derivation callback.
+func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: return the existing default account's XPub with otherwise valid
+	// private material, forcing refusal after the sequential allocation.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	query := db.ListAccountsQuery{SkipBalance: true}
+	before, err := store.ListAccounts(t.Context(), query)
+	require.NoError(t, err)
+
+	zero := uint32(0)
+	owner, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope:         db.KeyScopeBIP0084,
+		AccountNumber: &zero,
+		SkipBalance:   true,
+	})
+	require.NoError(t, err)
+	derive := kvdbDeriveFnFixture(t, mgr)
+	collision := func(ctx context.Context, scope db.KeyScope, number uint32,
+		watchOnly bool) (*db.DerivedAccountData, error) {
+
+		data, err := derive(ctx, scope, number, watchOnly)
+		if err == nil {
+			data.PublicKey = owner.PublicKey
+		}
+
+		return data, err
+	}
+	params := db.CreateDerivedAccountParams{
+		Scope: db.KeyScopeBIP0084,
+		Name:  "candidate",
+	}
+
+	// Act: force identity refusal after allocation and private-key preparation.
+	info, err := store.CreateDerivedAccount(t.Context(), params, collision)
+
+	// Assert: no account or child state survives, and a successful retry uses
+	// the same name and first available number without a stale cache entry.
+	require.ErrorIs(t, err, db.ErrAccountIdentityCollision)
+	require.Nil(t, info)
+	after, err := store.ListAccounts(t.Context(), query)
+	require.NoError(t, err)
+	require.ElementsMatch(t, before, after)
+	next, err := store.CreateDerivedAccount(t.Context(), params, derive)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), *next.AccountNumber)
 }

@@ -117,6 +117,22 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 		addrSchema = &converted
 	}
 
+	// Resolve schemas before registration can publish a new scoped manager.
+	schema, err := s.importedAccountSchema(scope, addrSchema, params.DryRun)
+	if err != nil {
+		return nil, err
+	}
+
+	err = checkAccountIdentity(ns, s.addrStore, db.AccountInfo{
+		KeyScope:    params.Scope,
+		AccountName: params.Name,
+		PublicKey:   params.PublicKey,
+		AddrSchema:  schema,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	scopedMgr, err := s.scopedManagerOrCreate(
 		ns, scope, addrSchema, params.DryRun,
 	)
@@ -214,4 +230,33 @@ func dryRunImportedAccount(ns walletdb.ReadWriteBucket,
 	return loadAccountInfo(
 		ns, scopedMgr, accountNumber, walletIsWatchOnly,
 	)
+}
+
+// importedAccountSchema resolves the candidate without registering a scope,
+// preserving unsupported previews and unknown-scope errors before admission.
+func (s *Store) importedAccountSchema(scope waddrmgr.KeyScope,
+	override *waddrmgr.ScopeAddrSchema, dryRun bool) (db.ScopeAddrSchema,
+	error) {
+
+	schema, hasDefault := waddrmgr.ScopeAddrMap[scope]
+
+	existing, err := s.addrStore.FetchScopedKeyManager(scope)
+	switch {
+	case err == nil:
+		schema = existing.AddrSchema()
+
+	case !waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound):
+		return db.ScopeAddrSchema{}, translateAccountErr(err,
+			db.ErrAccountNotFound)
+
+	case dryRun:
+		return db.ScopeAddrSchema{}, translateAccountErr(err,
+			db.ErrKeyScopeNotFound)
+
+	case !hasDefault && override == nil:
+		return db.ScopeAddrSchema{}, fmt.Errorf("%w %s",
+			errNoDefaultSchema, scope)
+	}
+
+	return effectiveAddrSchema(schema, override)
 }
