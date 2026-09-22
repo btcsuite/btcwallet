@@ -1,7 +1,9 @@
 package sqlite
 
 import (
+	"context"
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
@@ -54,4 +56,18 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 		InternalTypeID:    base.InternalTypeID,
 		ExternalTypeID:    base.ExternalTypeID,
 	})
+}
+
+// checkAccountIdentity checks all wallet peers before the write can commit.
+func checkAccountIdentity(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, candidate *db.AccountInfo) error {
+
+	accounts, err := (accountListQueries{q: qtx}).ListAll(
+		ctx, db.ListAccountsQuery{WalletID: walletID},
+	)
+	if err != nil {
+		return fmt.Errorf("list account identities: %w", err)
+	}
+
+	return db.CheckAccountIdentity(*candidate, accounts)
 }
