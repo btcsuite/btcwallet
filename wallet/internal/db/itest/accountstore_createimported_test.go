@@ -4,7 +4,9 @@ package itest
 
 import (
 	"bytes"
+	"context"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -397,6 +399,109 @@ func TestCreateImportedAccountIdentity(t *testing.T) {
 				require.ErrorIs(t, err, db.ErrAccountNameConflict)
 				require.Nil(t, info)
 			}
+		})
+	}
+}
+
+// TestCreateImportedAccountIdentityConcurrent checks wallet-wide admission
+// when competing imports start together, including duplicate-name precedence.
+func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		scope db.KeyScope
+		other string
+		want  error
+	}{
+		{
+			name:  "same scope",
+			scope: db.KeyScopeBIP0084,
+			other: "second",
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "cross scope",
+			scope: db.KeyScopeBIP0049Plus,
+			other: "second",
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "occupied name",
+			scope: db.KeyScopeBIP0084,
+			other: "first",
+			want:  db.ErrAccountNameConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: fresh SQL storage and a real XPub isolate each race;
+			// buffered results and a bounded context let both workers exit.
+			store := NewTestStore(t)
+			walletID := newWatchOnlyWallet(t, store, "identity-race")
+			key, err := hdkeychain.NewMaster(
+				RandomBytes(32), &chaincfg.SimNetParams,
+			)
+			require.NoError(t, err)
+			pub, err := key.Neuter()
+			require.NoError(t, err)
+
+			start := make(chan struct{})
+			results := make(chan error, 2)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+
+			for _, params := range []db.CreateImportedAccountParams{
+				{
+					WalletID:  walletID,
+					Scope:     db.KeyScopeBIP0084,
+					Name:      "first",
+					PublicKey: []byte(pub.String()),
+				},
+				{
+					WalletID:  walletID,
+					Scope:     tc.scope,
+					Name:      tc.other,
+					PublicKey: []byte(pub.String()),
+				},
+			} {
+				go func() {
+					<-start
+
+					_, err := store.CreateImportedAccount(ctx, params)
+					results <- err
+				}()
+			}
+
+			// Act: release both competing writes before collecting outcomes.
+			close(start)
+
+			firstErr, secondErr := <-results, <-results
+
+			// Assert: one account wins; the loser creates no row or child.
+			if firstErr != nil {
+				firstErr, secondErr = secondErr, firstErr
+			}
+
+			require.NoError(t, firstErr)
+			require.ErrorIs(t, secondErr, tc.want)
+
+			var accounts, secrets, addresses, next int
+
+			err = store.DB().QueryRowContext(ctx, `
+				SELECT (SELECT count(*) FROM accounts),
+				       (SELECT count(*) FROM account_secrets),
+				       (SELECT count(*) FROM addresses),
+				       (SELECT sum(next_account_number) FROM key_scopes)
+			`).Scan(&accounts, &secrets, &addresses, &next)
+			require.NoError(t, err)
+			require.Equal(t, 1, accounts)
+			require.Zero(t, secrets)
+			require.Zero(t, addresses)
+			require.Zero(t, next)
 		})
 	}
 }
