@@ -722,6 +722,118 @@ func TestRestoreInputMetadataReconcilesWalletDerivation(t *testing.T) {
 	require.Len(t, packet.Inputs[0].Bip32Derivation, 2)
 }
 
+// TestRestoreInputMetadataRejectsImpostorDerivation verifies that a caller
+// naming the wallet's own fingerprint and path for a different key is refused.
+//
+// Matching records by key alone would treat this as a cosigner. It is not: it
+// asserts that the wallet's own derivation path produces a key that it does
+// not, and preserving it would leave the packet saying so.
+func TestRestoreInputMetadataRejectsImpostorDerivation(t *testing.T) {
+	t.Parallel()
+
+	walletRec := testWalletDerivation()[0]
+	walletTap := testWalletTaprootDerivation()[0]
+
+	tests := []struct {
+		name      string
+		decorated psbt.PInput
+		caller    psbt.PInput
+	}{{
+		name: "a bip32 key on the wallet's own path",
+		decorated: psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2WPKHScript(1),
+			},
+			Bip32Derivation: testWalletDerivation(),
+		},
+		caller: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{{
+				PubKey: testKey(9).SerializeCompressed(),
+				MasterKeyFingerprint: walletRec.
+					MasterKeyFingerprint,
+				Bip32Path: walletRec.Bip32Path,
+			}},
+		},
+	}, {
+		name: "a taproot key on the wallet's own path",
+		decorated: psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2TRScript(1),
+			},
+			TaprootBip32Derivation: testWalletTaprootDerivation(),
+		},
+		caller: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.
+				TaprootBip32Derivation{{
+				XOnlyPubKey: schnorr.SerializePubKey(
+					testKey(9),
+				),
+				MasterKeyFingerprint: walletTap.
+					MasterKeyFingerprint,
+				Bip32Path: walletTap.Bip32Path,
+			}},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{tc.decorated},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
+	}
+}
+
+// TestRestoreInputMetadataKeepsCosignerOnItsOwnPath verifies that a cosigner
+// naming its own fingerprint and path is still kept, so the impostor check
+// refuses only the records that claim the wallet's place.
+func TestRestoreInputMetadataKeepsCosignerOnItsOwnPath(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Index: 3}
+	cosigner := &psbt.Bip32Derivation{
+		PubKey:               testKey(9).SerializeCompressed(),
+		MasterKeyFingerprint: 99,
+		Bip32Path:            []uint32{48, 0, 0, 2, 0},
+	}
+
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+		},
+		Inputs: []psbt.PInput{{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2WSHScript([]byte{0x51}),
+			},
+			Bip32Derivation: testWalletDerivation(),
+		}},
+	}
+
+	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
+		outPoint: {pInput: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{cosigner},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, packet.Inputs[0].Bip32Derivation, 2)
+	require.Contains(t, packet.Inputs[0].Bip32Derivation, cosigner)
+}
+
 // TestRestoreInputMetadataAgreeingValues verifies that a caller which repeats
 // back exactly what the wallet knows is not treated as a conflict. Callers
 // that decorated a packet before funding it are in this position.

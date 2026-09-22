@@ -384,6 +384,13 @@ func reconcileBip32(wallet, caller []*psbt.Bip32Derivation,
 			},
 		)
 		if at < 0 {
+			// Nobody else may claim the wallet's own place in the
+			// derivation tree.
+			err := checkNoImpostor(merged, w, idx)
+			if err != nil {
+				return nil, err
+			}
+
 			merged = append(merged, w)
 
 			continue
@@ -396,6 +403,33 @@ func reconcileBip32(wallet, caller []*psbt.Bip32Derivation,
 	}
 
 	return merged, nil
+}
+
+// checkNoImpostor refuses a caller record that claims the wallet's own
+// fingerprint and path for some other key.
+//
+// Matching records by key alone is not enough. A caller that names the
+// wallet's master fingerprint and derivation path while naming a different key
+// is not a cosigner: it is asserting that the wallet's own path produces a key
+// that it does not. Keeping such a record would leave the packet saying so.
+func checkNoImpostor(caller []*psbt.Bip32Derivation,
+	wallet *psbt.Bip32Derivation, idx int) error {
+
+	for _, c := range caller {
+		if c.MasterKeyFingerprint != wallet.MasterKeyFingerprint {
+			continue
+		}
+
+		if !slices.Equal(c.Bip32Path, wallet.Bip32Path) {
+			continue
+		}
+
+		return fmt.Errorf("%w: input %d names the wallet's own "+
+			"derivation path for another key",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	return nil
 }
 
 // reconcileTaproot is reconcileBip32 for taproot derivations, matching records
@@ -419,6 +453,11 @@ func reconcileTaproot(wallet, caller []*psbt.TaprootBip32Derivation,
 			},
 		)
 		if at < 0 {
+			err := checkNoTaprootImpostor(merged, w, idx)
+			if err != nil {
+				return nil, err
+			}
+
 			merged = append(merged, w)
 
 			continue
@@ -431,6 +470,27 @@ func reconcileTaproot(wallet, caller []*psbt.TaprootBip32Derivation,
 	}
 
 	return merged, nil
+}
+
+// checkNoTaprootImpostor is checkNoImpostor for taproot derivations.
+func checkNoTaprootImpostor(caller []*psbt.TaprootBip32Derivation,
+	wallet *psbt.TaprootBip32Derivation, idx int) error {
+
+	for _, c := range caller {
+		if c.MasterKeyFingerprint != wallet.MasterKeyFingerprint {
+			continue
+		}
+
+		if !slices.Equal(c.Bip32Path, wallet.Bip32Path) {
+			continue
+		}
+
+		return fmt.Errorf("%w: input %d names the wallet's own "+
+			"derivation path for another key",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	return nil
 }
 
 // bip32DerivationEqual compares two BIP32 derivation records, treating a pair
