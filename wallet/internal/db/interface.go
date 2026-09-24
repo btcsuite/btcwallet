@@ -505,7 +505,8 @@ type TxStore interface {
 	//
 	// Implementations must remove the root, its descendants and the outputs
 	// they created, and restore the outputs the branch spent, inside one
-	// database transaction.
+	// database transaction. Descendants an earlier event already made
+	// terminal are removed with the branch.
 	DeleteUnminedTx(ctx context.Context,
 		params DeleteUnminedTxParams) error
 
