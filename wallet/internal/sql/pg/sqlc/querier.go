@@ -145,6 +145,19 @@ type Querier interface {
 	// Performance:
 	// - Targets at most one row by `(wallet_id, tx_hash)`.
 	DeleteUnminedTransactionByHash(ctx context.Context, arg DeleteUnminedTransactionByHashParams) (int64, error)
+	// Deletes an unmined transaction row whatever its wallet-relative status.
+	//
+	// How:
+	// - Matches DeleteUnminedTransactionByHash but drops the status predicate, so
+	//   a row an earlier event made `replaced`, `failed` or `orphaned` is removed
+	//   too. Confirmed rows stay protected by the block_height check.
+	// - Used by branch deletion only, which takes a whole branch including
+	//   descendants already made terminal.
+	// - Leaf DeleteTx must keep using DeleteUnminedTransactionByHash, whose status
+	//   predicate is what stops it erasing retained history.
+	// Performance:
+	// - Targets at most one row by `(wallet_id, tx_hash)`.
+	DeleteUnminedTransactionByHashWithInvalid(ctx context.Context, arg DeleteUnminedTransactionByHashWithInvalidParams) (int64, error)
 	// Deletes all UTXO rows created by the provided transaction ID.
 	//
 	// How:
