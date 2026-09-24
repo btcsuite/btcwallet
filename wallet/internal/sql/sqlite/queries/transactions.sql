@@ -328,6 +328,25 @@ WHERE
     AND block_height IS NULL
     AND tx_status IN (0, 1);
 
+-- name: DeleteUnminedTransactionByHashWithInvalid :execrows
+-- Deletes an unmined transaction row whatever its wallet-relative status.
+--
+-- How:
+-- - Matches DeleteUnminedTransactionByHash but drops the status predicate, so
+--   a row an earlier event made `replaced`, `failed` or `orphaned` is removed
+--   too. Confirmed rows stay protected by the block_height check.
+-- - Used by branch deletion only, which takes a whole branch including
+--   descendants already made terminal.
+-- - Leaf DeleteTx must keep using DeleteUnminedTransactionByHash, whose status
+--   predicate is what stops it erasing retained history.
+-- Performance:
+-- - Targets at most one row by `(wallet_id, tx_hash)`.
+DELETE FROM transactions
+WHERE
+    wallet_id = ?
+    AND tx_hash = ?
+    AND block_height IS NULL;
+
 -- name: ListRollbackCoinbaseRoots :many
 -- Lists wallet-scoped coinbase transaction hashes at or above the rollback
 -- boundary that seed descendant invalidation.
