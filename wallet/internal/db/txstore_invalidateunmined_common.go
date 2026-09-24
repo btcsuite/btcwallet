@@ -41,8 +41,10 @@ type UnminedBranchOps interface {
 	LoadUnminedTxTarget(ctx context.Context, walletID uint32,
 		txHash chainhash.Hash) (UnminedTxTarget, error)
 
-	// ListUnminedTxRecords loads the wallet's active unmined transaction rows
-	// in the normalized shape the descendant walk expects.
+	// ListUnminedTxRecords loads the unmined rows the workflow's descendant
+	// walk must consider, in the normalized shape it expects. Invalidation
+	// considers the active set; removal also considers rows an earlier event
+	// made terminal.
 	ListUnminedTxRecords(ctx context.Context, walletID int64) (
 		[]UnminedTxRecord, error)
 

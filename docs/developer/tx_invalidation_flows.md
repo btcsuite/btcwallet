@@ -53,9 +53,10 @@ invariants.
   alive.
 - **Retained invalid history:** Invalid, replaced, failed, or orphaned rows
   remain part of the wallet's historical view. An invalidation workflow
-  rewrites state; it does not erase audit history. Caller-requested removal is
-  the exception: it erases an active unmined branch, never a row the wallet
-  itself made terminal.
+  rewrites state; it does not erase audit history. Branch removal is the
+  exception: it erases the unmined branch it is given, including descendants an
+  earlier event already made terminal, because a row left behind would block
+  the chain from recording that tx again.
 - **Event-owned graph mutation:** Row-local patching must stay row-local.
   Descendant traversal, spend-edge cleanup, replacement tracking, and rollback
   orphaning belong only to the workflows that own those mutations.

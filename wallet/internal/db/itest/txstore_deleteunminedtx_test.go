@@ -192,3 +192,104 @@ func TestDeleteUnminedTxRejectsConfirmedAndMissing(t *testing.T) {
 	)
 	require.ErrorIs(t, err, db.ErrTxNotFound)
 }
+
+// TestDeleteUnminedTxRemovesInvalidatedDescendant verifies that a descendant
+// already marked failed leaves with its parent, and that both transactions can
+// be recorded again if the chain confirms them after all.
+func TestDeleteUnminedTxRemovesInvalidatedDescendant(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-unmined-invalidated")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	block := CreateBlockFixture(t, store.Queries(), 450)
+
+	funding := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
+	)
+	err := store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       funding,
+			Received: time.Unix(1710004400, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	parent := newRegularTx(
+		[]wire.OutPoint{{Hash: funding.TxHash()}},
+		[]*wire.TxOut{{Value: 8000, PkScript: addr.ScriptPubKey}},
+	)
+
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: parent.TxHash()}},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	for i, tx := range []*wire.MsgTx{parent, child} {
+		err = store.CreateTx(
+			t.Context(),
+			db.CreateTxParams{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: time.Unix(int64(1710004410+i), 0),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		)
+		require.NoError(t, err)
+	}
+
+	// The child is invalidated first, so the parent is deleted while a
+	// retained failed row still depends on it.
+	err = store.InvalidateUnminedTx(
+		t.Context(),
+		db.InvalidateUnminedTxParams{
+			WalletID: walletID,
+			Txid:     child.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+
+	err = store.DeleteUnminedTx(
+		t.Context(),
+		db.DeleteUnminedTxParams{
+			WalletID: walletID,
+			Txid:     parent.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+
+	for _, tx := range []*wire.MsgTx{parent, child} {
+		_, err = store.GetTx(
+			t.Context(),
+			db.GetTxQuery{WalletID: walletID, Txid: tx.TxHash()},
+		)
+		require.ErrorIs(t, err, db.ErrTxNotFound)
+	}
+
+	// With no rows left behind, the chain can record both again.
+	confirming := CreateBlockFixture(t, store.Queries(), 451)
+	for i, tx := range []*wire.MsgTx{parent, child} {
+		err = store.CreateTx(
+			t.Context(),
+			db.CreateTxParams{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: time.Unix(int64(1710004420+i), 0),
+				Block:    &confirming,
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		)
+		require.NoError(t, err)
+	}
+}
