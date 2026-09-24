@@ -67,6 +67,40 @@ func (q *Queries) DeleteUnminedTransactionByHash(ctx context.Context, arg Delete
 	return result.RowsAffected()
 }
 
+const DeleteUnminedTransactionByHashWithInvalid = `-- name: DeleteUnminedTransactionByHashWithInvalid :execrows
+DELETE FROM transactions
+WHERE
+    wallet_id = ?
+    AND tx_hash = ?
+    AND block_height IS NULL
+`
+
+type DeleteUnminedTransactionByHashWithInvalidParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+// Deletes an unmined transaction row whatever its wallet-relative status.
+//
+// How:
+//   - Matches DeleteUnminedTransactionByHash but drops the status predicate, so
+//     a row an earlier event made `replaced`, `failed` or `orphaned` is removed
+//     too. Confirmed rows stay protected by the block_height check.
+//   - Used by branch deletion only, which takes a whole branch including
+//     descendants already made terminal.
+//   - Leaf DeleteTx must keep using DeleteUnminedTransactionByHash, whose status
+//     predicate is what stops it erasing retained history.
+//
+// Performance:
+// - Targets at most one row by `(wallet_id, tx_hash)`.
+func (q *Queries) DeleteUnminedTransactionByHashWithInvalid(ctx context.Context, arg DeleteUnminedTransactionByHashWithInvalidParams) (int64, error) {
+	result, err := q.exec(ctx, q.deleteUnminedTransactionByHashWithInvalidStmt, DeleteUnminedTransactionByHashWithInvalid, arg.WalletID, arg.TxHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetTransactionByHash = `-- name: GetTransactionByHash :one
 SELECT
     t.id,
