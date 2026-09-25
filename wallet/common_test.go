@@ -355,6 +355,17 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	return w, deps
 }
 
+// createSQLWalletWithMocks returns an unstarted mock wallet configured for SQL
+// operations.
+func createSQLWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
+	t.Helper()
+
+	w, deps := createTestWalletWithMocks(t)
+	w.addrStore = nil
+
+	return w, deps
+}
+
 // expectStopTeardown registers the one mock call Stop makes to clear in-memory
 // secret material: it locks the key vault. The expectation is optional so a
 // test that never stops the wallet is unaffected, and registered so a test that
@@ -371,6 +382,28 @@ func createStartedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Helper()
 
 	return createStartedWalletWithID(t, 0)
+}
+
+// createStartedSQLWalletWithMocks returns a started mock wallet configured for
+// SQL operations. Its mock syncer does not access addrStore.
+func createStartedSQLWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
+	t.Helper()
+
+	w, deps := createStartedWalletWithMocks(t)
+	w.addrStore = nil
+
+	return w, deps
+}
+
+// createUnlockedSQLWalletWithMocks returns a started and unlocked SQL mock
+// wallet.
+func createUnlockedSQLWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
+	t.Helper()
+
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.state.toUnlocked()
+
+	return w, deps
 }
 
 // createStartedWalletWithID creates a fully started Wallet instance whose
