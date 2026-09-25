@@ -166,10 +166,16 @@ func testCreateTransactionMultipleOutputs(h *bwtest.HarnessTest) {
 		Unlocked: true,
 	})
 
-	// Each payment is derived separately, so an authored transaction that
+	// Each payment gets its own address, so an authored transaction that
 	// collapsed its outputs onto one recipient fails the assertions below.
-	first := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
-	second := deriveWalletPayment(h, w, txCreatorFundingType, quarterBTC)
+	addrs := h.NewWalletAddressesOfType(w, txCreatorFundingType, 2)
+	firstScript, err := txscript.PayToAddrScript(addrs[0])
+	require.NoError(h, err, "failed to create payment pkscript")
+	secondScript, err := txscript.PayToAddrScript(addrs[1])
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	first := wire.TxOut{Value: int64(halfBTC), PkScript: firstScript}
+	second := wire.TxOut{Value: quarterBTC, PkScript: secondScript}
 	require.NotEqual(
 		h, first.PkScript, second.PkScript, "payments share a script",
 	)
