@@ -5091,16 +5091,11 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 	packet, err := psbt.NewFromUnsignedTx(tx)
 	require.NoError(t, err)
 
-	callerWitnessScript := []byte{0x51, 0x52, 0x53}
-	callerLeafScript := []*psbt.TaprootTapLeafScript{{
-		ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
-		Script:       []byte{0x51},
-		LeafVersion:  txscript.BaseLeafVersion,
-	}}
 	callerOutputScript := []byte{0x54, 0x55}
 
-	packet.Inputs[0].WitnessScript = callerWitnessScript
-	packet.Inputs[0].TaprootLeafScript = callerLeafScript
+	// The fixture UTXO is a single-key witness spend, so the input-level
+	// script records are not fields it could carry. Which records each
+	// kind of spend admits is covered against the merge itself.
 	packet.Inputs[0].SighashType = txscript.SigHashNone |
 		txscript.SigHashAnyOneCanPay
 	packet.Outputs[0].WitnessScript = callerOutputScript
@@ -5137,8 +5132,6 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 	)
 
 	fundedInput := funded.Inputs[inputIdx]
-	require.Equal(t, callerWitnessScript, fundedInput.WitnessScript)
-	require.Equal(t, callerLeafScript, fundedInput.TaprootLeafScript)
 	require.Equal(
 		t, txscript.SigHashNone|txscript.SigHashAnyOneCanPay,
 		fundedInput.SighashType,
