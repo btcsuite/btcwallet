@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
@@ -25,6 +28,123 @@ var (
 	// defaultAccountName is the name of the default account.
 	defaultAccountName = "default"
 )
+
+// TestChangeAllocationDuringStop verifies both admitted authoring entrypoints
+// finish allocating change after shutdown closes admission.
+func TestChangeAllocationDuringStop(t *testing.T) {
+	t.Parallel()
+
+	for _, fundPsbt := range []bool{false, true} {
+		name := "create transaction"
+		if fundPsbt {
+			name = "fund psbt"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: pause coin selection inside an admitted request.
+			w, deps := createStartedSQLWalletWithMocks(t)
+			deps.syncer.On("syncState").Return(syncStateSynced).Once()
+
+			fixture := expectDefaultAuthoringSources(t, w, deps)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			t.Cleanup(cancel)
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(unblock)
+
+			coins := []Coin{{
+				TxOut: wire.TxOut{
+					Value:    int64(fixture.utxo.Amount),
+					PkScript: fixture.utxo.PkScript,
+				},
+				OutPoint: fixture.utxo.OutPoint,
+			}}
+			strategy := &mockCoinSelectionStrategy{}
+			strategy.On("ArrangeCoins", coins, defaultFeeRate.Val()).
+				Run(func(mock.Arguments) {
+					close(entered)
+
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}).
+				Return(coins, nil).Once()
+			t.Cleanup(func() {
+				strategy.AssertExpectations(t)
+			})
+
+			policy := &InputsPolicy{Strategy: strategy}
+			tx := wire.NewMsgTx(wire.TxVersion)
+			tx.AddTxOut(&fixture.payment)
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			if fundPsbt {
+				deps.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+					WalletID: w.id, OutPoint: fixture.utxo.OutPoint,
+				}).Return(&fixture.utxo, nil).Once()
+				deps.store.On("GetTxDetail", mock.Anything,
+					db.GetTxDetailQuery{
+						WalletID: w.id,
+						Txid:     fixture.utxo.OutPoint.Hash,
+					},
+				).Return(testStoreTxDetail(
+					fixture.utxo.OutPoint.Hash, wire.NewTxOut(
+						int64(fixture.utxo.Amount),
+						fixture.utxo.PkScript,
+					),
+				), nil).Once()
+				expectSignerDerivedAddressInfo(
+					t, w, deps, fixture.inputAddr, db.WitnessPubKey,
+					fixture.inputKey.PubKey(),
+				)
+			}
+
+			result := make(chan error, 1)
+			go func() {
+				var err error
+				if fundPsbt {
+					_, _, err = w.FundPsbt(ctx, &FundIntent{
+						Packet: packet, Policy: policy,
+						FeeRate: defaultFeeRate,
+					})
+				} else {
+					_, err = w.CreateTransaction(ctx, &TxIntent{
+						Outputs: []wire.TxOut{fixture.payment},
+						Inputs:  policy, FeeRate: defaultFeeRate,
+					})
+				}
+
+				result <- err
+			}()
+
+			_, err = waitForReq(ctx, entered)
+			require.NoError(t, err)
+
+			// Act: close admission before the change callback runs.
+			stopped := make(chan error, 1)
+			go func() { stopped <- w.stop() }()
+
+			_, err = waitForReq(ctx, w.lifetimeCtx.Done())
+			require.NoError(t, err)
+			unblock()
+
+			// Assert: accepted authoring and Stop both finish normally.
+			resultErr, err := waitForReq(ctx, result)
+			require.NoError(t, err)
+
+			stopErr, err := waitForReq(ctx, stopped)
+			require.NoError(t, err)
+			require.NoError(t, stopErr)
+			require.NoError(t, resultErr)
+		})
+	}
+}
 
 // Shared fixtures reused across the TxIntent validation test cases.
 var (
@@ -60,6 +180,39 @@ type defaultAuthoringFixture struct {
 	// inputAddr is the P2WPKH address backing utxo and identifies its wallet
 	// derivation metadata during PSBT input decoration.
 	inputAddr address.Address
+}
+
+// expectFreshChangeAddress configures one SQL change allocation: exactly one
+// fresh internal child, registered on the wallet lifetime before its script is
+// returned. It returns the expected change script.
+func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
+	accountName string, scope waddrmgr.KeyScope,
+	addrType db.AddressType) []byte {
+
+	t.Helper()
+
+	addr, script, pubKey := expectedStoreAddress(
+		t, storeDerivationAccountPubKey(t), addrType, 1, 0,
+	)
+	mocks.store.On("NewDerivedAddresses", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID:    w.id,
+			AccountName: accountName,
+			Scope:       db.KeyScope(scope),
+			Change:      true,
+		}, uint32(1),
+	).Return([]db.AddressInfo{{
+		AddrType:          addrType,
+		HasDerivationPath: true,
+		Branch:            1,
+		ScriptPubKey:      script,
+		PubKey:            pubKey,
+	}}, nil).Once()
+	mocks.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once()
+
+	return script
 }
 
 // expectDefaultAuthoringSources configures automatic selection from the default
@@ -108,14 +261,10 @@ func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
 		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
 	}).Return([]db.UtxoInfo{utxo}, nil).Once()
-	mocks.store.On("NewDerivedAddress", mock.Anything,
-		db.NewDerivedAddressParams{
-			WalletID: w.id, AccountName: defaultAccountName,
-			Scope: scope, Change: true,
-		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: make([]byte, txsizes.P2TRPkScriptSize),
-	}, nil).Once()
+	expectFreshChangeAddress(
+		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
+		db.TaprootPubKey,
+	)
 
 	return defaultAuthoringFixture{
 		payment: payment, utxo: utxo, inputKey: inputKey,
@@ -947,7 +1096,7 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 	// Arrange: Prepare a synced wallet whose default BIP0086 account has
 	// one mature 100,000-sat UTXO. The 99,700-sat payment leaves only a
 	// sub-dust remainder after fees, so no change output should be created.
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 	fixture := expectDefaultAuthoringSources(t, w, mocks)
 	intent := &TxIntent{
@@ -1094,9 +1243,10 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, mocks := createTestWalletWithMocks(t)
+			w, mocks := createSQLWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
 			scope := waddrmgr.KeyScopeBIP0084
-			changeScript := []byte{0x00, 0x04}
 			isImportedAlias := tc.derivedName != ""
 
 			// The reserved imported alias has no account row on the
@@ -1137,16 +1287,10 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 				}, nil).Once()
 			}
 
-			mocks.store.On("NewDerivedAddress", mock.Anything,
-				db.NewDerivedAddressParams{
-					WalletID:    w.id,
-					AccountName: tc.expectedChangeAccount,
-					Scope:       db.KeyScope(scope),
-					Change:      true,
-				},
-			).Return(&db.AddressInfo{
-				ScriptPubKey: changeScript,
-			}, nil).Once()
+			changeScript := expectFreshChangeAddress(
+				t, w, mocks, tc.expectedChangeAccount, scope,
+				db.WitnessPubKey,
+			)
 
 			changeSource, err := w.createChangeSource(
 				t.Context(), &ScopedAccount{
@@ -1213,11 +1357,12 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := createTestWalletWithMocks(t)
+	w, mocks := createSQLWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
 	scope := waddrmgr.KeyScopeBIP0084
 	accountName := db.DefaultImportedAccountName
 	derivedAccount := uint32(waddrmgr.DefaultAccountNum)
-	changeScript := []byte{0x00, 0x04}
 
 	// The imported alias has no account row, so a real GetAccount by name
 	// returns ErrAccountNotFound. Wire that same answer here: the fix must
@@ -1245,16 +1390,10 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 		AddrSchema:    db.ScopeAddrMap[db.KeyScope(scope)],
 	}, nil).Once()
 
-	mocks.store.On("NewDerivedAddress", mock.Anything,
-		db.NewDerivedAddressParams{
-			WalletID:    w.id,
-			AccountName: waddrmgr.DefaultAccountName,
-			Scope:       db.KeyScope(scope),
-			Change:      true,
-		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: changeScript,
-	}, nil).Once()
+	changeScript := expectFreshChangeAddress(
+		t, w, mocks, waddrmgr.DefaultAccountName, scope,
+		db.WitnessPubKey,
+	)
 
 	changeSource, err := w.createChangeSource(
 		t.Context(), &ScopedAccount{
@@ -1994,7 +2133,7 @@ func corruptAmountPkScript() []byte {
 // the returned outpoints by name.
 //
 // No change-script derivation is registered. A refusal that arrived late enough
-// to allocate change would call NewDerivedAddress, and the mock fails an
+// to allocate change would call NewDerivedAddresses, and the mock fails an
 // unexpected call, so the omission is what pins every rejection ahead of change
 // allocation. Nothing leases either: authoring fails inside the input source,
 // which is before any wrapper reaches its lease obligations.
@@ -2136,7 +2275,8 @@ func requireCorruptAmountRejected(t *testing.T, tc corruptAmountCase,
 
 	require.ErrorIs(t, err, tc.wantErr)
 	mocks.store.AssertNotCalled(
-		t, "NewDerivedAddress", mock.Anything, mock.Anything,
+		t, "NewDerivedAddresses", mock.Anything, mock.Anything,
+		mock.Anything,
 	)
 }
 
@@ -2233,22 +2373,17 @@ func TestCreateTransactionManualSelectionAccepted(t *testing.T) {
 	// 100,000-sat UTXO, and select it by outpoint. The 99,700-sat payment
 	// leaves only a sub-dust remainder after fees, so no change output
 	// survives.
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	outpoints := expectCorruptAmountSources(
 		t, w, mocks, []btcutil.Amount{100_000},
 	)
 
-	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
-	mocks.store.On("NewDerivedAddress", mock.Anything,
-		db.NewDerivedAddressParams{
-			WalletID: w.id, AccountName: defaultAccountName,
-			Scope: scope, Change: true,
-		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: make([]byte, txsizes.P2TRPkScriptSize),
-	}, nil).Once()
+	expectFreshChangeAddress(
+		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
+		db.TaprootPubKey,
+	)
 
 	payment := wire.TxOut{
 		Value: 99_700, PkScript: corruptAmountPkScript(),
