@@ -309,6 +309,47 @@ func (h *HarnessTest) NewWalletAddressOfType(w *wallet.Wallet,
 	return addr
 }
 
+// NewWalletAddressesOfType returns count distinct receive addresses of the
+// requested type from the wallet's default account in that type's key scope.
+// SQL backends allocate the whole set as one fresh batch; kvdb, which has no
+// batch allocator, derives each address separately.
+func (h *HarnessTest) NewWalletAddressesOfType(w *wallet.Wallet,
+	addrType waddrmgr.AddressType, count int) []address.Address {
+
+	h.Helper()
+
+	addrs := make([]address.Address, 0, count)
+	if count == 0 {
+		return addrs
+	}
+
+	if h.dbType == dbNameKvdb {
+		for range count {
+			addrs = append(addrs, h.NewWalletAddressOfType(w, addrType))
+		}
+
+		return addrs
+	}
+
+	scope, err := addrType.KeyScope()
+	require.NoError(h, err, "failed to resolve address scope")
+
+	h.ensureAccount(w, scope, waddrmgr.DefaultAccountName)
+
+	batch, err := w.NewBulkAddresses(
+		h.Context(), wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), false, uint32(count), //nolint:gosec
+	)
+	require.NoError(h, err, "failed to create wallet addresses")
+
+	for _, info := range batch {
+		addrs = append(addrs, info.Addr)
+	}
+
+	return addrs
+}
+
 // WalletFunding describes the funding transaction and the outputs it created.
 //
 // A fixture that funded nothing returns the zero value, whose Tx and Block are
@@ -340,7 +381,7 @@ type WalletFunding struct {
 	ForeignOutpoints []wire.OutPoint
 }
 
-// FundWallet pays one output per amount to fresh wallet addresses of the
+// FundWallet pays one output per amount to distinct wallet addresses of the
 // default funding type in a single miner transaction, confirms it, and returns
 // what the funding transaction created.
 func (h *HarnessTest) FundWallet(w *wallet.Wallet,
@@ -351,8 +392,8 @@ func (h *HarnessTest) FundWallet(w *wallet.Wallet,
 	return h.FundWalletOfType(w, fundingAddrType, amounts...)
 }
 
-// FundWalletOfType pays one output per amount to fresh wallet addresses of the
-// requested address type in a single miner transaction, confirms it, and
+// FundWalletOfType pays one output per amount to distinct wallet addresses of
+// the requested address type in a single miner transaction, confirms it, and
 // returns what the funding transaction created.
 //
 // The transaction's outputs are classified here, where the transaction itself
@@ -363,11 +404,11 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 
 	h.Helper()
 
-	outputs := make([]*wire.TxOut, 0, len(amounts))
-	for _, amount := range amounts {
-		addr := h.NewWalletAddressOfType(w, addrType)
+	addrs := h.NewWalletAddressesOfType(w, addrType, len(amounts))
 
-		pkScript, err := txscript.PayToAddrScript(addr)
+	outputs := make([]*wire.TxOut, 0, len(amounts))
+	for i, amount := range amounts {
+		pkScript, err := txscript.PayToAddrScript(addrs[i])
 		require.NoError(h, err, "failed to create pkscript")
 
 		outputs = append(outputs, &wire.TxOut{
