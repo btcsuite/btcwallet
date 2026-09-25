@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
@@ -14,6 +15,52 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestChangeAllocationSQLiteNoChainSync verifies fresh change remains available
+// on excluded accounts without registering their scripts for live tracking.
+func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create an excluded account in a real SQLite wallet.
+	m := testSQLiteManager(t)
+	params := sqliteCreateParams(t)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+
+	chainMock, ok := w.cfg.Chain.(*bwmock.Chain)
+	require.True(t, ok)
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase, Timeout: -1,
+	}))
+
+	number := AccountNumber(7)
+	scope := waddrmgr.KeyScopeBIP0084
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope, Name: "excluded-change",
+		AccountNumber: &number, NoChainSync: true,
+	})
+	require.NoError(t, err)
+	source, err := w.createChangeSource(t.Context(), &ScopedAccount{
+		KeyScope: scope, AccountName: account.AccountName,
+	})
+	require.NoError(t, err)
+
+	// Act: allocate fresh change on the excluded account.
+	script, err := source.NewScript()
+	require.NoError(t, err)
+
+	// Assert: the fresh child persists without live script registration.
+	stored, err := w.store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID: w.id, ScriptPubKey: script,
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), stored.Branch)
+	require.Zero(t, stored.Index)
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, &chainParams)
+	require.NoError(t, err)
+	chainMock.AssertNotCalled(t, "WatchAddrsFromTip", mock.Anything, addrs)
+}
 
 // TestManagerCreateUsesCommittedWalletRow verifies that Create assembles the
 // Wallet identity from the row Store.CreateWallet returned. The later runtime
