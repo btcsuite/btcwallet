@@ -101,78 +101,6 @@ func TestAddressManagerFallbackDuringStop(t *testing.T) {
 	require.NoError(t, <-stoppedChan)
 }
 
-// TestGetUnusedAddressFallbackDuringStop keeps nested address derivation and
-// notification inside the accepted unused-address request during shutdown.
-func TestGetUnusedAddressFallbackDuringStop(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Pause an unused-address scan until shutdown closes admission.
-	// An empty result then forces derivation through the accepted request.
-	w, deps := createTestWalletWithMocks(t)
-	startLoadedWalletForTest(t, w)
-
-	enteredChan := make(chan struct{})
-	releaseChan := make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(releaseChan) })
-	t.Cleanup(unblock)
-
-	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
-	name := "fallback"
-	page, err := addressPageRequest()
-	require.NoError(t, err)
-	deps.store.On("IterAddresses", mock.Anything, db.ListAddressesQuery{
-		WalletID:    w.id,
-		AccountName: &name,
-		Scope:       &scope,
-		Page:        page,
-	}).Run(func(mock.Arguments) {
-		close(enteredChan)
-
-		<-releaseChan
-	}).Return(addressIter()).Once()
-
-	addr, err := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), w.cfg.ChainParams,
-	)
-	require.NoError(t, err)
-	expectStoreNewAddress(
-		t, w, deps, name, waddrmgr.KeyScopeBIP0084, false, addr,
-	)
-	deps.vault.On("Lock").Return().Once()
-
-	resultChan := make(chan addressResp, 1)
-	go func() {
-		addr, err := w.GetUnusedAddress(
-			t.Context(), name, waddrmgr.WitnessPubKey, false,
-		)
-		resultChan <- addressResp{addr: addr, err: err}
-	}()
-
-	<-enteredChan
-
-	// Act: Begin shutdown while the accepted scan is paused. Its fallback
-	// must still derive and register an address without another admission.
-	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.stop() }()
-
-	<-w.lifetimeCtx.Done()
-
-	// Assert: Stop waits for accepted work, and release permits the fallback
-	// to return its address. Fixture cleanup verifies chain registration.
-	select {
-	case err := <-stoppedChan:
-		t.Fatalf("Stop returned before address work: %v", err)
-	default:
-	}
-
-	unblock()
-
-	result := <-resultChan
-	require.NoError(t, result.err)
-	require.Equal(t, addr, result.addr)
-	require.NoError(t, <-stoppedChan)
-}
-
 // storeDerivationAccountPubKey returns a deterministic account-level public key
 // for store-native address derivation tests.
 func storeDerivationAccountPubKey(t *testing.T) *hdkeychain.ExtendedKey {
@@ -375,7 +303,7 @@ func addressInfoFromAddr(t *testing.T, addr address.Address) *db.AddressInfo {
 
 // derivedAddressInfoFromAddr builds derived store address metadata for tests.
 func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
-	addrType db.AddressType, accountName string, scope waddrmgr.KeyScope,
+	addrType db.AddressType, scope waddrmgr.KeyScope,
 	change bool, index uint32, fingerprint uint32,
 	pubKey *btcec.PublicKey) *db.AddressInfo {
 
@@ -384,7 +312,7 @@ func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
 	info := addressInfoFromAddr(t, addr)
 	accountNumber := uint32(0)
 	info.AddrType = addrType
-	info.AccountName = accountName
+	info.AccountName = waddrmgr.DefaultAccountName
 	info.AccountNumber = &accountNumber
 	info.KeyScope = db.KeyScope(scope)
 	info.MasterKeyFingerprint = fingerprint
@@ -502,28 +430,6 @@ func storeChild(t *testing.T, key *hdkeychain.ExtendedKey,
 		ScriptPubKey:      script,
 		PubKey:            pubKey,
 	}
-}
-
-// expectStoreNewAddress configures mock expectations for deriving an address.
-func expectStoreNewAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
-	accountName string, scope waddrmgr.KeyScope, change bool,
-	addr address.Address) {
-
-	t.Helper()
-
-	// Public receiving requires the Store to reject excluded accounts before
-	// allocation and forward the caller context; success requires watching.
-	deps.store.On(
-		"NewDerivedAddress", t.Context(),
-		db.NewDerivedAddressParams{
-			WalletID:         w.id,
-			AccountName:      accountName,
-			Scope:            db.KeyScope(scope),
-			Change:           change,
-			RequireChainSync: true,
-		},
-	).Return(addressInfoFromAddr(t, addr), nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
 }
 
 // expectSignerAddressInfo mocks Store.GetAddress to return a minimal
@@ -1408,305 +1314,6 @@ func TestNewAddressBlockedWatch(t *testing.T) {
 	require.Zero(t, result.info)
 }
 
-// TestGetUnusedAddress tests the GetUnusedAddress method to ensure it
-// correctly returns the earliest unused address.
-func TestGetUnusedAddress(t *testing.T) {
-	t.Parallel()
-
-	const importedXpubName = "imported-xpub"
-
-	// Arrange: supply stored derivation records so selection can use their
-	// branch and local use metadata directly. Strict mocks permit no account
-	// lookup; each selected child must be registered before it is returned.
-	w, deps := createStartedWalletWithMocks(t)
-
-	firstAddr, _ := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), w.cfg.ChainParams,
-	)
-	scope := waddrmgr.KeyScopeBIP0084
-	dbScope := db.KeyScope(scope)
-	defaultName := waddrmgr.DefaultAccountName
-	req, err := addressPageRequest()
-	require.NoError(t, err)
-
-	deps.store.On(
-		"IterAddresses", mock.Anything,
-		db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: &defaultName,
-			Scope:       &dbScope,
-			Page:        req,
-		},
-	).Return(addressIter(*derivedAddressInfoFromAddr(
-		t, firstAddr, db.WitnessPubKey, defaultName, scope, false, 0, 0,
-		nil,
-	))).Once()
-
-	deps.chain.On(
-		"WatchAddrsFromTip", mock.Anything, []address.Address{firstAddr},
-	).Return(nil).Once()
-
-	// Act: select the oldest external address not locally recorded as used.
-	unusedAddr, err := w.GetUnusedAddress(
-		t.Context(), defaultName, waddrmgr.WitnessPubKey, false,
-	)
-
-	// Assert: receiving keeps the first unused address instead of allocating.
-	require.NoError(t, err)
-	require.Equal(t, firstAddr.String(), unusedAddr.String())
-
-	// Arrange: an imported xpub child has a derivation path, so its local
-	// use metadata supports the same stored-address selection.
-	importedXpubAddr, _ := address.NewAddressWitnessPubKeyHash(
-		[]byte{
-			31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-			41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
-		}, w.cfg.ChainParams,
-	)
-	importedXpubInfo := derivedAddressInfoFromAddr(
-		t, importedXpubAddr, db.WitnessPubKey, importedXpubName, scope,
-		false, 0, 0, nil,
-	)
-	importedXpubInfo.IsImported = true
-	importedXpubInfo.AccountNumber = nil
-	importedXpubQueryName := importedXpubName
-
-	deps.store.On(
-		"IterAddresses", mock.Anything,
-		db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: &importedXpubQueryName,
-			Scope:       &dbScope,
-			Page:        req,
-		},
-	).Return(addressIter(*importedXpubInfo)).Once()
-
-	deps.chain.On(
-		"WatchAddrsFromTip", mock.Anything, []address.Address{importedXpubAddr},
-	).Return(nil).Once()
-
-	// Act: select a receiving address from the imported xpub account.
-	unusedImportedAddr, err := w.GetUnusedAddress(
-		t.Context(), importedXpubName, waddrmgr.WitnessPubKey, false,
-	)
-
-	// Assert: the existing unused xpub child remains usable without allocation.
-	require.NoError(t, err)
-	require.Equal(t, importedXpubAddr.String(), unusedImportedAddr.String())
-
-	// Arrange: make the stored child used so ordinary receiving must allocate
-	// its next child. Strict mocks permit only the scan, allocation, and watch.
-	usedFirstAddr := derivedAddressInfoFromAddr(
-		t, firstAddr, db.WitnessPubKey, defaultName, scope, false, 0, 0, nil,
-	)
-	usedFirstAddr.IsUsed = true
-	deps.store.On("IterAddresses", t.Context(), db.ListAddressesQuery{
-		WalletID:    w.id,
-		AccountName: &defaultName,
-		Scope:       &dbScope,
-		Page:        req,
-	}).Return(addressIter(*usedFirstAddr)).Once()
-
-	nextAddrVal, err := address.NewAddressWitnessPubKeyHash(
-		[]byte{
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-			11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-		}, w.cfg.ChainParams,
-	)
-	require.NoError(t, err)
-	expectStoreNewAddress(t, w, deps, defaultName, scope, false, nextAddrVal)
-
-	// Act: exhaust the used-address scan and enter the existing NewAddress
-	// fallback, which must make a receiving allocation request.
-	nextAddr, err := w.GetUnusedAddress(
-		t.Context(), defaultName, waddrmgr.WitnessPubKey, false,
-	)
-
-	// Assert: ordinary fallback still returns the new address and registers it.
-	require.NoError(t, err)
-	require.Equal(t, nextAddrVal, nextAddr)
-
-	// Arrange: provide an unused internal child to preserve change selection.
-	changeAddrVal, _ := address.NewAddressWitnessPubKeyHash(
-		[]byte{
-			21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-			31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-		}, w.cfg.ChainParams,
-	)
-
-	deps.store.On(
-		"IterAddresses", mock.Anything,
-		db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: &defaultName,
-			Scope:       &dbScope,
-			Page:        req,
-		},
-	).Return(addressIter(*derivedAddressInfoFromAddr(
-		t, changeAddrVal, db.WitnessPubKey, defaultName, scope, true, 0,
-		0, nil,
-	))).Once()
-
-	deps.chain.On(
-		"WatchAddrsFromTip", mock.Anything, []address.Address{changeAddrVal},
-	).Return(nil).Once()
-
-	// Act: request the unused child on the change branch of the same account.
-	unusedChangeAddr, err := w.GetUnusedAddress(
-		t.Context(), defaultName, waddrmgr.WitnessPubKey, true,
-	)
-
-	// Assert: selection returns the requested internal child, and every
-	// expected scan, fallback allocation, and notification occurred.
-	require.NoError(t, err)
-	require.Equal(t, changeAddrVal.String(), unusedChangeAddr.String())
-}
-
-// TestLiveWatchUnusedAddressError verifies that failed registration returns
-// an error without exposing the selected receiving address.
-func TestLiveWatchUnusedAddressError(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Select a stored child but reject its live registration. The
-	// shared fixture owns mock assertions and Wallet shutdown.
-	w, deps := createStartedWalletWithMocks(t)
-
-	addr, err := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), w.cfg.ChainParams,
-	)
-	require.NoError(t, err)
-	deps.store.On("IterAddresses", mock.Anything, mock.Anything).
-		Return(addressIter(*derivedAddressInfoFromAddr(
-			t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
-			waddrmgr.KeyScopeBIP0084, false, 1, 0, nil,
-		))).Once()
-
-	deps.chain.On(
-		"WatchAddrsFromTip", mock.Anything, []address.Address{addr},
-	).Return(errDBMock).Once()
-
-	// Act: Request the stored child through the receiving API so its
-	// registration failure is observed by the caller.
-	got, err := w.GetUnusedAddress(
-		t.Context(), waddrmgr.DefaultAccountName,
-		waddrmgr.WitnessPubKey, false,
-	)
-
-	// Assert: The registration error rejects the receiving result rather
-	// than returning an address whose live watch was not installed.
-	require.ErrorIs(t, err, errDBMock)
-	require.Nil(t, got)
-}
-
-// TestGetUnusedAddressNoChainSync verifies receiving rejection both when a
-// stored child exposes account policy and when an empty account needs
-// allocation.
-func TestGetUnusedAddressNoChainSync(t *testing.T) {
-	t.Parallel()
-
-	accountName := "key-only"
-	scope := waddrmgr.KeyScopeBIP0084
-	dbScope := db.KeyScope(scope)
-	req, err := addressPageRequest()
-	require.NoError(t, err)
-
-	// Both receiving branches obey the same policy; each lookup path below
-	// has independent mocks so its permitted operations remain explicit.
-	testCases := []struct {
-		name   string
-		change bool
-	}{
-		{
-			name:   "external",
-			change: false,
-		},
-		{
-			name:   "internal",
-			change: true,
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name+" stored child", func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange: return an unused child on the requested branch
-			// that would be selected without the stored policy guard.
-			w, deps := createStartedWalletWithMocks(t)
-			child, err := address.NewAddressWitnessPubKeyHash(
-				make([]byte, 20), w.cfg.ChainParams,
-			)
-			require.NoError(t, err)
-			info := derivedAddressInfoFromAddr(
-				t, child, db.WitnessPubKey, accountName, scope,
-				tc.change, 0, 0, nil,
-			)
-			info.NoChainSync = true
-			deps.store.On("IterAddresses", t.Context(), db.ListAddressesQuery{
-				WalletID:    w.id,
-				AccountName: &accountName,
-				Scope:       &dbScope,
-				Page:        req,
-			}).Return(addressIter(*info)).Once()
-
-			// Act: request receiving reuse from the excluded account.
-			addr, err := w.GetUnusedAddress(
-				t.Context(), accountName, waddrmgr.WitnessPubKey, tc.change,
-			)
-
-			// Assert: reject with the public diagnostic and no address;
-			// strict mocks forbid allocation, account reads and watching.
-			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
-			require.NotErrorIs(t, err, db.ErrAccountOperationUnsupported)
-			require.ErrorContains(t, err, accountName)
-			require.ErrorContains(t, err, "chain synchronization disabled")
-			require.Nil(t, addr)
-			deps.store.AssertExpectations(t)
-			deps.chain.AssertExpectations(t)
-		})
-
-		t.Run(tc.name+" empty account", func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange: an empty scan reaches NewAddress, whose existing
-			// allocation call refuses before consuming a child index.
-			w, deps := createStartedWalletWithMocks(t)
-			deps.store.On("IterAddresses", t.Context(), db.ListAddressesQuery{
-				WalletID:    w.id,
-				AccountName: &accountName,
-				Scope:       &dbScope,
-				Page:        req,
-			}).Return(addressIter()).Once()
-			deps.store.On("NewDerivedAddress", t.Context(),
-				db.NewDerivedAddressParams{
-					WalletID:         w.id,
-					AccountName:      accountName,
-					Scope:            dbScope,
-					Change:           tc.change,
-					RequireChainSync: true,
-				},
-			).Return((*db.AddressInfo)(nil), fmt.Errorf(
-				"%w: account %q has chain synchronization disabled",
-				db.ErrAccountOperationUnsupported, accountName,
-			)).Once()
-
-			// Act: exhaust the scan and request a fresh receiving child.
-			addr, err := w.GetUnusedAddress(
-				t.Context(), accountName, waddrmgr.WitnessPubKey, tc.change,
-			)
-
-			// Assert: translate the Store refusal to the public error;
-			// strict mocks forbid extra account reads or notification.
-			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
-			require.NotErrorIs(t, err, db.ErrAccountOperationUnsupported)
-			require.ErrorContains(t, err, accountName)
-			require.ErrorContains(t, err, "chain synchronization disabled")
-			require.Nil(t, addr)
-			deps.store.AssertExpectations(t)
-			deps.chain.AssertExpectations(t)
-		})
-	}
-}
-
 // TestGetAddressInfo tests the GetAddressInfo method to ensure it returns
 // information for both internal and external addresses.
 func TestGetAddressInfo(t *testing.T) {
@@ -1722,8 +1329,8 @@ func TestGetAddressInfo(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	expectStoreAddressInfo(t, w, deps, extAddr, derivedAddressInfoFromAddr(
-		t, extAddr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
-		waddrmgr.KeyScopeBIP0084, false, 0, 0, pubKey,
+		t, extAddr, db.WitnessPubKey, waddrmgr.KeyScopeBIP0084,
+		false, 0, 0, pubKey,
 	))
 
 	extInfo, err := w.GetAddressInfo(t.Context(), extAddr)
@@ -1739,8 +1346,8 @@ func TestGetAddressInfo(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	expectStoreAddressInfo(t, w, deps, intAddr, derivedAddressInfoFromAddr(
-		t, intAddr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
-		waddrmgr.KeyScopeBIP0084, true, 0, 0, pubKey,
+		t, intAddr, db.WitnessPubKey, waddrmgr.KeyScopeBIP0084,
+		true, 0, 0, pubKey,
 	))
 
 	intInfo, err := w.GetAddressInfo(t.Context(), intAddr)
@@ -1860,7 +1467,7 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 		MasterKeyFingerprint: 123,
 	}
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName, scope, false,
+		t, addr, db.WitnessPubKey, scope, false,
 		path.Index, path.MasterKeyFingerprint, pubKey,
 	))
 
@@ -1904,7 +1511,7 @@ func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 		MasterKeyFingerprint: 123,
 	}
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName, scope, true,
+		t, addr, db.WitnessPubKey, scope, true,
 		path.Index, path.MasterKeyFingerprint, pubKey,
 	))
 
@@ -2300,8 +1907,8 @@ func TestScriptForOutput(t *testing.T) {
 
 	_, pubKey := deterministicPrivKey(t)
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
-		waddrmgr.KeyScopeBIP0084, false, 0, 0, pubKey,
+		t, addr, db.WitnessPubKey, waddrmgr.KeyScopeBIP0084,
+		false, 0, 0, pubKey,
 	))
 
 	script, err := w.ScriptForOutput(t.Context(), output)
@@ -2337,8 +1944,8 @@ func TestScriptForOutputNestedWitness(t *testing.T) {
 	require.NoError(t, err)
 
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.NestedWitnessPubKey, waddrmgr.DefaultAccountName,
-		waddrmgr.KeyScopeBIP0049Plus, false, 0, 0, pubKey,
+		t, addr, db.NestedWitnessPubKey, waddrmgr.KeyScopeBIP0049Plus,
+		false, 0, 0, pubKey,
 	))
 
 	scriptInfo, err := w.ScriptForOutput(t.Context(), wire.TxOut{
