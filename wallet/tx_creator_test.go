@@ -62,6 +62,40 @@ type defaultAuthoringFixture struct {
 	inputAddr address.Address
 }
 
+// expectFreshChangeAddress configures one SQL change allocation: exactly one
+// fresh internal child, registered on the wallet lifetime before its script is
+// returned. It returns the expected change script.
+func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
+	accountName string, scope waddrmgr.KeyScope,
+	addrType db.AddressType) []byte {
+
+	t.Helper()
+
+	addr, script, pubKey := expectedStoreAddress(
+		t, storeDerivationAccountPubKey(t), addrType, 1, 0,
+	)
+	mocks.store.On("NewDerivedAddresses", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID:         w.id,
+			AccountName:      accountName,
+			Scope:            db.KeyScope(scope),
+			Change:           true,
+			RequireChainSync: true,
+		}, uint32(1),
+	).Return([]db.AddressInfo{{
+		AddrType:          addrType,
+		HasDerivationPath: true,
+		Branch:            1,
+		ScriptPubKey:      script,
+		PubKey:            pubKey,
+	}}, nil).Once()
+	mocks.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once()
+
+	return script
+}
+
 // expectDefaultAuthoringSources configures automatic selection from the default
 // BIP0086 account. It registers the account-by-name and account-by-number
 // lookups, a chain tip at height 100, one 100,000-sat P2WPKH UTXO mined at
@@ -108,14 +142,10 @@ func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
 		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
 	}).Return([]db.UtxoInfo{utxo}, nil).Once()
-	mocks.store.On("NewDerivedAddress", mock.Anything,
-		db.NewDerivedAddressParams{
-			WalletID: w.id, AccountName: defaultAccountName,
-			Scope: scope, Change: true,
-		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: make([]byte, txsizes.P2TRPkScriptSize),
-	}, nil).Once()
+	expectFreshChangeAddress(
+		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
+		db.TaprootPubKey,
+	)
 
 	return defaultAuthoringFixture{
 		payment: payment, utxo: utxo, inputKey: inputKey,
@@ -1095,8 +1125,9 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			t.Parallel()
 
 			w, mocks := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
 			scope := waddrmgr.KeyScopeBIP0084
-			changeScript := []byte{0x00, 0x04}
 			isImportedAlias := tc.derivedName != ""
 
 			// The reserved imported alias has no account row on the
@@ -1137,16 +1168,10 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 				}, nil).Once()
 			}
 
-			mocks.store.On("NewDerivedAddress", mock.Anything,
-				db.NewDerivedAddressParams{
-					WalletID:    w.id,
-					AccountName: tc.expectedChangeAccount,
-					Scope:       db.KeyScope(scope),
-					Change:      true,
-				},
-			).Return(&db.AddressInfo{
-				ScriptPubKey: changeScript,
-			}, nil).Once()
+			changeScript := expectFreshChangeAddress(
+				t, w, mocks, tc.expectedChangeAccount, scope,
+				db.WitnessPubKey,
+			)
 
 			changeSource, err := w.createChangeSource(
 				t.Context(), &ScopedAccount{
@@ -1214,10 +1239,11 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
 	scope := waddrmgr.KeyScopeBIP0084
 	accountName := db.DefaultImportedAccountName
 	derivedAccount := uint32(waddrmgr.DefaultAccountNum)
-	changeScript := []byte{0x00, 0x04}
 
 	// The imported alias has no account row, so a real GetAccount by name
 	// returns ErrAccountNotFound. Wire that same answer here: the fix must
@@ -1245,16 +1271,10 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 		AddrSchema:    db.ScopeAddrMap[db.KeyScope(scope)],
 	}, nil).Once()
 
-	mocks.store.On("NewDerivedAddress", mock.Anything,
-		db.NewDerivedAddressParams{
-			WalletID:    w.id,
-			AccountName: waddrmgr.DefaultAccountName,
-			Scope:       db.KeyScope(scope),
-			Change:      true,
-		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: changeScript,
-	}, nil).Once()
+	changeScript := expectFreshChangeAddress(
+		t, w, mocks, waddrmgr.DefaultAccountName, scope,
+		db.WitnessPubKey,
+	)
 
 	changeSource, err := w.createChangeSource(
 		t.Context(), &ScopedAccount{
@@ -1994,7 +2014,7 @@ func corruptAmountPkScript() []byte {
 // the returned outpoints by name.
 //
 // No change-script derivation is registered. A refusal that arrived late enough
-// to allocate change would call NewDerivedAddress, and the mock fails an
+// to allocate change would call NewDerivedAddresses, and the mock fails an
 // unexpected call, so the omission is what pins every rejection ahead of change
 // allocation. Nothing leases either: authoring fails inside the input source,
 // which is before any wrapper reaches its lease obligations.
@@ -2136,7 +2156,8 @@ func requireCorruptAmountRejected(t *testing.T, tc corruptAmountCase,
 
 	require.ErrorIs(t, err, tc.wantErr)
 	mocks.store.AssertNotCalled(
-		t, "NewDerivedAddress", mock.Anything, mock.Anything,
+		t, "NewDerivedAddresses", mock.Anything, mock.Anything,
+		mock.Anything,
 	)
 }
 
@@ -2240,15 +2261,10 @@ func TestCreateTransactionManualSelectionAccepted(t *testing.T) {
 		t, w, mocks, []btcutil.Amount{100_000},
 	)
 
-	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
-	mocks.store.On("NewDerivedAddress", mock.Anything,
-		db.NewDerivedAddressParams{
-			WalletID: w.id, AccountName: defaultAccountName,
-			Scope: scope, Change: true,
-		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: make([]byte, txsizes.P2TRPkScriptSize),
-	}, nil).Once()
+	expectFreshChangeAddress(
+		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
+		db.TaprootPubKey,
+	)
 
 	payment := wire.TxOut{
 		Value: 99_700, PkScript: corruptAmountPkScript(),

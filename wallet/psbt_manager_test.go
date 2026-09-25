@@ -1152,7 +1152,7 @@ func TestFundPsbtTranslatesAmountError(t *testing.T) {
 	// Arrange: Register only the lookups source preparation performs. The
 	// change script is never requested, because authoring rejects the
 	// output set before it reaches the change callback, so registering
-	// NewDerivedAddress would leave an unmet expectation at cleanup.
+	// NewDerivedAddresses would leave an unmet expectation at cleanup.
 	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
 	accountInfo := &db.AccountInfo{
@@ -5002,12 +5002,20 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	changeScript, err := txscript.PayToAddrScript(changeAddr)
 	require.NoError(t, err)
 
-	mocks.store.On("NewDerivedAddress", mock.Anything,
+	mocks.store.On("NewDerivedAddresses", mock.Anything,
 		db.NewDerivedAddressParams{
 			WalletID: w.id, AccountName: defaultAccountName,
-			Scope: scope, Change: true,
-		},
-	).Return(&db.AddressInfo{ScriptPubKey: changeScript}, nil).Once()
+			Scope: scope, Change: true, RequireChainSync: true,
+		}, uint32(1),
+	).Return([]db.AddressInfo{{
+		ScriptPubKey:      changeScript,
+		AddrType:          db.TaprootPubKey,
+		HasDerivationPath: true,
+		Branch:            1,
+	}}, nil).Once()
+	mocks.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
+	).Return(nil).Once()
 
 	// Input decoration and change output decoration both resolve their
 	// address through the store.
