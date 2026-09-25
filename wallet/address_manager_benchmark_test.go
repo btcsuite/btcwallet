@@ -354,8 +354,6 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 		)
 
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
-
-		addrType = waddrmgr.PubKeyHash
 	)
 
 	for i := 0; i <= maxGrowthIteration; i++ {
@@ -403,8 +401,9 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := w.NewAddress(
-					b.Context(), accountName, addrType,
-					false,
+					b.Context(), NewAccountSelectorByName(
+						scopes[0], accountName,
+					), false,
 				)
 				require.NoError(b, err)
 			}

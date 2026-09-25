@@ -1191,16 +1191,20 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	require.NotNil(t, vault)
 
 	chain.On(
-		"NotifyReceived",
+		"WatchAddrsFromTip", mock.Anything,
 		mock.MatchedBy(func(addrs []address.Address) bool {
 			return len(addrs) == 1
 		}),
 	).Return(nil).Once()
 
-	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+	info, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, "default",
+		), false,
 	)
 	require.NoError(t, err)
+
+	addr := info.Addr
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
@@ -1339,20 +1343,24 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	require.NotZero(t, *secondary.AccountNumber)
 
 	chain.On(
-		"NotifyReceived",
+		"WatchAddrsFromTip", mock.Anything,
 		mock.MatchedBy(func(addrs []address.Address) bool {
 			return len(addrs) == 1
 		}),
 	).Return(nil).Once()
 
-	addr, err := w.NewAddress(
-		t.Context(), "secondary", waddrmgr.WitnessPubKey, false,
+	info, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, "secondary",
+		), false,
 	)
 	require.NoError(t, err)
 
+	addr := info.Addr
+
 	// Read back the store's view of the address so the expected leaf key is
 	// derived at exactly the branch and index the store assigned.
-	info, err := w.GetAddressInfo(t.Context(), addr)
+	info, err = w.GetAddressInfo(t.Context(), addr)
 	require.NoError(t, err)
 	require.NotNil(t, info.Derivation, "SQL-derived address must carry "+
 		"derivation metadata")
@@ -1410,16 +1418,20 @@ func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 	require.NoError(t, err)
 
 	chain.On(
-		"NotifyReceived",
+		"WatchAddrsFromTip", mock.Anything,
 		mock.MatchedBy(func(addrs []address.Address) bool {
 			return len(addrs) == 1
 		}),
 	).Return(nil).Once()
 
-	addr, err := w.NewAddress(
-		t.Context(), "secondary", waddrmgr.WitnessPubKey, false,
+	info, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, "secondary",
+		), false,
 	)
 	require.NoError(t, err)
+
+	addr := info.Addr
 	require.NotNil(t, addr)
 }
 
