@@ -679,10 +679,11 @@ func testAddressManagerRejectKVDBBatch(h *bwtest.HarnessTest) {
 			// Kvdb still supports count-one allocation. Child zero after
 			// reopen proves rejection did not silently consume its cursor.
 			next, err := w.NewAddress(
-				ctx, accountName, waddrmgr.WitnessPubKey, false,
+				ctx, wallet.NewAccountSelectorByName(scope, accountName),
+				false,
 			)
 			require.NoError(h, err)
-			require.Equal(h, want.Addr, next)
+			require.Equal(h, want.Addr, next.Addr)
 		})
 	}
 }

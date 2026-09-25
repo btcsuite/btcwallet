@@ -283,9 +283,10 @@ func (h *HarnessTest) NewWalletAddress(w *wallet.Wallet) address.Address {
 	return h.NewWalletAddressOfType(w, fundingAddrType)
 }
 
-// NewWalletAddressOfType derives a fresh receive address of the requested type
-// from the wallet's default account in that type's key scope, ensuring the
-// account exists first.
+// NewWalletAddressOfType returns a receive address of the requested type from
+// the wallet's default account in that type's key scope, ensuring the account
+// exists first. SQL wallets return the oldest unused address, so repeated
+// calls before funding return the same address; kvdb wallets derive a new one.
 //
 // Callers that need funds under a particular key scope must use this instead
 // of NewWalletAddress, because the wallet resolves accounts per scope: coins
@@ -301,12 +302,14 @@ func (h *HarnessTest) NewWalletAddressOfType(w *wallet.Wallet,
 
 	h.ensureAccount(w, scope, waddrmgr.DefaultAccountName)
 
-	addr, err := w.NewAddress(
-		h.Context(), waddrmgr.DefaultAccountName, addrType, false,
+	info, err := w.NewAddress(
+		h.Context(), wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), false,
 	)
 	require.NoError(h, err, "failed to create address")
 
-	return addr
+	return info.Addr
 }
 
 // NewWalletAddressesOfType returns count distinct receive addresses of the
