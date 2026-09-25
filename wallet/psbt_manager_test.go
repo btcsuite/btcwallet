@@ -5347,7 +5347,7 @@ func testMalformedPacket(outPoint wire.OutPoint,
 	case "signed input":
 		packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
 			PubKey:    bytes.Repeat([]byte{0x02}, 33),
-			Signature: bytes.Repeat([]byte{0x30}, 71),
+			Signature: testDerSig(),
 		}}
 
 	case "unusable derivation key":

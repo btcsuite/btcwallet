@@ -5,11 +5,11 @@
 package wallet
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -86,6 +86,11 @@ func validatePacket(packet *psbt.Packet) error {
 		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
 	}
 
+	err = validatePacketEncoding(packet)
+	if err != nil {
+		return err
+	}
+
 	// Global fields the wallet cannot classify would be dropped by any
 	// transformation, so refuse them up front rather than silently losing
 	// them.
@@ -100,6 +105,55 @@ func validatePacket(packet *psbt.Packet) error {
 	}
 
 	return validatePacketOutputs(packet)
+}
+
+// validatePacketEncoding checks that a packet is one the psbt package itself
+// would accept, by writing it out and reading it back.
+//
+// The record contents a PSBT can carry are the psbt package's to define, and
+// it already refuses the ones that are unusable: keys that do not parse,
+// signatures that are not signatures, control blocks of the wrong shape. A
+// packet the wallet admitted but that package would not is one the wallet
+// could hand back and the caller could not serialize.
+//
+// Asking it directly is also the only way to stay current: a record type the
+// psbt package learns to validate is covered here without the wallet keeping
+// its own list of what to look at.
+//
+// This runs after the pointer sweep, because serializing reads through every
+// entry the packet holds.
+func validatePacketEncoding(packet *psbt.Packet) error {
+	// Serializing is not read-only: the psbt package sorts an input's and
+	// an output's record lists in place as it writes them. Those slices
+	// belong to the caller, so the probe has to be a copy, or validating a
+	// packet would reorder the one the caller still holds.
+	probe := clonePacket(packet)
+
+	// An input carrying either final field has every one of its other
+	// records skipped by serialization, so a probe that kept them would
+	// write nothing to read back and judge nothing. Dropping them puts the
+	// remaining records where the parser can see them. Nothing is lost:
+	// the psbt package stores both final fields as raw bytes and validates
+	// neither, and whether a packet may carry them at all is a question
+	// for each operation rather than for this one.
+	for i := range probe.Inputs {
+		probe.Inputs[i].FinalScriptSig = nil
+		probe.Inputs[i].FinalScriptWitness = nil
+	}
+
+	var raw bytes.Buffer
+
+	err := probe.Serialize(&raw)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	_, err = psbt.NewFromRawBytes(&raw, false)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	return nil
 }
 
 // validatePacketPointers checks that nothing the wallet will read through is
@@ -274,15 +328,12 @@ func validatePacketInputs(packet *psbt.Packet) error {
 			return err
 		}
 
-		err = validateDerivationRecords(
-			pIn.Bip32Derivation, pIn.TaprootBip32Derivation,
-			"input", i,
-		)
+		err = validateInputSighash(pIn, i)
 		if err != nil {
 			return err
 		}
 
-		err = validateInputSighash(pIn, i)
+		err = validateMerkleRoot(pIn, i)
 		if err != nil {
 			return err
 		}
@@ -300,58 +351,27 @@ func validatePacketOutputs(packet *psbt.Packet) error {
 			return fmt.Errorf("%w: output %d carries %d fields",
 				ErrUnclassifiedField, i, len(pOut.Unknowns))
 		}
-
-		err := validateDerivationRecords(
-			pOut.Bip32Derivation, pOut.TaprootBip32Derivation,
-			"output", i,
-		)
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil
 }
 
-// validateDerivationRecords checks that derivation records carry keys the psbt
-// package would accept, and that no key is named twice.
+// validateMerkleRoot checks that a taproot merkle root is a hash.
 //
-// A record list is only metadata until something reads it, and what reads it
-// parses the key. A packet carrying a key that does not parse is one the
-// wallet could hand back and the caller could not serialize.
-func validateDerivationRecords(bip32 []*psbt.Bip32Derivation,
-	taproot []*psbt.TaprootBip32Derivation, kind string, idx int) error {
-
-	seen := make(map[string]struct{}, len(bip32)+len(taproot))
-	for i, d := range bip32 {
-		_, err := btcec.ParsePubKey(d.PubKey)
-		if err != nil {
-			return fmt.Errorf("%w: %s %d derivation %d has an "+
-				"unusable key", ErrPacketMalformed, kind, idx, i)
-		}
-
-		if _, ok := seen[string(d.PubKey)]; ok {
-			return fmt.Errorf("%w: %s %d names one derivation key "+
-				"twice", ErrPacketMalformed, kind, idx)
-		}
-
-		seen[string(d.PubKey)] = struct{}{}
+// The psbt package stores this record without inspecting it, so parsing a
+// packet back will not refuse a root of the wrong size. It is not the only
+// record stored raw — an output's tap tree is too — but it is the only one
+// with a fixed size the wallet can assert without parsing anything, which is
+// why it is the only one checked here.
+func validateMerkleRoot(pIn *psbt.PInput, idx int) error {
+	if pIn.TaprootMerkleRoot == nil {
+		return nil
 	}
 
-	for i, d := range taproot {
-		_, err := schnorr.ParsePubKey(d.XOnlyPubKey)
-		if err != nil {
-			return fmt.Errorf("%w: %s %d taproot derivation %d "+
-				"has an unusable key", ErrPacketMalformed, kind,
-				idx, i)
-		}
-
-		if _, ok := seen[string(d.XOnlyPubKey)]; ok {
-			return fmt.Errorf("%w: %s %d names one derivation key "+
-				"twice", ErrPacketMalformed, kind, idx)
-		}
-
-		seen[string(d.XOnlyPubKey)] = struct{}{}
+	if len(pIn.TaprootMerkleRoot) != chainhash.HashSize {
+		return fmt.Errorf("%w: input %d has a %d byte taproot merkle "+
+			"root", ErrPacketMalformed, idx,
+			len(pIn.TaprootMerkleRoot))
 	}
 
 	return nil
