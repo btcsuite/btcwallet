@@ -1192,8 +1192,7 @@ func TestNewAccountNoChainSyncUnsupported(t *testing.T) {
 	// Arrange: allow the existing admission checks on an unlocked wallet
 	// with an available name. Strict mocks have no secret or write
 	// expectations, so crossing into creation would fail this test.
-	w, deps := createUnlockedWalletWithMocks(t)
-	w.addrStore = nil
+	w, deps := createUnlockedSQLWalletWithMocks(t)
 	scope := waddrmgr.KeyScopeBIP0084
 
 	expectAccountNameAvailable(deps, scope, testAccountName)
@@ -2056,8 +2055,7 @@ func TestNewAccountInvalidPath(t *testing.T) {
 
 	// Arrange: use an invalid exact number and strict mocks with no expected
 	// calls. The shared validator's tests own the complete path-input matrix.
-	w, _ := createStartedWalletWithMocks(t)
-	w.addrStore = nil
+	w, _ := createStartedSQLWalletWithMocks(t)
 	number := AccountNumber(db.MaxAccountNumber + 1)
 
 	// Act: enter creation through the public boundary with a malformed path.
@@ -2142,8 +2140,7 @@ func TestNewAccountCancellationPreservesCommitError(t *testing.T) {
 
 	// Arrange: hold an admitted Store write until explicitly released with
 	// an ambiguous result. Cleanup releases it before the fixture drains Stop.
-	w, deps := createUnlockedWalletWithMocks(t)
-	w.addrStore = nil
+	w, deps := createUnlockedSQLWalletWithMocks(t)
 	scope := waddrmgr.KeyScopeBIP0084
 	number := AccountNumber(7)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -2291,8 +2288,7 @@ func TestNewAccountCustomScopeMissingFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, deps := createUnlockedWalletWithMocks(t)
-			w.addrStore = nil
+			w, deps := createUnlockedSQLWalletWithMocks(t)
 			scope := waddrmgr.KeyScope{
 				Purpose: 1017,
 			}
@@ -2362,8 +2358,7 @@ func TestNewAccountInvalidSchema(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, _ := createUnlockedWalletWithMocks(t)
-			w.addrStore = nil
+			w, _ := createUnlockedSQLWalletWithMocks(t)
 			number := AccountNumber(7)
 
 			// Act: submit the malformed schema through the public request.
@@ -2426,8 +2421,7 @@ func TestNewAccountScopeSchemaConflict(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, deps := createUnlockedWalletWithMocks(t)
-			w.addrStore = nil
+			w, deps := createUnlockedSQLWalletWithMocks(t)
 			scope := waddrmgr.KeyScope{
 				Purpose: test.purpose,
 			}
@@ -2501,8 +2495,7 @@ func TestNewAccountExistingScopeSchema(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, deps := createUnlockedWalletWithMocks(t)
-			w.addrStore = nil
+			w, deps := createUnlockedSQLWalletWithMocks(t)
 			scope := waddrmgr.KeyScope{
 				Purpose: test.purpose,
 			}
