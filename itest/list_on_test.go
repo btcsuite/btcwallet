@@ -158,6 +158,11 @@ var allTestCases = []*testCase{
 		Name:     "account manager enforce account rename lifecycle",
 		TestFunc: testAccountManagerEnforceAccountRenameLifecycle,
 	},
+	// Account admission must refuse shared scripts before deriving children.
+	{
+		Name:     "account manager reject account identity",
+		TestFunc: testAccountManagerRejectAccountIdentity,
+	},
 	{
 		Name:     "account manager import account",
 		TestFunc: testAccountManagerImportAccount,

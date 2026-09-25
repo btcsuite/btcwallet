@@ -1015,6 +1015,12 @@ func TestNewAccountStoreErrors(t *testing.T) {
 		storeErr error
 		want     error
 	}{
+		// A Store collision must expose only the wallet-owned identity.
+		{
+			name:     "identity collision",
+			storeErr: db.ErrAccountIdentityCollision,
+			want:     ErrAccountIdentityCollision,
+		},
 		{
 			name:     "sql duplicate",
 			storeErr: db.ErrAccountNameConflict,
@@ -1523,6 +1529,12 @@ func TestImportAccountStoreErrors(t *testing.T) {
 		storeErr error
 		want     error
 	}{
+		// A Store collision must expose only the wallet-owned identity.
+		{
+			name:     "identity collision",
+			storeErr: db.ErrAccountIdentityCollision,
+			want:     ErrAccountIdentityCollision,
+		},
 		{
 			name:     "name conflict",
 			storeErr: db.ErrAccountNameConflict,

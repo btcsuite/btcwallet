@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
@@ -721,4 +722,183 @@ func TestCreateDerivedAccountExactMaxNumber(t *testing.T) {
 	// sequential fallback; path-validation tests cover the first rejection.
 	require.NoError(t, err)
 	require.Equal(t, number, *info.AccountNumber)
+}
+
+// TestCreateDerivedAccountIdentityRollback checks exact-number precedence and
+// rollback of a colliding root account, including a newly requested scope.
+func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		scope  db.KeyScope
+		number uint32
+		want   error
+	}{
+		{
+			name:   "vacant custom scope",
+			scope:  db.KeyScope{Purpose: 100, Coin: 0},
+			number: 7,
+			want:   db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "occupied number wins",
+			scope: db.KeyScopeBIP0084,
+			want:  db.ErrAccountNumberConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a childless root account owns the callback's XPub.
+			// Reusing its XPub forces a collision after allocation.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "derived-identity")
+			key, err := hdkeychain.NewMaster(
+				RandomBytes(32), &chaincfg.SimNetParams,
+			)
+			require.NoError(t, err)
+			pub, err := key.Neuter()
+			require.NoError(t, err)
+
+			derive := func(context.Context, db.KeyScope, uint32,
+				bool) (*db.DerivedAccountData, error) {
+
+				return &db.DerivedAccountData{
+					PublicKey:           []byte(pub.String()),
+					EncryptedPrivateKey: []byte("encrypted account key"),
+				}, nil
+			}
+			params := db.CreateDerivedAccountParams{
+				WalletID: walletID,
+				Scope:    db.KeyScopeBIP0084,
+				Name:     "owner",
+			}
+			_, err = store.CreateDerivedAccount(t.Context(), params, derive)
+			require.NoError(t, err)
+
+			schema := db.ScopeAddrMap[db.KeyScopeBIP0084]
+			params.Scope, params.Name = tc.scope, "candidate"
+			params.AccountNumber, params.AddrSchema = &tc.number, &schema
+
+			// Act: attempt exact creation with occupied derivation material.
+			info, err := store.CreateDerivedAccount(t.Context(), params, derive)
+
+			// Assert: the error commits no scope, cursor, account, secret, or
+			// watch row. Raw counts expose effects hidden by account reads.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, info)
+
+			var accounts, secrets, scopes, addresses, next int
+
+			err = store.DB().QueryRowContext(t.Context(), `
+				SELECT (SELECT count(*) FROM accounts),
+				       (SELECT count(*) FROM account_secrets),
+				       (SELECT count(*) FROM key_scopes),
+				       (SELECT count(*) FROM addresses),
+				       (SELECT sum(next_account_number) FROM key_scopes)
+			`).Scan(&accounts, &secrets, &scopes, &addresses, &next)
+			require.NoError(t, err)
+			require.Equal(t, 1, accounts)
+			require.Equal(t, 1, secrets)
+			require.Equal(t, 1, scopes)
+			require.Zero(t, addresses)
+			require.Equal(t, 1, next)
+
+			params.Scope, params.AccountNumber = db.KeyScopeBIP0084, nil
+			created, err := store.CreateDerivedAccount(
+				t.Context(), params, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+			require.Equal(t, uint32(1), *created.AccountNumber)
+		})
+	}
+}
+
+// TestCreateAccountIdentityConcurrent checks that imported and derived account
+// creation participate in the same wallet-wide admission transaction.
+func TestCreateAccountIdentityConcurrent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: supply the same real XPub to different creation paths/scopes.
+	// Each worker returns through a buffered channel under a bounded context.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "mixed-identity-race")
+	key, err := hdkeychain.NewMaster(
+		RandomBytes(32), &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	pub, err := key.Neuter()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	start := make(chan struct{})
+	imported := make(chan error, 1)
+	derived := make(chan error, 1)
+
+	go func() {
+		<-start
+
+		_, err := store.CreateImportedAccount(
+			ctx, db.CreateImportedAccountParams{
+				WalletID:            walletID,
+				Scope:               db.KeyScopeBIP0049Plus,
+				Name:                "import candidate",
+				PublicKey:           []byte(pub.String()),
+				EncryptedPrivateKey: []byte("encrypted account key"),
+			},
+		)
+		imported <- err
+	}()
+	go func() {
+		<-start
+
+		_, err := store.CreateDerivedAccount(ctx, db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "derived",
+		}, func(context.Context, db.KeyScope, uint32,
+			bool) (*db.DerivedAccountData, error) {
+
+			return &db.DerivedAccountData{
+				PublicKey:           []byte(pub.String()),
+				EncryptedPrivateKey: []byte("encrypted account key"),
+			}, nil
+		})
+		derived <- err
+	}()
+
+	// Act: let both creation paths compete before joining either worker.
+	close(start)
+
+	importErr, deriveErr := <-imported, <-derived
+
+	// Assert: precisely one path wins, with only its account, secret and
+	// optional derived allocation committed and no address/watch facts.
+	wantNext := 0
+	if deriveErr == nil {
+		require.ErrorIs(t, importErr, db.ErrAccountIdentityCollision)
+
+		wantNext = 1
+	} else {
+		require.NoError(t, importErr)
+		require.ErrorIs(t, deriveErr, db.ErrAccountIdentityCollision)
+	}
+
+	var accounts, secrets, addresses, next int
+
+	err = store.DB().QueryRowContext(ctx, `
+		SELECT (SELECT count(*) FROM accounts),
+		       (SELECT count(*) FROM account_secrets),
+		       (SELECT count(*) FROM addresses),
+		       (SELECT sum(next_account_number) FROM key_scopes)
+	`).Scan(&accounts, &secrets, &addresses, &next)
+	require.NoError(t, err)
+	require.Equal(t, 1, accounts)
+	require.Equal(t, 1, secrets)
+	require.Zero(t, addresses)
+	require.Equal(t, wantNext, next)
 }
