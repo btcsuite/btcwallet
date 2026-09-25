@@ -496,9 +496,13 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 
 	accountName := waddrmgr.DefaultAccountName
 	for i := range addrsPerAccount {
-		addr, err := templateW.NewAddress(tb.Context(),
-			accountName, waddrmgr.WitnessPubKey, false)
+		info, err := templateW.NewAddress(tb.Context(),
+			NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084, accountName,
+			), false)
 		require.NoError(tb, err)
+
+		addr := info.Addr
 
 		// Select target addresses based on the calculated chunk.
 		// For example, if we have 100 addresses and need 10 UTXOs, we pick

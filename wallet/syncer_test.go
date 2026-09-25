@@ -7226,14 +7226,16 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	// Arrange: Keep the real sync worker waiting for backend readiness while
 	// preparing one funding block and an external spend of its only credit.
 	manager, client, w := newLiveWatchManager(t)
-	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
 
-	addr, err := w.NewAddress(
-		t.Context(), waddrmgr.DefaultAccountName,
-		waddrmgr.WitnessPubKey, false,
+	recv, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
+		), false,
 	)
 	require.NoError(t, err)
-	script, err := txscript.PayToAddrScript(addr)
+	script, err := txscript.PayToAddrScript(recv.Addr)
 	require.NoError(t, err)
 
 	funding := wire.NewMsgTx(2)
@@ -7369,14 +7371,16 @@ func TestLiveWatchTargetedScanFailure(t *testing.T) {
 	// Arrange: Keep the worker waiting for backend readiness and prepare a
 	// historical payment that only the explicitly driven rescan discovers.
 	_, client, w := newLiveWatchManager(t)
-	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
 
-	addr, err := w.NewAddress(
-		t.Context(), waddrmgr.DefaultAccountName,
-		waddrmgr.WitnessPubKey, false,
+	recv, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
+		), false,
 	)
 	require.NoError(t, err)
-	script, err := txscript.PayToAddrScript(addr)
+	script, err := txscript.PayToAddrScript(recv.Addr)
 	require.NoError(t, err)
 
 	tx := wire.NewMsgTx(2)
