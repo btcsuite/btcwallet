@@ -56,38 +56,41 @@ func (m *mockNewDerivedAddressOps) CreateDerivedAddress(ctx context.Context,
 	return row, args.Error(1)
 }
 
-// TestNewDerivedAddressWithOpsNilDeriveFn verifies that the shared workflow
-// rejects a missing derivation callback before touching the backend adapter.
-func TestNewDerivedAddressWithOpsNilDeriveFn(t *testing.T) {
+// TestNewDerivedAddressesWithOpsNilDeriveFn verifies that a missing callback
+// is rejected before touching the backend adapter.
+func TestNewDerivedAddressesWithOpsNilDeriveFn(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Keep the strict ops mock free of expectations so any backend
-	// call proves validation happened too late.
+	// Arrange: Allow no backend calls because the callback is required before
+	// any account lookup or counter mutation can occur.
 	ops := &mockNewDerivedAddressOps{}
 
-	// Act: Invoke the shared workflow without the required derivation
-	// callback.
-	_, err := NewDerivedAddressWithOps(
-		t.Context(), NewDerivedAddressParams{}, ops, nil,
+	// Act: Request one child through the same workflow used by SQL stores.
+	addresses, exhausted, err := NewDerivedAddressesWithOps(
+		t.Context(), NewDerivedAddressParams{}, 1, ops, nil,
 	)
 
-	// Assert: The callback error is returned before the backend is touched.
+	// Assert: Admission fails without rows or exhaustion, and no backend
+	// operation was needed to detect the missing callback.
 	require.ErrorIs(t, err, errNilAddressDerivationFunc)
+	require.Nil(t, addresses)
+	require.False(t, exhausted)
+	ops.AssertExpectations(t)
 }
 
-// TestNewDerivedAddressWithOpsBuildsInfo verifies that the workflow threads the
-// account lookup key, index allocation, and insert request through the adapter
-// and assembles the resulting AddressInfo with its account metadata.
-func TestNewDerivedAddressWithOpsBuildsInfo(t *testing.T) {
+// TestNewDerivedAddressesWithOpsBuildsInfo verifies that count-one allocation
+// forwards account and child identity and assembles the returned metadata.
+func TestNewDerivedAddressesWithOpsBuildsInfo(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Expect one lookup, counter advance and insert for a non-default
+	// account, so the returned locator must use the resolved account number.
 	now := time.Unix(1710005000, 0).UTC()
 	params := NewDerivedAddressParams{
 		WalletID:    7,
 		AccountName: "acct",
 		Scope:       KeyScopeBIP0084,
 	}
-
 	account := DerivedAddressAccount{
 		AccountID:     42,
 		AccountNumber: sqlNullInt64(3),
@@ -100,31 +103,31 @@ func TestNewDerivedAddressWithOpsBuildsInfo(t *testing.T) {
 			InternalAddrType: WitnessPubKey,
 		},
 	}
-
-	// Arrange: Require each shared-workflow stage once with the complete
-	// normalized account key and derived-address insert request.
 	ops := &mockNewDerivedAddressOps{}
-	ops.On(
-		"GetAccount", mock.Anything, AccountKeyFromParams(params),
-	).Return(account, nil).Once()
-	ops.On(
-		"NextIndex", mock.Anything, int64(42), false,
-	).Return(int64(5), nil).Once()
-	ops.On(
-		"CreateDerivedAddress", mock.Anything,
-		CreateDerivedAddressRequest{
-			WalletID:     int64(params.WalletID),
-			AccountID:    42,
-			AddrType:     WitnessPubKey,
-			Index:        5,
-			ScriptPubKey: []byte{1},
-			PubKey:       []byte{2},
-		},
-	).Return(CreateDerivedAddressRow{
+	ops.On("GetAccount", t.Context(), AccountLookupKey{
+		WalletID:    int64(params.WalletID),
+		Purpose:     int64(params.Scope.Purpose),
+		CoinType:    int64(params.Scope.Coin),
+		AccountName: params.AccountName,
+	}).Return(account, nil).Once()
+	ops.On("NextIndex", t.Context(), int64(42), false).Return(
+		int64(5), nil,
+	).Once()
+	// The batch workflow checks ownership before inserting the fresh child.
+	ops.On("AddressOwned", t.Context(), int64(params.WalletID), []byte{1}).
+		Return(false, nil).Once()
+	ops.On("CreateDerivedAddress", t.Context(), CreateDerivedAddressRequest{
+		WalletID:     int64(params.WalletID),
+		AccountID:    42,
+		AddrType:     WitnessPubKey,
+		Branch:       0,
+		Index:        5,
+		ScriptPubKey: []byte{1},
+		PubKey:       []byte{2},
+	}).Return(CreateDerivedAddressRow{
 		ID:        99,
 		CreatedAt: now,
 	}, nil).Once()
-
 	deriveFn := func(_ context.Context, p AddressDerivationParams) (
 		*DerivedAddressData, error) {
 
@@ -137,12 +140,17 @@ func TestNewDerivedAddressWithOpsBuildsInfo(t *testing.T) {
 		}, nil
 	}
 
-	// Act: Run count-one allocation through the shared workflow.
-	info, err := NewDerivedAddressWithOps(t.Context(), params, ops, deriveFn)
+	// Act: Allocate one child through the production batch workflow.
+	addresses, exhausted, err := NewDerivedAddressesWithOps(
+		t.Context(), params, 1, ops, deriveFn,
+	)
 
-	// Assert: The returned metadata matches the account and inserted row, and
-	// every required backend stage ran exactly once.
+	// Assert: The sole result retains the persisted identity and account
+	// metadata, with exactly the expected backend operations completed.
 	require.NoError(t, err)
+	require.False(t, exhausted)
+	require.Len(t, addresses, 1)
+	info := addresses[0]
 	require.Equal(t, uint32(99), info.ID)
 	require.Equal(t, params.AccountName, info.AccountName)
 	require.Equal(t, params.Scope, info.KeyScope)
@@ -150,32 +158,30 @@ func TestNewDerivedAddressWithOpsBuildsInfo(t *testing.T) {
 	ops.AssertExpectations(t)
 }
 
-// TestNewDerivedAddressWithOpsRejectsDerivedAccountWithoutNumber verifies a
-// wallet-derived account missing its derived account number is rejected
-// instead of being treated as an imported-xpub account, before deriving.
-func TestNewDerivedAddressWithOpsRejectsDerivedAccountWithoutNumber(
+// TestNewDerivedAddressesWithOpsRejectsDerivedAccountWithoutNumber verifies
+// that malformed wallet-derived accounts fail before child derivation.
+func TestNewDerivedAddressesWithOpsRejectsDerivedAccountWithoutNumber(
 	t *testing.T) {
 
 	t.Parallel()
 
+	// Arrange: Return a derived account with a NULL account number. No counter
+	// or insert expectation is allowed, because this account cannot be used.
 	params := NewDerivedAddressParams{
 		WalletID:    7,
 		AccountName: "acct",
 		Scope:       KeyScopeBIP0084,
 	}
-	deriveCalled := false
-
-	// Arrange: Return a derived account whose missing account number violates
-	// the stored account-shape invariant, and observe any derivation attempt.
 	ops := &mockNewDerivedAddressOps{}
-	ops.On(
-		"GetAccount", mock.Anything, AccountKeyFromParams(params),
-	).Return(DerivedAddressAccount{
-		AccountID:   42,
-		AccountName: params.AccountName,
-		IsDerived:   true,
-	}, nil).Once()
+	ops.On("GetAccount", t.Context(), AccountKeyFromParams(params)).Return(
+		DerivedAddressAccount{
+			AccountID:   42,
+			AccountName: params.AccountName,
+			IsDerived:   true,
+		}, nil,
+	).Once()
 
+	deriveCalled := false
 	deriveFn := func(context.Context,
 		AddressDerivationParams) (*DerivedAddressData, error) {
 
@@ -184,12 +190,16 @@ func TestNewDerivedAddressWithOpsRejectsDerivedAccountWithoutNumber(
 		return &DerivedAddressData{}, nil
 	}
 
-	// Act: Run allocation with the corrupt account shape.
-	_, err := NewDerivedAddressWithOps(t.Context(), params, ops, deriveFn)
+	// Act: Attempt the count-one request with the malformed account metadata.
+	addresses, exhausted, err := NewDerivedAddressesWithOps(
+		t.Context(), params, 1, ops, deriveFn,
+	)
 
-	// Assert: Preflight rejects the account before derivation and satisfies
-	// only the required account lookup.
+	// Assert: Account corruption stops allocation without invoking derivation
+	// or reporting exhaustion; only the account lookup was performed.
 	require.ErrorIs(t, err, errAccountShapeCorruption)
+	require.Nil(t, addresses)
+	require.False(t, exhausted)
 	require.False(t, deriveCalled)
 	ops.AssertExpectations(t)
 }
@@ -199,11 +209,11 @@ func TestNewDerivedAddressWithOpsRejectsDerivedAccountWithoutNumber(
 func TestDerivedAddressInputNilDerivedData(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Return nil derived data after allocating one exact child index.
+	// Arrange: Allocate one index, then return nil data without an error to
+	// exercise validation of the callback result before row construction.
 	params := NewDerivedAddressParams{
 		Scope: KeyScopeBIP0084,
 	}
-
 	deriveFn := func(context.Context,
 		AddressDerivationParams) (*DerivedAddressData, error) {
 
@@ -211,7 +221,6 @@ func TestDerivedAddressInputNilDerivedData(t *testing.T) {
 
 		return derivedData, nil
 	}
-
 	accountNumber := uint32(0)
 	account := DerivedAddressAccount{
 		AccountID: 1,
@@ -221,17 +230,17 @@ func TestDerivedAddressInputNilDerivedData(t *testing.T) {
 		},
 	}
 	ops := &mockNewDerivedAddressOps{}
-	ops.On(
-		"NextIndex", mock.Anything, int64(1), false,
-	).Return(int64(7), nil).Once()
+	ops.On("NextIndex", t.Context(), int64(1), false).Return(
+		int64(7), nil,
+	).Once()
 
-	// Act: Invoke the leaf-input stage directly to isolate nil callback data.
+	// Act: Prepare the child using the callback that omits its result data.
 	addrType, branch, index, scriptPubKey, pubKey, err := derivedAddressInput(
 		t.Context(), params, account, &accountNumber, ops, deriveFn,
 	)
 
-	// Assert: No partial address material escapes and the allocation stage ran
-	// once before the callback returned its invalid result.
+	// Assert: No partial derivation escapes, and the expected single counter
+	// allocation is accounted for by the mock.
 	require.Zero(t, addrType)
 	require.Zero(t, branch)
 	require.Zero(t, index)
