@@ -1,0 +1,3856 @@
+//go:build itest
+
+package itest
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"math"
+	"sort"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	"github.com/stretchr/testify/require"
+)
+
+// mockDeriveFunc returns a test address derivation function. It generates
+// deterministic script pubkeys from scope, account number, branch, and index so
+// derived test addresses are unique across scopes.
+func mockDeriveFunc() db.AddressDerivationFunc {
+	return func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		_ = ctx
+
+		var accountNumber uint32
+		if params.DerivedAccountNumber != nil {
+			accountNumber = *params.DerivedAccountNumber
+		}
+
+		scriptPubKey := make([]byte, 20)
+		binary.BigEndian.PutUint32(scriptPubKey[0:4], accountNumber)
+		binary.BigEndian.PutUint32(scriptPubKey[4:8], params.Branch)
+		binary.BigEndian.PutUint32(scriptPubKey[8:12], params.Index)
+		binary.BigEndian.PutUint32(scriptPubKey[12:16], params.Scope.Purpose)
+		binary.BigEndian.PutUint32(scriptPubKey[16:20], params.Scope.Coin)
+
+		return &db.DerivedAddressData{
+			ScriptPubKey: scriptPubKey,
+		}, nil
+	}
+}
+
+// newDerivedAddress creates and returns a derived address for testing.
+func newDerivedAddress(t *testing.T, store db.AddressStore, walletID uint32,
+	scope db.KeyScope, accountName string, change bool) *db.AddressInfo {
+
+	t.Helper()
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       scope,
+			AccountName: accountName,
+			Change:      change,
+		},
+	)
+	require.NoError(t, err)
+
+	return info
+}
+
+// createDerivedAddresses creates and returns a slice of derived addresses for
+// testing.
+func createDerivedAddresses(t *testing.T, store db.AddressStore,
+	walletID uint32, scope db.KeyScope, accountName string, change bool,
+	count int) []db.AddressInfo {
+
+	t.Helper()
+
+	addresses := make([]db.AddressInfo, 0, count)
+	for range count {
+		info := newDerivedAddress(
+			t, store, walletID, scope, accountName, change,
+		)
+		addresses = append(addresses, *info)
+	}
+
+	return addresses
+}
+
+// getAccountByName retrieves an account by wallet, scope, and name for testing.
+func getAccountByName(t *testing.T, store db.AccountStore, walletID uint32,
+	scope db.KeyScope, accountName string) *db.AccountInfo {
+
+	t.Helper()
+
+	account, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, accountName),
+	)
+	require.NoError(t, err)
+
+	return account
+}
+
+// rawImportedAddresses lists raw imported addresses through the accountless raw
+// import query.
+func rawImportedAddresses(t *testing.T, store db.AddressStore, walletID uint32,
+	limit uint32) []db.AddressInfo {
+
+	t.Helper()
+
+	result, err := store.ListAddresses(
+		t.Context(), db.ListAddressesQuery{
+			WalletID: walletID,
+			Page:     newTestReq[uint32](t, limit),
+		},
+	)
+	require.NoError(t, err)
+
+	return result.Items
+}
+
+// listAccountAddressesQuery creates an account-scoped address listing query.
+func listAccountAddressesQuery(t *testing.T, walletID uint32,
+	scope db.KeyScope, accountName string, limit uint32) db.ListAddressesQuery {
+
+	t.Helper()
+
+	return db.ListAddressesQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		AccountName: &accountName,
+		Page:        newTestReq[uint32](t, limit),
+	}
+}
+
+// collectAddressPages collects paginated address results by iterating through
+// all pages from ListAddresses until Next is nil.
+func collectAddressPages(t *testing.T, store db.AddressStore,
+	query db.ListAddressesQuery) []page.Result[db.AddressInfo, uint32] {
+
+	t.Helper()
+
+	pages := make([]page.Result[db.AddressInfo, uint32], 0)
+	for {
+		pageResult, err := store.ListAddresses(t.Context(), query)
+		require.NoError(t, err)
+
+		pages = append(pages, pageResult)
+
+		if pageResult.Next == nil {
+			return pages
+		}
+
+		query.Page.After = pageResult.Next
+	}
+}
+
+// flattenAddressPages flattens paginated address results into a single
+// slice containing all addresses from all pages.
+func flattenAddressPages(
+	pages []page.Result[db.AddressInfo, uint32]) []db.AddressInfo {
+
+	count := 0
+	for i := range pages {
+		count += len(pages[i].Items)
+	}
+
+	addresses := make([]db.AddressInfo, 0, count)
+	for i := range pages {
+		addresses = append(addresses, pages[i].Items...)
+	}
+
+	return addresses
+}
+
+// importedAddressWallet picks the wallet flavor a subtest needs based on
+// whether the imported address carries private-key material. Per ADR
+// 0012, public-only (no private key) imports require a watch-only
+// wallet, while imports with private-key material require a spendable
+// wallet.
+func importedAddressWallet(t *testing.T, store db.WalletStore,
+	name string, withPrivateKey bool) uint32 {
+
+	t.Helper()
+
+	if withPrivateKey {
+		return newWallet(t, store, name)
+	}
+
+	return newWatchOnlyWallet(t, store, name)
+}
+
+// TestNewImportedAddress verifies that NewImportedAddress correctly imports
+// addresses of different types, with and without private key material.
+func TestNewImportedAddress(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	p2pkhAddr, err := address.NewAddressPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	p2wpkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	p2trAddr, err := address.NewAddressTaproot(
+		pubKey.SerializeCompressed()[1:], &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name              string
+		addr              address.Address
+		scope             db.KeyScope
+		expectedAddrType  db.AddressType
+		providePrivateKey bool
+	}{
+		{
+			name:              "P2PKH without private key",
+			addr:              p2pkhAddr,
+			scope:             db.KeyScopeBIP0044,
+			expectedAddrType:  db.PubKeyHash,
+			providePrivateKey: false,
+		},
+		{
+			name:              "P2PKH with private key",
+			addr:              p2pkhAddr,
+			scope:             db.KeyScopeBIP0044,
+			expectedAddrType:  db.PubKeyHash,
+			providePrivateKey: true,
+		},
+		{
+			name:              "P2WPKH without private key",
+			addr:              p2wpkhAddr,
+			scope:             db.KeyScopeBIP0084,
+			expectedAddrType:  db.WitnessPubKey,
+			providePrivateKey: false,
+		},
+		{
+			name:              "P2WPKH with private key",
+			addr:              p2wpkhAddr,
+			scope:             db.KeyScopeBIP0084,
+			expectedAddrType:  db.WitnessPubKey,
+			providePrivateKey: true,
+		},
+		{
+			name:              "P2TR without private key",
+			addr:              p2trAddr,
+			scope:             db.KeyScopeBIP0086,
+			expectedAddrType:  db.TaprootPubKey,
+			providePrivateKey: false,
+		},
+		{
+			name:              "P2TR with private key",
+			addr:              p2trAddr,
+			scope:             db.KeyScopeBIP0086,
+			expectedAddrType:  db.TaprootPubKey,
+			providePrivateKey: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			walletID := importedAddressWallet(
+				t, store, "wallet-imported-"+tc.name,
+				tc.providePrivateKey,
+			)
+
+			params := db.NewImportedAddressParams{
+				WalletID:     walletID,
+				AddressType:  tc.expectedAddrType,
+				PubKey:       RandomBytes(33),
+				ScriptPubKey: RandomBytes(32),
+			}
+
+			if tc.providePrivateKey {
+				params.EncryptedPrivateKey = RandomBytes(32)
+			}
+
+			// Import the address.
+			info, err := store.NewImportedAddress(t.Context(), params)
+			require.NoError(t, err)
+
+			// Verify AddressInfo fields.
+			require.NotZero(t, info.ID)
+			require.Nil(t, info.AccountID)
+			require.Nil(t, info.AccountNumber)
+			require.Empty(t, info.AccountName)
+			require.Equal(t, db.KeyScope{}, info.KeyScope)
+			require.True(t, info.IsImported)
+			require.NotZero(t, info.CreatedAt)
+			require.Equal(t, uint32(0), info.Branch)
+			require.Equal(t, uint32(0), info.Index)
+			require.NotNil(t, info.PubKey)
+			require.NotNil(t, info.ScriptPubKey)
+			require.Equal(t, tc.expectedAddrType, info.AddrType)
+
+			// Verify address_secrets row for imported addresses.
+			secret, err := store.GetAddressSecret(
+				t.Context(), db.GetAddressSecretQuery{
+					WalletID:     walletID,
+					ScriptPubKey: params.ScriptPubKey,
+				},
+			)
+
+			if tc.providePrivateKey {
+				require.NoError(t, err)
+				require.Equal(
+					t, params.EncryptedPrivateKey, secret.EncryptedPrivKey,
+				)
+				require.Empty(t, secret.EncryptedScript)
+			} else {
+				require.ErrorIs(t, err, db.ErrSecretNotFound)
+			}
+		})
+	}
+}
+
+// TestImportedAddressUsesAliasWithoutAccount documents the SQL import policy
+// for private-key address imports: a raw imported address uses the reserved
+// imported alias without materializing an account row and is never treated as a
+// member of a derived account. See ADR 0013.
+func TestImportedAddressUsesAliasWithoutAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	scope := db.KeyScopeBIP0084
+
+	// Spendable wallet so the private-key-bearing import is the path the
+	// ADR 0012 symmetric invariant accepts.
+	walletID := newWallet(t, store, "wallet-import-lands-in-imported")
+
+	// A derived account exists in the same scope. The imported address must not
+	// be attributed to it.
+	createDerivedAccount(t, store, walletID, scope, "derived-acct")
+
+	// Import a private-key-bearing address. No "imported" account row should be
+	// created; the name is only a raw-import compatibility alias.
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	// The address exposes no account identity.
+	require.True(t, info.IsImported)
+	require.Empty(t, info.AccountName)
+	require.Nil(t, info.AccountID)
+	require.Nil(t, info.AccountNumber)
+
+	_, err = store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, db.DefaultImportedAccountName,
+		),
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
+// TestImportedAddressNeverLandsInDerivedAccount documents that the SQL import
+// flow never retargets a raw imported address into a derived account.
+func TestImportedAddressNeverLandsInDerivedAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	scope := db.KeyScopeBIP0084
+
+	walletID := newWallet(t, store, "wallet-import-no-imported-account")
+
+	// Only a derived account exists. The import must not reuse it.
+	createDerivedAccount(t, store, walletID, scope, "derived-only")
+
+	derivedAccountID := GetAccountID(
+		t, queries, GetKeyScopeID(t, queries, walletID, scope),
+		"derived-only",
+	)
+
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	// The address is raw imported, not in the pre-existing derived account.
+	require.True(t, info.IsImported)
+	require.Empty(t, info.AccountName)
+	require.Nil(t, info.AccountID)
+	require.Nil(t, info.AccountNumber)
+	require.NotEqualValues(t, derivedAccountID, info.AccountID)
+}
+
+// TestNewImportedAddressWithEncryptedScript verifies that NewImportedAddress
+// correctly imports script-based addresses (P2SH, P2WSH) with EncryptedScript,
+// and that the EncryptedScript is stored and retrievable via GetAddressSecret.
+func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	redeemScript := RandomBytes(32)
+	witnessScript := RandomBytes(48)
+
+	testCases := []struct {
+		name             string
+		scope            db.KeyScope
+		addressType      db.AddressType
+		encryptedScript  []byte
+		hasPrivateKey    bool
+		expectedAddrType db.AddressType
+	}{
+		{
+			name:             "P2SH with EncryptedScript only",
+			scope:            db.KeyScopeBIP0044,
+			addressType:      db.ScriptHash,
+			encryptedScript:  redeemScript,
+			hasPrivateKey:    false,
+			expectedAddrType: db.ScriptHash,
+		},
+		{
+			name: "P2SH with both EncryptedPrivateKey and " +
+				"EncryptedScript",
+			scope:            db.KeyScopeBIP0044,
+			addressType:      db.ScriptHash,
+			encryptedScript:  redeemScript,
+			hasPrivateKey:    true,
+			expectedAddrType: db.ScriptHash,
+		},
+		{
+			name:             "P2WSH with EncryptedScript only",
+			scope:            db.KeyScopeBIP0049Plus,
+			addressType:      db.WitnessScript,
+			encryptedScript:  witnessScript,
+			hasPrivateKey:    false,
+			expectedAddrType: db.WitnessScript,
+		},
+		{
+			name: "P2WSH with both EncryptedPrivateKey and " +
+				"EncryptedScript",
+			scope:            db.KeyScopeBIP0049Plus,
+			addressType:      db.WitnessScript,
+			encryptedScript:  witnessScript,
+			hasPrivateKey:    true,
+			expectedAddrType: db.WitnessScript,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			walletIsWatchOnly := !tc.hasPrivateKey
+			walletID := importedAddressWallet(
+				t, store, "wallet-encrypted-script-"+tc.name,
+				tc.hasPrivateKey,
+			)
+
+			scriptPubKey := RandomBytes(32)
+
+			params := db.NewImportedAddressParams{
+				WalletID:        walletID,
+				AddressType:     tc.addressType,
+				PubKey:          RandomBytes(33),
+				ScriptPubKey:    scriptPubKey,
+				EncryptedScript: tc.encryptedScript,
+			}
+
+			if tc.hasPrivateKey {
+				params.EncryptedPrivateKey = RandomBytes(32)
+			}
+
+			info, err := store.NewImportedAddress(t.Context(), params)
+			require.NoError(t, err)
+
+			require.NotZero(t, info.ID)
+			require.Nil(t, info.AccountID)
+			require.Nil(t, info.AccountNumber)
+			require.Empty(t, info.AccountName)
+			require.Equal(t, db.KeyScope{}, info.KeyScope)
+			require.True(t, info.IsImported)
+			require.NotZero(t, info.CreatedAt)
+			require.Equal(t, uint32(0), info.Branch)
+			require.Equal(t, uint32(0), info.Index)
+			require.NotNil(t, info.PubKey)
+			require.NotNil(t, info.ScriptPubKey)
+			require.Equal(t, tc.expectedAddrType, info.AddrType)
+			require.Equal(t, walletIsWatchOnly, info.IsWatchOnly)
+
+			secret, err := store.GetAddressSecret(
+				t.Context(), db.GetAddressSecretQuery{
+					WalletID:     walletID,
+					ScriptPubKey: params.ScriptPubKey,
+				},
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.encryptedScript, secret.EncryptedScript)
+
+			if tc.hasPrivateKey {
+				require.Equal(
+					t, params.EncryptedPrivateKey, secret.EncryptedPrivKey,
+				)
+			} else {
+				require.Empty(t, secret.EncryptedPrivKey)
+			}
+		})
+	}
+}
+
+// TestNewImportedTaprootScriptRejectedOnSpendable verifies the ADR 0012
+// invariant at the store boundary: a spendable (non-watch-only) wallet cannot
+// import a taproot script that carries only encrypted script material and no
+// address private key.
+//
+// This test previously asserted the opposite. Holding a tapscript is not spend
+// capability -- the script states a spending condition, not the signing
+// material
+// that satisfies it -- so it cannot stand in for the address private key. The
+// same import on a watch-only wallet is accepted, which is covered below.
+func TestNewImportedTaprootScriptRejectedOnSpendable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletID := newWallet(t, store, "wallet-spendable-taproot-script")
+
+	params := db.NewImportedAddressParams{
+		WalletID:        walletID,
+		AddressType:     db.TaprootPubKey,
+		ScriptPubKey:    RandomBytes(32),
+		EncryptedScript: RandomBytes(48),
+	}
+
+	_, err := store.NewImportedAddress(t.Context(), params)
+	require.ErrorIs(t, err, db.ErrSpendableWalletNeedsAddressPrivKey)
+}
+
+// TestNewImportedTaprootScriptWatchOnly verifies the accepted half of the same
+// invariant: a watch-only wallet may import a script-only taproot address and
+// read its encrypted script back. Observing a script that cannot be spent is
+// what a watch-only wallet is for.
+func TestNewImportedTaprootScriptWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-watchonly-taproot-script",
+	)
+
+	encryptedScript := RandomBytes(48)
+	params := db.NewImportedAddressParams{
+		WalletID:        walletID,
+		AddressType:     db.TaprootPubKey,
+		ScriptPubKey:    RandomBytes(32),
+		EncryptedScript: encryptedScript,
+	}
+
+	info, err := store.NewImportedAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.True(t, info.HasScript)
+	require.True(t, info.IsWatchOnly)
+	require.Equal(t, db.TaprootPubKey, info.AddrType)
+
+	// Read the imported script back, mirroring how ScriptForOutput resolves
+	// the encrypted script for a taproot script-path spend.
+	secret, err := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     walletID,
+			ScriptPubKey: params.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, encryptedScript, secret.EncryptedScript)
+	require.Empty(t, secret.EncryptedPrivKey)
+
+	// SQL script ciphertext is always written under the script key.
+	require.True(t, secret.ScriptIsSecret)
+}
+
+// TestGetAddressSecretRejectsEmptySelector verifies that the SQL backends
+// reject an address-secret query with no script pubkey instead of issuing the
+// read. A malformed selector must not read as a missing secret, and must fail
+// the same way on every backend.
+func TestGetAddressSecretRejectsEmptySelector(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(t, store, "empty-secret-selector")
+
+	for _, script := range [][]byte{nil, {}} {
+		secret, err := store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:     walletID,
+				ScriptPubKey: script,
+			},
+		)
+		require.ErrorIs(t, err, db.ErrInvalidAddressQuery)
+		require.Nil(t, secret)
+	}
+}
+
+// TestNewImportedAddressNormalizesEmptyPrivateKey verifies that empty private
+// key payloads are treated as absent for validation and persisted as NULL.
+func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-empty-private-import",
+	)
+
+	params := db.NewImportedAddressParams{
+		WalletID:            walletID,
+		AddressType:         db.ScriptHash,
+		PubKey:              RandomBytes(33),
+		ScriptPubKey:        RandomBytes(32),
+		EncryptedPrivateKey: []byte{},
+		EncryptedScript:     RandomBytes(48),
+	}
+
+	info, err := store.NewImportedAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.True(t, info.IsWatchOnly)
+
+	secret, err := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     walletID,
+			ScriptPubKey: params.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.Nil(t, secret.EncryptedPrivKey)
+	require.Equal(t, params.EncryptedScript, secret.EncryptedScript)
+}
+
+// TestWatchOnlyHierarchyAddressRules is the canonical wallet-to-account-to-
+// address watch-only matrix for derived and imported addresses.
+func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
+	t.Parallel()
+
+	type watchOnlyAddressStore interface {
+		db.AddressStore
+		db.AccountStore
+	}
+
+	tests := []struct {
+		name            string
+		walletParams    func(string) db.CreateWalletParams
+		wantWatchOnly   bool
+		wantErr         error
+		createAddressFn func(*testing.T, watchOnlyAddressStore, uint32) (bool,
+			error)
+	}{
+		{
+			name: "standard wallet derived address is " +
+				"spendable",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: false,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				createDerivedAccount(
+					t, store, walletID, db.KeyScopeBIP0084, "derived",
+				)
+
+				info := newDerivedAddress(
+					t, store, walletID, db.KeyScopeBIP0084, "derived", false,
+				)
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet derived address is " +
+				"watch-only",
+			walletParams:  CreateWatchOnlyWalletParams,
+			wantWatchOnly: true,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				createDerivedAccount(
+					t, store, walletID, db.KeyScopeBIP0084, "derived",
+				)
+
+				info := newDerivedAddress(
+					t, store, walletID, db.KeyScopeBIP0084, "derived", false,
+				)
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "standard wallet imported address with " +
+				"private key is spendable",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: false,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+
+				// No "imported" account is pre-created: raw imports
+				// use the reserved alias directly.
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:            walletID,
+						AddressType:         db.WitnessPubKey,
+						PubKey:              RandomBytes(33),
+						ScriptPubKey:        RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "standard wallet imported address without " +
+				"private key is rejected",
+			walletParams: CreateWalletParamsFixture,
+			wantErr:      db.ErrSpendableWalletNeedsAddressPrivKey,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+
+				// The spendable-wallet invariant rejects a public-only
+				// import before any imported-account alias is needed.
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:     walletID,
+						AddressType:  db.WitnessPubKey,
+						PubKey:       RandomBytes(33),
+						ScriptPubKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet script-only imported " +
+				"address is watch-only",
+			walletParams:  CreateWatchOnlyWalletParams,
+			wantWatchOnly: true,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+
+				// A script-only import on a watch-only wallet uses the
+				// reserved alias and remains watch-only.
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:        walletID,
+						AddressType:     db.WitnessScript,
+						PubKey:          RandomBytes(33),
+						ScriptPubKey:    RandomBytes(32),
+						EncryptedScript: RandomBytes(48),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet imported address with " +
+				"private key is rejected",
+			walletParams: CreateWatchOnlyWalletParams,
+			wantErr:      db.ErrWatchOnlyViolation,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+
+				// The watch-only invariant rejects a private-key
+				// import before any imported-account alias is needed.
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:            walletID,
+						AddressType:         db.WitnessScript,
+						PubKey:              RandomBytes(33),
+						ScriptPubKey:        RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+						EncryptedScript:     RandomBytes(48),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewTestStore(t)
+
+			walletInfo, err := store.CreateWallet(
+				t.Context(), tc.walletParams("watch-only-address-matrix"),
+			)
+			require.NoError(t, err)
+
+			isWatchOnly, err := tc.createAddressFn(t, store, walletInfo.ID)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			if tc.wantErr != nil {
+				return
+			}
+
+			require.Equal(t, tc.wantWatchOnly, isWatchOnly)
+		})
+	}
+}
+
+// TestWatchOnlyAddressSecretTriggers verifies that address_secrets rejects
+// private-key writes for watch-only imported addresses while still allowing
+// inserts and updates for non-watch-only parent wallets.
+func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("watch-only insert is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-address-secret-insert"),
+		)
+		require.NoError(t, err)
+
+		// Raw imports use the reserved alias directly; no "imported"
+		// account is pre-created.
+		info, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     walletInfo.ID,
+				AddressType:  db.WitnessPubKey,
+				PubKey:       RandomBytes(33),
+				ScriptPubKey: RandomBytes(32),
+			},
+		)
+		require.NoError(t, err)
+
+		err = insertAddressSecretRaw(
+			t, store.DB(), int64(info.ID), RandomBytes(32), nil,
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("watch-only update is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-address-secret-update"),
+		)
+		require.NoError(t, err)
+
+		// Raw imports use the reserved alias directly; no "imported"
+		// account is pre-created.
+		info, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:        walletInfo.ID,
+				AddressType:     db.WitnessScript,
+				PubKey:          RandomBytes(33),
+				ScriptPubKey:    RandomBytes(32),
+				EncryptedScript: RandomBytes(48),
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, info.IsWatchOnly)
+
+		err = updateAddressSecretRaw(
+			t, store.DB(), int64(info.ID), RandomBytes(32), RandomBytes(48),
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("non-watch-only update succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		// ADR 0012: an imported address on a spendable wallet must
+		// carry encrypted private-key material at creation time, so
+		// the API path inserts the secret row. The trigger's
+		// non-watch-only allow path is exercised via UPDATE on that
+		// row; a raw INSERT would conflict with the API-inserted
+		// row and is no longer reachable.
+		walletID := newWallet(
+			t, store, "spendable-address-secret-trigger",
+		)
+
+		initialPrivKey := RandomBytes(32)
+		params := db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: initialPrivKey,
+		}
+		info, err := store.NewImportedAddress(t.Context(), params)
+		require.NoError(t, err)
+		require.False(t, info.IsWatchOnly)
+
+		updatedPrivKey := RandomBytes(32)
+		updatedScript := RandomBytes(48)
+		err = updateAddressSecretRaw(
+			t, store.DB(), int64(info.ID), updatedPrivKey, updatedScript,
+		)
+		require.NoError(t, err)
+
+		secret, err := store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:     walletID,
+				ScriptPubKey: params.ScriptPubKey,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, updatedPrivKey, secret.EncryptedPrivKey)
+		require.Equal(t, updatedScript, secret.EncryptedScript)
+	})
+}
+
+// TestImportedAddressRowsInsertDelete verifies that raw imported address
+// inserts and deletes are reflected through the imported alias listing.
+func TestImportedAddressRowsInsertDelete(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	dbConn := store.DB()
+	// ADR 0012: imported addresses without private-key material need a
+	// watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-counter",
+	)
+
+	const importedAddrCount = 5
+
+	addressIDs := make([]uint32, 0, importedAddrCount)
+
+	for range importedAddrCount {
+		info, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     walletID,
+				AddressType:  db.WitnessPubKey,
+				ScriptPubKey: RandomBytes(32),
+				PubKey:       RandomBytes(33),
+			},
+		)
+		require.NoError(t, err)
+
+		addressIDs = append(addressIDs, info.ID)
+	}
+
+	addresses := rawImportedAddresses(
+		t, store, walletID, importedAddrCount,
+	)
+	require.Len(t, addresses, importedAddrCount)
+
+	for _, addressID := range addressIDs {
+		MustDeleteAddress(t, dbConn, addressID)
+	}
+
+	addresses = rawImportedAddresses(
+		t, store, walletID, importedAddrCount,
+	)
+	require.Empty(t, addresses)
+}
+
+// TestImportedAddressConcurrentInsert verifies that concurrent raw imported
+// address inserts are all visible through the imported alias listing.
+func TestImportedAddressConcurrentInsert(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	dbConn := store.DB()
+	// ADR 0012: imported addresses without private-key material need a
+	// watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-counter-concurrent",
+	)
+
+	const workers = 20
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	warmup, err := store.NewImportedAddress(
+		ctx, db.NewImportedAddressParams{
+			WalletID:     walletID,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: RandomBytes(32),
+			PubKey:       RandomBytes(33),
+		},
+	)
+	require.NoError(t, err)
+
+	type insertResult struct {
+		id  uint32
+		err error
+	}
+
+	insertResultChan := make(chan insertResult, workers)
+
+	var wg sync.WaitGroup
+
+	for range workers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			info, err := store.NewImportedAddress(
+				ctx, db.NewImportedAddressParams{
+					WalletID:     walletID,
+					AddressType:  db.WitnessPubKey,
+					ScriptPubKey: RandomBytes(32),
+					PubKey:       RandomBytes(33),
+				},
+			)
+			if err != nil {
+				insertResultChan <- insertResult{err: err}
+				return
+			}
+
+			insertResultChan <- insertResult{id: info.ID}
+		}()
+	}
+
+	wg.Wait()
+	close(insertResultChan)
+
+	addressIDs := make([]uint32, 0, workers+1)
+	addressIDs = append(addressIDs, warmup.ID)
+
+	for result := range insertResultChan {
+		require.NoError(t, result.err)
+		addressIDs = append(addressIDs, result.id)
+	}
+
+	require.Len(t, addressIDs, workers+1)
+
+	addresses := rawImportedAddresses(
+		t, store, walletID, workers+1,
+	)
+	require.Len(t, addresses, workers+1)
+
+	deleteErrChan := make(chan error, len(addressIDs))
+	for _, addressID := range addressIDs {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			deleteErrChan <- deleteAddress(ctx, dbConn, addressID)
+		}()
+	}
+
+	wg.Wait()
+	close(deleteErrChan)
+
+	for err := range deleteErrChan {
+		require.NoError(t, err)
+	}
+
+	addresses = rawImportedAddresses(
+		t, store, walletID, workers+1,
+	)
+	require.Empty(t, addresses)
+}
+
+// TestRawImportedAddressDoesNotMaterializeAccount verifies that repeated raw
+// imports use the reserved alias without creating an accounts row for it.
+func TestRawImportedAddressDoesNotMaterializeAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	scope := db.KeyScopeBIP0084
+
+	// ADR 0012: public-only raw imports need a watch-only wallet to satisfy the
+	// symmetric invariant.
+	walletID := newWatchOnlyWallet(t, store, "wallet-raw-import-idempotent")
+
+	first, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: RandomBytes(32),
+			PubKey:       RandomBytes(33),
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, first.AccountName)
+	require.Nil(t, first.AccountID)
+
+	second, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: RandomBytes(32),
+			PubKey:       RandomBytes(33),
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, second.AccountName)
+	require.Nil(t, second.AccountID)
+
+	_, err = store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, db.DefaultImportedAccountName,
+		),
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	addresses := rawImportedAddresses(t, store, walletID, 2)
+	require.Len(t, addresses, 2)
+}
+
+// TestNewImportedAddressDuplicate verifies that importing an address with
+// a duplicate ScriptPubKey fails with a constraint error.
+func TestNewImportedAddressDuplicate(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-duplicate-import")
+
+	// Set up encryption parameters (same for both imports). Raw imports
+	// share the reserved alias.
+	scriptPubKey := RandomBytes(32)
+
+	params := db.NewImportedAddressParams{
+		WalletID:            walletID,
+		AddressType:         db.WitnessPubKey,
+		PubKey:              RandomBytes(33),
+		ScriptPubKey:        scriptPubKey,
+		EncryptedPrivateKey: RandomBytes(32),
+	}
+
+	// Import address first time (should succeed).
+	_, err := store.NewImportedAddress(t.Context(), params)
+	require.NoError(t, err)
+
+	// Attempt to import with same ScriptPubKey (should fail).
+	_, err = store.NewImportedAddress(t.Context(), params)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+	require.ErrorContains(t, err, "script_pub_key")
+}
+
+// TestNewImportedAddressDuplicateAcrossScopes verifies that imported-address
+// creation rejects the same script pubkey across different imported scopes in
+// one wallet.
+func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	// ADR 0012: imported addresses without private-key material require
+	// a watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-duplicate-import-cross-scope",
+	)
+
+	scriptPubKey := RandomBytes(32)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			AddressType:  db.PubKeyHash,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	_, err = store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+	require.ErrorContains(t, err, "script_pub_key")
+}
+
+// TestNewImportedAddressDuplicateAcrossWallets verifies that wallet-scoped
+// uniqueness allows the same script pubkey to be imported into different
+// wallets.
+func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	// ADR 0012: imported addresses without private-key material require
+	// watch-only wallets to satisfy the symmetric invariant.
+	firstWalletID := newWatchOnlyWallet(
+		t, store, "wallet-duplicate-import-a",
+	)
+	secondWalletID := newWatchOnlyWallet(
+		t, store, "wallet-duplicate-import-b",
+	)
+
+	scriptPubKey := RandomBytes(32)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     firstWalletID,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     secondWalletID,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.NotZero(t, info.ID)
+	require.Nil(t, info.AccountID)
+	require.Nil(t, info.AccountNumber)
+}
+
+// TestCreateImportedAddressRawIsAccountless verifies that direct raw imported
+// address inserts create wallet-local addresses with no account identity.
+func TestCreateImportedAddressRawIsAccountless(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "wallet-raw-import-accountless")
+	scriptPubKey := RandomBytes(32)
+
+	err := createImportedAddressRaw(
+		t.Context(), queries, walletID, scriptPubKey,
+	)
+	require.NoError(t, err)
+
+	info, err := store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     walletID,
+		ScriptPubKey: scriptPubKey,
+	})
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Empty(t, info.AccountName)
+	require.Equal(t, db.KeyScope{}, info.KeyScope)
+	require.Nil(t, info.AccountID)
+	require.Nil(t, info.AccountNumber)
+}
+
+// TestCreateDerivedAddressRejectsWalletAccountMismatch verifies that the
+// composite wallet/account invariant is enforced by the database on direct
+// derived-address inserts.
+func TestCreateDerivedAddressRejectsWalletAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	firstWalletID := newWallet(t, store, "wallet-raw-derived-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-raw-derived-mismatch-b")
+	accountName := "raw-derived"
+
+	createDerivedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, accountName,
+	)
+	createDerivedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0084, accountName,
+	)
+
+	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
+	firstAccountID := GetAccountID(t, queries, firstScopeID, accountName)
+
+	err := createDerivedAddressRaw(
+		t, queries, secondWalletID, firstAccountID, 0, 0, RandomBytes(20),
+	)
+	require.Error(t, err)
+}
+
+// TestAddressWalletIDImmutable verifies that raw address reparenting updates
+// cannot change wallet ownership after insert.
+func TestAddressWalletIDImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	// ADR 0012: public-only imported addresses need watch-only wallets
+	// to satisfy the symmetric invariant.
+	sourceWalletID := newWatchOnlyWallet(
+		t, store, "address-wallet-immutable-source",
+	)
+	targetWalletID := newWatchOnlyWallet(
+		t, store, "address-wallet-immutable-target",
+	)
+
+	scriptPubKey := RandomBytes(32)
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     sourceWalletID,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	err = reparentAddressRaw(
+		t, store.DB(), int64(info.ID), targetWalletID,
+	)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	addressInfo, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     sourceWalletID,
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, addressInfo)
+	require.Equal(t, info.ID, addressInfo.ID)
+}
+
+// TestGetAddressSecret verifies that GetAddressSecret correctly retrieves
+// address secrets for watch-only imported addresses and returns an error for
+// spendable addresses or non-existent address IDs.
+func TestGetAddressSecret(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	testCases := []struct {
+		name              string
+		providePrivateKey bool
+		shouldHaveSecret  bool
+	}{
+		{
+			name:              "spendable import",
+			providePrivateKey: true,
+			shouldHaveSecret:  true,
+		},
+		{
+			name:              "watch-only import",
+			providePrivateKey: false,
+			shouldHaveSecret:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			walletID := importedAddressWallet(
+				t, store, "wallet-secrets-"+tc.name,
+				tc.providePrivateKey,
+			)
+
+			params := db.NewImportedAddressParams{
+				WalletID:     walletID,
+				AddressType:  db.PubKeyHash,
+				PubKey:       RandomBytes(33),
+				ScriptPubKey: RandomBytes(32),
+			}
+
+			if tc.providePrivateKey {
+				params.EncryptedPrivateKey = RandomBytes(32)
+			}
+
+			info, errNewAddr := store.NewImportedAddress(t.Context(), params)
+			require.NoError(t, errNewAddr)
+
+			if tc.shouldHaveSecret {
+				secret, err := store.GetAddressSecret(
+					t.Context(), db.GetAddressSecretQuery{
+						WalletID:  walletID,
+						AddressID: &info.ID,
+					},
+				)
+				require.NoError(t, err)
+				require.NotNil(t, secret)
+				require.Equal(t, info.ID, secret.AddressID)
+				require.Equal(
+					t, params.EncryptedPrivateKey, secret.EncryptedPrivKey,
+				)
+				require.Empty(t, secret.EncryptedScript)
+			} else {
+				_, err := store.GetAddressSecret(
+					t.Context(), db.GetAddressSecretQuery{
+						WalletID:  walletID,
+						AddressID: &info.ID,
+					},
+				)
+				require.ErrorIs(t, err, db.ErrSecretNotFound)
+			}
+		})
+	}
+
+	t.Run("cross-wallet address denied", func(t *testing.T) {
+		walletID := newWallet(t, store, "wallet-secrets-cross-self")
+
+		otherWalletID := newWallet(t, store, "wallet-secrets-other")
+
+		params := db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.PubKeyHash,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		}
+
+		_, err := store.NewImportedAddress(t.Context(), params)
+		require.NoError(t, err)
+
+		_, err = store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:     otherWalletID,
+				ScriptPubKey: params.ScriptPubKey,
+			},
+		)
+		require.ErrorIs(t, err, db.ErrAddressNotFound)
+	})
+
+	// Test a script pubkey that belongs to no address.
+	t.Run("non-existent address", func(t *testing.T) {
+		walletID := newWallet(t, store, "wallet-secrets-nonexistent")
+
+		_, err := store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:     walletID,
+				ScriptPubKey: RandomBytes(32),
+			},
+		)
+		require.ErrorIs(t, err, db.ErrAddressNotFound)
+	})
+}
+
+// TestGetAddress verifies that GetAddress correctly retrieves addresses by
+// ID and by encrypted script pubkey, and returns appropriate errors for
+// invalid or non-existent queries.
+func TestGetAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupFunc func(t *testing.T, addrStore db.AddressStore,
+			accountStore db.AccountStore, walletID uint32) db.GetAddressQuery
+		watchOnlyWallet bool
+		wantErr         error
+		validate        func(t *testing.T, addr *db.AddressInfo)
+	}{
+		{
+			name:            "get by encrypted script pubkey",
+			watchOnlyWallet: true,
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.GetAddressQuery {
+
+				t.Helper()
+
+				script := RandomBytes(32)
+				params := db.NewImportedAddressParams{
+					WalletID:     walletID,
+					AddressType:  db.WitnessPubKey,
+					PubKey:       RandomBytes(33),
+					ScriptPubKey: script,
+				}
+				_, err := addrStore.NewImportedAddress(t.Context(), params)
+				require.NoError(t, err)
+
+				return db.GetAddressQuery{
+					WalletID:     walletID,
+					ScriptPubKey: script,
+				}
+			},
+			validate: func(t *testing.T, addr *db.AddressInfo) {
+				t.Helper()
+
+				require.NotNil(t, addr.ScriptPubKey)
+				require.True(t, addr.IsImported)
+				require.True(t, addr.IsWatchOnly)
+			},
+		},
+		{
+			name: "get imported address with private key",
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.GetAddressQuery {
+
+				t.Helper()
+
+				script := RandomBytes(32)
+				params := db.NewImportedAddressParams{
+					WalletID:            walletID,
+					AddressType:         db.WitnessPubKey,
+					PubKey:              RandomBytes(33),
+					ScriptPubKey:        script,
+					EncryptedPrivateKey: RandomBytes(32),
+				}
+				_, err := addrStore.NewImportedAddress(t.Context(), params)
+				require.NoError(t, err)
+
+				return db.GetAddressQuery{
+					WalletID:     walletID,
+					ScriptPubKey: script,
+				}
+			},
+			validate: func(t *testing.T, addr *db.AddressInfo) {
+				t.Helper()
+				require.NotNil(t, addr.ScriptPubKey)
+				require.True(t, addr.IsImported)
+				require.False(t, addr.IsWatchOnly)
+			},
+		},
+		{
+			name: "address not found by script",
+			setupFunc: func(_ *testing.T, _ db.AddressStore,
+				_ db.AccountStore, walletID uint32) db.GetAddressQuery {
+
+				return db.GetAddressQuery{
+					WalletID:     walletID,
+					ScriptPubKey: RandomBytes(32),
+				}
+			},
+			wantErr: db.ErrAddressNotFound,
+		},
+		{
+			name: "invalid query - empty script pubkey",
+			setupFunc: func(_ *testing.T, _ db.AddressStore,
+				_ db.AccountStore, walletID uint32) db.GetAddressQuery {
+
+				return db.GetAddressQuery{
+					WalletID:     walletID,
+					ScriptPubKey: nil,
+				}
+			},
+			wantErr: db.ErrInvalidAddressQuery,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := NewTestStore(t)
+
+			var walletID uint32
+			if tc.watchOnlyWallet {
+				walletID = newWatchOnlyWallet(
+					t, store, tc.name+"-wallet",
+				)
+			} else {
+				walletID = newWallet(t, store, tc.name+"-wallet")
+			}
+
+			query := tc.setupFunc(t, store, store, walletID)
+			addr, err := store.GetAddress(t.Context(), query)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				require.Nil(t, addr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, addr)
+
+			if tc.validate != nil {
+				tc.validate(t, addr)
+			}
+		})
+	}
+}
+
+// TestResolveOwnedAddresses verifies the batched address resolver: it returns
+// only the wallet-owned subset of a mixed script set, omits scripts that do not
+// belong to the wallet, and treats an empty input as an empty result without
+// error.
+func TestResolveOwnedAddresses(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletID := newWatchOnlyWallet(t, store, "resolve-addresses-wallet")
+
+	// Import three addresses with known scripts; these are the wallet-owned
+	// scripts the batch lookup must resolve.
+	ownedScripts := make([][]byte, 0, 3)
+	for range 3 {
+		script := RandomBytes(32)
+		_, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     walletID,
+				AddressType:  db.WitnessPubKey,
+				PubKey:       RandomBytes(33),
+				ScriptPubKey: script,
+			},
+		)
+		require.NoError(t, err)
+
+		ownedScripts = append(ownedScripts, script)
+	}
+
+	// Two scripts the wallet does not own. They must be omitted from the
+	// result rather than surfaced as an error.
+	foreignScripts := [][]byte{RandomBytes(32), RandomBytes(32)}
+
+	t.Run("mixed owned and foreign", func(t *testing.T) {
+		t.Parallel()
+
+		query := db.ResolveOwnedAddressesQuery{WalletID: walletID}
+		query.ScriptPubKeys = append(query.ScriptPubKeys, ownedScripts...)
+		query.ScriptPubKeys = append(
+			query.ScriptPubKeys, foreignScripts...,
+		)
+
+		owned, err := store.ResolveOwnedAddresses(t.Context(), query)
+		require.NoError(t, err)
+
+		// Only the owned scripts come back, keyed by string(script).
+		require.Len(t, owned, len(ownedScripts))
+
+		for _, script := range ownedScripts {
+			info, ok := owned[string(script)]
+			require.True(t, ok)
+			require.Equal(t, script, info.ScriptPubKey)
+		}
+
+		for _, script := range foreignScripts {
+			_, ok := owned[string(script)]
+			require.False(t, ok)
+		}
+	})
+
+	t.Run("only foreign scripts", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				WalletID:      walletID,
+				ScriptPubKeys: foreignScripts,
+			},
+		)
+		require.NoError(t, err)
+		require.Empty(t, owned)
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{WalletID: walletID},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, owned)
+		require.Empty(t, owned)
+	})
+
+	t.Run("wallet scoping", func(t *testing.T) {
+		t.Parallel()
+
+		// A different wallet must not see the first wallet's owned
+		// scripts even when asked for them by script.
+		otherWalletID := newWatchOnlyWallet(
+			t, store, "resolve-addresses-other-wallet",
+		)
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				WalletID:      otherWalletID,
+				ScriptPubKeys: ownedScripts,
+			},
+		)
+		require.NoError(t, err)
+		require.Empty(t, owned)
+	})
+}
+
+// TestListAddresses verifies that ListAddresses correctly returns addresses
+// with page-contract behavior, filters by scope appropriately, and handles
+// empty results without error.
+func TestListAddresses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupFunc func(t *testing.T, addrStore db.AddressStore,
+			accountStore db.AccountStore, walletID uint32) db.ListAddressesQuery
+		wantCount int
+		wantErr   error
+		validate  func(t *testing.T, addrs []db.AddressInfo)
+	}{
+		{
+			name: "list multiple addresses for account",
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.ListAddressesQuery {
+
+				t.Helper()
+
+				createDerivedAccount(
+					t, accountStore, walletID, db.KeyScopeBIP0044,
+					"test-account",
+				)
+
+				createDerivedAddresses(
+					t, addrStore, walletID, db.KeyScopeBIP0044,
+					"test-account",
+					false, 5,
+				)
+
+				return listAccountAddressesQuery(
+					t, walletID, db.KeyScopeBIP0044, "test-account", 10,
+				)
+			},
+			wantCount: 5,
+			validate: func(t *testing.T, addrs []db.AddressInfo) {
+				t.Helper()
+
+				require.Len(t, addrs, 5)
+				for i, addr := range addrs {
+					require.Equal(t, uint32(i), addr.Index)
+					require.Equal(t, uint32(0), addr.Branch)
+					require.False(t, addr.IsImported)
+					require.False(t, addr.IsWatchOnly)
+					require.Equal(
+						t, uint32(0),
+						accountNumberNotNil(t, addr.AccountNumber),
+					)
+					require.Equal(t, "test-account", addr.AccountName)
+					require.Equal(t, db.KeyScopeBIP0044, addr.KeyScope)
+					require.Equal(
+						t, uint32(0xC0DEC0DE),
+						addr.MasterKeyFingerprint,
+					)
+				}
+
+				require.False(t, addrs[0].IsWatchOnly)
+			},
+		},
+
+		{
+			name: "list addresses - empty result",
+			setupFunc: func(t *testing.T, _ db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.ListAddressesQuery {
+
+				t.Helper()
+
+				createDerivedAccount(
+					t, accountStore, walletID, db.KeyScopeBIP0084,
+					"empty-account",
+				)
+
+				return listAccountAddressesQuery(
+					t, walletID, db.KeyScopeBIP0084, "empty-account", 10,
+				)
+			},
+			wantCount: 0,
+		},
+		{
+			name: "list addresses filters by scope correctly",
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.ListAddressesQuery {
+
+				t.Helper()
+
+				// Create accounts in different scopes.
+				createDerivedAccount(
+					t, accountStore, walletID, db.KeyScopeBIP0044,
+					"bip44-multi",
+				)
+				createDerivedAccount(
+					t, accountStore, walletID, db.KeyScopeBIP0049Plus,
+					"bip49-multi",
+				)
+
+				createDerivedAddresses(
+					t, addrStore, walletID, db.KeyScopeBIP0044,
+					"bip44-multi",
+					false, 3,
+				)
+
+				createDerivedAddresses(
+					t, addrStore, walletID, db.KeyScopeBIP0049Plus,
+					"bip49-multi",
+					false, 2,
+				)
+
+				// Query only BIP0044 scope.
+				return listAccountAddressesQuery(
+					t, walletID, db.KeyScopeBIP0044, "bip44-multi", 10,
+				)
+			},
+			wantCount: 3,
+			validate: func(t *testing.T, addrs []db.AddressInfo) {
+				t.Helper()
+
+				require.Len(t, addrs, 3)
+				for _, addr := range addrs {
+					require.False(t, addr.IsImported)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+
+			query := tc.setupFunc(t, store, store, walletID)
+			pageResult, err := store.ListAddresses(t.Context(), query)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+
+			addrs := pageResult.Items
+			require.Len(t, addrs, tc.wantCount)
+
+			if tc.validate != nil {
+				tc.validate(t, addrs)
+			}
+		})
+	}
+}
+
+// TestListAddressesZeroLimit verifies ListAddresses rejects a zero page limit.
+func TestListAddressesZeroLimit(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-addresses-zero-limit")
+
+	accountName := "test-account"
+	scope := db.KeyScopeBIP0044
+	_, err := store.ListAddresses(t.Context(), db.ListAddressesQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		AccountName: &accountName,
+	})
+	require.ErrorIs(t, err, db.ErrInvalidPageLimit)
+}
+
+// TestListAddressesWatchOnlyWallet verifies that ListAddresses preserves the
+// watch-only flag for derived addresses from a watch-only wallet.
+func TestListAddressesWatchOnlyWallet(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), CreateWatchOnlyWalletParams("watch-only-list-wallet"),
+	)
+	require.NoError(t, err)
+
+	_, err = store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletInfo.ID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "watch-only-account",
+		},
+		SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	createDerivedAddresses(
+		t, store, walletInfo.ID, db.KeyScopeBIP0084, "watch-only-account",
+		false, 3,
+	)
+
+	pageResult, err := store.ListAddresses(
+		t.Context(), listAccountAddressesQuery(
+			t, walletInfo.ID, db.KeyScopeBIP0084,
+			"watch-only-account", 10,
+		),
+	)
+	require.NoError(t, err)
+
+	addrs := pageResult.Items
+	require.Len(t, addrs, 3)
+
+	for _, addr := range addrs {
+		require.False(t, addr.IsImported)
+	}
+
+	require.True(t, addrs[0].IsWatchOnly)
+}
+
+// TestNewDerivedAddress verifies that NewDerivedAddress correctly creates
+// derived receiving addresses with proper AddressInfo fields on both branches.
+func TestNewDerivedAddress(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-derived")
+
+	testCases := []struct {
+		name           string
+		change         bool
+		expectedBranch uint32
+	}{
+		{
+			name:           "external address",
+			change:         false,
+			expectedBranch: 0,
+		},
+		{
+			name:           "change address",
+			change:         true,
+			expectedBranch: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange: create a separate ordinary account so each branch
+			// starts at index zero and supplies its own expected identity.
+			accountName := tc.name
+			account, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					WalletID: walletID,
+					Scope:    db.KeyScopeBIP0044,
+					Name:     accountName,
+				}, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+
+			query := listAccountAddressesQuery(
+				t, walletID, db.KeyScopeBIP0044, accountName, 10,
+			)
+
+			// Act: require a receiving address on the selected branch so the
+			// Store must enforce the policy loaded with its owning account.
+			info, err := store.NewDerivedAddress(
+				t.Context(), db.NewDerivedAddressParams{
+					WalletID:         walletID,
+					Scope:            db.KeyScopeBIP0044,
+					AccountName:      accountName,
+					Change:           tc.change,
+					RequireChainSync: true,
+				},
+			)
+
+			// Assert: successful receiving allocation produces the first child
+			// with the identity and derivation metadata of its owning account.
+			require.NoError(t, err)
+			require.Zero(t, info.Index)
+			require.NotZero(t, info.ID)
+			require.NotZero(t, info.AccountID)
+			require.False(t, info.IsImported)
+			require.NotZero(t, info.CreatedAt)
+			require.Equal(t, tc.expectedBranch, info.Branch)
+			require.NotNil(t, info.ScriptPubKey)
+			require.Nil(t, info.PubKey)
+			require.Equal(t, account.AccountNumber, info.AccountNumber)
+			require.Equal(t, account.AccountName, info.AccountName)
+			require.Equal(t, account.KeyScope, info.KeyScope)
+			require.NotNil(t, account.MasterKeyFingerprint)
+			require.Equal(
+				t, *account.MasterKeyFingerprint,
+				info.MasterKeyFingerprint,
+			)
+
+			// Act: use ordinary account listing to read the persisted child.
+			listed, err := store.ListAddresses(t.Context(), query)
+
+			// Assert: the existing join supplies the policy needed for
+			// receiving rejection while retaining ordinary lookup visibility.
+			require.NoError(t, err)
+			require.Len(t, listed.Items, 1)
+			require.Equal(t, info.ID, listed.Items[0].ID)
+			require.False(t, listed.Items[0].NoChainSync)
+		})
+	}
+}
+
+// TestNewDerivedAddressNoChainSync verifies that receiving rejection performs
+// no derivation, persists no child, and leaves the branch index intact.
+func TestNewDerivedAddressNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// The same refusal contract applies to each independently allocated branch.
+	testCases := []struct {
+		name   string
+		change bool
+	}{
+		{
+			name:   "external",
+			change: false,
+		},
+		{
+			name:   "internal",
+			change: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: use a real Store with an observed derivation callback
+			// so a rollback cannot hide derivation performed before refusal.
+			deriveCalls := 0
+			derive := mockDeriveFunc()
+			store := NewTestStoreWithDerive(t, func(ctx context.Context,
+				params db.AddressDerivationParams) (*db.DerivedAddressData,
+				error) {
+
+				deriveCalls++
+
+				return derive(ctx, params)
+			})
+			walletID := newWallet(t, store, "wallet-untracked-receiving")
+			accountName := "key-only"
+			_, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					WalletID:    walletID,
+					Scope:       db.KeyScopeBIP0044,
+					Name:        accountName,
+					NoChainSync: true,
+				}, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+
+			callsBefore := deriveCalls
+			query := listAccountAddressesQuery(
+				t, walletID, db.KeyScopeBIP0044, accountName, 10,
+			)
+
+			// Act: request receiving allocation on the excluded account;
+			// stored policy must reject before deriving or consuming a child.
+			info, err := store.NewDerivedAddress(
+				t.Context(), db.NewDerivedAddressParams{
+					WalletID:         walletID,
+					Scope:            db.KeyScopeBIP0044,
+					AccountName:      accountName,
+					Change:           tc.change,
+					RequireChainSync: true,
+				},
+			)
+
+			// Assert: refusal never invokes derivation or persists a child.
+			require.ErrorIs(t, err, db.ErrAccountOperationUnsupported)
+			require.Nil(t, info)
+			require.Equal(t, callsBefore, deriveCalls)
+			listed, err := store.ListAddresses(t.Context(), query)
+			require.NoError(t, err)
+			require.Empty(t, listed.Items)
+
+			// Probe the next raw allocation to prove refusal left this branch
+			// at index zero; raw allocation has no receiving requirement.
+			next := newDerivedAddress(
+				t, store, walletID, db.KeyScopeBIP0044,
+				accountName, tc.change,
+			)
+			require.Zero(t, next.Index)
+
+			// The existing account join must still expose the excluded policy
+			// on that child, allowing receiving reuse to reject it as well.
+			listed, err = store.ListAddresses(t.Context(), query)
+			require.NoError(t, err)
+			require.Len(t, listed.Items, 1)
+			require.Equal(t, next.ID, listed.Items[0].ID)
+			require.True(t, listed.Items[0].NoChainSync)
+		})
+	}
+}
+
+// TestNewDerivedAddressUsesStoredScopeSchema verifies that derived addresses
+// use the address schema persisted on the key scope instead of recomputing the
+// default schema from the scope tuple.
+func TestNewDerivedAddressUsesStoredScopeSchema(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-derived-stored-schema")
+
+	strictBIP49 := &db.ScopeAddrSchema{
+		ExternalAddrType: db.NestedWitnessPubKey,
+		InternalAddrType: db.NestedWitnessPubKey,
+	}
+
+	_, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:            walletID,
+			Scope:               db.KeyScopeBIP0049Plus,
+			Name:                "strict-bip49-import",
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+			AddrSchema:          strictBIP49,
+		},
+	)
+	require.NoError(t, err)
+
+	accountName := "derived-on-strict-bip49"
+	createDerivedAccount(
+		t, store, walletID, db.KeyScopeBIP0049Plus, accountName,
+	)
+
+	info := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0049Plus, accountName, true,
+	)
+	require.Equal(t, db.NestedWitnessPubKey, info.AddrType)
+}
+
+// TestNewDerivedAddressDerivesByAccountNumber verifies that the derivation
+// callback receives the BIP44 account number, not the SQL account row ID.
+func TestNewDerivedAddressDerivesByAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	var derivedAccountNumber uint32
+
+	baseDerive := mockDeriveFunc()
+	deriveFn := func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		derivedAccountNumber = accountNumberNotNil(
+			t, params.DerivedAccountNumber,
+		)
+
+		return baseDerive(ctx, params)
+	}
+
+	store := NewTestStoreWithDerive(t, deriveFn)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "wallet-derived-account-number")
+
+	createDerivedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, "first-account",
+	)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+
+	const accountNumber uint32 = 17
+
+	accountName := "account-number-17"
+	CreateAccountWithNumber(t, queries, scopeID, accountNumber, accountName)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: accountName,
+		},
+	)
+	require.NoError(t, err)
+
+	require.NotEqual(t, info.AccountID, info.AccountNumber)
+	require.Equal(t, accountNumber, accountNumberNotNil(t, info.AccountNumber))
+	require.Equal(t, accountNumber, derivedAccountNumber)
+}
+
+// TestNewDerivedAddressOnImportedAccount verifies that an imported xpub
+// account can derive addresses through the store even though its account_number
+// is NULL. The derivation callback uses AccountPubKey from the imported
+// account; DerivedAccountNumber is nil because no BIP44 number applies to
+// imported xpub accounts.
+//
+// Regression for the rejection that returns ErrNilDBAccountNumber when an
+// imported xpub account row reaches NewDerivedAddressWithOps — the store
+// now tolerates NULL account_number and passes nil through to the callback.
+func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	// ADR 0012: a public-only xpub import requires a watch-only wallet;
+	// the spendable-wallet invariant rejects the same import.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-derive",
+	)
+
+	// Create an imported xpub account: real PublicKey, no encrypted
+	// private key (watch-only xpub import).
+	name := "imported-xpub"
+	_, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:  walletID,
+			Name:      name,
+			Scope:     db.KeyScopeBIP0084,
+			PublicKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: name,
+			Change:      false,
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	// Imported xpub children are imported key material, but still have child
+	// address path facts. The wallet-derived account signal remains
+	// AccountNumber != nil.
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
+
+	read, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     walletID,
+			ScriptPubKey: info.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, read.IsImported)
+	require.Nil(t, read.AccountNumber)
+	require.Equal(t, name, read.AccountName)
+	require.Equal(t, info.Branch, read.Branch)
+	require.Equal(t, info.Index, read.Index)
+}
+
+// TestGetAddressRejectsDerivedParentWithoutPath verifies that imported-xpub
+// address parents marked as derived are not treated as raw imports when the
+// derived_addresses child row is missing.
+func TestGetAddressRejectsDerivedParentWithoutPath(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-derived-parent-without-path",
+	)
+
+	accountName := hardwareAccountName
+	CreateImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, true,
+	)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+	scriptPubKey := RandomBytes(22)
+
+	_, err := createDerivedAddressParentRaw(
+		t, queries, walletID, accountID, scriptPubKey,
+	)
+	require.NoError(t, err)
+
+	rawImports := rawImportedAddresses(
+		t, store, walletID, 10,
+	)
+	require.Empty(t, rawImports)
+
+	_, err = store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     walletID,
+		ScriptPubKey: scriptPubKey,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "address subtype invariant violated")
+}
+
+// TestAddressIDImmutable verifies that raw address primary-key updates cannot
+// change address identity after insert.
+func TestAddressIDImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "address-id-immutable")
+	scriptPubKey := RandomBytes(22)
+
+	created, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        scriptPubKey,
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	addressID := int64(created.ID)
+	err = updateAddressIDRaw(t, store.DB(), addressID, addressID+1000)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	info, err := store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     walletID,
+		ScriptPubKey: scriptPubKey,
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint32(addressID), info.ID)
+}
+
+// TestDerivedAddressRowImmutable verifies that derived address child rows are
+// insert-only because their account ownership and path are structural identity.
+func TestDerivedAddressRowImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "derived-address-row-immutable")
+	accountName := "derived-address-identity"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	info := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, false,
+	)
+
+	err := updateDerivedAddressIndexRaw(t, store.DB(), int64(info.ID), 99)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+}
+
+// TestDerivedAccountNumberRejectsImportedAccount verifies that the database
+// rejects BIP44 account-number rows under imported account parents.
+func TestDerivedAccountNumberRejectsImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-account-number-address",
+	)
+
+	accountName := hardwareAccountName
+	CreateImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, true,
+	)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+	scriptPubKey := RandomBytes(22)
+	err := createDerivedAddressRaw(
+		t, queries, walletID, accountID, 0, 0, scriptPubKey,
+	)
+	require.NoError(t, err)
+
+	err = updateAccountNumberRaw(t, dbConn, accountID, 7)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	info, err := store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     walletID,
+		ScriptPubKey: scriptPubKey,
+	})
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
+}
+
+// TestNewDerivedAddressDerivationGuards verifies that NewDerivedAddress returns
+// errors instead of panicking when the derivation callback is nil or returns
+// nil derived data.
+func TestNewDerivedAddressDerivationGuards(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil derive callback", func(t *testing.T) {
+		store := NewTestStoreWithDerive(t, nil)
+		walletID := newWallet(t, store, "wallet-derived-nil-derive")
+		accountName := "derived-guard-test"
+		createDerivedAccount(
+			t, store, walletID, db.KeyScopeBIP0084, accountName,
+		)
+
+		params := db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: accountName,
+			Change:      false,
+		}
+
+		var (
+			info *db.AddressInfo
+			err  error
+		)
+
+		require.NotPanics(
+			t, func() {
+				info, err = store.NewDerivedAddress(t.Context(), params)
+			},
+		)
+
+		require.Nil(t, info)
+		require.Error(t, err)
+	})
+
+	t.Run("nil derived data", func(t *testing.T) {
+		deriveFn := func(context.Context,
+			db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+			//nolint:nilnil // Intentionally exercise nil-data success guard.
+			return nil, nil
+		}
+		store := NewTestStoreWithDerive(t, deriveFn)
+		walletID := newWallet(t, store, "wallet-derived-nil-data")
+		accountName := "derived-guard-test"
+		createDerivedAccount(
+			t, store, walletID, db.KeyScopeBIP0084, accountName,
+		)
+
+		params := db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: accountName,
+			Change:      false,
+		}
+
+		var (
+			info *db.AddressInfo
+			err  error
+		)
+
+		require.NotPanics(
+			t, func() {
+				info, err = store.NewDerivedAddress(t.Context(), params)
+			},
+		)
+
+		require.Nil(t, info)
+		require.Error(t, err)
+	})
+}
+
+// TestNewImportedAddressUsesNoAccount verifies that importing raw addresses
+// returns no account identity and does not create an imported account row.
+func TestNewImportedAddressUsesNoAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "test-wallet")
+	scope := db.KeyScopeBIP0084
+
+	first, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			EncryptedPrivateKey: RandomBytes(32),
+			ScriptPubKey:        RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, first.IsImported)
+	require.Empty(t, first.AccountName)
+	require.Nil(t, first.AccountID)
+	require.Nil(t, first.AccountNumber)
+
+	second, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			EncryptedPrivateKey: RandomBytes(32),
+			ScriptPubKey:        RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, second.AccountName)
+	require.Nil(t, second.AccountID)
+	require.Nil(t, second.AccountNumber)
+
+	_, err = store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, db.DefaultImportedAccountName,
+		),
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	accounts, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+			Scope:    &scope,
+		},
+	)
+	require.NoError(t, err)
+
+	for _, acct := range accounts {
+		require.NotEqual(t, db.DefaultImportedAccountName, acct.AccountName)
+	}
+
+	addresses := rawImportedAddresses(t, store, walletID, 2)
+	require.Len(t, addresses, 2)
+}
+
+// TestNewImportedAddressRawListIsAccountless verifies that raw imported address
+// listings are wallet-wide and not scoped through an imported account alias.
+func TestNewImportedAddressRawListIsAccountless(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-import-scope-isolated")
+
+	bip44, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.PubKeyHash,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	bip84, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	require.Empty(t, bip44.AccountName)
+	require.Empty(t, bip84.AccountName)
+	require.Nil(t, bip44.AccountID)
+	require.Nil(t, bip84.AccountID)
+
+	rawAddrs := rawImportedAddresses(
+		t, store, walletID, 10,
+	)
+	require.Len(t, rawAddrs, 2)
+	require.ElementsMatch(t, []uint32{bip44.ID, bip84.ID}, []uint32{
+		rawAddrs[0].ID, rawAddrs[1].ID,
+	})
+}
+
+// TestGetAddressSecret_DerivedAddress verifies that calling GetAddressSecret
+// on a derived address returns db.ErrSecretNotFound (not ErrAddressNotFound).
+// This validates the LEFT JOIN: derived addresses exist in the addresses
+// table but have no corresponding row in address_secrets. The query returns a
+// row with NULL encrypted_priv_key, and the converter returns
+// ErrSecretNotFound.
+func TestGetAddressSecret_DerivedAddress(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "test-wallet")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "test-account")
+
+	params := db.NewDerivedAddressParams{
+		WalletID:    walletID,
+		AccountName: "test-account",
+		Scope:       db.KeyScopeBIP0084,
+		Change:      false,
+	}
+	addrInfo, err := store.NewDerivedAddress(
+		t.Context(), params,
+	)
+	require.NoError(t, err)
+
+	// Attempt to get secret for derived address.
+	// Derived addresses have no row in address_secrets table.
+	_, err = store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     walletID,
+			ScriptPubKey: addrInfo.ScriptPubKey,
+		},
+	)
+
+	// Expect ErrSecretNotFound (not ErrAddressNotFound) because the
+	// LEFT JOIN returns a row with NULL encrypted_priv_key.
+	require.ErrorIs(t, err, db.ErrSecretNotFound)
+}
+
+// TestNewDerivedAddressSequentialIndexes verifies that derived addresses
+// receive sequential indexes 0, 1, 2, 3, 4 within the same account and
+// branch.
+func TestNewDerivedAddressSequentialIndexes(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-sequential-indexes")
+
+	// Create derived account for the test.
+	accountName := "sequential-test"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	// Create 5 addresses in external branch and verify sequential indexes.
+	for i := range 5 {
+		info := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, accountName, false,
+		)
+		require.NotNil(t, info)
+		require.Equal(t, uint32(i), info.Index)
+	}
+}
+
+// TestListAddressesOrdering verifies that ListAddresses returns addresses
+// sorted by index in ascending order, with addresses grouped by branch.
+func TestListAddressesOrdering(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-ordering")
+
+	createDerivedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, "ordering-account",
+	)
+
+	createDerivedAddresses(
+		t, store, walletID, db.KeyScopeBIP0084, "ordering-account", false, 3,
+	)
+	createDerivedAddresses(
+		t, store, walletID, db.KeyScopeBIP0084, "ordering-account", true, 3,
+	)
+
+	pageResult, err := store.ListAddresses(
+		t.Context(),
+		listAccountAddressesQuery(
+			t, walletID, db.KeyScopeBIP0084, "ordering-account", 10,
+		),
+	)
+
+	require.NoError(t, err)
+
+	addresses := pageResult.Items
+	require.Len(t, addresses, 6)
+
+	// Separate addresses by branch for verification.
+	var (
+		externalAddrs []db.AddressInfo
+		changeAddrs   []db.AddressInfo
+	)
+
+	for _, addr := range addresses {
+		if addr.Branch == 0 {
+			externalAddrs = append(externalAddrs, addr)
+		} else {
+			changeAddrs = append(changeAddrs, addr)
+		}
+	}
+
+	// Verify external addresses sorted by index.
+	for i := 1; i < len(externalAddrs); i++ {
+		require.LessOrEqual(
+			t, externalAddrs[i-1].Index, externalAddrs[i].Index,
+			"external addresses not in order",
+		)
+	}
+
+	// Verify change addresses sorted by index.
+	for i := 1; i < len(changeAddrs); i++ {
+		require.LessOrEqual(
+			t, changeAddrs[i-1].Index, changeAddrs[i].Index,
+			"change addresses not in order",
+		)
+	}
+}
+
+// TestListAddressesPagination verifies that ListAddresses paginates correctly
+// and sets Next without requiring an extra round-trip.
+func TestListAddressesPagination(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-addresses-strong-mode")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "account-a")
+	createDerivedAccount(t, store, walletID, scope, "account-b")
+
+	accountA := createDerivedAddresses(
+		t, store, walletID, scope, "account-a", false, 5,
+	)
+	createDerivedAddresses(t, store, walletID, scope, "account-b", false, 2)
+
+	query := listAccountAddressesQuery(t, walletID, scope, "account-a", 2)
+
+	page1, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, page1.Items, 2)
+	require.Equal(t, accountA[:2], page1.Items)
+	require.NotNil(t, page1.Next)
+
+	query.Page.After = page1.Next
+	page2, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, page2.Items, 2)
+	require.Equal(t, accountA[2:4], page2.Items)
+	require.NotNil(t, page2.Next)
+
+	query.Page.After = page2.Next
+	page3, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, page3.Items, 1)
+	require.Equal(t, accountA[4:], page3.Items)
+	require.Nil(t, page3.Next)
+
+	query.Page.After = uint32Ptr(page3.Items[len(page3.Items)-1].ID)
+	page4, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Empty(t, page4.Items)
+	require.Nil(t, page4.Next)
+
+	paged := append([]db.AddressInfo{}, page1.Items...)
+	paged = append(paged, page2.Items...)
+	paged = append(paged, page3.Items...)
+	require.Equal(t, accountA, paged)
+
+	for i, addr := range paged {
+		require.Equal(t, uint32(i), addr.Index)
+		require.Equal(t, uint32(0), addr.Branch)
+	}
+}
+
+// TestListAddressesExactBoundary verifies that pagination correctly handles
+// the exact boundary case where total results equal page-size multiples.
+func TestListAddressesExactBoundary(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "boundary-wallet")
+	scope := db.KeyScopeBIP0084
+	accountName := "boundary-account"
+
+	createDerivedAccount(t, store, walletID, scope, accountName)
+	expected := createDerivedAddresses(
+		t, store, walletID, scope, accountName, false, 4,
+	)
+
+	query := listAccountAddressesQuery(t, walletID, scope, accountName, 2)
+
+	page1, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Equal(t, expected[:2], page1.Items)
+	require.NotNil(t, page1.Next)
+	require.Equal(t, page1.Items[1].ID, *page1.Next)
+
+	query.Page.After = page1.Next
+	page2, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Equal(t, expected[2:], page2.Items)
+	require.Nil(t, page2.Next)
+	require.Greater(t, page2.Items[0].ID, *page1.Next)
+
+	query.Page.After = uint32Ptr(page2.Items[len(page2.Items)-1].ID)
+	page3, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Empty(t, page3.Items)
+	require.Nil(t, page3.Next)
+}
+
+// TestListAddressesPagedEmptyResult verifies that paginated ListAddresses
+// returns an empty result with no cursor for an account with no addresses.
+func TestListAddressesPagedEmptyResult(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-addresses-empty")
+	scope := db.KeyScopeBIP0084
+	pageSize := uint(2)
+
+	createDerivedAccount(t, store, walletID, scope, "empty-account")
+
+	pageResult, err := store.ListAddresses(
+		t.Context(),
+		listAccountAddressesQuery(
+			t, walletID, scope, "empty-account", uint32(pageSize),
+		),
+	)
+	require.NoError(t, err)
+	require.Empty(t, pageResult.Items)
+	require.Nil(t, pageResult.Next)
+}
+
+// TestListAddressesDeterministicPagination verifies stable ID-ordered address
+// pagination and next-cursor behavior.
+func TestListAddressesDeterministicPagination(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-address-deterministic")
+	scope := db.KeyScopeBIP0084
+	accountName := "deterministic-account"
+	createDerivedAccount(t, store, walletID, scope, accountName)
+	expected := createDerivedAddresses(
+		t, store, walletID, scope, accountName, false, 5,
+	)
+
+	pages := collectAddressPages(
+		t, store, listAccountAddressesQuery(t, walletID, scope, accountName, 2),
+	)
+	require.Len(t, pages, 3)
+	require.Len(t, pages[0].Items, 2)
+	require.Len(t, pages[1].Items, 2)
+	require.Len(t, pages[2].Items, 1)
+	require.NotNil(t, pages[0].Next)
+	require.NotNil(t, pages[1].Next)
+	require.Nil(t, pages[2].Next)
+
+	addresses := flattenAddressPages(pages)
+	require.Equal(t, expected, addresses)
+
+	seenIDs := make(map[uint32]struct{}, len(addresses))
+	for i := range pages {
+		for j, addr := range pages[i].Items {
+			_, duplicate := seenIDs[addr.ID]
+			require.False(t, duplicate)
+
+			seenIDs[addr.ID] = struct{}{}
+
+			// Skip the first item on the first page; there's no prior cursor
+			// to compare against.
+			if i == 0 && j == 0 {
+				continue
+			}
+
+			// First item on a later page: verify it sorts strictly after the
+			// previous page's cursor to ensure no gaps or duplicates at page
+			// boundaries.
+			if j == 0 {
+				require.Greater(t, addr.ID, *pages[i-1].Next)
+				continue
+			}
+
+			// Items within the same page: verify strict ordering to ensure
+			// the page contents are sorted.
+			require.Greater(t, addr.ID, pages[i].Items[j-1].ID)
+		}
+	}
+
+	for i := range addresses {
+		if i == 0 {
+			continue
+		}
+
+		require.Less(t, addresses[i-1].ID, addresses[i].ID)
+	}
+}
+
+// TestListAddressesAccountIsolation verifies that ListAddresses returns only
+// addresses for the requested account, excluding addresses from other accounts.
+func TestListAddressesAccountIsolation(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-address-account-isolation")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "account-a")
+	createDerivedAccount(t, store, walletID, scope, "account-b")
+
+	expected := createDerivedAddresses(
+		t, store, walletID, scope, "account-a", false, 5,
+	)
+	otherAccount := createDerivedAddresses(
+		t, store, walletID, scope, "account-b", false, 3,
+	)
+
+	pages := collectAddressPages(
+		t, store, listAccountAddressesQuery(t, walletID, scope, "account-a", 2),
+	)
+	addresses := flattenAddressPages(pages)
+
+	require.Len(t, addresses, len(expected))
+	require.Equal(t, expected, addresses)
+	accountAID := expected[0].AccountID
+
+	accountBID := otherAccount[0].AccountID
+	for _, addr := range addresses {
+		require.Equal(t, accountAID, addr.AccountID)
+		require.NotEqual(t, accountBID, addr.AccountID)
+	}
+}
+
+// TestListAddressesInsertAfterCursor verifies inserts after page N are
+// returned on page N+1 when pagination uses increasing ID cursors.
+func TestListAddressesInsertAfterCursor(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-address-boundary-insert")
+	scope := db.KeyScopeBIP0084
+	accountName := "boundary-account"
+	createDerivedAccount(t, store, walletID, scope, accountName)
+	createDerivedAddresses(t, store, walletID, scope, accountName, false, 3)
+
+	query := listAccountAddressesQuery(t, walletID, scope, accountName, 2)
+	page1, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, page1.Items, 2)
+	require.NotNil(t, page1.Next)
+
+	// Pagination is by increasing address ID (id > cursor).
+	// An address created after page 1 should therefore appear on page 2.
+	inserted := newDerivedAddress(
+		t, store, walletID, scope, accountName, false,
+	)
+
+	query.Page.After = page1.Next
+	page2, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, page2.Items, 2)
+	require.Equal(t, uint32(2), page2.Items[0].Index)
+	require.Equal(t, inserted.ID, page2.Items[1].ID)
+	require.Equal(t, uint32(3), page2.Items[1].Index)
+	require.Nil(t, page2.Next)
+}
+
+// TestListAddressesCursorEdges verifies stale and zero-value cursors produce
+// deterministic page results.
+func TestListAddressesCursorEdges(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-address-cursor-edges")
+	scope := db.KeyScopeBIP0084
+	accountName := "cursor-account"
+	createDerivedAccount(t, store, walletID, scope, accountName)
+	createDerivedAddresses(t, store, walletID, scope, accountName, false, 3)
+
+	staleReq := newTestReq[uint32](t, 2)
+	staleReq.After = uint32Ptr(math.MaxUint32)
+
+	staleQuery := db.ListAddressesQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		AccountName: &accountName,
+		Page:        staleReq,
+	}
+	stalePage, err := store.ListAddresses(t.Context(), staleQuery)
+	require.NoError(t, err)
+	require.Empty(t, stalePage.Items)
+	require.Nil(t, stalePage.Next)
+
+	zeroReq := newTestReq[uint32](t, 2)
+	zeroReq.After = uint32Ptr(0)
+
+	zeroQuery := db.ListAddressesQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		AccountName: &accountName,
+		Page:        zeroReq,
+	}
+	zeroPage, err := store.ListAddresses(t.Context(), zeroQuery)
+	require.NoError(t, err)
+	require.Len(t, zeroPage.Items, 2)
+	require.Equal(t, uint32(0), zeroPage.Items[0].Index)
+	require.Equal(t, uint32(1), zeroPage.Items[1].Index)
+	require.NotNil(t, zeroPage.Next)
+}
+
+// TestIterAddresses verifies that IterAddresses yields the same addresses in
+// the same order as manual cursor-based pagination.
+func TestIterAddresses(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-iter-addresses")
+	scope := db.KeyScopeBIP0084
+	pageSize := uint(2)
+
+	createDerivedAccount(t, store, walletID, scope, "iter-account")
+	expected := createDerivedAddresses(
+		t, store, walletID, scope, "iter-account", false, 5,
+	)
+
+	query := listAccountAddressesQuery(
+		t, walletID, scope, "iter-account", uint32(pageSize),
+	)
+
+	iterAddrs := make([]db.AddressInfo, 0, len(expected))
+	for addr, err := range store.IterAddresses(t.Context(), query) {
+		require.NoError(t, err)
+
+		iterAddrs = append(iterAddrs, addr)
+	}
+
+	paged := flattenAddressPages(collectAddressPages(t, store, query))
+	require.Equal(t, expected, paged)
+	require.Equal(t, expected, iterAddrs)
+	require.Equal(t, paged, iterAddrs)
+}
+
+// TestIterAddressesPaginated verifies that IterAddresses produces the same
+// results as manual pagination and correctly signals end-of-list.
+func TestIterAddressesPaginated(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-iter-addresses-early")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "iter-account")
+	createDerivedAddresses(
+		t, store, walletID, scope, "iter-account", false, 4,
+	)
+
+	query := listAccountAddressesQuery(t, walletID, scope, "iter-account", 2)
+
+	pages := collectAddressPages(t, store, query)
+	require.Len(t, pages, 2)
+	require.NotNil(t, pages[0].Next)
+	require.Nil(t, pages[1].Next)
+
+	expected := flattenAddressPages(pages)
+
+	iterAddrs := make([]db.AddressInfo, 0, len(expected))
+	for addr, err := range store.IterAddresses(t.Context(), query) {
+		require.NoError(t, err)
+
+		iterAddrs = append(iterAddrs, addr)
+	}
+
+	require.Equal(t, expected, iterAddrs)
+}
+
+// TestIterAddressesEmpty verifies that IterAddresses correctly handles
+// empty accounts without error and yields no addresses.
+func TestIterAddressesEmpty(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-iter-addresses-empty")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "empty-account")
+
+	query := listAccountAddressesQuery(t, walletID, scope, "empty-account", 10)
+
+	for addr, err := range store.IterAddresses(t.Context(), query) {
+		require.NoError(t, err)
+		require.Failf(t, "unexpected address", "address=%v", addr)
+	}
+}
+
+// TestNewDerivedAddressErrors verifies that NewDerivedAddress returns
+// appropriate errors for invalid parameters, including non-existent
+// accounts, unknown key scopes, and empty account names.
+func TestNewDerivedAddressErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		params  db.NewDerivedAddressParams
+		wantErr error
+	}{
+		{
+			name: "non-existent account",
+			params: db.NewDerivedAddressParams{
+				Scope:       db.KeyScopeBIP0084,
+				AccountName: "non-existent",
+				Change:      false,
+			},
+			wantErr: db.ErrAccountNotFound,
+		},
+		{
+			name: "empty account name",
+			params: db.NewDerivedAddressParams{
+				Scope:       db.KeyScopeBIP0044,
+				AccountName: "",
+				Change:      false,
+			},
+			wantErr: db.ErrAccountNotFound,
+		},
+		{
+			name: "unknown key scope returns account not found",
+			params: db.NewDerivedAddressParams{
+				Scope: db.KeyScope{
+					Purpose: 999,
+					Coin:    999,
+				},
+				AccountName: "any-name",
+				Change:      false,
+			},
+			wantErr: db.ErrAccountNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+			tc.params.WalletID = walletID
+
+			info, err := store.NewDerivedAddress(
+				t.Context(), tc.params,
+			)
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestNewDerivedAddress_WalletAccountMismatch verifies that derived address
+// creation rejects a wallet/scope/account lookup that resolves in another
+// wallet but not in the caller's wallet.
+func TestNewDerivedAddress_WalletAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	firstWalletID := newWallet(t, store, "wallet-derived-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-derived-mismatch-b")
+	accountName := "shared-name"
+
+	createDerivedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, accountName,
+	)
+	createDerivedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0044, accountName,
+	)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    secondWalletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: accountName,
+			Change:      false,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.Nil(t, info)
+}
+
+// TestNewDerivedAddressConcurrent verifies that concurrent address
+// creation produces unique sequential indexes without conflicts.
+func TestNewDerivedAddressConcurrent(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "concurrent-wallet")
+
+	accountName := "concurrent-account"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	const workers = 20
+
+	type deriveResult struct {
+		info db.AddressInfo
+		err  error
+	}
+
+	resultCh := make(chan deriveResult, workers)
+
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	for range workers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			info, err := store.NewDerivedAddress(
+				ctx, db.NewDerivedAddressParams{
+					WalletID:    walletID,
+					Scope:       db.KeyScopeBIP0084,
+					AccountName: accountName,
+					Change:      false,
+				},
+			)
+			if err != nil {
+				resultCh <- deriveResult{err: err}
+				return
+			}
+
+			resultCh <- deriveResult{info: *info}
+		}()
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]db.AddressInfo, 0, workers)
+	for result := range resultCh {
+		require.NoError(t, result.err)
+		results = append(results, result.info)
+	}
+
+	require.Len(t, results, workers)
+
+	// Verify all indexes are unique and sequential.
+	indexes := make([]uint32, workers)
+	for i, addr := range results {
+		indexes[i] = addr.Index
+	}
+
+	sort.Slice(indexes, func(i, j int) bool {
+		return indexes[i] < indexes[j]
+	})
+
+	for i := range workers {
+		require.Equal(t, uint32(i), indexes[i])
+	}
+}
+
+// TestNewDerivedAddressBranchIsolation verifies that external (branch 0)
+// and change (branch 1) addresses maintain independent sequential index
+// counters within the same account.
+func TestNewDerivedAddressBranchIsolation(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-branch-isolation")
+
+	// Create derived account for the test.
+	accountName := "branch-isolation-test"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	// Create addresses alternating between branches:
+	// external-0, change-0, external-1, change-1, external-2, change-2.
+	externalAddrs := make([]db.AddressInfo, 0, 3)
+	changeAddrs := make([]db.AddressInfo, 0, 3)
+
+	for range 3 {
+		// Create external address (branch 0).
+		extInfo := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, accountName, false,
+		)
+		externalAddrs = append(externalAddrs, *extInfo)
+
+		// Create change address (branch 1).
+		chgInfo := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, accountName, true,
+		)
+		changeAddrs = append(changeAddrs, *chgInfo)
+	}
+
+	// Verify external addresses have indexes 0, 1, 2.
+	for i, addr := range externalAddrs {
+		require.Equal(t, uint32(i), addr.Index)
+		require.Equal(t, uint32(0), addr.Branch)
+	}
+
+	// Verify change addresses have indexes 0, 1, 2.
+	for i, addr := range changeAddrs {
+		require.Equal(t, uint32(i), addr.Index)
+		require.Equal(t, uint32(1), addr.Branch)
+	}
+}
+
+// TestNewDerivedAddressAccountKeyCounts verifies that account key counts are
+// derived from the next index counters for both external and internal branches.
+func TestNewDerivedAddressAccountKeyCounts(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-account-key-counts")
+
+	accountName := "counted-account"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	createDerivedAddresses(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, false, 3,
+	)
+	createDerivedAddresses(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, true, 2,
+	)
+
+	account := getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, accountName,
+	)
+	require.Equal(t, uint32(3), account.ExternalKeyCount)
+	require.Equal(t, uint32(2), account.InternalKeyCount)
+	require.Zero(t, account.ImportedKeyCount)
+}
+
+// TestNewDerivedAddressBranchCounters verifies that external and internal
+// counters advance independently when new addresses are created.
+func TestNewDerivedAddressBranchCounters(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-branch-counters")
+
+	accountName := "branch-counter-account"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, true,
+	)
+
+	account := getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, accountName,
+	)
+	require.Equal(t, uint32(0), account.ExternalKeyCount)
+	require.Equal(t, uint32(1), account.InternalKeyCount)
+
+	newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, false,
+	)
+
+	account = getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, accountName,
+	)
+	require.Equal(t, uint32(1), account.ExternalKeyCount)
+	require.Equal(t, uint32(1), account.InternalKeyCount)
+}
+
+// TestNewDerivedAddressMaxIndex verifies that the singular allocator returns
+// the last normal child once and rejects the exhausted external branch.
+func TestNewDerivedAddressMaxIndex(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Place the branch counter at its last non-hardened child.
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
+	walletID := newWallet(t, store, "wallet-max-index")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "max-acct")
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, "max-acct")
+
+	// Preserve a preceding child while positioning the counter at the last
+	// normal leaf, so exhaustion cannot be mistaken for an empty account.
+	CreateAddressWithIndex(
+		t, queries, walletID, accountID, 0, db.MaxAddressIndex-1,
+	)
+	UpdateAccountNextExternalIndex(t, dbConn, accountID, db.MaxAddressIndex)
+
+	// Act: Allocate the last normal child through the singular wrapper.
+	info := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "max-acct", false,
+	)
+
+	// Assert: The boundary child is available exactly once.
+	require.Equal(t, db.MaxAddressIndex, info.Index)
+
+	// Act: Try the exhausted branch again; the index must not cross into
+	// hardened derivation.
+	_, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: "max-acct",
+			Change:      false,
+		},
+	)
+
+	// Assert: Both branches expose the same durable exhaustion sentinel.
+	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+}
+
+// TestNewDerivedAddressMaxIndexInternal verifies that the singular allocator
+// returns the last normal child once and rejects the exhausted internal branch.
+func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Place the branch counter at its last non-hardened child.
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
+	walletID := newWallet(t, store, "wallet-max-index-internal")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "max-acct")
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, "max-acct")
+
+	// Preserve the preceding internal child while positioning its independent
+	// counter at the last normal leaf.
+	CreateAddressWithIndex(
+		t, queries, walletID, accountID, 1, db.MaxAddressIndex-1,
+	)
+	UpdateAccountNextInternalIndex(t, dbConn, accountID, db.MaxAddressIndex)
+
+	// Act: Allocate the last normal child through the singular wrapper.
+	info := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "max-acct", true,
+	)
+
+	// Assert: The boundary child is available exactly once.
+	require.Equal(t, db.MaxAddressIndex, info.Index)
+
+	// Act: Try the exhausted branch again without allowing a hardened child.
+	_, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: "max-acct",
+			Change:      true,
+		},
+	)
+
+	// Assert: Both branches expose the same durable exhaustion sentinel.
+	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+}
+
+// TestNewDerivedAddressesConcurrentBatches checks that concurrent transactions
+// return complete contiguous batches without interleaving their child indexes.
+func TestNewDerivedAddressesConcurrentBatches(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Both requests allocate two children from the same account and
+	// branch, so only transaction-level serialization can keep batches intact.
+	store := NewTestStore(t)
+	id := newWallet(t, store, "concurrent-batches")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		Scope:            db.KeyScopeBIP0084,
+		AccountName:      derivedAccountName,
+		RequireChainSync: true,
+	}
+
+	type result struct {
+		batch []db.AddressInfo
+		err   error
+	}
+
+	results := make(chan result, 2)
+
+	// Act: Submit both batches independently. Collect both results before
+	// asserting, so both allocators finish before cleanup closes storage.
+	for range 2 {
+		go func() {
+			batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+			results <- result{
+				batch: batch,
+				err:   err,
+			}
+		}()
+	}
+
+	completed := []result{<-results, <-results}
+
+	// Assert: Each batch contains adjacent children and their starting indexes
+	// are 0 and 2, regardless of which concurrent request finishes first.
+	starts := make([]uint32, 0, len(completed))
+	for _, result := range completed {
+		require.NoError(t, result.err)
+		require.Len(t, result.batch, 2)
+		require.Equal(t, result.batch[0].Index+1, result.batch[1].Index)
+
+		starts = append(starts, result.batch[0].Index)
+	}
+
+	require.ElementsMatch(t, []uint32{0, 2}, starts)
+}
+
+// TestNewDerivedAddressesSurvivesReopen checks that both address rows and the
+// next-child counter survive closing and reopening the SQL Store.
+func TestNewDerivedAddressesSurvivesReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit one internal batch through the real SQL transaction.
+	// Reuse the existing reopen fixture to read it through a fresh connection.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	id := newWallet(t, store, "reopened-batch")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		Scope:            db.KeyScopeBIP0084,
+		AccountName:      derivedAccountName,
+		Change:           true,
+		RequireChainSync: true,
+	}
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+
+	// Act: Close the original pool, read its persisted rows, then allocate from
+	// the same branch using only the reopened Store's durable state.
+	require.NoError(t, store.Close())
+	store = reopen()
+	rows, rowsErr := store.ListAddresses(
+		t.Context(),
+		listAccountAddressesQuery(t, id, params.Scope, params.AccountName, 10),
+	)
+	// Select by semantic number alone to exercise the SQL lookup independently
+	// of the name used for the first batch and its durable row query.
+	require.NotNil(t, batch[0].AccountNumber)
+
+	params.AccountName = ""
+	params.AccountNumber = batch[0].AccountNumber
+	next, nextErr := store.NewDerivedAddresses(t.Context(), params, 1)
+
+	// Assert: Reopening preserves the original destinations and starts the
+	// next allocation after their indexes instead of returning either again.
+	require.NoError(t, rowsErr)
+	require.Len(t, rows.Items, 2)
+	require.Equal(t, batch[0].ScriptPubKey, rows.Items[0].ScriptPubKey)
+	require.Equal(t, batch[1].ScriptPubKey, rows.Items[1].ScriptPubKey)
+	require.NoError(t, nextErr)
+	require.Len(t, next, 1)
+	require.Equal(t, batch[0].AccountNumber, next[0].AccountNumber)
+	require.Equal(t, derivedAccountName, next[0].AccountName)
+	require.Equal(t, uint32(2), next[0].Index)
+	require.Equal(t, uint32(1), next[0].Branch)
+}
+
+// TestNewDerivedAddressesSkipsInvalidChildren checks that an invalid leaf is
+// consumed without shortening the batch or being reused by the next call.
+func TestNewDerivedAddressesSkipsInvalidChildren(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reject two leaves through the existing derivation seam. Return
+	// the ordinary deterministic derivation for every other child.
+	derive := mockDeriveFunc()
+	store := NewTestStoreWithDerive(t, func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		if params.Index == 1 || params.Index == 3 {
+			return nil, db.ErrAddressChildUnavailable
+		}
+
+		return derive(ctx, params)
+	})
+	id := newWallet(t, store, "invalid-child")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		AccountName:      derivedAccountName,
+		Scope:            db.KeyScopeBIP0084,
+		RequireChainSync: true,
+	}
+
+	// Act: Fill a batch across the invalid child, then allocate one child
+	// across another invalid leaf through the singular wrapper.
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	next, nextErr := store.NewDerivedAddress(t.Context(), params)
+
+	// Assert: Both requested children are returned in order, and the next
+	// allocation skips the unavailable child through the singular API.
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	require.Equal(t, uint32(0), batch[0].Index)
+	require.Equal(t, uint32(2), batch[1].Index)
+	require.NoError(t, nextErr)
+	require.Equal(t, uint32(4), next.Index)
+}
+
+// TestNewDerivedAddressesRollsBackFailure checks that a definite derivation
+// failure persists neither candidate rows nor consumed counter progress.
+func TestNewDerivedAddressesRollsBackFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fail after one candidate exists, then allow the subsequent
+	// independent request to prove that definite rollback made it reusable.
+	failure := errors.New("derivation failed")
+	fail := true
+	derive := mockDeriveFunc()
+	store := NewTestStoreWithDerive(t, func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		if fail && params.Index == 1 {
+			return nil, failure
+		}
+
+		return derive(ctx, params)
+	})
+	id := newWallet(t, store, "rollback-batch")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		AccountName:      derivedAccountName,
+		Scope:            db.KeyScopeBIP0084,
+		RequireChainSync: true,
+	}
+
+	// Act: Fail the batch and read the persisted counter and rows before
+	// making a new request with derivation available again.
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	account := getAccountByName(
+		t, store, id, params.Scope, params.AccountName,
+	)
+	rows, rowsErr := store.ListAddresses(t.Context(),
+		listAccountAddressesQuery(t, id, params.Scope, params.AccountName, 10))
+	fail = false
+	next, nextErr := store.NewDerivedAddresses(t.Context(), params, 2)
+
+	// Assert: The failed batch has no rows or progress, and the next request
+	// safely obtains both original indexes rather than a truncated result.
+	require.ErrorIs(t, err, failure)
+	require.Nil(t, batch)
+	require.NoError(t, rowsErr)
+	require.Empty(t, rows.Items)
+	require.Zero(t, account.ExternalKeyCount)
+	require.NoError(t, nextErr)
+	require.Len(t, next, 2)
+	require.Equal(t, uint32(0), next[0].Index)
+	require.Equal(t, uint32(1), next[1].Index)
+}
+
+// TestNewDerivedAddressesPreservesRawOwnership skips an imported candidate
+// without changing its ownership, secret material, or absent derivation path.
+func TestNewDerivedAddressesPreservesRawOwnership(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Import exactly the script that the next account child would
+	// produce. Preserve its encrypted secret as an ownership regression probe.
+	store := NewTestStore(t)
+	id := newWallet(t, store, "raw-collision")
+	createDerivedAccount(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	account := getAccountByName(
+		t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+	)
+	data, err := mockDeriveFunc()(t.Context(), db.AddressDerivationParams{
+		Scope:                db.KeyScopeBIP0084,
+		DerivedAccountNumber: account.AccountNumber,
+	})
+	require.NoError(t, err)
+
+	secret := RandomBytes(32)
+	raw, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            id,
+			AddressType:         db.WitnessPubKey,
+			ScriptPubKey:        data.ScriptPubKey,
+			PubKey:              RandomBytes(33),
+			EncryptedPrivateKey: secret,
+		},
+	)
+	require.NoError(t, err)
+
+	params := db.NewDerivedAddressParams{
+		WalletID:         id,
+		AccountName:      derivedAccountName,
+		Scope:            db.KeyScopeBIP0084,
+		RequireChainSync: true,
+	}
+
+	// Act: Allocate one child across the imported script collision. The
+	// singular API must skip it instead of failing forever at the same index.
+	first, err := store.NewDerivedAddress(t.Context(), params)
+
+	// Assert: Child zero remains imported; the first new child is index one.
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), first.Index)
+
+	// Act: Continue through the plural API, then reload imported ownership
+	// and its secret to detect any overwrite by the singular allocation.
+	batch, err := store.NewDerivedAddresses(t.Context(), params, 2)
+	rows := rawImportedAddresses(t, store, id, 10)
+	storedSecret, secretErr := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     id,
+			ScriptPubKey: data.ScriptPubKey,
+		},
+	)
+
+	// Assert: The batch follows the singular child while the imported row
+	// retains its identity, accountless ownership, path, and encrypted secret.
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	require.Equal(t, uint32(2), batch[0].Index)
+	require.Equal(t, uint32(3), batch[1].Index)
+	require.Len(t, rows, 1)
+	require.Equal(t, raw.ID, rows[0].ID)
+	require.Nil(t, rows[0].AccountID)
+	require.False(t, rows[0].HasDerivationPath)
+	require.NoError(t, secretErr)
+	require.Equal(t, secret, storedSecret.EncryptedPrivKey)
+}
+
+// TestNewDerivedAddressesExhaustion preserves terminal progress without partial
+// rows, including repeated allocations at the final normal child.
+func TestNewDerivedAddressesExhaustion(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		start    uint32
+		count    uint32
+		skipLast bool
+		winners  int
+	}{
+		{
+			name:     "discard partial batch",
+			start:    db.MaxAddressIndex - 1,
+			count:    2,
+			skipLast: true,
+		},
+		{
+			name:    "allocate final normal child",
+			start:   db.MaxAddressIndex,
+			count:   1,
+			winners: 1,
+		},
+		{
+			name:  "already exhausted",
+			start: db.MaxAddressIndex + 1,
+			count: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Put the durable counter at the domain boundary using
+			// the SQL fixture, optionally making the last leaf invalid.
+			derive := mockDeriveFunc()
+			store, reopen := newReopenableTestStore(t, func(ctx context.Context,
+				p db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+				if tc.skipLast && p.Index == db.MaxAddressIndex {
+					return nil, db.ErrAddressChildUnavailable
+				}
+
+				return derive(ctx, p)
+			})
+			id := newWallet(t, store, "exhaustion")
+			createDerivedAccount(
+				t, store, id, db.KeyScopeBIP0084, derivedAccountName,
+			)
+			scopeID := GetKeyScopeID(t, store.Queries(), id, db.KeyScopeBIP0084)
+			accountID := GetAccountID(
+				t, store.Queries(), scopeID, derivedAccountName,
+			)
+			UpdateAccountNextExternalIndex(t, store.DB(), accountID, tc.start)
+
+			params := db.NewDerivedAddressParams{
+				WalletID:         id,
+				AccountName:      derivedAccountName,
+				Scope:            db.KeyScopeBIP0084,
+				RequireChainSync: true,
+			}
+
+			// Act: Allocate twice at the boundary, checking each result before
+			// reopening. The separate batch test covers concurrent allocation.
+			var winners int
+			for range 2 {
+				batch, err := store.NewDerivedAddresses(
+					t.Context(), params, tc.count,
+				)
+				if err != nil {
+					require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+					require.Nil(t, batch)
+
+					continue
+				}
+
+				require.Len(t, batch, int(tc.count))
+				require.Equal(t, db.MaxAddressIndex, batch[0].Index)
+
+				winners++
+			}
+
+			require.NoError(t, store.Close())
+			store = reopen()
+			again, err := store.NewDerivedAddresses(t.Context(), params, 1)
+			account := getAccountByName(
+				t, store, id, params.Scope, derivedAccountName,
+			)
+			rows, rowsErr := store.ListAddresses(t.Context(),
+				listAccountAddressesQuery(
+					t, id, params.Scope, derivedAccountName, 10,
+				),
+			)
+
+			// Assert: Only a complete final-child winner can persist a row.
+			// Exhaustion, including repeat calls, leaves the counter terminal.
+			require.Equal(t, tc.winners, winners)
+			require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+			require.Nil(t, again)
+			require.Equal(t, db.MaxAddressIndex+1, account.ExternalKeyCount)
+			require.NoError(t, rowsErr)
+			require.Len(t, rows.Items, tc.winners)
+		})
+	}
+}
+
+// TestNewDerivedAddressesRejectsNoChainSync verifies receiving refusal before
+// derivation, child-counter changes, or address-row insertion.
+func TestNewDerivedAddressesRejectsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An excluded account and an observed derivation callback make
+	// even a rolled-back, incorrectly admitted derivation observable.
+	calls := 0
+	store := NewTestStoreWithDerive(t, func(context.Context,
+		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		calls++
+
+		return nil, errors.New("unexpected derivation")
+	})
+	id := newWallet(t, store, "excluded-batch")
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    id,
+			Scope:       db.KeyScopeBIP0084,
+			Name:        "key-only",
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	// Act: Request a receiving batch and inspect persisted account/address
+	// state through the same public Store queries used by other callers.
+	batch, err := store.NewDerivedAddresses(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:         id,
+			Scope:            db.KeyScopeBIP0084,
+			AccountName:      "key-only",
+			RequireChainSync: true,
+		}, 2,
+	)
+	account := getAccountByName(
+		t, store, id, db.KeyScopeBIP0084, "key-only",
+	)
+	rows, rowsErr := store.ListAddresses(t.Context(),
+		listAccountAddressesQuery(t, id, db.KeyScopeBIP0084, "key-only", 10))
+
+	// Assert: Policy refusal performs no derivation and persists no progress
+	// or addresses, rather than merely hiding results after mutation.
+	require.ErrorIs(t, err, db.ErrAccountOperationUnsupported)
+	require.Nil(t, batch)
+	require.Zero(t, calls)
+	require.Zero(t, account.ExternalKeyCount)
+	require.NoError(t, rowsErr)
+	require.Empty(t, rows.Items)
+}

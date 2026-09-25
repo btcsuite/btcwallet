@@ -12,8 +12,85 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// recoveryAddressDeriver derives a recovery lookahead address for one account
+// branch child. KVDB satisfies this with its scoped key manager; SQL satisfies
+// it with account public material loaded from db.Store.
+type recoveryAddressDeriver interface {
+	DeriveAddr(account uint32, branch uint32, index uint32) (
+		address.Address, []byte, error)
+}
+
+// storeRecoveryDeriver derives recovery lookahead addresses from SQL-loaded
+// account metadata without touching walletdb or a waddrmgr.Manager.
+type storeRecoveryDeriver struct {
+	chainParams   *chaincfg.Params
+	scope         waddrmgr.KeyScope
+	accountPubKey []byte
+	addrSchema    waddrmgr.ScopeAddrSchema
+
+	// derivedAccountNumber is the account's real BIP44 number, kept apart
+	// from the key recovery state indexes the account by. It is nil for an
+	// imported account, which has no wallet-derived number and whose
+	// lookahead derives from accountPubKey alone.
+	derivedAccountNumber *uint32
+}
+
+// DeriveAddr derives one recovery lookahead address using the same pure helper
+// SQL address generation uses.
+//
+// The account argument is the recovery state's own map key, which an untargeted
+// full scan sets to the store row ID; derivation records the real account
+// number instead, so the two identities never blur.
+func (d *storeRecoveryDeriver) DeriveAddr(_ uint32, branch uint32,
+	index uint32) (address.Address, []byte, error) {
+
+	addrType, err := recoveryAddrType(d.addrSchema, branch)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	params := db.AddressDerivationParams{
+		Scope:                db.KeyScope(d.scope),
+		DerivedAccountNumber: d.derivedAccountNumber,
+		Branch:               branch,
+		Index:                index,
+		AddrType:             addrType,
+		AccountPubKey:        d.accountPubKey,
+	}
+
+	addr, script, _, err := deriveStoreAddress(params, d.chainParams)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return addr, script, nil
+}
+
+// recoveryAddrType returns the store address type used for a recovery branch.
+func recoveryAddrType(schema waddrmgr.ScopeAddrSchema,
+	branch uint32) (db.AddressType, error) {
+
+	storeSchema, err := db.ScopeAddrSchemaFromWaddrmgr(schema)
+	if err != nil {
+		return 0, err
+	}
+
+	switch branch {
+	case waddrmgr.ExternalBranch:
+		return storeSchema.ExternalAddrType, nil
+
+	case waddrmgr.InternalBranch:
+		return storeSchema.InternalAddrType, nil
+
+	default:
+		return 0, fmt.Errorf("recovery branch %d: %w", branch,
+			db.ErrInvalidParam)
+	}
+}
 
 // RecoveryState manages the initialization and lookup of ScopeRecoveryStates
 // for any actively used key scopes.
@@ -41,9 +118,37 @@ type RecoveryState struct {
 	// TODO(yy): Deprecated, remove.
 	scopes map[waddrmgr.KeyScope]*ScopeRecoveryState
 
-	// branchStates maintains the recovery state for every branch (scope +
-	// account + branch). This is the source of truth.
+	// branchStates maintains the recovery state for every branch, keyed by
+	// (scope + account key + branch). The account key is whatever the
+	// loader chose: the caller's BIP44 number for a targeted scan, and the
+	// durable store row ID for an untargeted full scan, where an imported
+	// account would otherwise collide with a derived account sharing that
+	// number. This is the source of truth.
 	branchStates map[waddrmgr.BranchScope]*BranchRecoveryState
+
+	// accountDerivers holds store-native derivation adapters for accounts
+	// whose lookahead can be derived from SQL-loaded public account
+	// metadata, keyed by the same account key as branchStates. KVDB
+	// recovery leaves this empty and derives through addrMgr instead.
+	accountDerivers map[waddrmgr.AccountScope]recoveryAddressDeriver
+
+	// accountNames maps every account loaded into the recovery state to its
+	// durable name, keyed by the same account key as branchStates. A
+	// backend resolving
+	// an emitted horizon must prefer the name: both store backends mask an
+	// imported account's number to 0, so resolving an imported-xpub horizon
+	// by number alone would mis-resolve to the default derived account or
+	// fail. This lookup lets the syncer stamp ScanHorizon.AccountName at
+	// emission.
+	accountNames map[waddrmgr.AccountScope]string
+
+	// accountIDs maps the recovery account key to the account's stable store
+	// row identity. The two differ on the targeted path, where the key is
+	// the account number the caller named while the value is the durable row
+	// ID; only an untargeted full scan keys on the row ID itself. The syncer
+	// stamps that identity onto ScanHorizon at emission, so a later account
+	// rename cannot break horizon extension.
+	accountIDs map[waddrmgr.AccountScope]*uint32
 
 	// watchedOutPoints contains the set of all outpoints known to the
 	// wallet. This is updated iteratively as new outpoints are found during
@@ -89,6 +194,11 @@ func NewRecoveryState(recoveryWindow uint32,
 		branchStates: make(
 			map[waddrmgr.BranchScope]*BranchRecoveryState,
 		),
+		accountDerivers: make(
+			map[waddrmgr.AccountScope]recoveryAddressDeriver,
+		),
+		accountNames:     make(map[waddrmgr.AccountScope]string),
+		accountIDs:       make(map[waddrmgr.AccountScope]*uint32),
 		watchedOutPoints: make(map[wire.OutPoint]address.Address),
 		chainParams:      chainParams,
 		addrMgr:          addrMgr,
@@ -150,18 +260,51 @@ func (rs *RecoveryState) WatchListSize() int {
 	return len(rs.addrFilters) + len(rs.outpoints)
 }
 
+// AccountName returns the durable name of the account at the given scope and
+// recovery account key, as loaded into the recovery state. The bool reports
+// whether the account was found; callers that fail to find a name MUST fall
+// back to that key rather than emitting an empty name, since an empty name
+// would resolve to no account at the backend.
+func (rs *RecoveryState) AccountName(scope waddrmgr.KeyScope,
+	account uint32) (string, bool) {
+
+	name, ok := rs.accountNames[waddrmgr.AccountScope{
+		Scope:   scope,
+		Account: account,
+	}]
+
+	return name, ok
+}
+
+// AccountID returns the stable store row identity recorded for the given scope
+// and recovery account key. On the targeted path the key is the caller's
+// account number and the returned row ID differs from it. The bool reports
+// whether an identity was recorded.
+func (rs *RecoveryState) AccountID(scope waddrmgr.KeyScope,
+	account uint32) (*uint32, bool) {
+
+	id, ok := rs.accountIDs[waddrmgr.AccountScope{
+		Scope:   scope,
+		Account: account,
+	}]
+	if !ok || id == nil {
+		return nil, false
+	}
+
+	idCopy := *id
+
+	return &idCopy, true
+}
+
 // GetBranchState returns the recovery state for the provided branch scope.
 // It acts as the source of truth for branch states by either retrieving an
-// existing in-memory BranchRecoveryState for the given `bs` (branch scope)
-// or creating a new one if it doesn't already exist.
+// existing in-memory BranchRecoveryState for the branch scope or creating a new
+// one.
 //
-// When a new state is created, it fetches the appropriate AccountStore (key
-// manager) from the Address Manager. This ensures that the BranchRecoveryState
-// is correctly linked to its derivation logic and maintains a consistent,
-// up-to-date view of the branch's lookahead horizon and derived addresses
-// throughout the recovery process. This centralization prevents redundant
-// state creation and ensures all recovery operations for a specific branch
-// operate on the same instance.
+// When a new state is created, it resolves the branch's derivation source from
+// either store-native account metadata or the legacy address manager. This
+// keeps SQL recovery walletdb-free while preserving KVDB's scoped-manager
+// behavior.
 func (rs *RecoveryState) GetBranchState(bs waddrmgr.BranchScope) (
 	*BranchRecoveryState, error) {
 
@@ -169,23 +312,42 @@ func (rs *RecoveryState) GetBranchState(bs waddrmgr.BranchScope) (
 		return s, nil
 	}
 
-	// We assume the scope is valid and active if we are requesting state
-	// for it.
-	var mgr waddrmgr.AccountStore
-	if rs.addrMgr != nil {
-		var err error
-
-		mgr, err = rs.addrMgr.FetchScopedKeyManager(bs.Scope)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch manager for "+
-				"scope %v: %w", bs.Scope, err)
-		}
+	deriver, err := rs.recoveryDeriver(bs)
+	if err != nil {
+		return nil, err
 	}
 
-	s := NewBranchRecoveryState(rs.recoveryWindow, mgr)
+	s := NewBranchRecoveryState(rs.recoveryWindow, deriver)
 	rs.branchStates[bs] = s
 
 	return s, nil
+}
+
+// recoveryDeriver resolves the derivation implementation for a branch scope.
+func (rs *RecoveryState) recoveryDeriver(
+	bs waddrmgr.BranchScope) (recoveryAddressDeriver, error) {
+
+	accountScope := waddrmgr.AccountScope{
+		Scope:   bs.Scope,
+		Account: bs.Account,
+	}
+
+	if deriver, ok := rs.accountDerivers[accountScope]; ok {
+		return deriver, nil
+	}
+
+	if rs.addrMgr == nil {
+		return nil, fmt.Errorf("missing recovery deriver for %v/%d",
+			bs.Scope, bs.Account)
+	}
+
+	deriver, err := rs.addrMgr.FetchScopedKeyManager(bs.Scope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch manager for "+
+			"scope %v: %w", bs.Scope, err)
+	}
+
+	return deriver, nil
 }
 
 // AddrEntry holds the derivation info for an address to support
@@ -329,7 +491,18 @@ func (rs *RecoveryState) ProcessBlock(block *wire.MsgBlock) (
 		foundHorizons   map[waddrmgr.BranchScope]uint32
 	)
 
+	// A same-block lookahead rerun happens when this block pays to an
+	// already-watched lookahead address and expandHorizons derives more
+	// addresses before the block is filtered again. filterTx mutates
+	// rs.outpoints in place during each pass, so restore the pre-block set
+	// before every pass. Otherwise a spent watched outpoint deleted during
+	// the first pass would be missing from the second pass, and a spend-only
+	// transaction could be dropped from the final overwritten result.
+	outpointsSnapshot := copyOutpointMap(rs.outpoints)
+
 	for {
+		rs.outpoints = copyOutpointMap(outpointsSnapshot)
+
 		relevantTxs, foundScopes, relevantOutputs = rs.filterBlock(
 			block,
 		)
@@ -359,6 +532,32 @@ func (rs *RecoveryState) ProcessBlock(block *wire.MsgBlock) (
 	}, nil
 }
 
+// setAccountID records the stable store account ID for an account loaded into
+// the recovery state.
+func (rs *RecoveryState) setAccountID(scope waddrmgr.KeyScope,
+	account uint32, accountID *uint32) {
+
+	if accountID == nil {
+		return
+	}
+
+	id := *accountID
+	rs.accountIDs[waddrmgr.AccountScope{
+		Scope:   scope,
+		Account: account,
+	}] = &id
+}
+
+// copyOutpointMap returns a shallow copy of the watched outpoint set.
+func copyOutpointMap(src map[wire.OutPoint][]byte) map[wire.OutPoint][]byte {
+	dst := make(map[wire.OutPoint][]byte, len(src))
+	for op, script := range src {
+		dst[op] = script
+	}
+
+	return dst
+}
+
 // initAccountState initializes the recovery state for a specific account by
 // setting up branch recovery states for both external and internal branches.
 // It iterates through the known address counts (from the provided account
@@ -366,6 +565,14 @@ func (rs *RecoveryState) ProcessBlock(block *wire.MsgBlock) (
 // derived addresses up to the recovery window.
 func (rs *RecoveryState) initAccountState(
 	props *waddrmgr.AccountProperties) error {
+
+	// Record the account name so emitted horizons can carry the durable,
+	// backend-agnostic identity rather than relying on the account number,
+	// which both store backends mask to 0 for imported accounts.
+	rs.accountNames[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: props.AccountNumber,
+	}] = props.AccountName
 
 	initBranch := func(branch uint32, lastKnownIndex uint32) error {
 		bs := waddrmgr.BranchScope{
@@ -401,6 +608,47 @@ func (rs *RecoveryState) initAccountState(
 	if err != nil {
 		return fmt.Errorf("derive internal addrs for %s/%d': %w",
 			props.KeyScope, props.AccountNumber, err)
+	}
+
+	return nil
+}
+
+// setStoreAccount records the store identities for one account loaded through
+// the Store, and must run before Initialize because initialization derives the
+// lookahead window.
+//
+// accountID is the durable store row identity stamped onto emitted horizons.
+// accountNumber is the account's real BIP44 number and is nil for an imported
+// account. props.AccountNumber carries the recovery account key the loader
+// chose: the caller's account number for a targeted scan, and the row ID for an
+// untargeted full scan, where an imported account would otherwise collide with
+// a derived account sharing its BIP44 number.
+//
+// KVDB recovery keeps addrMgr set and resolves derivation lazily from the
+// scoped manager, so it needs no per-account adapter here.
+func (rs *RecoveryState) setStoreAccount(props *waddrmgr.AccountProperties,
+	accountID *uint32, accountNumber *uint32) error {
+
+	rs.setAccountID(props.KeyScope, props.AccountNumber, accountID)
+
+	if rs.addrMgr != nil {
+		return nil
+	}
+
+	if props.AccountPubKey == nil || props.AddrSchema == nil {
+		return fmt.Errorf("account %s/%d missing recovery metadata",
+			props.KeyScope, props.AccountNumber)
+	}
+
+	rs.accountDerivers[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: props.AccountNumber,
+	}] = &storeRecoveryDeriver{
+		chainParams:          rs.chainParams,
+		scope:                props.KeyScope,
+		accountPubKey:        []byte(props.AccountPubKey.String()),
+		addrSchema:           *props.AddrSchema,
+		derivedAccountNumber: accountNumber,
 	}
 
 	return nil
@@ -610,21 +858,21 @@ type BranchRecoveryState struct {
 	// invalid keys.
 	invalidChildren map[uint32]struct{}
 
-	// manager is the scoped key manager used to derive addresses for this
-	// branch.
-	manager waddrmgr.AccountStore
+	// deriver derives addresses for this branch using either a scoped key
+	// manager or store-native account metadata.
+	deriver recoveryAddressDeriver
 }
 
 // NewBranchRecoveryState creates a new BranchRecoveryState that can be used to
 // track either the external or internal branch of an account's derivation path.
 func NewBranchRecoveryState(recoveryWindow uint32,
-	manager waddrmgr.AccountStore) *BranchRecoveryState {
+	deriver recoveryAddressDeriver) *BranchRecoveryState {
 
 	return &BranchRecoveryState{
 		recoveryWindow:  recoveryWindow,
 		addresses:       make(map[uint32]address.Address),
 		invalidChildren: make(map[uint32]struct{}),
-		manager:         manager,
+		deriver:         deriver,
 	}
 }
 
@@ -751,7 +999,12 @@ func (brs *BranchRecoveryState) buildAddrFilters(bs waddrmgr.BranchScope,
 	// 3. Derive & Cache.
 	// Iterate to derive the required number of new addresses.
 	for count < windowToDerive {
-		addr, _, err := brs.manager.DeriveAddr(
+		if brs.deriver == nil {
+			return nil, errors.New("derive addr: missing " +
+				"recovery deriver")
+		}
+
+		addr, _, err := brs.deriver.DeriveAddr(
 			bs.Account, bs.Branch, childIndex,
 		)
 		if err != nil {
