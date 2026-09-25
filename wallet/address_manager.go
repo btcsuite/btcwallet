@@ -856,6 +856,33 @@ func (w *Wallet) handleAllocateNextKey(r allocateNextKeyReq) {
 	r.respChan <- allocateNextKeyResp{key: key}
 }
 
+// isImportedAddrAccountSelector reports whether the selector names the reserved
+// raw-import bucket, which has no account key to derive addresses from.
+func isImportedAddrAccountSelector(selector AccountSelector) bool {
+	return selector.accountName != nil &&
+		*selector.accountName == waddrmgr.ImportedAddrAccountName
+}
+
+// newDerivedAddressParams copies a validated semantic selector into Store
+// allocation parameters. The Store resolves it inside the write transaction,
+// including the receiving-policy guard.
+func (w *Wallet) newDerivedAddressParams(selector AccountSelector,
+	internal bool) db.NewDerivedAddressParams {
+
+	params := db.NewDerivedAddressParams{
+		WalletID:         w.id,
+		Scope:            db.KeyScope(selector.keyScope),
+		AccountNumber:    (*uint32)(selector.accountNumber),
+		Change:           internal,
+		RequireChainSync: true,
+	}
+	if selector.accountName != nil {
+		params.AccountName = *selector.accountName
+	}
+
+	return params
+}
+
 // NewBulkAddresses force-allocates fresh addresses instead of reusing unused
 // children. Large unused gaps can hinder seed recovery. Count must be 1..100;
 // internal selects the change branch. SQL commits atomically, then registers
@@ -885,28 +912,13 @@ func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
 
 	// The reserved import bucket holds raw addresses, not an account xpub.
 	// Reject it before admission, as the single-address methods do.
-	if selector.accountName != nil &&
-		*selector.accountName == waddrmgr.ImportedAddrAccountName {
-
+	if isImportedAddrAccountSelector(selector) {
 		return nil, ErrImportedAccountNoAddrGen
-	}
-
-	// Copy the semantic selector into the admitted request. The Store resolves
-	// it inside the write transaction, including the receiving-policy guard.
-	params := db.NewDerivedAddressParams{
-		WalletID:         w.id,
-		Scope:            db.KeyScope(selector.keyScope),
-		AccountNumber:    (*uint32)(selector.accountNumber),
-		Change:           internal,
-		RequireChainSync: true,
-	}
-	if selector.accountName != nil {
-		params.AccountName = *selector.accountName
 	}
 
 	r := newBulkAddressesReq{
 		reqCtx:   reqCtx{ctx: ctx},
-		params:   params,
+		params:   w.newDerivedAddressParams(selector, internal),
 		count:    count,
 		respChan: make(chan bulkAddressesResp, 1),
 	}
@@ -925,12 +937,37 @@ func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
 // handleNewBulkAddresses commits a batch before registering its destinations.
 // Only the Wallet lifetime can cancel registration of already committed rows.
 func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
-	stored, err := w.store.NewDerivedAddresses(r.ctx, r.params, r.count)
+	stored, err := w.allocateDerivedAddresses(r.ctx, r.params, r.count)
 	if err != nil {
-		r.respChan <- bulkAddressesResp{err: bulkAddressErr(err)}
+		r.respChan <- bulkAddressesResp{err: err}
 
 		return
 	}
+
+	batch, err := w.deliverStoreAddresses(r.ctx, stored)
+	r.respChan <- bulkAddressesResp{addresses: batch, err: err}
+}
+
+// allocateDerivedAddresses allocates count fresh SQL children and exposes
+// wallet-owned error identities.
+func (w *Wallet) allocateDerivedAddresses(ctx context.Context,
+	params db.NewDerivedAddressParams, count uint32) ([]db.AddressInfo,
+	error) {
+
+	stored, err := w.store.NewDerivedAddresses(ctx, params, count)
+	if err != nil {
+		return nil, bulkAddressErr(err)
+	}
+
+	return stored, nil
+}
+
+// deliverStoreAddresses converts committed addresses to public metadata and
+// registers them from the chain tip before the caller may observe them. Only
+// the Wallet lifetime can cancel registration; caller cancellation is checked
+// afterwards so committed destinations are never left half-registered.
+func (w *Wallet) deliverStoreAddresses(ctx context.Context,
+	stored []db.AddressInfo) ([]AddressInfo, error) {
 
 	// Reuse the public metadata conversion, including imported-xpub semantics.
 	batch := make([]AddressInfo, 0, len(stored))
@@ -939,30 +976,25 @@ func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
 	for i := range stored {
 		info, err := addressInfoFromStoreAddress(&stored[i], w.cfg.ChainParams)
 		if err != nil {
-			r.respChan <- bulkAddressesResp{err: err}
-
-			return
+			return nil, err
 		}
 
 		batch = append(batch, info)
 		addrs = append(addrs, info.Addr)
 	}
 
-	err = w.cfg.Chain.WatchAddrsFromTip(w.lifetimeCtx, addrs)
+	//nolint:contextcheck // Only the Wallet lifetime may cancel registration.
+	err := w.cfg.Chain.WatchAddrsFromTip(w.lifetimeCtx, addrs)
 	if err != nil {
-		r.respChan <- bulkAddressesResp{err: err}
-
-		return
+		return nil, err
 	}
 
-	err = r.ctx.Err()
+	err = ctx.Err()
 	if err != nil {
-		r.respChan <- bulkAddressesResp{err: err}
-
-		return
+		return nil, err
 	}
 
-	r.respChan <- bulkAddressesResp{addresses: batch}
+	return batch, nil
 }
 
 // bulkAddressErr exposes wallet-owned allocation identities. Ambiguity wins
