@@ -766,9 +766,6 @@ func (w *Wallet) handleReq(req any) {
 	case newAddressReq:
 		w.handleNewAddress(r)
 
-	case getUnusedAddressReq:
-		w.handleGetUnusedAddress(r)
-
 	case getAddressInfoReq:
 		w.handleGetAddressInfo(r)
 
