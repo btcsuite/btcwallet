@@ -666,15 +666,15 @@ func (w *Wallet) NewAddress(ctx context.Context, selector AccountSelector,
 		return AddressInfo{}, fmt.Errorf("%w: %w", ErrInvalidParam, err)
 	}
 
+	// The reserved import bucket holds raw addresses, not an account xpub.
+	// Reject it with the other input checks, as bulk allocation does.
+	if isImportedAddrAccountSelector(selector) {
+		return AddressInfo{}, ErrImportedAccountNoAddrGen
+	}
+
 	err = w.state.validateStarted()
 	if err != nil {
 		return AddressInfo{}, err
-	}
-
-	// The reserved import bucket holds raw addresses, not an account xpub.
-	// Reject it before admission, as bulk allocation does.
-	if isImportedAddrAccountSelector(selector) {
-		return AddressInfo{}, ErrImportedAccountNoAddrGen
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
@@ -849,15 +849,15 @@ func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
 		return nil, fmt.Errorf("%w: %w", ErrInvalidParam, err)
 	}
 
+	// The reserved import bucket holds raw addresses, not an account xpub.
+	// Reject it with the other input checks, as NewAddress does.
+	if isImportedAddrAccountSelector(selector) {
+		return nil, ErrImportedAccountNoAddrGen
+	}
+
 	err = w.state.validateStarted()
 	if err != nil {
 		return nil, err
-	}
-
-	// The reserved import bucket holds raw addresses, not an account xpub.
-	// Reject it before admission, as NewAddress does.
-	if isImportedAddrAccountSelector(selector) {
-		return nil, ErrImportedAccountNoAddrGen
 	}
 
 	r := newBulkAddressesReq{
