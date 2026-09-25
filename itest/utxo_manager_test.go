@@ -202,13 +202,14 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 
 	h.FundWallet(w, oneBTC)
 
-	addr, err := w.NewAddress(
-		h.Context(), waddrmgr.DefaultAccountName,
-		waddrmgr.WitnessPubKey, false,
+	info, err := w.NewAddress(
+		h.Context(), wallet.NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
+		), false,
 	)
 	require.NoError(h, err, "failed to create address")
 
-	pkScript, err := txscript.PayToAddrScript(addr)
+	pkScript, err := txscript.PayToAddrScript(info.Addr)
 	require.NoError(h, err, "failed to create pkscript")
 
 	output := &wire.TxOut{Value: int64(oneBTC), PkScript: pkScript}

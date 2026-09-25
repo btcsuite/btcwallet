@@ -220,27 +220,14 @@ type AddressManager interface {
 	NewBulkAddresses(ctx context.Context, selector AccountSelector,
 		internal bool, count uint32) ([]AddressInfo, error)
 
-	// NewAddress returns a new address for the given account and address
-	// type. NoChainSync accounts return ErrAccountOperationUnsupported
-	// because receiving requires automatic chain tracking.
-	//
-	// NOTE: This method should be used with caution. Unlike
-	// GetUnusedAddress, it does not scan for previously derived but unused
-	// addresses. Using this method repeatedly can create gaps in the
-	// address chain, which may negatively impact wallet recovery under
-	// BIP44. It is primarily intended for advanced use cases such as bulk
-	// address generation.
-	NewAddress(ctx context.Context, accountName string,
-		addrType waddrmgr.AddressType,
-		change bool) (address.Address, error)
-
-	// GetUnusedAddress returns the oldest address not recorded as used by
-	// the wallet, or allocates one if none remains. NoChainSync accounts
-	// return ErrAccountOperationUnsupported because their address use is not
-	// tracked automatically.
-	GetUnusedAddress(ctx context.Context, accountName string,
-		addrType waddrmgr.AddressType, change bool) (
-		address.Address, error)
+	// NewAddress returns a receiving address for the selected account and
+	// branch (internal when true). SQL wallets return the oldest unused
+	// child, allocating exactly one only when none exists, and register it
+	// before returning. Kvdb allocates the next child on every call.
+	// NoChainSync accounts return ErrAccountOperationUnsupported. Use
+	// NewBulkAddresses for deliberate fresh allocation.
+	NewAddress(ctx context.Context, selector AccountSelector,
+		internal bool) (AddressInfo, error)
 
 	// GetAddressInfo returns detailed information about a managed address. If
 	// the address is not known to the wallet, the returned error wraps
@@ -566,30 +553,14 @@ type bulkAddressesResp struct {
 	err       error
 }
 
-// newAddressReq retains value parameters until derivation and notification end.
+// newAddressReq keeps selection, fallback allocation, and registration in one
+// admission.
 type newAddressReq struct {
 	reqCtx
 
-	accountName string
-	addrType    waddrmgr.AddressType
-	change      bool
-	respChan    chan addressResp
-}
-
-// getUnusedAddressReq keeps lookup and fallback derivation in one admission.
-type getUnusedAddressReq struct {
-	reqCtx
-
-	accountName string
-	addrType    waddrmgr.AddressType
-	change      bool
-	respChan    chan addressResp
-}
-
-// addressResp carries either address acquisition result to a buffered receiver.
-type addressResp struct {
-	addr address.Address
-	err  error
+	selector AccountSelector
+	internal bool
+	respChan chan addressInfoResp
 }
 
 // getAddressInfoReq borrows the destination until the accepted lookup ends.
@@ -666,90 +637,63 @@ type derivationInfoResp struct {
 	err  error
 }
 
-// NewAddress returns a new address for the given account and address type.
-// This method is a low-level primitive that will always derive a new, unused
-// address from the end of the address chain.
-// NoChainSync accounts return ErrAccountOperationUnsupported before allocation
-// because receiving requires automatic chain tracking.
+// NewAddress returns a receiving address for the selected account and branch.
+// Internal selects the change branch. The address type always comes from the
+// stored account schema.
 //
-// It returns the next external or internal address for the wallet dictated by
-// the value of the `change` parameter. If change is true, then an internal
-// address will be returned, otherwise an external address should be returned.
-// The account parameter is the name of the account from which the address
-// should be generated. The addrType parameter specifies the type of address to
-// be generated.
+// SQL wallets return the unused child with the lowest derivation index on the
+// selected branch, so repeated calls reuse the same address until the wallet
+// records it as used. Only when the branch has no unused child is exactly one
+// fresh child allocated, using the same atomic path as NewBulkAddresses. The
+// selected address is registered from the chain tip before it is returned;
+// Neutrino keeps its existing history behavior. Once admitted, registration
+// completes even if the caller cancels, and every error returns a zero
+// AddressInfo. A failed or canceled delivery leaves the committed child
+// unused, so a later call selects it again instead of allocating another.
+// ErrIndeterminateCommit never implies that a child is reusable.
 //
-// NOTE: This method should be used with caution. Unlike GetUnusedAddress, it
-// does not scan for previously derived but unused addresses. Using this method
-// repeatedly can create gaps in the address chain. If a gap of 20 consecutive
-// unused addresses is created, wallet recovery from seed may fail under BIP44.
-// It is primarily intended for advanced use cases such as bulk address
-// generation. For most applications, GetUnusedAddress is the recommended
-// method for obtaining a receiving address.
+// Kvdb wallets allocate and notify the next child on every call.
 //
-// TODO(yy): The current implementation of NewAddress has several architectural
-// issues that should be addressed:
-//
-//  1. **Lack of Separation of Concerns:** The method tightly couples the
-//     database logic with the address generation and chain backend
-//     notification logic. The `waddrmgr` package currently handles both
-//     derivation and persistence within a single database transaction, which
-//     makes the transaction larger and longer than necessary.
-//
-// 2. **Incorrect Ordering of Operations:** The current flow is:
-//  1. Create DB transaction.
-//  2. Derive address.
-//  3. Save address to DB.
-//  4. Commit DB transaction.
-//  5. Notify the chain backend to watch the new address.
-//     This creates a potential race condition. If the program crashes after
-//     committing the address to the database but before successfully
-//     notifying the chain backend, the wallet will own an address that the
-//     backend is not aware of. This could lead to a permanent loss of funds
-//     if coins are sent to that address.
-//
-// Refactoring Plan:
-//   - **Decouple `waddrmgr`:** The `waddrmgr` package should be refactored to
-//     separate its concerns. It should provide:
-//   - A pure, stateless function to derive an address from account info.
-//   - A simple method to persist a newly derived address to the database.
-//   - **Improve Operation Ordering in `wallet`:** The `NewAddress` method in
-//     the `wallet` package should be updated to follow a more robust
-//     sequence:
-//     1. Start a DB transaction to read the required account information.
-//     2. Use the pure derivation function from `waddrmgr` to generate the
-//     new address *outside* of any DB transaction.
-//     3. Notify the chain backend to watch the new address.
-//     4. If the notification is successful, start a *second*, short-lived DB
-//     transaction to persist the new address.
-//     This ensures that we only save an address after we are confident that
-//     it is being watched by the backend, preventing fund loss.
-func (w *Wallet) NewAddress(ctx context.Context, accountName string,
-	addrType waddrmgr.AddressType, change bool) (address.Address, error) {
+// NoChainSync accounts return ErrAccountOperationUnsupported before any
+// address is selected, allocated, or registered, because their address use is
+// not tracked automatically. Callers that deliberately need fresh addresses
+// should use NewBulkAddresses; large unused gaps can hinder seed recovery.
+func (w *Wallet) NewAddress(ctx context.Context, selector AccountSelector,
+	internal bool) (AddressInfo, error) {
 
-	err := w.state.validateStarted()
+	err := selector.validate()
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, fmt.Errorf("%w: %w", ErrInvalidParam, err)
+	}
+
+	// The reserved import bucket holds raw addresses, not an account xpub.
+	// Reject it with the other input checks, as bulk allocation does.
+	if isImportedAddrAccountSelector(selector) {
+		return AddressInfo{}, ErrImportedAccountNoAddrGen
+	}
+
+	err = w.state.validateStarted()
+	if err != nil {
+		return AddressInfo{}, err
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
 	r := newAddressReq{
-		reqCtx:      reqCtx{ctx: ctx},
-		accountName: accountName,
-		addrType:    addrType,
-		change:      change,
-		respChan:    make(chan addressResp, 1),
+		reqCtx:   reqCtx{ctx: ctx},
+		selector: selector,
+		internal: internal,
+		respChan: make(chan addressInfoResp, 1),
 	}
 
 	err = w.sendReq(ctx, r)
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
 	// Once admitted, wait for the result even if cancellation arrives.
 	result := <-r.respChan
 
-	return result.addr, result.err
+	return result.info, result.err
 }
 
 // AllocateNextKey creates and persists the next child key and returns its
@@ -856,6 +800,33 @@ func (w *Wallet) handleAllocateNextKey(r allocateNextKeyReq) {
 	r.respChan <- allocateNextKeyResp{key: key}
 }
 
+// isImportedAddrAccountSelector reports whether the selector names the reserved
+// raw-import bucket, which has no account key to derive addresses from.
+func isImportedAddrAccountSelector(selector AccountSelector) bool {
+	return selector.accountName != nil &&
+		*selector.accountName == waddrmgr.ImportedAddrAccountName
+}
+
+// newDerivedAddressParams copies a validated semantic selector into Store
+// allocation parameters. The Store resolves it inside the write transaction,
+// including the receiving-policy guard.
+func (w *Wallet) newDerivedAddressParams(selector AccountSelector,
+	internal bool) db.NewDerivedAddressParams {
+
+	params := db.NewDerivedAddressParams{
+		WalletID:         w.id,
+		Scope:            db.KeyScope(selector.keyScope),
+		AccountNumber:    (*uint32)(selector.accountNumber),
+		Change:           internal,
+		RequireChainSync: true,
+	}
+	if selector.accountName != nil {
+		params.AccountName = *selector.accountName
+	}
+
+	return params
+}
+
 // NewBulkAddresses force-allocates fresh addresses instead of reusing unused
 // children. Large unused gaps can hinder seed recovery. Count must be 1..100;
 // internal selects the change branch. SQL commits atomically, then registers
@@ -878,35 +849,20 @@ func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
 		return nil, fmt.Errorf("%w: %w", ErrInvalidParam, err)
 	}
 
+	// The reserved import bucket holds raw addresses, not an account xpub.
+	// Reject it with the other input checks, as NewAddress does.
+	if isImportedAddrAccountSelector(selector) {
+		return nil, ErrImportedAccountNoAddrGen
+	}
+
 	err = w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	// The reserved import bucket holds raw addresses, not an account xpub.
-	// Reject it before admission, as the single-address methods do.
-	if selector.accountName != nil &&
-		*selector.accountName == waddrmgr.ImportedAddrAccountName {
-
-		return nil, ErrImportedAccountNoAddrGen
-	}
-
-	// Copy the semantic selector into the admitted request. The Store resolves
-	// it inside the write transaction, including the receiving-policy guard.
-	params := db.NewDerivedAddressParams{
-		WalletID:         w.id,
-		Scope:            db.KeyScope(selector.keyScope),
-		AccountNumber:    (*uint32)(selector.accountNumber),
-		Change:           internal,
-		RequireChainSync: true,
-	}
-	if selector.accountName != nil {
-		params.AccountName = *selector.accountName
-	}
-
 	r := newBulkAddressesReq{
 		reqCtx:   reqCtx{ctx: ctx},
-		params:   params,
+		params:   w.newDerivedAddressParams(selector, internal),
 		count:    count,
 		respChan: make(chan bulkAddressesResp, 1),
 	}
@@ -925,12 +881,44 @@ func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
 // handleNewBulkAddresses commits a batch before registering its destinations.
 // Only the Wallet lifetime can cancel registration of already committed rows.
 func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
-	stored, err := w.store.NewDerivedAddresses(r.ctx, r.params, r.count)
+	// Serialize with NewAddress so its oldest-unused selection never races
+	// a concurrent allocation on the same wallet. Registration runs unlocked.
+	w.addrMu.Lock()
+	stored, err := w.allocateDerivedAddresses(r.ctx, r.params, r.count)
+	w.addrMu.Unlock()
+
 	if err != nil {
-		r.respChan <- bulkAddressesResp{err: bulkAddressErr(err)}
+		r.respChan <- bulkAddressesResp{err: err}
 
 		return
 	}
+
+	batch, err := w.deliverStoreAddresses(r.ctx, stored)
+	r.respChan <- bulkAddressesResp{addresses: batch, err: err}
+}
+
+// allocateDerivedAddresses allocates count fresh SQL children and exposes
+// wallet-owned error identities.
+//
+// NOTE: The caller must hold addrMu.
+func (w *Wallet) allocateDerivedAddresses(ctx context.Context,
+	params db.NewDerivedAddressParams, count uint32) ([]db.AddressInfo,
+	error) {
+
+	stored, err := w.store.NewDerivedAddresses(ctx, params, count)
+	if err != nil {
+		return nil, bulkAddressErr(err)
+	}
+
+	return stored, nil
+}
+
+// deliverStoreAddresses converts committed addresses to public metadata and
+// registers them from the chain tip before the caller may observe them. Only
+// the Wallet lifetime can cancel registration; caller cancellation is checked
+// afterwards so committed destinations are never left half-registered.
+func (w *Wallet) deliverStoreAddresses(ctx context.Context,
+	stored []db.AddressInfo) ([]AddressInfo, error) {
 
 	// Reuse the public metadata conversion, including imported-xpub semantics.
 	batch := make([]AddressInfo, 0, len(stored))
@@ -939,30 +927,25 @@ func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
 	for i := range stored {
 		info, err := addressInfoFromStoreAddress(&stored[i], w.cfg.ChainParams)
 		if err != nil {
-			r.respChan <- bulkAddressesResp{err: err}
-
-			return
+			return nil, err
 		}
 
 		batch = append(batch, info)
 		addrs = append(addrs, info.Addr)
 	}
 
-	err = w.cfg.Chain.WatchAddrsFromTip(w.lifetimeCtx, addrs)
+	//nolint:contextcheck // Only the Wallet lifetime may cancel registration.
+	err := w.cfg.Chain.WatchAddrsFromTip(w.lifetimeCtx, addrs)
 	if err != nil {
-		r.respChan <- bulkAddressesResp{err: err}
-
-		return
+		return nil, err
 	}
 
-	err = r.ctx.Err()
+	err = ctx.Err()
 	if err != nil {
-		r.respChan <- bulkAddressesResp{err: err}
-
-		return
+		return nil, err
 	}
 
-	r.respChan <- bulkAddressesResp{addresses: batch}
+	return batch, nil
 }
 
 // bulkAddressErr exposes wallet-owned allocation identities. Ambiguity wins
@@ -984,244 +967,205 @@ func bulkAddressErr(err error) error {
 
 // handleNewAddress delivers the result of an accepted component request.
 func (w *Wallet) handleNewAddress(r newAddressReq) {
-	// Reuse address derivation shared with the unused-address fallback.
-	addr, err := w.newAddress(
-		r.ctx, r.accountName, r.addrType, r.change,
-	)
-	r.respChan <- addressResp{addr: addr, err: err}
+	info, err := w.newAddress(r.ctx, r.selector, r.internal)
+	r.respChan <- addressInfoResp{info: info, err: err}
 }
 
-// newAddress derives and registers an address inside its accepted request.
-func (w *Wallet) newAddress(ctx context.Context, accountName string,
-	addrType waddrmgr.AddressType, change bool) (address.Address, error) {
+// newAddress resolves the receiving account, then selects or allocates one
+// address through the backend-specific path inside its accepted request.
+func (w *Wallet) newAddress(ctx context.Context, selector AccountSelector,
+	internal bool) (AddressInfo, error) {
 
-	// Addresses cannot be derived from the catch-all imported accounts.
-	if accountName == waddrmgr.ImportedAddrAccountName {
-		return nil, ErrImportedAccountNoAddrGen
-	}
-
-	keyScope, err := addrType.KeyScope()
+	// A ready receiver must not start dependency work for a canceled caller.
+	err := ctx.Err()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
+		return AddressInfo{}, err
 	}
+
+	accountName, err := w.receivingAccountName(ctx, selector)
+	if err != nil {
+		return AddressInfo{}, err
+	}
+
+	if w.usesKVDBStore() {
+		return w.newKVDBAddress(ctx, selector, accountName, internal)
+	}
+
+	stored, err := w.oldestUnusedOrNewAddress(
+		ctx, selector, accountName, internal,
+	)
+	if err != nil {
+		return AddressInfo{}, err
+	}
+
+	delivered, err := w.deliverStoreAddresses(ctx, []db.AddressInfo{stored})
+	if err != nil {
+		return AddressInfo{}, err
+	}
+
+	return delivered[0], nil
+}
+
+// receivingAccountName resolves the selector to its account name and enforces
+// the receiving policy before any address is read, allocated, or watched.
+func (w *Wallet) receivingAccountName(ctx context.Context,
+	selector AccountSelector) (string, error) {
+
+	query := db.GetAccountQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(selector.keyScope),
+		Name:          selector.accountName,
+		AccountNumber: (*uint32)(selector.accountNumber),
+		SkipBalance:   true,
+	}
+
+	account, err := w.cache.GetAccount(ctx, query)
+	if err != nil {
+		// A missing scope also means the requested account is absent.
+		var publicErr error
+		if isAccountMissing(err) {
+			publicErr = ErrAccountNotFound
+		}
+
+		return "", publicAccountErr(err, publicErr)
+	}
+
+	// A numbered selector may still resolve to the raw-import bucket.
+	if account.AccountName == waddrmgr.ImportedAddrAccountName {
+		return "", ErrImportedAccountNoAddrGen
+	}
+
+	if account.NoChainSync {
+		return "", fmt.Errorf("%w: account %q has chain "+
+			"synchronization disabled", ErrAccountOperationUnsupported,
+			account.AccountName)
+	}
+
+	return account.AccountName, nil
+}
+
+// oldestUnusedOrNewAddress returns the unused SQL child with the lowest index
+// on the selected branch, or allocates exactly one when none exists. It owns
+// addrMu for the whole selection so concurrent callers on an empty branch
+// observe one allocation and return the same child.
+func (w *Wallet) oldestUnusedOrNewAddress(ctx context.Context,
+	selector AccountSelector, accountName string,
+	internal bool) (db.AddressInfo, error) {
+
+	w.addrMu.Lock()
+	defer w.addrMu.Unlock()
+
+	// Waiting for the lock may outlast the caller; do no work for it then.
+	err := ctx.Err()
+	if err != nil {
+		return db.AddressInfo{}, err
+	}
+
+	oldest, found, err := w.oldestUnusedAddressLocked(
+		ctx, selector.keyScope, accountName, internal,
+	)
+	if err != nil {
+		return db.AddressInfo{}, err
+	}
+
+	if found {
+		return oldest, nil
+	}
+
+	// Keep the original selector so the Store resolves the same account the
+	// public batch API would, including numbered selectors.
+	stored, err := w.allocateDerivedAddresses(
+		ctx, w.newDerivedAddressParams(selector, internal), 1,
+	)
+	if err != nil {
+		return db.AddressInfo{}, err
+	}
+
+	return stored[0], nil
+}
+
+// oldestUnusedAddressLocked scans every stored address of the account and
+// returns the unused derived child with the lowest index on the requested
+// branch. Iteration follows row IDs rather than child indexes, so all pages
+// are inspected.
+//
+// NOTE: The caller must hold addrMu.
+func (w *Wallet) oldestUnusedAddressLocked(ctx context.Context,
+	scope waddrmgr.KeyScope, accountName string,
+	internal bool) (db.AddressInfo, bool, error) {
+
+	req, err := addressPageRequest()
+	if err != nil {
+		return db.AddressInfo{}, false, err
+	}
+
+	dbScope := db.KeyScope(scope)
+	addresses := w.store.IterAddresses(ctx, db.ListAddressesQuery{
+		WalletID:    w.id,
+		AccountName: &accountName,
+		Scope:       &dbScope,
+		Page:        req,
+	})
+
+	var (
+		oldest db.AddressInfo
+		found  bool
+	)
+
+	for storeAddr, err := range addresses {
+		if err != nil {
+			return db.AddressInfo{}, false, err
+		}
+
+		if !storeAddr.HasDerivationPath || storeAddr.IsUsed ||
+			(storeAddr.Branch == 1) != internal {
+
+			continue
+		}
+
+		if found && storeAddr.Index >= oldest.Index {
+			continue
+		}
+
+		oldest = storeAddr
+		found = true
+	}
+
+	return oldest, found, nil
+}
+
+// newKVDBAddress allocates and notifies the next kvdb child. Kvdb has no batch
+// allocator or address-use tracking to reuse, so it always moves forward.
+func (w *Wallet) newKVDBAddress(ctx context.Context, selector AccountSelector,
+	accountName string, internal bool) (AddressInfo, error) {
 
 	// Require receiving admission during the allocation's existing account
-	// read, so excluded accounts consume no child and need no extra lookup.
-	addrInfo, err := w.store.NewDerivedAddress(
+	// read, so excluded accounts consume no child.
+	storeAddr, err := w.store.NewDerivedAddress(
 		ctx, db.NewDerivedAddressParams{
 			WalletID:         w.id,
 			AccountName:      accountName,
-			Scope:            db.KeyScope(keyScope),
-			Change:           change,
+			Scope:            db.KeyScope(selector.keyScope),
+			Change:           internal,
 			RequireChainSync: true,
 		},
 	)
 	if err != nil {
-		// Keep the Store identity internal while exposing the established
-		// public unsupported-operation error with the refusal diagnostic.
-		if errors.Is(err, db.ErrAccountOperationUnsupported) {
-			return nil, fmt.Errorf(
-				"%w: %s", ErrAccountOperationUnsupported, err.Error(),
-			)
-		}
-
-		return nil, err
+		return AddressInfo{}, bulkAddressErr(err)
 	}
 
-	addr := extractAddrFromPKScript(addrInfo.ScriptPubKey, w.cfg.ChainParams)
-	if addr == nil {
-		return nil, fmt.Errorf("%w: from pkscript %x",
-			ErrUnableToExtractAddress, addrInfo.ScriptPubKey)
+	info, err := addressInfoFromStoreAddress(storeAddr, w.cfg.ChainParams)
+	if err != nil {
+		return AddressInfo{}, err
 	}
 
 	// Notify the rpc server about the newly created address.
-	err = w.cfg.Chain.NotifyReceived([]address.Address{addr})
+	err = w.cfg.Chain.NotifyReceived([]address.Address{info.Addr})
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
-	return addr, nil
-}
-
-// GetUnusedAddress returns the first, oldest, unused address by scanning
-// forward from the start of the derivation path. The address is considered
-// "unused" if the wallet has not recorded it as used. For accounts that track
-// address use, this is the recommended default for obtaining a receiving
-// address: it avoids reuse and gaps in the address chain, supporting recovery
-// under standards like BIP44 that enforce a gap limit of 20 unused addresses.
-// If all previously derived addresses have been used, this method delegates
-// to NewAddress to generate a new one.
-// NoChainSync accounts return ErrAccountOperationUnsupported because their
-// address use is not tracked automatically. Rejection does not allocate a child
-// or register a chain watch.
-//
-// TODO(yy): The current implementation of GetUnusedAddress is inefficient for
-// wallets with a large number of used addresses. It iterates from the first
-// address (index 0) forward until it finds an unused one, resulting in an O(n)
-// complexity where n is the number of used addresses.
-//
-// A potential optimization of scanning backwards from the last derived address
-// is UNSAFE. While faster in the common case, it can create gaps in the
-// address chain. For example, if addresses [0, 1, 3] are used but [2] is not,
-// a backward scan would return a new address after 3, leaving 2 as a gap.
-// This violates the BIP44 gap limit (typically 20) and can lead to fund loss
-// upon wallet recovery from seed, as the recovery process would stop scanning
-// at the gap.
-//
-// The correct optimization is to persist a "first unused address pointer"
-// (e.g., `firstUnusedExternalIndex`) for each account in the database.
-//
-// This would change the logic to:
-//  1. `GetUnusedAddress`: Becomes an O(1) lookup. It reads the index from the
-//     database and derives the address at that index.
-//  2. `MarkUsed`: When an address is marked as used, if its index matches the
-//     stored pointer, a one-time forward scan is performed to find the next
-//     unused address, and the pointer is updated in the database.
-//
-// This moves the expensive scan from the frequent "read" operation to the less
-// frequent "write" operation, providing both performance and safety.
-func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
-	addrType waddrmgr.AddressType, change bool) (address.Address, error) {
-
-	err := w.state.validateStarted()
-	if err != nil {
-		return nil, err
-	}
-
-	// Admission keeps dependency access joined through concurrent Stop.
-	r := getUnusedAddressReq{
-		reqCtx:      reqCtx{ctx: ctx},
-		accountName: accountName,
-		addrType:    addrType,
-		change:      change,
-		respChan:    make(chan addressResp, 1),
-	}
-
-	err = w.sendReq(ctx, r)
-	if err != nil {
-		return nil, err
-	}
-
-	// Once admitted, wait for the result even if cancellation arrives.
-	result := <-r.respChan
-
-	return result.addr, result.err
-}
-
-// handleGetUnusedAddress reuses or derives an address without a second
-// admission.
-// The admitted caller waits for this result before reusing its inputs.
-func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
-	if r.accountName == waddrmgr.ImportedAddrAccountName {
-		r.respChan <- addressResp{err: ErrImportedAccountNoAddrGen}
-
-		return
-	}
-
-	keyScope, err := r.addrType.KeyScope()
-	if err != nil {
-		r.respChan <- addressResp{
-			err: fmt.Errorf("%w: %v", ErrUnknownAddrType, r.addrType),
-		}
-
-		return
-	}
-
-	req, err := addressPageRequest()
-	if err != nil {
-		r.respChan <- addressResp{err: err}
-
-		return
-	}
-
-	addresses := w.store.IterAddresses(
-		r.ctx, db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: &r.accountName,
-			Scope:       (*db.KeyScope)(&keyScope),
-			Page:        req,
-		},
-	)
-	for storeAddr, err := range addresses {
-		if err != nil {
-			r.respChan <- addressResp{err: err}
-
-			return
-		}
-
-		// Read the policy from the existing account join before treating a
-		// locally unused child as a receiving address.
-		if storeAddr.NoChainSync {
-			r.respChan <- addressResp{
-				err: fmt.Errorf("%w: account %q has chain "+
-					"synchronization disabled",
-					ErrAccountOperationUnsupported, r.accountName),
-			}
-
-			return
-		}
-
-		unusedAddr, ok, err := nextUnusedStoreAddress(
-			storeAddr, r.change, w.cfg.ChainParams,
-		)
-		if err != nil {
-			r.respChan <- addressResp{err: err}
-
-			return
-		}
-
-		if !ok {
-			continue
-		}
-
-		// A scan may have just stored this child. Register it before
-		// returning, even if the scan's registration is still pending.
-		err = w.cfg.Chain.WatchAddrsFromTip(
-			context.WithoutCancel(r.ctx), []address.Address{unusedAddr},
-		)
-		if err != nil {
-			r.respChan <- addressResp{err: err}
-
-			return
-		}
-
-		r.respChan <- addressResp{addr: unusedAddr}
-
-		return
-	}
-
-	// Otherwise, we'll generate a new one.
-	responseAddr, responseErr := w.newAddress(
-		r.ctx, r.accountName, r.addrType, r.change,
-	)
-	r.respChan <- addressResp{addr: responseAddr, err: responseErr}
-}
-
-// nextUnusedStoreAddress returns the unused address candidate represented by a
-// store record, if it matches the requested branch and is not already used.
-func nextUnusedStoreAddress(storeAddr db.AddressInfo,
-	change bool,
-	chainParams *chaincfg.Params) (address.Address, bool, error) {
-
-	if !storeAddr.HasDerivationPath {
-		return nil, false, nil
-	}
-
-	if (storeAddr.Branch == 1) != change {
-		return nil, false, nil
-	}
-
-	if storeAddr.IsUsed {
-		return nil, false, nil
-	}
-
-	addr := extractAddrFromPKScript(storeAddr.ScriptPubKey, chainParams)
-	if addr == nil {
-		return nil, false, fmt.Errorf("%w: from pkscript %x",
-			ErrUnableToExtractAddress, storeAddr.ScriptPubKey)
-	}
-
-	return addr, true, nil
+	return info, nil
 }
 
 // GetAddressInfo returns detailed information regarding a wallet address. If

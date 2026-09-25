@@ -205,13 +205,14 @@ func BenchmarkGetAddressInfoAPI(b *testing.B) {
 	}
 }
 
-// BenchmarkGetUnusedAddressAPI benchmarks GetUnusedAddress API and its
-// deprecated variant NewAddressDeprecated using same key scope and identical
-// address datasets across multiple dataset sizes. Test names start with dataset
+// BenchmarkNewAddressUsedRotationAPI benchmarks NewAddress, marking each
+// returned address used so the next call must rotate, against its deprecated
+// variant NewAddressDeprecated using same key scope and identical address
+// datasets across multiple dataset sizes. Test names start with dataset
 // size to group API comparisons for benchstat analysis. The benchmark
 // demonstrates the trade-off between performance (O(1) vs O(n)) and safety
 // (preventing address reuse and BIP44 gap limit violations).
-func BenchmarkGetUnusedAddressAPI(b *testing.B) {
+func BenchmarkNewAddressUsedRotationAPI(b *testing.B) {
 	const (
 		// startGrowthIteration is the starting iteration index for the
 		// growth sequence.
@@ -247,8 +248,6 @@ func BenchmarkGetUnusedAddressAPI(b *testing.B) {
 		)
 
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
-
-		addrType = waddrmgr.PubKeyHash
 	)
 
 	for i := 0; i <= maxGrowthIteration; i++ {
@@ -299,15 +298,16 @@ func BenchmarkGetUnusedAddressAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				addr, err := bw.GetUnusedAddress(
-					b.Context(), accountName, addrType,
-					false,
+				info, err := bw.NewAddress(
+					b.Context(), NewAccountSelectorByName(
+						scopes[0], accountName,
+					), false,
 				)
 				require.NoError(b, err)
 
 				// Mark the address as used to make the
 				// benchmark iteration idempotent.
-				markAddressAsUsed(b, bw.Wallet, addr)
+				markAddressAsUsed(b, bw.Wallet, info.Addr)
 			}
 		})
 	}
@@ -354,8 +354,6 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 		)
 
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
-
-		addrType = waddrmgr.PubKeyHash
 	)
 
 	for i := 0; i <= maxGrowthIteration; i++ {
@@ -403,8 +401,9 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := w.NewAddress(
-					b.Context(), accountName, addrType,
-					false,
+					b.Context(), NewAccountSelectorByName(
+						scopes[0], accountName,
+					), false,
 				)
 				require.NoError(b, err)
 			}

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
@@ -260,7 +261,6 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	m := testSQLiteManager(t)
 	chainMock, ok := m.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
-	chainMock.On("NotifyReceived", mock.Anything).Return(nil).Once()
 
 	params := sqliteCreateParams(t)
 	original, err := m.Create(params)
@@ -291,14 +291,19 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	addr, err := w.NewAddress(
-		t.Context(), waddrmgr.DefaultAccountName,
-		waddrmgr.WitnessPubKey, false,
+	info, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
+		), false,
 	)
 
-	// Assert: The public derivation succeeds and its required notification
+	// Assert: The public derivation succeeds and its required registration
 	// proves the loaded Wallet received the Manager-owned chain source.
 	require.NotSame(t, original, w)
 	require.NoError(t, err, "NewAddress requires the installed deriver")
-	require.NotNil(t, addr)
+	require.NotNil(t, info.Addr)
+	chainMock.AssertCalled(
+		t, "WatchAddrsFromTip", w.lifetimeCtx,
+		[]address.Address{info.Addr},
+	)
 }

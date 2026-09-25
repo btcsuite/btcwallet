@@ -599,12 +599,41 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 			addrType)
 	}
 
-	newChangeScript := func() ([]byte, error) {
+	return &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript: w.newChangeScriptFunc(
+			ctx, changeAccount.KeyScope, derivationAccount,
+		),
+	}, nil
+}
+
+// newChangeScriptFunc returns the callback that allocates one fresh internal
+// child of the derivation account each time the author needs change. SQL
+// change is never a reusable receiving address: it is allocated by the batch
+// path and watched before its script is returned. Kvdb keeps its existing
+// single-address allocator.
+func (w *Wallet) newChangeScriptFunc(ctx context.Context,
+	scope waddrmgr.KeyScope, derivationAccount string) func() ([]byte, error) {
+
+	if !w.usesKVDBStore() {
+		selector := NewAccountSelectorByName(scope, derivationAccount)
+
+		return func() ([]byte, error) {
+			batch, err := w.NewBulkAddresses(ctx, selector, true, 1)
+			if err != nil {
+				return nil, err
+			}
+
+			return txscript.PayToAddrScript(batch[0].Addr)
+		}
+	}
+
+	return func() ([]byte, error) {
 		addrInfo, err := w.store.NewDerivedAddress(
 			ctx, db.NewDerivedAddressParams{
 				WalletID:    w.id,
 				AccountName: derivationAccount,
-				Scope:       db.KeyScope(changeAccount.KeyScope),
+				Scope:       db.KeyScope(scope),
 				Change:      true,
 			},
 		)
@@ -614,11 +643,6 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 
 		return addrInfo.ScriptPubKey, nil
 	}
-
-	return &txauthor.ChangeSource{
-		ScriptSize: scriptSize,
-		NewScript:  newChangeScript,
-	}, nil
 }
 
 // normalizeAndValidateTxIntent applies the default input policy and validates
