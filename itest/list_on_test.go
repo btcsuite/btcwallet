@@ -15,6 +15,21 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
+	// Batch delivery must expose complete, durable public address results.
+	{
+		Name:     "address manager allocate batch",
+		TestFunc: testAddressManagerAllocateBatch,
+	},
+	// Invalid counts and excluded accounts must expose no partial mutation.
+	{
+		Name:     "address manager reject sql batch",
+		TestFunc: testAddressManagerRejectSQLBatch,
+	},
+	// Kvdb rejects batches without consuming its count-one allocation cursor.
+	{
+		Name:     "address manager reject kvdb batch",
+		TestFunc: testAddressManagerRejectKVDBBatch,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
