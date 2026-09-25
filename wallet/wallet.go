@@ -357,6 +357,13 @@ type Wallet struct {
 	// TODO(yy): Deprecate.
 	NtfnServer *NotificationServer
 
+	// addrMu serializes SQL receiving-address selection with fresh address
+	// allocation, so concurrent NewAddress calls on an empty branch allocate
+	// once and return the same child. It is held only across Store lookup
+	// and allocation, never during chain registration. It coordinates
+	// calls on this Wallet only, not independent processes.
+	addrMu sync.Mutex
+
 	// wg is a wait group used to track and wait for all long-running
 	// background goroutines to finish during a graceful shutdown.
 	wg sync.WaitGroup
