@@ -314,3 +314,44 @@ func TestTxNotifierCloseRejectsSubscribe(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrWalletStopped)
 }
+
+// TestSubscribeTxnsRequiresStarted verifies that a wallet accepts
+// subscriptions only while it is started.
+func TestSubscribeTxnsRequiresStarted(t *testing.T) {
+	t.Parallel()
+
+	w, _ := createTestWalletWithMocks(t)
+
+	_, err := w.SubscribeTxns(t.Context())
+
+	require.ErrorIs(t, err, ErrStateForbidden)
+}
+
+// TestWalletStopEndsTxSubscriptions verifies that stopping the wallet ends
+// its subscriptions with ErrWalletStopped.
+func TestWalletStopEndsTxSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	w, _ := createStartedWalletWithMocks(t)
+
+	sub, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+
+	err = w.stop()
+
+	require.NoError(t, err)
+	require.ErrorIs(t, requireTxSubscriptionEnded(t, sub), ErrWalletStopped)
+}
+
+// TestSubscribeTxnsRejectsStopped verifies that a stopped wallet rejects new
+// subscriptions with ErrWalletStopped.
+func TestSubscribeTxnsRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	w, _ := createStartedWalletWithMocks(t)
+	require.NoError(t, w.stop())
+
+	_, err := w.SubscribeTxns(t.Context())
+
+	require.ErrorIs(t, err, ErrWalletStopped)
+}

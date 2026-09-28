@@ -21,6 +21,37 @@ var ErrTxSubscriptionOverflow = errors.New(
 	"transaction subscription queue full",
 )
 
+// TxNotifier provides live notifications of wallet transaction changes.
+type TxNotifier interface {
+	// SubscribeTxns returns a subscription to the wallet's transaction
+	// changes.
+	SubscribeTxns(ctx context.Context) (*TxSubscription, error)
+}
+
+// A compile-time assertion to ensure that Wallet implements the TxNotifier
+// interface.
+var _ TxNotifier = (*Wallet)(nil)
+
+// SubscribeTxns returns a subscription to the transaction changes made by
+// writes that begin after this call returns. A write already in progress may
+// go unreported. Subscribing does not replay what the wallet already records;
+// use ListTxns for it. A later recovery or rescan can still report historical
+// transactions it newly records or newly confirms.
+//
+// The subscription lives until ctx ends, Cancel is called, its reader falls
+// TxSubscriptionQueueLimit events behind, or the wallet stops; Err then
+// reports which. The wallet must be started.
+//
+// NOTE: This method is part of the TxNotifier interface.
+func (w *Wallet) SubscribeTxns(ctx context.Context) (*TxSubscription, error) {
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	return w.txEvents.subscribe(ctx)
+}
+
 // TxSubscription delivers wallet transaction changes. Events for one
 // transaction arrive in the order the wallet committed them. Each subscription
 // buffers up to TxSubscriptionQueueLimit undelivered events, so a slow reader
