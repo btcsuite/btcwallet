@@ -56,6 +56,8 @@ const sighashBaseMask = txscript.SigHashType(0x1f)
 // before the wallet consults its store, its keys or the chain. It says only
 // whether the packet can be interpreted; rules belonging to one operation live
 // with that operation, as validateFundPacket does for funding.
+//
+// It does not refuse unclassified fields; validateFundPacket does.
 func validatePacket(packet *psbt.Packet) error {
 	if packet == nil || packet.UnsignedTx == nil {
 		return ErrPacketNil
@@ -84,14 +86,6 @@ func validatePacket(packet *psbt.Packet) error {
 	err = packet.SanityCheck()
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrPacketMalformed, err)
-	}
-
-	// Global fields the wallet cannot classify would be dropped by any
-	// transformation, so refuse them up front rather than silently losing
-	// them.
-	if len(packet.Unknowns) > 0 {
-		return fmt.Errorf("%w: %d global fields",
-			ErrUnclassifiedField, len(packet.Unknowns))
 	}
 
 	err = validatePacketInputs(packet)
@@ -264,11 +258,6 @@ func validatePacketInputs(packet *psbt.Packet) error {
 
 		pIn := &packet.Inputs[i]
 
-		if len(pIn.Unknowns) > 0 {
-			return fmt.Errorf("%w: input %d carries %d fields",
-				ErrUnclassifiedField, i, len(pIn.Unknowns))
-		}
-
 		err := validateInputUtxos(pIn, outPoint, i)
 		if err != nil {
 			return err
@@ -295,11 +284,6 @@ func validatePacketInputs(packet *psbt.Packet) error {
 func validatePacketOutputs(packet *psbt.Packet) error {
 	for i := range packet.Outputs {
 		pOut := &packet.Outputs[i]
-
-		if len(pOut.Unknowns) > 0 {
-			return fmt.Errorf("%w: output %d carries %d fields",
-				ErrUnclassifiedField, i, len(pOut.Unknowns))
-		}
 
 		err := validateDerivationRecords(
 			pOut.Bip32Derivation, pOut.TaprootBip32Derivation,
@@ -454,9 +438,15 @@ func validateInputSighash(pIn *psbt.PInput, idx int) error {
 // Funding rewrites the transaction, adding inputs, appending a change output
 // and reordering everything. That is why an existing signature is refused
 // rather than silently invalidated, and why SIGHASH_SINGLE cannot be honoured:
-// it commits an input to the output at its own index.
+// it commits an input to the output at its own index. Fields the wallet cannot
+// classify are refused because funding cannot promise to preserve them.
 func validateFundPacket(packet *psbt.Packet) error {
 	err := validatePacket(packet)
+	if err != nil {
+		return err
+	}
+
+	err = validateNoUnknowns(packet)
 	if err != nil {
 		return err
 	}
@@ -477,6 +467,33 @@ func validateFundPacket(packet *psbt.Packet) error {
 				"SIGHASH_SINGLE, which funding cannot "+
 				"preserve across added outputs and sorting",
 				ErrUnsafeSighash, i)
+		}
+	}
+
+	return nil
+}
+
+// validateNoUnknowns checks that a packet carries no field the wallet cannot
+// classify, globally or on any input or output.
+func validateNoUnknowns(packet *psbt.Packet) error {
+	if len(packet.Unknowns) > 0 {
+		return fmt.Errorf("%w: %d global fields",
+			ErrUnclassifiedField, len(packet.Unknowns))
+	}
+
+	for i := range packet.Inputs {
+		n := len(packet.Inputs[i].Unknowns)
+		if n > 0 {
+			return fmt.Errorf("%w: input %d carries %d fields",
+				ErrUnclassifiedField, i, n)
+		}
+	}
+
+	for i := range packet.Outputs {
+		n := len(packet.Outputs[i].Unknowns)
+		if n > 0 {
+			return fmt.Errorf("%w: output %d carries %d fields",
+				ErrUnclassifiedField, i, n)
 		}
 	}
 
