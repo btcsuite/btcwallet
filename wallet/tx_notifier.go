@@ -9,6 +9,34 @@ import (
 	"sync"
 )
 
+// TxNotifier provides live notifications of wallet transaction changes.
+type TxNotifier interface {
+	// SubscribeTxns returns a subscription to the wallet's transaction
+	// changes.
+	SubscribeTxns(ctx context.Context) (*TxSubscription, error)
+}
+
+// A compile-time assertion to ensure that Wallet implements the TxNotifier
+// interface.
+var _ TxNotifier = (*Wallet)(nil)
+
+// SubscribeTxns returns a subscription to the transaction changes made by
+// writes that begin after this call returns. A write already in progress may
+// go unreported, and earlier history is not replayed; use ListTxns for it.
+//
+// The subscription lives until ctx ends, Cancel is called, or the wallet
+// stops. The wallet must be started.
+//
+// NOTE: This method is part of the TxNotifier interface.
+func (w *Wallet) SubscribeTxns(ctx context.Context) (*TxSubscription, error) {
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	return w.txEvents.subscribe(ctx)
+}
+
 // TxSubscription delivers wallet transaction changes. Events for one
 // transaction arrive in the order the wallet committed them. Each subscription
 // buffers its own undelivered events, so a slow reader never stalls the wallet
