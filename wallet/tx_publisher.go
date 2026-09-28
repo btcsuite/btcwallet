@@ -210,6 +210,15 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		return
 	}
 
+	// Capture whether the wallet already records the tx, so a successful
+	// publish reports it only when this request recorded it.
+	rec, err := w.beginTxRecord(r.ctx, []txWrite{{hash: r.tx.TxHash()}})
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
 	// First, we'll attempt to add the tx to our wallet's DB. This will
 	// allow us to track the tx's confirmation status, and also
 	// re-broadcast it upon startup. If any of the subsequent steps fail,
@@ -219,6 +228,9 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// removal below so a wallet-unrelated tx (never recorded) is not
 	// removed, which would clobber the publish error with ErrTxNotFound.
 	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
+
+	rec.release()
+
 	if err != nil {
 		r.respErrChan <- err
 
@@ -230,6 +242,8 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// to prevent subsequent attempts with stale transaction data.
 	err = w.publishTx(r.tx, ourAddrs)
 	if err == nil {
+		rec.deliver(r.ctx)
+
 		r.respErrChan <- nil
 
 		return

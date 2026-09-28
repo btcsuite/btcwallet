@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -604,6 +605,207 @@ func TestSubscribeTxnsReorgReconfirms(t *testing.T) {
 				require.NotNil(t, event.Block)
 				require.Equal(t, block.Hash, event.Block.Hash)
 			}
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcast verifies that a successful Broadcast reports the
+// transaction, and that the chain relaying it afterwards reports nothing more.
+func TestSubscribeTxnsBroadcast(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			published := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &published.MsgTx, false).
+				Return(&published.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &published.MsgTx, "")
+			require.NoError(t, err)
+
+			for _, rec := range []*wtxmgr.TxRecord{published, relayed} {
+				err = f.sync.processChainUpdate(
+					t.Context(), chain.RelevantTx{TxRecord: rec},
+				)
+				require.NoError(t, err)
+			}
+
+			event := receiveTxEvent(t, sub)
+			require.Equal(t, published.Hash, event.Hash)
+			require.Nil(t, event.Block)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastFailure verifies that a Broadcast the chain
+// rejects reports nothing, even though the wallet recorded the transaction
+// before publishing it.
+func TestSubscribeTxnsBroadcastFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			rejected := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &rejected.MsgTx, false).
+				Return(nil, errPublish).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &rejected.MsgTx, "")
+			require.ErrorIs(t, err, errPublish)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastRecorded verifies that publishing a transaction
+// the wallet already records reports nothing, since the publish does not
+// change it.
+func TestSubscribeTxnsBroadcastRecorded(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			recorded := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			err := f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: recorded},
+			)
+			require.NoError(t, err)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &recorded.MsgTx, false).
+				Return(&recorded.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &recorded.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastKnownToNetwork verifies that a Broadcast the
+// mempool check reports as already broadcast neither records nor reports the
+// transaction.
+func TestSubscribeTxnsBroadcastKnownToNetwork(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			known := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					RejectReason: "txn-already-in-mempool",
+				}}, nil).Once()
+			f.chain.On("MapRPCErr", mock.Anything).
+				Return(chain.ErrTxAlreadyInMempool).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &known.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastUnrelated verifies that publishing a transaction
+// that neither pays nor spends the wallet reports nothing, since the wallet
+// never records it.
+func TestSubscribeTxnsBroadcastUnrelated(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+
+			foreignAddr, err := address.NewAddressWitnessPubKeyHash(
+				make([]byte, 20), &chainParams,
+			)
+			require.NoError(t, err)
+
+			unrelated := newTxEventRecord(t, foreignAddr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &unrelated.MsgTx, false).
+				Return(&unrelated.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &unrelated.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
 		})
 	}
 }

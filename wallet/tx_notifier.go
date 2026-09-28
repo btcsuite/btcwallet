@@ -29,12 +29,13 @@ var _ TxNotifier = (*Wallet)(nil)
 // writes that begin after this call returns. A write already in progress may
 // go unreported, and earlier history is not replayed; use ListTxns for it.
 //
-// The wallet reports a transaction the chain backend relays unconfirmed when
-// it first records it, and reports each block that newly confirms a wallet
-// transaction, including after a reorg. A transaction disconnected by a reorg
-// is not reported until a block confirms it again. Chain backends that do not
-// relay unconfirmed transactions, such as neutrino, only produce
-// confirmations.
+// The wallet reports an unconfirmed transaction when it first records it,
+// either from the chain backend or through a successful Broadcast, and reports
+// each block that newly confirms a wallet transaction, including after a
+// reorg. A transaction disconnected by a reorg is not reported until a block
+// confirms it again. Chain backends that do not relay unconfirmed
+// transactions, such as neutrino, report unconfirmed transactions only
+// through Broadcast.
 //
 // The subscription lives until ctx ends, Cancel is called, or the wallet
 // stops. The wallet must be started.
