@@ -47,13 +47,17 @@ var _ TxNotifier = (*Wallet)(nil)
 // use ListTxns for it. A later recovery or rescan can still report historical
 // transactions it newly records or newly confirms.
 //
-// The wallet reports a transaction the chain backend relays unconfirmed when
-// it first records it, and reports each block that newly confirms a wallet
-// transaction, including after a reorg. A confirmation is reported once the
-// wallet's synced tip reaches its block, so it carries at least one
-// confirmation. A transaction disconnected by a reorg is not reported until a
-// block confirms it again. Chain backends that do not relay unconfirmed
-// transactions, such as neutrino, only produce confirmations.
+// The wallet reports an unconfirmed transaction when it first records it,
+// either from the chain backend or through a successful Broadcast, and reports
+// each block that newly confirms a wallet transaction, including after a
+// reorg. A confirmation is reported once the wallet's synced tip reaches its
+// block, so it carries at least one confirmation. A Broadcast reports its
+// transaction before returning, unless the network already knew it or a
+// confirmation of it is committed while it publishes. That confirmation
+// supersedes the unconfirmed event, even if a reorg later disconnects it. A
+// transaction disconnected by a reorg is not reported until a block confirms
+// it again. Chain backends that do not relay unconfirmed transactions, such as
+// neutrino, report unconfirmed transactions only through Broadcast.
 //
 // The subscription lives until ctx ends, Cancel is called, its reader falls
 // TxSubscriptionQueueLimit events behind, a committed change cannot be read
@@ -219,6 +223,26 @@ type txNotifier struct {
 	// pending holds confirmations whose block is above the wallet's synced
 	// tip, until the tip reaches it.
 	pending []pendingTxEvent
+
+	// inflight tracks, per transaction, the Broadcast records that recorded
+	// it and have not delivered yet. It is guarded by recordMu.
+	inflight map[chainhash.Hash][]*txInflight
+}
+
+// txInflight marks a transaction a Broadcast recorded and is still
+// publishing.
+type txInflight struct {
+	// superseded is set once a confirmation of the transaction is
+	// reported or held, so the Broadcast reports nothing for it.
+	superseded bool
+}
+
+// supersede marks every in-flight Broadcast of txHash as superseded by a
+// confirmation. The caller holds recordMu.
+func (n *txNotifier) supersede(txHash chainhash.Hash) {
+	for _, flight := range n.inflight[txHash] {
+		flight.superseded = true
+	}
 }
 
 // pendingTxEvent is a confirmation held until the wallet's synced tip reaches
@@ -425,6 +449,9 @@ type txRecord struct {
 	// entries lists the recorded transactions in delivery order. It is
 	// nil for an inactive record.
 	entries []txRecordEntry
+
+	// held marks each entry in flight after hold, until deliver or discard.
+	held []*txInflight
 }
 
 // beginTxRecord reads the current state of the written transactions and holds
@@ -476,6 +503,64 @@ func (r *txRecord) release() {
 	}
 }
 
+// hold releases the record lock like release, but first marks each recorded
+// transaction in flight so a confirmation committed before deliver supersedes
+// its event. Call deliver or discard afterwards.
+func (r *txRecord) hold() {
+	if r.entries == nil {
+		return
+	}
+
+	n := &r.w.txEvents
+	if n.inflight == nil {
+		n.inflight = make(map[chainhash.Hash][]*txInflight)
+	}
+
+	r.held = make([]*txInflight, len(r.entries))
+	for i, entry := range r.entries {
+		r.held[i] = &txInflight{}
+		n.inflight[entry.hash] = append(n.inflight[entry.hash], r.held[i])
+	}
+
+	n.recordMu.Unlock()
+}
+
+// discard ends a held record without reporting it. It does nothing for a
+// record that is not held.
+func (r *txRecord) discard() {
+	if r.held == nil {
+		return
+	}
+
+	r.w.txEvents.recordMu.Lock()
+	defer r.w.txEvents.recordMu.Unlock()
+
+	r.unhold()
+}
+
+// unhold removes the record's in-flight marks. The caller holds recordMu.
+func (r *txRecord) unhold() {
+	n := &r.w.txEvents
+	for i, entry := range r.entries {
+		flights := n.inflight[entry.hash]
+		for j, flight := range flights {
+			if flight == r.held[i] {
+				flights = append(flights[:j], flights[j+1:]...)
+
+				break
+			}
+		}
+
+		if len(flights) == 0 {
+			delete(n.inflight, entry.hash)
+		} else {
+			n.inflight[entry.hash] = flights
+		}
+	}
+
+	r.held = nil
+}
+
 // deliver reports the changes the committed write made, then the held
 // confirmations the wallet's synced tip has reached. Reading and delivering
 // under the record lock keeps events for one transaction in commit order
@@ -487,6 +572,10 @@ func (r *txRecord) deliver(ctx context.Context) {
 
 	n.recordMu.Lock()
 	defer n.recordMu.Unlock()
+
+	if r.held != nil {
+		defer r.unhold()
+	}
 
 	if r.entries == nil && len(n.pending) == 0 {
 		return
@@ -516,6 +605,11 @@ func (r *txRecord) report(ctx context.Context, i int, height int32) error {
 	n := &r.w.txEvents
 	entry := r.entries[i]
 
+	// A confirmation reported or held since hold supersedes it.
+	if r.held != nil && r.held[i].superseded {
+		return nil
+	}
+
 	detail, err := r.w.getTxDetail(ctx, entry.hash, height)
 	if errors.Is(err, ErrTxNotFound) {
 		return nil
@@ -529,7 +623,15 @@ func (r *txRecord) report(ctx context.Context, i int, height int32) error {
 		return nil
 	}
 
-	if detail.Block != nil && detail.Block.Height > height {
+	if detail.Block == nil {
+		n.deliver(detail)
+
+		return nil
+	}
+
+	n.supersede(entry.hash)
+
+	if detail.Block.Height > height {
 		n.pending = append(n.pending, pendingTxEvent{
 			hash:   entry.hash,
 			block:  detail.Block.Hash,

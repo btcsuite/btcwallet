@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -1011,6 +1012,433 @@ func TestSubscribeTxnsReadFailureEndsSubscriptions(t *testing.T) {
 			require.Equal(
 				t, later.Hash, receiveTxEvent(t, resubscribed).Hash,
 			)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcast verifies that a successful Broadcast reports the
+// transaction, and that the chain relaying it afterwards reports nothing more.
+func TestSubscribeTxnsBroadcast(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			published := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &published.MsgTx, false).
+				Return(&published.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &published.MsgTx, "")
+			require.NoError(t, err)
+
+			for _, rec := range []*wtxmgr.TxRecord{published, relayed} {
+				err = f.sync.processChainUpdate(
+					t.Context(), chain.RelevantTx{TxRecord: rec},
+				)
+				require.NoError(t, err)
+			}
+
+			event := receiveTxEvent(t, sub)
+			require.Equal(t, published.Hash, event.Hash)
+			require.Nil(t, event.Block)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastFailure verifies that a Broadcast the chain
+// rejects reports nothing, even though the wallet recorded the transaction
+// before publishing it.
+func TestSubscribeTxnsBroadcastFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			rejected := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &rejected.MsgTx, false).
+				Return(nil, errPublish).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &rejected.MsgTx, "")
+			require.ErrorIs(t, err, errPublish)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastRecorded verifies that publishing a transaction
+// the wallet already records reports nothing, since the publish does not
+// change it.
+func TestSubscribeTxnsBroadcastRecorded(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			recorded := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			err := f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: recorded},
+			)
+			require.NoError(t, err)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &recorded.MsgTx, false).
+				Return(&recorded.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &recorded.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastKnownToNetwork verifies that a Broadcast the
+// mempool check reports as already broadcast neither records nor reports the
+// transaction.
+func TestSubscribeTxnsBroadcastKnownToNetwork(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			known := newTxEventRecord(t, f.addr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					RejectReason: "txn-already-in-mempool",
+				}}, nil).Once()
+			f.chain.On("MapRPCErr", mock.Anything).
+				Return(chain.ErrTxAlreadyInMempool).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &known.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastUnrelated verifies that publishing a transaction
+// that neither pays nor spends the wallet reports nothing, since the wallet
+// never records it.
+func TestSubscribeTxnsBroadcastUnrelated(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+
+			foreignAddr, err := address.NewAddressWitnessPubKeyHash(
+				make([]byte, 20), &chainParams,
+			)
+			require.NoError(t, err)
+
+			unrelated := newTxEventRecord(t, foreignAddr, 1)
+			relayed := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &unrelated.MsgTx, false).
+				Return(&unrelated.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &unrelated.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: relayed},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, relayed.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastCanceledCaller verifies that a publish that
+// succeeds is still reported when the caller cancels its context during the
+// publish, since Broadcast waits for the admitted request regardless.
+func TestSubscribeTxnsBroadcastCanceledCaller(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			published := newTxEventRecord(t, f.addr, 1)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &published.MsgTx, false).
+				Run(func(mock.Arguments) { cancel() }).
+				Return(&published.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(ctx, &published.MsgTx, "")
+			require.NoError(t, err)
+
+			event := receiveTxEvent(t, sub)
+			require.Equal(t, published.Hash, event.Hash)
+			require.Nil(t, event.Block)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastSuperseded verifies that a confirmation committed
+// while Broadcast publishes supersedes its unconfirmed event: subscribers see
+// the confirmation and no unconfirmed event after it.
+func TestSubscribeTxnsBroadcastSuperseded(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			published := newTxEventRecord(t, f.addr, 1)
+			later := newTxEventRecord(t, f.addr, 2)
+
+			// Hold the publish response until the confirmation has been
+			// committed and delivered.
+			publishing := make(chan struct{})
+			release := make(chan struct{})
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &published.MsgTx, false).
+				Run(func(mock.Arguments) {
+					close(publishing)
+					<-release
+				}).
+				Return(&published.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			broadcastErr := make(chan error, 1)
+			go func() {
+				broadcastErr <- f.w.Broadcast(
+					t.Context(), &published.MsgTx, "",
+				)
+			}()
+
+			<-publishing
+
+			block := nextTxEventBlock(f.w, 1)
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.FilteredBlockConnected{
+					Block: block,
+					RelevantTxs: []*wtxmgr.TxRecord{
+						published,
+					},
+				},
+			)
+			require.NoError(t, err)
+
+			confirmed := receiveTxEvent(t, sub)
+
+			close(release)
+			require.NoError(t, <-broadcastErr)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: later},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, published.Hash, confirmed.Hash)
+			require.NotNil(t, confirmed.Block)
+			require.Equal(t, block.Hash, confirmed.Block.Hash)
+
+			// Broadcast reported nothing after the confirmation, so the
+			// next event reports the later transaction.
+			require.Equal(t, later.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastSupersededReorg verifies that a confirmation
+// committed while Broadcast publishes still supersedes its unconfirmed event
+// after a reorg disconnects the confirming block before the publish settles.
+func TestSubscribeTxnsBroadcastSupersededReorg(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			published := newTxEventRecord(t, f.addr, 1)
+			later := newTxEventRecord(t, f.addr, 2)
+			forkPoint := f.w.SyncedTo()
+
+			// Hold the publish response until the confirmation has been
+			// delivered and its block disconnected.
+			publishing := make(chan struct{})
+			release := make(chan struct{})
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return([]*btcjson.TestMempoolAcceptResult{{
+					Allowed: true,
+				}}, nil).Once()
+			f.chain.On("SendRawTransaction", &published.MsgTx, false).
+				Run(func(mock.Arguments) {
+					close(publishing)
+					<-release
+				}).
+				Return(&published.Hash, nil).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			broadcastErr := make(chan error, 1)
+			go func() {
+				broadcastErr <- f.w.Broadcast(
+					t.Context(), &published.MsgTx, "",
+				)
+			}()
+
+			<-publishing
+
+			block := nextTxEventBlock(f.w, 1)
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.FilteredBlockConnected{
+					Block: block,
+					RelevantTxs: []*wtxmgr.TxRecord{
+						published,
+					},
+				},
+			)
+			require.NoError(t, err)
+
+			confirmed := receiveTxEvent(t, sub)
+
+			require.NoError(t, f.sync.rewindToBlock(t.Context(), forkPoint))
+
+			close(release)
+			require.NoError(t, <-broadcastErr)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: later},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, published.Hash, confirmed.Hash)
+			require.NotNil(t, confirmed.Block)
+
+			// Broadcast reported nothing after the confirmation, even
+			// though the transaction is unconfirmed again.
+			require.Equal(t, later.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsBroadcastKnownWithoutMempoolCheck verifies that when the
+// backend cannot test mempool acceptance and the publish finds the network
+// already holds the transaction, Broadcast keeps tracking it but reports no
+// publication.
+func TestSubscribeTxnsBroadcastKnownWithoutMempoolCheck(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend)
+			known := newTxEventRecord(t, f.addr, 1)
+			later := newTxEventRecord(t, f.addr, 2)
+
+			f.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return(nil, chain.ErrUnimplemented).Once()
+			f.chain.On("SendRawTransaction", &known.MsgTx, false).
+				Return(nil, chain.ErrTxAlreadyInMempool).Once()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			err = f.w.Broadcast(t.Context(), &known.MsgTx, "")
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: later},
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, later.Hash, receiveTxEvent(t, sub).Hash)
+
+			_, err = f.w.GetTx(t.Context(), known.Hash)
+			require.NoError(t, err, "known transaction is not tracked")
 		})
 	}
 }
