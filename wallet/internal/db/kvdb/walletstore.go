@@ -240,6 +240,13 @@ func (s *Store) UpdateWallet(_ context.Context,
 			return errMissingAddrmgrNamespace
 		}
 
+		if params.SyncedTo != nil {
+			err := s.releaseMaturedLeases(tx, params.SyncedTo)
+			if err != nil {
+				return err
+			}
+		}
+
 		return updateWallet(ns, addrStore, params)
 	})
 	if err != nil {
