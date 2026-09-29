@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -417,4 +418,262 @@ func TestTimedLeaseEndsWithFundingInvalidation(t *testing.T) {
 		OutPoint: f.outPoint,
 	})
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// tipWriter names a Store method that advances a wallet's sync tip.
+type tipWriter uint8
+
+const (
+	// tipWriterTxBatch advances the tip through ApplyTxBatch.
+	tipWriterTxBatch tipWriter = iota
+
+	// tipWriterScanBatch advances the tip through ApplyScanBatch.
+	tipWriterScanBatch
+
+	// tipWriterUpdateWallet advances the tip through UpdateWallet.
+	tipWriterUpdateWallet
+)
+
+// advanceTip moves the fixture wallet's sync tip to a new block at height
+// through the given writer.
+func (f *leasePolicyFixture) advanceTip(t *testing.T, writer tipWriter,
+	height uint32) {
+
+	t.Helper()
+
+	block := NewBlockFixture(height)
+
+	var err error
+
+	switch writer {
+	case tipWriterTxBatch:
+		err = f.store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+			WalletID: f.walletID,
+			SyncedTo: &block,
+		})
+
+	case tipWriterScanBatch:
+		err = f.store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+			WalletID:     f.walletID,
+			SyncedBlocks: []db.Block{block},
+		})
+
+	case tipWriterUpdateWallet:
+		err = f.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+			WalletID: f.walletID,
+			SyncedTo: &block,
+		})
+
+	default:
+		t.Fatalf("unknown tip writer %d", writer)
+	}
+
+	require.NoError(t, err)
+}
+
+// TestConfirmationLeaseReleasesAtSpendDepth verifies that every writer that
+// advances the wallet sync tip releases a confirmation-controlled lease exactly
+// when its spend reaches the requested depth, and not one block earlier.
+func TestConfirmationLeaseReleasesAtSpendDepth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		writer tipWriter
+	}{
+		{name: "tx batch sync tip", writer: tipWriterTxBatch},
+		{name: "scan batch synced blocks", writer: tipWriterScanBatch},
+		{name: "update wallet sync tip", writer: tipWriterUpdateWallet},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newLeasePolicyFixture(t, "wallet-lease-maturity")
+			owner := db.LockID{1}
+			spendHeight := uint32(leaseFundingHeight + 1)
+
+			f.lease(t, owner, leaseReleaseDepth)
+			f.publishSpend(t)
+			f.confirmSpend(t, spendHeight)
+
+			// One block short of the requested depth keeps the lease.
+			f.advanceTip(t, tc.writer, spendHeight+leaseReleaseDepth-2)
+			f.requireLease(t, owner, int32(spendHeight))
+
+			f.advanceTip(t, tc.writer, spendHeight+leaseReleaseDepth-1)
+
+			leases, err := f.store.ListLeasedOutputs(
+				t.Context(), f.walletID,
+			)
+			require.NoError(t, err)
+			require.Empty(t, leases)
+		})
+	}
+}
+
+// TestConfirmationLeaseMaturesInSpendBatch verifies that a batch which both
+// confirms the spend and advances the tip to the release depth releases the
+// lease, so maturity is checked after the batch records its transactions.
+func TestConfirmationLeaseMaturesInSpendBatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		apply func(f *leasePolicyFixture, ctx context.Context,
+			spend []db.CreateTxParams, blocks []db.Block) error
+	}{
+		{
+			name: "tx batch",
+			apply: func(f *leasePolicyFixture, ctx context.Context,
+				spend []db.CreateTxParams, blocks []db.Block) error {
+
+				return f.store.ApplyTxBatch(ctx, db.TxBatchParams{
+					WalletID:     f.walletID,
+					Transactions: spend,
+					SyncedTo:     &blocks[len(blocks)-1],
+				})
+			},
+		},
+		{
+			name: "scan batch",
+			apply: func(f *leasePolicyFixture, ctx context.Context,
+				spend []db.CreateTxParams, blocks []db.Block) error {
+
+				return f.store.ApplyScanBatch(ctx, db.ScanBatchParams{
+					WalletID:     f.walletID,
+					Transactions: spend,
+					SyncedBlocks: blocks,
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newLeasePolicyFixture(t, "wallet-lease-spend-batch")
+			f.lease(t, db.LockID{1}, leaseReleaseDepth)
+
+			blocks := make([]db.Block, leaseReleaseDepth)
+			for i := range blocks {
+				blocks[i] = NewBlockFixture(
+					leaseFundingHeight + 1 + uint32(i),
+				)
+			}
+
+			spend := []db.CreateTxParams{{
+				WalletID: f.walletID,
+				Tx:       f.spendTx,
+				Received: time.Unix(1710007100, 0),
+				Block:    &blocks[0],
+				Status:   db.TxStatusPublished,
+			}}
+
+			err := tc.apply(f, t.Context(), spend, blocks)
+			require.NoError(t, err)
+
+			leases, err := f.store.ListLeasedOutputs(
+				t.Context(), f.walletID,
+			)
+			require.NoError(t, err)
+			require.Empty(t, leases)
+		})
+	}
+}
+
+// TestConfirmationLeaseWithoutConfirmedSpendSurvivesTip verifies that tip
+// advances never release a lease whose spend is unconfirmed or disconnected,
+// because only a confirmed spend carries maturity progress.
+func TestConfirmationLeaseWithoutConfirmedSpendSurvivesTip(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-lease-disconnected-tip")
+	owner := db.LockID{1}
+	spendHeight := uint32(leaseFundingHeight + 1)
+
+	f.lease(t, owner, leaseReleaseDepth)
+	f.publishSpend(t)
+	f.confirmSpend(t, spendHeight)
+
+	err := f.store.RollbackToBlock(t.Context(), spendHeight)
+	require.NoError(t, err)
+
+	tip := NewBlockFixture(spendHeight + 10*leaseReleaseDepth)
+	err = f.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: f.walletID,
+		SyncedTo: &tip,
+	})
+	require.NoError(t, err)
+	f.requireLease(t, owner, -1)
+}
+
+// TestConfirmationLeaseMaturesOnLateSpend verifies that a spend recorded
+// below the existing sync tip releases an already-matured lease, even when
+// the write does not move the tip.
+func TestConfirmationLeaseMaturesOnLateSpend(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		apply func(f *leasePolicyFixture, ctx context.Context,
+			spend []db.CreateTxParams) error
+	}{
+		{
+			name: "tx batch",
+			apply: func(f *leasePolicyFixture, ctx context.Context,
+				spend []db.CreateTxParams) error {
+
+				return f.store.ApplyTxBatch(ctx, db.TxBatchParams{
+					WalletID:     f.walletID,
+					Transactions: spend,
+				})
+			},
+		},
+		{
+			name: "targeted scan batch",
+			apply: func(f *leasePolicyFixture, ctx context.Context,
+				spend []db.CreateTxParams) error {
+
+				return f.store.ApplyScanBatch(ctx, db.ScanBatchParams{
+					WalletID:     f.walletID,
+					Transactions: spend,
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newLeasePolicyFixture(t, "wallet-lease-late-spend")
+			f.lease(t, db.LockID{1}, leaseReleaseDepth)
+
+			spendBlock := NewBlockFixture(leaseFundingHeight + 1)
+			f.advanceTip(
+				t, tipWriterUpdateWallet,
+				spendBlock.Height+leaseReleaseDepth-1,
+			)
+
+			spend := []db.CreateTxParams{{
+				WalletID: f.walletID,
+				Tx:       f.spendTx,
+				Received: time.Unix(1710007100, 0),
+				Block:    &spendBlock,
+				Status:   db.TxStatusPublished,
+			}}
+
+			err := tc.apply(f, t.Context(), spend)
+			require.NoError(t, err)
+
+			leases, err := f.store.ListLeasedOutputs(
+				t.Context(), f.walletID,
+			)
+			require.NoError(t, err)
+			require.Empty(t, leases)
+		})
+	}
 }

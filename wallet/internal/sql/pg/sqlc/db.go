@@ -90,6 +90,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteKeyScopeSecretsStmt, err = db.PrepareContext(ctx, DeleteKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteKeyScopeSecrets: %w", err)
 	}
+	if q.deleteMaturedUtxoLeasesStmt, err = db.PrepareContext(ctx, DeleteMaturedUtxoLeases); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteMaturedUtxoLeases: %w", err)
+	}
 	if q.deleteUnminedTransactionByHashStmt, err = db.PrepareContext(ctx, DeleteUnminedTransactionByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteUnminedTransactionByHash: %w", err)
 	}
@@ -452,6 +455,11 @@ func (q *Queries) Close() error {
 	if q.deleteKeyScopeSecretsStmt != nil {
 		if cerr := q.deleteKeyScopeSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteKeyScopeSecretsStmt: %w", cerr)
+		}
+	}
+	if q.deleteMaturedUtxoLeasesStmt != nil {
+		if cerr := q.deleteMaturedUtxoLeasesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteMaturedUtxoLeasesStmt: %w", cerr)
 		}
 	}
 	if q.deleteUnminedTransactionByHashStmt != nil {
@@ -930,6 +938,7 @@ type Queries struct {
 	deleteExpiredUtxoLeasesStmt                   *sql.Stmt
 	deleteKeyScopeStmt                            *sql.Stmt
 	deleteKeyScopeSecretsStmt                     *sql.Stmt
+	deleteMaturedUtxoLeasesStmt                   *sql.Stmt
 	deleteUnminedTransactionByHashStmt            *sql.Stmt
 	deleteUnminedTransactionByHashWithInvalidStmt *sql.Stmt
 	deleteUtxosByTxIDStmt                         *sql.Stmt
@@ -1041,6 +1050,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteExpiredUtxoLeasesStmt:                   q.deleteExpiredUtxoLeasesStmt,
 		deleteKeyScopeStmt:                            q.deleteKeyScopeStmt,
 		deleteKeyScopeSecretsStmt:                     q.deleteKeyScopeSecretsStmt,
+		deleteMaturedUtxoLeasesStmt:                   q.deleteMaturedUtxoLeasesStmt,
 		deleteUnminedTransactionByHashStmt:            q.deleteUnminedTransactionByHashStmt,
 		deleteUnminedTransactionByHashWithInvalidStmt: q.deleteUnminedTransactionByHashWithInvalidStmt,
 		deleteUtxosByTxIDStmt:                         q.deleteUtxosByTxIDStmt,

@@ -186,3 +186,31 @@ WHERE
             AND u.spent_by_tx_id IS NULL
         )
     );
+
+-- name: DeleteMaturedUtxoLeases :execrows
+-- Deletes confirmation-controlled leases whose spend reached its release
+-- depth at the wallet's stored sync tip.
+--
+-- How:
+-- - A spend confirmed at height h has synced_height - h + 1 confirmations,
+--   where h is the block height of the transaction spending the leased output.
+-- - Timed leases are skipped. An unspent output, an unconfirmed spend, or a
+--   wallet without a sync tip makes the comparison NULL, so the row stays.
+-- Performance:
+-- - Scans the wallet's leases through the wallet-scoped lease index and looks
+--   up each spender by primary key.
+DELETE FROM utxo_leases
+WHERE
+    utxo_leases.wallet_id = ?1
+    AND utxo_leases.release_after_spend_confs > 0
+    AND (
+        SELECT s.synced_height
+        FROM wallet_sync_states AS s
+        WHERE s.wallet_id = utxo_leases.wallet_id
+    ) - (
+        SELECT spend.block_height
+        FROM utxos AS u
+        INNER JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
+        WHERE u.id = utxo_leases.utxo_id
+    ) + 1
+    >= utxo_leases.release_after_spend_confs;

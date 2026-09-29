@@ -133,6 +133,18 @@ type Querier interface {
 	DeleteKeyScope(ctx context.Context, id int64) (int64, error)
 	// Deletes the secrets for a key scope.
 	DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int64, error)
+	// Deletes confirmation-controlled leases whose spend reached its release
+	// depth at the wallet's stored sync tip.
+	//
+	// How:
+	// - A spend confirmed at height h has synced_height - h + 1 confirmations,
+	//   where h is the block height of the transaction spending the leased output.
+	// - Timed leases are skipped. An unspent output, an unconfirmed spend, or a
+	//   wallet without a sync tip makes the comparison NULL, so the row stays.
+	// Performance:
+	// - Scans the wallet's leases through the wallet-scoped lease index and looks
+	//   up each spender by primary key.
+	DeleteMaturedUtxoLeases(ctx context.Context, walletID int64) (int64, error)
 	// Deletes an unconfirmed transaction row.
 	//
 	// How:

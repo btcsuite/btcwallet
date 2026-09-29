@@ -75,7 +75,7 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 			}
 		}
 
-		return nil
+		return releaseMaturedLeases(ctx, qtx, params.WalletID)
 	})
 }
 
