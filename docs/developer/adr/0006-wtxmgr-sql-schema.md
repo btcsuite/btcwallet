@@ -202,6 +202,20 @@ integrity checks.
 - `expires_at` is stored as a UTC `TIMESTAMP`
 - lease acquisition, renewal, and cleanup compare against explicit UTC values
   supplied by the caller
+- `release_after_spend_confs` selects a confirmation-controlled lease when it
+  is non-zero. Such a lease ignores `expires_at`, stays after its output is
+  spent or its funding transaction is invalidated, and ends only when its
+  owner releases it or when its spend reaches that depth at the wallet's sync
+  tip
+- spend progress is the block height of the transaction spending the leased
+  output, read through `utxos.spent_by_tx_id`. `spend_disconnected` records
+  the one fact that height cannot show: an observed spend lost its block.
+  Without a confirmed spend, progress is `-1` when that flag is set and `0`
+  otherwise. Timed leases never set it
+- writes that record transactions or move the sync tip delete
+  confirmation-controlled leases matured at the stored sync tip, in the same
+  transaction and after recording the write's transactions, so no background
+  expiry worker is needed
 
 ### 3.5 Triggers
 
@@ -212,6 +226,10 @@ expressed through ordinary foreign keys alone:
 - `wallet(tx_id) == wallet(address_id)` on `utxos`
 - same-wallet `spent_by_tx_id` on `utxos`
 - lease wallet consistency on `utxo_leases`
+- lease spend disconnects on `utxo_leases`, set when the spending
+  transaction's `block_height` is cleared. Every writer that disconnects a
+  spend, including block deletes during rollback, therefore records it without
+  its own hook
 
 This keeps the database responsible for protecting the critical wallet-scoping
 rules rather than assuming the application layer is always correct.
