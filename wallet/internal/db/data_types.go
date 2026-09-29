@@ -1471,7 +1471,8 @@ type UtxoInfo struct {
 	// without a local signing path, including imported account children.
 	Spendable *bool
 
-	// IsLocked is true when the UTXO has an active (non-expired) lease.
+	// IsLocked is true when the UTXO has an active lease. A
+	// confirmation-controlled lease stays active past its expiration.
 	// Sourced from LEFT JOIN utxo_leases with the lease-expiration
 	// comparison done in SQL against a caller-supplied UTC timestamp; the
 	// API still models leases separately from UTXO existence, but the
@@ -1599,8 +1600,16 @@ type LeaseOutputParams struct {
 	// OutPoint is the outpoint of the UTXO to lock.
 	OutPoint wire.OutPoint
 
-	// Duration is the duration to lock the UTXO for.
+	// Duration is the duration to lock the UTXO for. A
+	// confirmation-controlled lease stores the resulting expiration but
+	// does not apply it.
 	Duration time.Duration
+
+	// ReleaseAfterSpendConfs selects a confirmation-controlled lease that
+	// lasts until the output's spend reaches this depth or the owner
+	// releases it. Zero creates a timed lease, or keeps the stored depth when
+	// the owner renews an existing lease.
+	ReleaseAfterSpendConfs uint32
 }
 
 // ReleaseOutputParams contains the parameters for releasing a UTXO lease.
@@ -1626,8 +1635,19 @@ type LeasedOutput struct {
 	// LockID is the ID of the lock.
 	LockID LockID
 
-	// Expiration is the time when the lock expires.
+	// Expiration is the time when a timed lock expires. A
+	// confirmation-controlled lock keeps this value but does not apply it.
 	Expiration time.Time
+
+	// ReleaseAfterSpendConfs is the spend depth that releases a
+	// confirmation-controlled lock. Zero means the lock is timed.
+	ReleaseAfterSpendConfs uint32
+
+	// ConfirmedSpendHeight is the spend progress of a
+	// confirmation-controlled lock. Zero means no confirmed spend was
+	// observed, -1 means an observed spend was disconnected, and a positive
+	// value is the height of the confirmed spend.
+	ConfirmedSpendHeight int32
 }
 
 // BalanceResult represents one wallet-scoped balance view after applying the

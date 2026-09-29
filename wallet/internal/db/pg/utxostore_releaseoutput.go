@@ -35,7 +35,8 @@ type releaseOutputOps struct {
 var _ db.ReleaseOutputOps = (*releaseOutputOps)(nil)
 
 // LookupUtxoID resolves the wallet-owned outpoint to its stable postgres UTXO
-// row ID.
+// row ID. A spent output resolves while a confirmation-controlled lease still
+// holds it.
 func (o *releaseOutputOps) LookupUtxoID(ctx context.Context,
 	params db.ReleaseOutputParams) (int64, error) {
 
@@ -44,8 +45,8 @@ func (o *releaseOutputOps) LookupUtxoID(ctx context.Context,
 		return 0, err
 	}
 
-	utxoID, err := o.qtx.GetUtxoIDByOutpoint(
-		ctx, sqlc.GetUtxoIDByOutpointParams{
+	utxoID, err := o.qtx.GetReleasableUtxoIDByOutpoint(
+		ctx, sqlc.GetReleasableUtxoIDByOutpointParams{
 			WalletID:    int64(params.WalletID),
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: outputIndex,
