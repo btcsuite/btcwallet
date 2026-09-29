@@ -1930,6 +1930,7 @@ func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
 	txStore := newTxStore(t, dbConn)
 	addrStore := &bwmock.AddrStore{}
 	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Maybe()
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	store := NewStore(dbConn, txStore, addrStore)
 
 	txMsg := &wire.MsgTx{Version: 1}
@@ -2049,6 +2050,7 @@ func TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch(t *testing.T) {
 	txStore := newTxStore(t, dbConn)
 	addrStore := &bwmock.AddrStore{}
 	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Maybe()
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	store := NewStore(dbConn, txStore, addrStore)
 
 	txMsg := &wire.MsgTx{Version: 1}

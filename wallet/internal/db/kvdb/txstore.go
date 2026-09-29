@@ -440,20 +440,26 @@ func (s *Store) applyLegacyBatchUpdate(tx walletdb.ReadWriteTx,
 	}
 
 	return s.applyLegacyBatchSyncTip(
-		addrmgrNs, params, syncTipRestore,
+		tx, addrmgrNs, params, syncTipRestore,
 	)
 }
 
 // applyLegacyBatchSyncTip applies the optional sync-tip update for a legacy
 // transaction batch.
-func (s *Store) applyLegacyBatchSyncTip(ns walletdb.ReadWriteBucket,
-	params db.TxBatchParams, syncTipRestore *batchSyncTipRestore) error {
+func (s *Store) applyLegacyBatchSyncTip(tx walletdb.ReadWriteTx,
+	ns walletdb.ReadWriteBucket, params db.TxBatchParams,
+	syncTipRestore *batchSyncTipRestore) error {
 
 	if params.SyncedTo == nil {
-		return nil
+		return s.releaseLeasesMaturedAtSyncedTo(tx, params.Transactions)
 	}
 
 	block, err := db.BlockStampFromBlock(params.SyncedTo)
+	if err != nil {
+		return err
+	}
+
+	err = s.releaseMaturedLeases(tx, params.SyncedTo)
 	if err != nil {
 		return err
 	}
@@ -1971,8 +1977,14 @@ func (s *Store) ApplyScanBatch(_ context.Context,
 			return err
 		}
 
+		if len(params.SyncedBlocks) == 0 {
+			return s.releaseLeasesMaturedAtSyncedTo(
+				tx, params.Transactions,
+			)
+		}
+
 		return s.applyLegacySyncedBlocks(
-			addrmgrNs, params.SyncedBlocks, &syncTipRestore,
+			tx, addrmgrNs, params.SyncedBlocks, &syncTipRestore,
 		)
 	})
 	if err != nil {
@@ -2179,8 +2191,20 @@ func (s *Store) applyLegacyScanHorizon(ns walletdb.ReadWriteBucket,
 
 // applyLegacySyncedBlocks connects a sequence of legacy synced blocks and
 // records the last successful live sync-tip advance for rollback.
-func (s *Store) applyLegacySyncedBlocks(ns walletdb.ReadWriteBucket,
-	blocks []db.Block, syncTipRestore *batchSyncTipRestore) error {
+func (s *Store) applyLegacySyncedBlocks(tx walletdb.ReadWriteTx,
+	ns walletdb.ReadWriteBucket, blocks []db.Block,
+	syncTipRestore *batchSyncTipRestore) error {
+
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	// Leases that mature at any connected block have also matured at the
+	// final one.
+	err := s.releaseMaturedLeases(tx, &blocks[len(blocks)-1])
+	if err != nil {
+		return err
+	}
 
 	previous := s.addrStore.SyncedTo()
 
