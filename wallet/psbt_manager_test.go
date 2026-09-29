@@ -3130,8 +3130,8 @@ func TestCreateBip32SpendDetails(t *testing.T) {
 	}
 }
 
-// TestSignTaprootPsbtInput tests that signTaprootPsbtInput successfully
-// generates and appends a signature for a valid Taproot input.
+// TestSignTaprootPsbtInput tests that a planned Taproot input is signed and
+// the signature appended to it.
 func TestSignTaprootPsbtInput(t *testing.T) {
 	t.Parallel()
 
@@ -3187,15 +3187,18 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 		},
 	)
 
-	// Act: Call signTaprootPsbtInput to sign the input using the mocked
-	// wallet and keys.
+	// Act: Plan the input, then sign the plan using the mocked wallet and
+	// keys.
 	sigHashes := txscript.NewTxSigHashes(
 		tx, txscript.NewCannedPrevOutputFetcher(
 			packet.Inputs[0].WitnessUtxo.PkScript,
 			packet.Inputs[0].WitnessUtxo.Value,
 		),
 	)
-	err = w.signTaprootPsbtInput(t.Context(), packet, 0, sigHashes, nil)
+	plan, err := w.planTaprootPsbtInput(packet, 0, sigHashes, nil)
+	require.NoError(t, err)
+
+	err = w.signPlannedInput(t.Context(), packet, plan)
 
 	// Assert: Verify that no error occurred and that the TaprootKeySpendSig
 	// field in the PSBT input is now populated with a signature.
@@ -3203,8 +3206,8 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 	require.NotEmpty(t, packet.Inputs[0].TaprootKeySpendSig)
 }
 
-// TestSignBip32PsbtInput tests that signBip32PsbtInput successfully generates
-// and appends a signature for a valid BIP32 (SegWit v0) input.
+// TestSignBip32PsbtInput tests that a planned BIP32 (SegWit v0) input is
+// signed and the signature appended to it.
 func TestSignBip32PsbtInput(t *testing.T) {
 	t.Parallel()
 
@@ -3267,15 +3270,18 @@ func TestSignBip32PsbtInput(t *testing.T) {
 		},
 	)
 
-	// Act: Call signBip32PsbtInput to sign the input using the mocked
-	// wallet and keys.
+	// Act: Plan the input, then sign the plan using the mocked wallet and
+	// keys.
 	sigHashes := txscript.NewTxSigHashes(
 		tx, txscript.NewCannedPrevOutputFetcher(
 			packet.Inputs[0].WitnessUtxo.PkScript,
 			packet.Inputs[0].WitnessUtxo.Value,
 		),
 	)
-	err = w.signBip32PsbtInput(t.Context(), packet, 0, sigHashes, nil)
+	plan, err := w.planBip32PsbtInput(packet, 0, sigHashes, nil)
+	require.NoError(t, err)
+
+	err = w.signPlannedInput(t.Context(), packet, plan)
 
 	// Assert: Verify that no error occurred and that the PartialSigs field
 	// in the PSBT input is populated with a signature from the expected
@@ -3996,9 +4002,9 @@ func TestSignPsbtRejectsLeafVersionMismatchBeforeKeyLookup(t *testing.T) {
 	require.Equal(t, before, packet)
 }
 
-// TestSignTaprootPsbtInputErrors tests various error conditions in
-// signTaprootPsbtInput.
-func TestSignTaprootPsbtInputErrors(t *testing.T) {
+// TestPlanTaprootPsbtInputErrors tests various error conditions in
+// planTaprootPsbtInput.
+func TestPlanTaprootPsbtInputErrors(t *testing.T) {
 	t.Parallel()
 
 	w, _ := createUnlockedWalletWithMocks(t)
@@ -4015,7 +4021,7 @@ func TestSignTaprootPsbtInputErrors(t *testing.T) {
 		Bip32Path: []uint32{1}, // Too short
 	}}
 	packet.Inputs[0].TaprootBip32Derivation = tapDerivation
-	err = w.signTaprootPsbtInput(t.Context(), packet, 0, nil, nil)
+	_, err = w.planTaprootPsbtInput(packet, 0, nil, nil)
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
 
 	// Case 2: CreateTaprootSpendDetails error (e.g. invalid merkle root).
@@ -4026,13 +4032,13 @@ func TestSignTaprootPsbtInputErrors(t *testing.T) {
 		0, 0,
 	}
 	packet.Inputs[0].TaprootMerkleRoot = []byte{0x01} // Invalid length
-	err = w.signTaprootPsbtInput(t.Context(), packet, 0, nil, nil)
+	_, err = w.planTaprootPsbtInput(packet, 0, nil, nil)
 	require.ErrorIs(t, err, ErrInvalidTaprootMerkleRootLength)
 }
 
-// TestSignBip32PsbtInputErrors tests various error conditions in
-// signBip32PsbtInput.
-func TestSignBip32PsbtInputErrors(t *testing.T) {
+// TestPlanBip32PsbtInputErrors tests various error conditions in
+// planBip32PsbtInput.
+func TestPlanBip32PsbtInputErrors(t *testing.T) {
 	t.Parallel()
 
 	w, _ := createUnlockedWalletWithMocks(t)
@@ -4048,7 +4054,7 @@ func TestSignBip32PsbtInputErrors(t *testing.T) {
 	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
 		Bip32Path: []uint32{1}, // Too short
 	}}
-	err = w.signBip32PsbtInput(t.Context(), packet, 0, nil, nil)
+	_, err = w.planBip32PsbtInput(packet, 0, nil, nil)
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
 
 	// Case 2: Unknown Purpose.
@@ -4058,7 +4064,7 @@ func TestSignBip32PsbtInputErrors(t *testing.T) {
 		hdkeychain.HardenedKeyStart + 0,
 		0, 0,
 	}
-	err = w.signBip32PsbtInput(t.Context(), packet, 0, nil, nil)
+	_, err = w.planBip32PsbtInput(packet, 0, nil, nil)
 	require.ErrorIs(t, err, ErrUnknownBip32Purpose)
 }
 
