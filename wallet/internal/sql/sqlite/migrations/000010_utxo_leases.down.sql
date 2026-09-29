@@ -1,4 +1,5 @@
 -- Rollback note: Idempotent by design (using "IF EXISTS").
 -- Must succeed even if objects are already dropped or database is in an
 -- unexpected state.
+DROP TRIGGER IF EXISTS trg_mark_utxo_lease_spend_disconnected;
 DROP TABLE IF EXISTS utxo_leases;
