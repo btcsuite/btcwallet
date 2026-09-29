@@ -180,3 +180,20 @@ WHERE
             AND u.spent_by_tx_id IS NULL
         )
     );
+
+-- name: DeleteMaturedUtxoLeases :execrows
+-- Deletes confirmation-controlled leases whose spend reached its release
+-- depth at the wallet's new sync tip.
+--
+-- How:
+-- - A spend confirmed at height h has tip_height - h + 1 confirmations.
+-- - Rows without a confirmed spend (progress 0 or -1) and timed leases are
+--   untouched.
+-- Performance:
+-- - Uses the partial spend-maturity index scoped by wallet.
+DELETE FROM utxo_leases
+WHERE
+    wallet_id = $1
+    AND release_after_spend_confs > 0
+    AND confirmed_spend_height > 0
+    AND sqlc.arg('tip_height')::BIGINT - confirmed_spend_height + 1 >= release_after_spend_confs;
