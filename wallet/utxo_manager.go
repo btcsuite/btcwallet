@@ -93,8 +93,43 @@ type LeasedOutput struct {
 	// LockID is the lease owner identifier.
 	LockID wtxmgr.LockID
 
-	// Expiration is when the current lease expires.
+	// Expiration is when a timed lease expires. A confirmation-controlled
+	// lease keeps this value but does not apply it.
 	Expiration time.Time
+
+	// ReleaseAfterSpendConfs is the spend depth that releases a
+	// confirmation-controlled lease. Zero means the lease is timed.
+	ReleaseAfterSpendConfs uint32
+
+	// ConfirmedSpendHeight is the spend progress of a
+	// confirmation-controlled lease. Zero means no confirmed spend was
+	// observed, -1 means an observed spend was disconnected and awaits
+	// reconfirmation, and a positive value is the height of the confirmed
+	// spend.
+	ConfirmedSpendHeight int32
+}
+
+// LeaseOption configures a LeaseOutput call.
+type LeaseOption func(*leaseOptions)
+
+// leaseOptions holds the optional LeaseOutput settings.
+type leaseOptions struct {
+	releaseAfterSpendConfs uint32
+}
+
+// WithReleaseAfterSpend makes a lease confirmation-controlled: it ignores its
+// wall-clock expiration and lasts until the transaction spending the output
+// reaches confs confirmations, or until its owner releases it. A
+// reorganization that disconnects the spend resets that progress and keeps the
+// lease. An abandoned lease whose spend never confirms must be released
+// explicitly.
+//
+// A zero confs value creates a timed lease, or keeps the stored depth when the
+// owner renews an existing lease. A non-zero value replaces the stored depth.
+func WithReleaseAfterSpend(confs uint32) LeaseOption {
+	return func(opts *leaseOptions) {
+		opts.releaseAfterSpendConfs = confs
+	}
 }
 
 // UtxoQuery holds the set of options for a ListUnspent query.
@@ -122,16 +157,19 @@ type UtxoManager interface {
 	GetUtxo(ctx context.Context, prevOut wire.OutPoint) (*Utxo, error)
 
 	// LeaseOutput locks an output for a given duration, preventing it from
-	// being used in transactions.
+	// being used in transactions. WithReleaseAfterSpend instead keeps the
+	// lease until the output's spend reaches a confirmation depth.
 	LeaseOutput(ctx context.Context, id wtxmgr.LockID,
-		op wire.OutPoint, duration time.Duration) (time.Time, error)
+		op wire.OutPoint, duration time.Duration,
+		opts ...LeaseOption) (time.Time, error)
 
 	// ReleaseOutput unlocks a previously leased output, making it available
 	// for use.
 	ReleaseOutput(ctx context.Context, id wtxmgr.LockID,
 		op wire.OutPoint) error
 
-	// ListLeasedOutputs returns a list of all currently leased outputs.
+	// ListLeasedOutputs returns a list of all currently leased outputs,
+	// including confirmation-controlled leases whose output is spent.
 	ListLeasedOutputs(ctx context.Context) ([]*LeasedOutput, error)
 }
 
@@ -170,6 +208,7 @@ type leaseOutputReq struct {
 	id       wtxmgr.LockID
 	op       wire.OutPoint
 	duration time.Duration
+	opts     leaseOptions
 	respChan chan leaseOutputResp
 }
 
@@ -439,6 +478,9 @@ func (w *Wallet) handleGetUtxo(r getUtxoReq) {
 // LeaseOutput locks an output for a given duration, reserving it so that it is
 // not selected for other transactions until the lease expires.
 //
+// WithReleaseAfterSpend selects a confirmation-controlled lease that ignores
+// the returned expiration and outlives the output's spend.
+//
 // The lock is acquired by delegating to the wallet's db.Store implementation,
 // which records the lease under the supplied LockID and returns its expiration
 // time. The store's internal sentinels are translated into the public,
@@ -448,11 +490,17 @@ func (w *Wallet) handleGetUtxo(r getUtxoReq) {
 //
 // NOTE: This is part of the UtxoManager interface implementation.
 func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
-	op wire.OutPoint, duration time.Duration) (time.Time, error) {
+	op wire.OutPoint, duration time.Duration,
+	opts ...LeaseOption) (time.Time, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return time.Time{}, err
+	}
+
+	var leaseOpts leaseOptions
+	for _, opt := range opts {
+		opt(&leaseOpts)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
@@ -461,6 +509,7 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 		id:       id,
 		op:       op,
 		duration: duration,
+		opts:     leaseOpts,
 		respChan: make(chan leaseOutputResp, 1),
 	}
 
@@ -480,10 +529,11 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 func (w *Wallet) handleLeaseOutput(r leaseOutputReq) {
 	lease, err := w.store.LeaseOutput(
 		r.ctx, db.LeaseOutputParams{
-			WalletID: w.id,
-			ID:       db.LockID(r.id),
-			OutPoint: r.op,
-			Duration: r.duration,
+			WalletID:               w.id,
+			ID:                     db.LockID(r.id),
+			OutPoint:               r.op,
+			Duration:               r.duration,
+			ReleaseAfterSpendConfs: r.opts.releaseAfterSpendConfs,
 		},
 	)
 	if err != nil {
@@ -626,9 +676,11 @@ func (w *Wallet) handleListLeasedOutputs(r listLeasedOutputsReq) {
 	outputs := make([]*LeasedOutput, len(leases))
 	for i := range leases {
 		outputs[i] = &LeasedOutput{
-			OutPoint:   leases[i].OutPoint,
-			LockID:     wtxmgr.LockID(leases[i].LockID),
-			Expiration: leases[i].Expiration,
+			OutPoint:               leases[i].OutPoint,
+			LockID:                 wtxmgr.LockID(leases[i].LockID),
+			Expiration:             leases[i].Expiration,
+			ReleaseAfterSpendConfs: leases[i].ReleaseAfterSpendConfs,
+			ConfirmedSpendHeight:   leases[i].ConfirmedSpendHeight,
 		}
 	}
 

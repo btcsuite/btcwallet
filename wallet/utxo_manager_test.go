@@ -341,6 +341,73 @@ func TestLeaseOutput(t *testing.T) {
 	require.Equal(t, expiration, actualExpiration)
 }
 
+// TestLeaseOutputReleaseAfterSpend verifies that WithReleaseAfterSpend
+// forwards the requested depth to the store, that the last option wins, and
+// that a zero depth is forwarded unchanged so the store keeps an existing
+// lease's depth.
+func TestLeaseOutputReleaseAfterSpend(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	tests := []struct {
+		name      string
+		opts      []LeaseOption
+		wantConfs uint32
+	}{
+		{
+			name:      "depth",
+			opts:      []LeaseOption{WithReleaseAfterSpend(6)},
+			wantConfs: 6,
+		},
+		{
+			name: "last option wins",
+			opts: []LeaseOption{
+				WithReleaseAfterSpend(6),
+				WithReleaseAfterSpend(2),
+			},
+			wantConfs: 2,
+		},
+		{
+			name:      "zero depth",
+			opts:      []LeaseOption{WithReleaseAfterSpend(0)},
+			wantConfs: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+			expiration := time.Now().Add(time.Hour).UTC()
+
+			mocks.store.On(
+				"LeaseOutput", mock.Anything,
+				db.LeaseOutputParams{
+					WalletID:               w.id,
+					ID:                     db.LockID{1},
+					OutPoint:               outPoint,
+					Duration:               time.Hour,
+					ReleaseAfterSpendConfs: tc.wantConfs,
+				},
+			).Return(&db.LeasedOutput{
+				OutPoint:               outPoint,
+				LockID:                 db.LockID{1},
+				Expiration:             expiration,
+				ReleaseAfterSpendConfs: tc.wantConfs,
+			}, nil).Once()
+
+			actual, err := w.LeaseOutput(
+				t.Context(), wtxmgr.LockID{1}, outPoint,
+				time.Hour, tc.opts...,
+			)
+			require.NoError(t, err)
+			require.Equal(t, expiration, actual)
+		})
+	}
+}
+
 // TestLeaseOutputErr tests that LeaseOutput translates the store's db-native
 // sentinels into the public, wallet-owned errors.
 func TestLeaseOutputErr(t *testing.T) {
@@ -485,6 +552,12 @@ func TestListLeasedOutputs(t *testing.T) {
 			OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 			LockID:     db.LockID{1},
 			Expiration: leasedOutput.Expiration,
+		}, {
+			OutPoint:               wire.OutPoint{Hash: [32]byte{2}},
+			LockID:                 db.LockID{2},
+			Expiration:             leasedOutput.Expiration,
+			ReleaseAfterSpendConfs: 3,
+			ConfirmedSpendHeight:   -1,
 		}}, nil,
 	)
 
@@ -494,5 +567,11 @@ func TestListLeasedOutputs(t *testing.T) {
 		OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 		LockID:     wtxmgr.LockID{1},
 		Expiration: leasedOutput.Expiration,
+	}, {
+		OutPoint:               wire.OutPoint{Hash: [32]byte{2}},
+		LockID:                 wtxmgr.LockID{2},
+		Expiration:             leasedOutput.Expiration,
+		ReleaseAfterSpendConfs: 3,
+		ConfirmedSpendHeight:   -1,
 	}}, leasedOutputs)
 }
