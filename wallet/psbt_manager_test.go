@@ -3139,11 +3139,12 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 	plan, err := w.planTaprootPsbtInput(packet, 0, sigHashes, nil)
 	require.NoError(t, err)
 
-	err = w.signPlannedInput(t.Context(), packet, plan)
+	signed, err := w.signPlannedInput(t.Context(), packet, plan)
 
 	// Assert: Verify that no error occurred and that the TaprootKeySpendSig
 	// field in the PSBT input is now populated with a signature.
 	require.NoError(t, err)
+	require.True(t, signed)
 	require.NotEmpty(t, packet.Inputs[0].TaprootKeySpendSig)
 }
 
@@ -3222,12 +3223,13 @@ func TestSignBip32PsbtInput(t *testing.T) {
 	plan, err := w.planBip32PsbtInput(packet, 0, sigHashes, nil)
 	require.NoError(t, err)
 
-	err = w.signPlannedInput(t.Context(), packet, plan)
+	signed, err := w.signPlannedInput(t.Context(), packet, plan)
 
 	// Assert: Verify that no error occurred and that the PartialSigs field
 	// in the PSBT input is populated with a signature from the expected
 	// public key.
 	require.NoError(t, err)
+	require.True(t, signed)
 	require.Len(t, packet.Inputs[0].PartialSigs, 1)
 	require.Equal(t, pubKeyBytes, packet.Inputs[0].PartialSigs[0].PubKey)
 }
@@ -3642,6 +3644,32 @@ func TestSignPsbtRejectsInvalidRecordBeforeKeyLookup(t *testing.T) {
 	// Assert: the record is refused, no key was looked up, and the
 	// caller's packet is unchanged.
 	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+	mocks.store.AssertNotCalled(
+		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	)
+	require.Equal(t, before, packet)
+}
+
+// TestSignPsbtPlansEveryInputBeforeKeyLookup tests that an invalid input is
+// reported before the wallet looks up a key for any other input, including a
+// signable one ahead of it.
+func TestSignPsbtPlansEveryInputBeforeKeyLookup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: input 0 is signable, input 1 names the wrong coin type.
+	packet := testP2WPKHSignPacket(t, 0, 1)
+	packet.Inputs[1].Bip32Derivation[0].Bip32Path[1] =
+		hdkeychain.HardenedKeyStart + 0
+
+	before := clonePacket(packet)
+	w, mocks := createUnlockedWalletWithMocks(t)
+
+	// Act: sign the packet.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the bad path is reported, no key was looked up, and the
+	// caller's packet is unchanged.
+	require.ErrorIs(t, err, ErrInvalidBip32Path)
 	mocks.store.AssertNotCalled(
 		t, "GetAccountSecret", mock.Anything, mock.Anything,
 	)
