@@ -3428,6 +3428,59 @@ func TestSignPsbtRejectsNilTxInput(t *testing.T) {
 	require.ErrorIs(t, err, ErrPacketMalformed)
 }
 
+// TestSignPsbtSkipsWalletKeySpendRecord tests that a second signing pass keeps
+// the wallet's own Taproot key-path signature and looks up no key.
+func TestSignPsbtSkipsWalletKeySpendRecord(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a BIP-86 input for the key the wallet derives, signed once.
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	pkScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootKeyNoScript(walletPub),
+	)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+	packet, _, _ := testAuthPacket(t, utxo, txscript.SigHashDefault)
+	packet.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{{
+			XOnlyPubKey: schnorr.SerializePubKey(walletPub),
+			Bip32Path: []uint32{
+				hdkeychain.HardenedKeyStart + 86,
+				hdkeychain.HardenedKeyStart + 1,
+				hdkeychain.HardenedKeyStart + 0,
+				0, 0,
+			},
+		}}
+	derivations := clonePacket(packet).Inputs[0].TaprootBip32Derivation
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+		waddrmgr.DerivationPath{InternalAccount: 0},
+	)
+
+	_, err = w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+	require.NoError(t, err)
+	require.Len(t, packet.Inputs[0].TaprootKeySpendSig, 64)
+
+	signed := clonePacket(packet)
+
+	// Act: sign the packet again.
+	result, err := w.SignPsbt(
+		t.Context(), &SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: nothing was signed or changed, and the derivation is
+	// byte-for-byte what it was before either pass.
+	require.NoError(t, err)
+	require.Empty(t, result.SignedInputs)
+	require.Equal(t, signed, packet)
+	require.Equal(
+		t, derivations, packet.Inputs[0].TaprootBip32Derivation,
+	)
+}
+
 // TestSignTaprootPsbtInputErrors tests various error conditions in
 // signTaprootPsbtInput.
 func TestSignTaprootPsbtInputErrors(t *testing.T) {
