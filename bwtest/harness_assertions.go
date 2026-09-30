@@ -3,6 +3,7 @@ package bwtest
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -48,5 +49,27 @@ func (h *HarnessTest) AssertWalletSynced(w *wallet.Wallet) {
 	}, defaultTestTimeout)
 	if err != nil {
 		h.Fatalf("wallet sync timeout: %v", err)
+	}
+}
+
+// ReceiveTxEvent returns the next event sub delivers. It fails the test if the
+// subscription ends or delivers nothing within the default timeout.
+func (h *HarnessTest) ReceiveTxEvent(
+	sub *wallet.TxSubscription) *wallet.TxDetail {
+
+	h.Helper()
+
+	select {
+	case detail, ok := <-sub.Events():
+		if !ok {
+			h.Fatalf("transaction subscription ended: %v", sub.Err())
+		}
+
+		return detail
+
+	case <-time.After(defaultTestTimeout):
+		h.Fatalf("no transaction event within %v", defaultTestTimeout)
+
+		return nil
 	}
 }
