@@ -3,8 +3,13 @@
 package itest
 
 import (
+	"bytes"
+	"context"
 	"testing"
+	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
@@ -217,4 +222,286 @@ func TestCreateImportedAccountDuplicateName(t *testing.T) {
 	_, err = store.CreateImportedAccount(t.Context(), params)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "constraint")
+}
+
+// TestCreateImportedAccountIdentity tests script ownership admission through
+// the concrete Store, including metadata normalization and disjoint branches.
+func TestCreateImportedAccountIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: construct equal payloads with different serialization metadata,
+	// plus independent public-key and chain-code changes for allowed controls.
+	master, err := hdkeychain.NewMaster(
+		bytes.Repeat([]byte{0xCC}, 32), &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	key, err := master.Neuter()
+	require.NoError(t, err)
+	pub, err := key.ECPubKey()
+	require.NoError(t, err)
+
+	alias := hdkeychain.NewExtendedKey(
+		chaincfg.MainNetParams.HDPublicKeyID[:], pub.SerializeCompressed(),
+		key.ChainCode(), []byte{1, 2, 3, 4}, 3, 42, false,
+	)
+	other, err := key.Derive(1)
+	require.NoError(t, err)
+
+	otherChain := hdkeychain.NewExtendedKey(
+		chaincfg.MainNetParams.HDPublicKeyID[:], pub.SerializeCompressed(),
+		bytes.Repeat([]byte{0xDD}, 32), []byte{1, 2, 3, 4}, 3, 42, false,
+	)
+	plus := db.ScopeAddrMap[db.KeyScopeBIP0049Plus]
+	strict := db.ScopeAddrSchema{
+		ExternalAddrType: db.NestedWitnessPubKey,
+		InternalAddrType: db.NestedWitnessPubKey,
+	}
+	swapped := db.ScopeAddrSchema{
+		ExternalAddrType: db.WitnessPubKey,
+		InternalAddrType: db.NestedWitnessPubKey,
+	}
+
+	tests := []struct {
+		name        string
+		ownerScope  db.KeyScope
+		ownerSchema *db.ScopeAddrSchema
+		scope       db.KeyScope
+		schema      *db.ScopeAddrSchema
+		key         string
+		dryRun      bool
+		want        error
+	}{
+		{
+			name:       "same scope",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			key:        alias.String(),
+			want:       db.ErrAccountIdentityCollision,
+		},
+		{
+			name:       "internal overlap across scopes",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0049Plus,
+			key:        alias.String(),
+			want:       db.ErrAccountIdentityCollision,
+		},
+		{
+			name:       "strict nested disjoint",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0049Plus,
+			schema:     &strict,
+			key:        alias.String(),
+		},
+		{
+			name:        "external overlap",
+			ownerScope:  db.KeyScopeBIP0049Plus,
+			ownerSchema: &strict,
+			scope:       db.KeyScope{Purpose: 100, Coin: 0},
+			schema:      &plus,
+			key:         alias.String(),
+			want:        db.ErrAccountIdentityCollision,
+		},
+		{
+			name:       "cross branch equality is disjoint",
+			ownerScope: db.KeyScopeBIP0049Plus,
+			scope:      db.KeyScope{Purpose: 100, Coin: 0},
+			schema:     &swapped,
+			key:        alias.String(),
+		},
+		{
+			name:       "different payload",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			key:        other.String(),
+		},
+		{
+			name:       "same pubkey different chain code",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			key:        otherChain.String(),
+		},
+		{
+			name:       "preview collision",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			key:        alias.String(),
+			dryRun:     true,
+			want:       db.ErrAccountIdentityCollision,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: the existing owner has no children and is excluded
+			// from chain sync, which must not hide its script ownership.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "identity")
+			owner := db.CreateImportedAccountParams{
+				WalletID:            walletID,
+				Name:                "owner",
+				Scope:               tc.ownerScope,
+				AddrSchema:          tc.ownerSchema,
+				PublicKey:           []byte(key.String()),
+				EncryptedPrivateKey: RandomBytes(32),
+				NoChainSync:         true,
+			}
+			_, err := store.CreateImportedAccount(t.Context(), owner)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{
+				WalletID:    walletID,
+				SkipBalance: true,
+			}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			candidate := owner
+			candidate.Name, candidate.PublicKey = "candidate", []byte(tc.key)
+			candidate.Scope, candidate.AddrSchema = tc.scope, tc.schema
+			candidate.MasterFingerprint, candidate.DryRun = 123, tc.dryRun
+
+			// Act: attempt the second import within the real SQL write.
+			info, err := store.CreateImportedAccount(t.Context(), candidate)
+
+			// Assert: collisions return no row and no secret or child/watch
+			// fact; disjoint identities remain admitted with their secrets.
+			require.ErrorIs(t, err, tc.want)
+			after, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			if tc.want != nil {
+				require.Nil(t, info)
+				require.Equal(t, before, after)
+			} else {
+				require.NotNil(t, info)
+				require.Len(t, after, 2)
+			}
+
+			var secrets, addresses, children int
+
+			err = store.DB().QueryRowContext(t.Context(), `
+				SELECT (SELECT count(*) FROM account_secrets),
+				       (SELECT count(*) FROM addresses),
+				       (SELECT count(*) FROM derived_addresses)
+			`).Scan(&secrets, &addresses, &children)
+			require.NoError(t, err)
+			require.Equal(t, len(after), secrets)
+			require.Zero(t, addresses)
+			require.Zero(t, children)
+
+			// Act: occupy the original name with the normalized alias twice.
+			owner.PublicKey = []byte(alias.String())
+			for range 2 {
+				info, err = store.CreateImportedAccount(t.Context(), owner)
+
+				// Assert: uniqueness precedence is stable across retries.
+				require.ErrorIs(t, err, db.ErrAccountNameConflict)
+				require.Nil(t, info)
+			}
+		})
+	}
+}
+
+// TestCreateImportedAccountIdentityConcurrent checks wallet-wide admission
+// when competing imports start together, including duplicate-name precedence.
+func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		scope db.KeyScope
+		other string
+		want  error
+	}{
+		{
+			name:  "same scope",
+			scope: db.KeyScopeBIP0084,
+			other: "second",
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "cross scope",
+			scope: db.KeyScopeBIP0049Plus,
+			other: "second",
+			want:  db.ErrAccountIdentityCollision,
+		},
+		{
+			name:  "occupied name",
+			scope: db.KeyScopeBIP0084,
+			other: "first",
+			want:  db.ErrAccountNameConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: fresh SQL storage and a real XPub isolate each race;
+			// buffered results and a bounded context let both workers exit.
+			store := NewTestStore(t)
+			walletID := newWatchOnlyWallet(t, store, "identity-race")
+			key, err := hdkeychain.NewMaster(
+				RandomBytes(32), &chaincfg.SimNetParams,
+			)
+			require.NoError(t, err)
+			pub, err := key.Neuter()
+			require.NoError(t, err)
+
+			start := make(chan struct{})
+			results := make(chan error, 2)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+
+			for _, params := range []db.CreateImportedAccountParams{
+				{
+					WalletID:  walletID,
+					Scope:     db.KeyScopeBIP0084,
+					Name:      "first",
+					PublicKey: []byte(pub.String()),
+				},
+				{
+					WalletID:  walletID,
+					Scope:     tc.scope,
+					Name:      tc.other,
+					PublicKey: []byte(pub.String()),
+				},
+			} {
+				go func() {
+					<-start
+
+					_, err := store.CreateImportedAccount(ctx, params)
+					results <- err
+				}()
+			}
+
+			// Act: release both competing writes before collecting outcomes.
+			close(start)
+
+			firstErr, secondErr := <-results, <-results
+
+			// Assert: one account wins; the loser creates no row or child.
+			if firstErr != nil {
+				firstErr, secondErr = secondErr, firstErr
+			}
+
+			require.NoError(t, firstErr)
+			require.ErrorIs(t, secondErr, tc.want)
+
+			var accounts, secrets, addresses, next int
+
+			err = store.DB().QueryRowContext(ctx, `
+				SELECT (SELECT count(*) FROM accounts),
+				       (SELECT count(*) FROM account_secrets),
+				       (SELECT count(*) FROM addresses),
+				       (SELECT sum(next_account_number) FROM key_scopes)
+			`).Scan(&accounts, &secrets, &addresses, &next)
+			require.NoError(t, err)
+			require.Equal(t, 1, accounts)
+			require.Zero(t, secrets)
+			require.Zero(t, addresses)
+			require.Zero(t, next)
+		})
+	}
 }
