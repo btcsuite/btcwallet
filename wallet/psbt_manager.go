@@ -1104,6 +1104,15 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 		packet.UnsignedTx, prevOutFetcher,
 	)
 
+	// Existing records are kept and can stop an input being signed, so
+	// they must verify first.
+	err = authorizeSignRecords(packet, sigHashes, prevOutFetcher)
+	if err != nil {
+		r.respChan <- signPsbtResp{err: err}
+
+		return
+	}
+
 	// Iterate through each input in the PSBT. For each input, we attempt
 	// to sign it if the wallet can provide the necessary key material and
 	// if the input itself is in a signable state. This loop handles both
