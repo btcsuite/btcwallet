@@ -1778,13 +1778,13 @@ func testSignerRejectWatchOnly(h *bwtest.HarnessTest) {
 	})
 	require.True(h, w.IsWatchOnly())
 
-	addr, err := w.NewAddress(
-		ctx, accountName, keys.addrType, false,
+	info, err := w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(keys.scope, accountName), false,
 	)
 	require.NoError(h, err)
+	require.Equal(h, keys.addrType, info.AddrType)
 
-	info, err := w.GetAddressInfo(ctx, addr)
-	require.NoError(h, err)
+	addr := info.Addr
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(h, err)

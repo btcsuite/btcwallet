@@ -515,13 +515,7 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 
 	accountName := changeAccount.AccountName
 
-	// storeAddrType is the effective internal (change branch) address type
-	// used to build the change script; derivationAccount is the account the
-	// change address is derived under. Both are resolved per branch below.
-	var (
-		storeAddrType     db.AddressType
-		derivationAccount string
-	)
+	var derivationAccount *db.AccountInfo
 
 	switch accountName {
 	// The reserved imported alias cannot derive its own change and, unlike
@@ -553,8 +547,7 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 				derivedAccount, err)
 		}
 
-		storeAddrType = derivedInfo.AddrSchema.InternalAddrType
-		derivationAccount = derivedInfo.AccountName
+		derivationAccount = derivedInfo
 
 	// For a named account (including non-default imported xpub accounts) the
 	// by-name lookup both rejects an unknown account up front and supplies
@@ -584,11 +577,12 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 				accountName, err)
 		}
 
-		storeAddrType = accountInfo.AddrSchema.InternalAddrType
-		derivationAccount = accountName
+		derivationAccount = accountInfo
 	}
 
-	addrType, err := addresstype.ToWallet(storeAddrType, false)
+	addrType, err := addresstype.ToWallet(
+		derivationAccount.AddrSchema.InternalAddrType, false,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -599,12 +593,55 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 			addrType)
 	}
 
-	newChangeScript := func() ([]byte, error) {
+	return &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript: w.newChangeScriptFunc(
+			ctx, changeAccount.KeyScope, derivationAccount,
+		),
+	}, nil
+}
+
+// newChangeScriptFunc allocates fresh change within the admitted authoring
+// request. SQL registers the committed script unless its account excludes live
+// tracking; kvdb keeps legacy allocation.
+func (w *Wallet) newChangeScriptFunc(ctx context.Context,
+	scope waddrmgr.KeyScope,
+	derivationAccount *db.AccountInfo) func() ([]byte, error) {
+
+	if w.addrStore == nil {
+		params := db.NewDerivedAddressParams{
+			WalletID:    w.id,
+			AccountName: derivationAccount.AccountName,
+			Scope:       db.KeyScope(scope),
+			Change:      true,
+		}
+
+		return func() ([]byte, error) {
+			w.addrMu.Lock()
+			stored, err := w.allocateDerivedAddresses(ctx, params, 1)
+			w.addrMu.Unlock()
+
+			if err != nil {
+				return nil, err
+			}
+
+			if !derivationAccount.NoChainSync {
+				_, err = w.deliverStoreAddresses(ctx, stored)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			return stored[0].ScriptPubKey, nil
+		}
+	}
+
+	return func() ([]byte, error) {
 		addrInfo, err := w.store.NewDerivedAddress(
 			ctx, db.NewDerivedAddressParams{
 				WalletID:    w.id,
-				AccountName: derivationAccount,
-				Scope:       db.KeyScope(changeAccount.KeyScope),
+				AccountName: derivationAccount.AccountName,
+				Scope:       db.KeyScope(scope),
 				Change:      true,
 			},
 		)
@@ -614,11 +651,6 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 
 		return addrInfo.ScriptPubKey, nil
 	}
-
-	return &txauthor.ChangeSource{
-		ScriptSize: scriptSize,
-		NewScript:  newChangeScript,
-	}, nil
 }
 
 // normalizeAndValidateTxIntent applies the default input policy and validates

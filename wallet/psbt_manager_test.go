@@ -129,7 +129,7 @@ func TestFundPsbtPopulationError(t *testing.T) {
 	// in its first decoration lookup, once it is well past the point where
 	// it used to have rewritten the caller's packet. Return a real Store
 	// error.
-	w, deps := createTestWalletWithMocks(t)
+	w, deps := createSQLWalletWithMocks(t)
 	startLoadedWalletForTest(t, w)
 	deps.syncer.On("syncState").Return(syncStateSynced).Once()
 	deps.vault.On("Lock").Return().Once()
@@ -1033,7 +1033,7 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 	// one mature 100,000-sat UTXO, then build a packet requesting the
 	// fixture's 99,700-sat payment. Register the store metadata needed to
 	// decorate that selected P2WPKH input in the funded PSBT.
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	fixture := expectDefaultAuthoringSources(t, w, mocks)
@@ -1152,7 +1152,7 @@ func TestFundPsbtTranslatesAmountError(t *testing.T) {
 	// Arrange: Register only the lookups source preparation performs. The
 	// change script is never requested, because authoring rejects the
 	// output set before it reaches the change callback, so registering
-	// NewDerivedAddress would leave an unmet expectation at cleanup.
+	// NewDerivedAddresses would leave an unmet expectation at cleanup.
 	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
 	accountInfo := &db.AccountInfo{
@@ -5002,12 +5002,20 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	changeScript, err := txscript.PayToAddrScript(changeAddr)
 	require.NoError(t, err)
 
-	mocks.store.On("NewDerivedAddress", mock.Anything,
+	mocks.store.On("NewDerivedAddresses", mock.Anything,
 		db.NewDerivedAddressParams{
 			WalletID: w.id, AccountName: defaultAccountName,
 			Scope: scope, Change: true,
-		},
-	).Return(&db.AddressInfo{ScriptPubKey: changeScript}, nil).Once()
+		}, uint32(1),
+	).Return([]db.AddressInfo{{
+		ScriptPubKey:      changeScript,
+		AddrType:          db.TaprootPubKey,
+		HasDerivationPath: true,
+		Branch:            1,
+	}}, nil).Once()
+	mocks.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
+	).Return(nil).Once()
 
 	// Input decoration and change output decoration both resolve their
 	// address through the store.
@@ -5061,7 +5069,7 @@ func testFundingPacket(outPoints ...wire.OutPoint) *psbt.Packet {
 func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
@@ -5182,7 +5190,7 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
@@ -5223,7 +5231,7 @@ func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 func TestFundPsbtRejectsContradictedUtxo(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
@@ -5267,7 +5275,7 @@ func TestFundPsbtRejectsContradictedUtxo(t *testing.T) {
 func TestFundPsbtDuplicateOutputs(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
@@ -5432,7 +5440,7 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 
 	// Arrange: a taproot UTXO the wallet owns, and a parent transaction
 	// that genuinely hashes to the outpoint spending it.
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	inputKey, err := btcec.NewPrivateKey()
