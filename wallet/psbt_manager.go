@@ -1015,8 +1015,11 @@ func (w *Wallet) createTxIntent(packet *psbt.Packet,
 //     generate the raw ECDSA or Schnorr signature using the underlying
 //     `Signer`.
 //
-// The packet is validated, then signed as a copy: the caller's packet is
-// updated only if the call succeeds.
+// The packet is validated, and every existing signature record must verify
+// against its input or the call fails with ErrInvalidSignatureRecord. Valid
+// records are kept; one for the wallet's key means that input is not signed
+// again. The packet is then signed as a copy: the caller's packet is updated
+// only if the call succeeds.
 //
 // Accepted signing finishes before return, including partial signatures and
 // supplied input tweakers, even if the caller cancels after admission.

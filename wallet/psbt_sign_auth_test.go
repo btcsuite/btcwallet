@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"slices"
 	"testing"
 
@@ -64,6 +65,531 @@ func testP2WPKHScript(t *testing.T, key *btcec.PublicKey) []byte {
 	require.NoError(t, err)
 
 	return script
+}
+
+// TestAuthorizeSignRecordsP2WPKH verifies that a P2WPKH partial signature is
+// kept only when its key is the one the output pays and it verifies over the
+// input's digest at the input's sighash.
+func TestAuthorizeSignRecordsP2WPKH(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+
+		// signer is the key that produces the signature.
+		signer int
+
+		// recordKey is the key the record names.
+		recordKey int
+
+		// valueDelta is added to the spent value before signing, so a
+		// non-zero value signs the wrong digest.
+		valueDelta int64
+
+		// sigHash is the sighash the signature is made with. The input
+		// requests SIGHASH_ALL.
+		sigHash txscript.SigHashType
+
+		// wantErr is nil for a record that passes.
+		wantErr error
+	}{{
+		name:    "valid",
+		sigHash: txscript.SigHashAll,
+	}, {
+		name:      "key the output does not pay",
+		signer:    1,
+		recordKey: 1,
+		sigHash:   txscript.SigHashAll,
+		wantErr:   ErrInvalidSignatureRecord,
+	}, {
+		name:    "signed by another key",
+		signer:  1,
+		sigHash: txscript.SigHashAll,
+		wantErr: ErrInvalidSignatureRecord,
+	}, {
+		name:       "wrong digest",
+		valueDelta: 1,
+		sigHash:    txscript.SigHashAll,
+		wantErr:    ErrInvalidSignatureRecord,
+	}, {
+		name:    "other sighash",
+		sigHash: txscript.SigHashNone,
+		wantErr: ErrInvalidSignatureRecord,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an output paying key 0, and a record signed
+			// as the case describes.
+			keys := testAuthKeys()
+			utxo := &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, keys[0].PubKey()),
+			}
+			packet, sigHashes, prevOuts := testAuthPacket(
+				t, utxo, txscript.SigHashAll,
+			)
+
+			sig, err := txscript.RawTxInWitnessSignature(
+				packet.UnsignedTx, sigHashes, 0,
+				utxo.Value+tc.valueDelta, utxo.PkScript,
+				tc.sigHash, keys[tc.signer],
+			)
+			require.NoError(t, err)
+
+			recordKey := keys[tc.recordKey].PubKey()
+			packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+				PubKey:    recordKey.SerializeCompressed(),
+				Signature: sig,
+			}}
+
+			// Act: authorize the packet's records.
+			err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+			// Assert: only the valid record passes.
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestAuthorizeSignRecordsUnsetSighash verifies which partial signatures an
+// input that sets no sighash type accepts: SIGHASH_ALL, the BIP 174 default,
+// and the zero byte this wallet signs with, but nothing else.
+func TestAuthorizeSignRecordsUnsetSighash(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+		// wantErr is nil for a record that passes.
+		wantErr error
+	}{{
+		name:    "bip 174 default",
+		sigHash: txscript.SigHashAll,
+	}, {
+		name:    "zero byte",
+		sigHash: txscript.SigHashDefault,
+	}, {
+		name:    "other sighash",
+		sigHash: txscript.SigHashNone,
+		wantErr: ErrInvalidSignatureRecord,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input with no sighash type, carrying a
+			// signature made with the case's sighash.
+			key := testAuthKeys()[0]
+			utxo := &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, key.PubKey()),
+			}
+			packet, sigHashes, prevOuts := testAuthPacket(
+				t, utxo, txscript.SigHashDefault,
+			)
+
+			sig, err := txscript.RawTxInWitnessSignature(
+				packet.UnsignedTx, sigHashes, 0, utxo.Value,
+				utxo.PkScript, tc.sigHash, key,
+			)
+			require.NoError(t, err)
+
+			packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+				PubKey:    key.PubKey().SerializeCompressed(),
+				Signature: sig,
+			}}
+
+			// Act: authorize the packet's records.
+			err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+			// Assert: only the default and the zero byte pass.
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestAuthorizeSignRecordsP2PKH verifies that a legacy P2PKH signature is
+// checked over the legacy digest.
+func TestAuthorizeSignRecordsP2PKH(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a P2PKH output and a signature for it.
+	key := testAuthKeys()[0]
+	addr, err := address.NewAddressPubKeyHash(
+		address.Hash160(key.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+	packet, sigHashes, prevOuts := testAuthPacket(
+		t, utxo, txscript.SigHashAll,
+	)
+
+	sig, err := txscript.RawTxInSignature(
+		packet.UnsignedTx, 0, pkScript, txscript.SigHashAll, key,
+	)
+	require.NoError(t, err)
+
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+		PubKey:    key.PubKey().SerializeCompressed(),
+		Signature: sig,
+	}}
+
+	// Act: authorize the packet's records.
+	err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+	// Assert: the record passes.
+	require.NoError(t, err)
+}
+
+// TestAuthorizeSignRecordsNestedP2WPKH verifies that a nested P2WPKH signature
+// is checked through the redeem script the output commits to.
+func TestAuthorizeSignRecordsNestedP2WPKH(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+
+		// redeemKey is the key whose P2WPKH program the input carries
+		// as its redeem script, and that signs over it. The output
+		// always wraps key 0's program.
+		redeemKey int
+
+		// wantErr is nil for a record that passes.
+		wantErr error
+	}{{
+		name: "committed redeem script",
+	}, {
+		name:      "redeem script the output does not pay",
+		redeemKey: 1,
+		wantErr:   ErrInvalidSignatureRecord,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a P2SH output wrapping key 0's P2WPKH
+			// program, and an input carrying the case's redeem
+			// script with a signature over it.
+			keys := testAuthKeys()
+			addr, err := address.NewAddressScriptHash(
+				testP2WPKHScript(t, keys[0].PubKey()),
+				&chainParams,
+			)
+			require.NoError(t, err)
+			pkScript, err := txscript.PayToAddrScript(addr)
+			require.NoError(t, err)
+
+			utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+			packet, sigHashes, prevOuts := testAuthPacket(
+				t, utxo, txscript.SigHashAll,
+			)
+
+			signer := keys[tc.redeemKey]
+			redeem := testP2WPKHScript(t, signer.PubKey())
+			packet.Inputs[0].RedeemScript = redeem
+
+			sig, err := txscript.RawTxInWitnessSignature(
+				packet.UnsignedTx, sigHashes, 0, utxo.Value,
+				redeem, txscript.SigHashAll, signer,
+			)
+			require.NoError(t, err)
+
+			packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+				PubKey:    signer.PubKey().SerializeCompressed(),
+				Signature: sig,
+			}}
+
+			// Act: authorize the packet's records.
+			err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+			// Assert: only the committed redeem script passes.
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+// testP2WSHMultisig returns a 2-of-2 witness script over both test keys and the
+// P2WSH output script paying it.
+func testP2WSHMultisig(t *testing.T,
+	keys [2]*btcec.PrivateKey) ([]byte, []byte) {
+
+	t.Helper()
+
+	addrKeys := make([]*address.AddressPubKey, 0, len(keys))
+	for _, key := range keys {
+		addrKey, err := address.NewAddressPubKey(
+			key.PubKey().SerializeCompressed(), &chainParams,
+		)
+		require.NoError(t, err)
+
+		addrKeys = append(addrKeys, addrKey)
+	}
+
+	witnessScript, err := txscript.MultiSigScript(addrKeys, 2)
+	require.NoError(t, err)
+
+	hash := sha256.Sum256(witnessScript)
+	addr, err := address.NewAddressWitnessScriptHash(hash[:], &chainParams)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return witnessScript, pkScript
+}
+
+// TestAuthorizeSignRecordsP2WSH verifies that a P2WSH signature is checked
+// through the witness script the output commits to.
+func TestAuthorizeSignRecordsP2WSH(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+
+		// scriptSuffix is appended to the witness script the input
+		// carries, so a non-empty suffix breaks the commitment.
+		scriptSuffix []byte
+
+		// signer is the key that signs and that the record names: 1
+		// is the script's co-signer, 2 a key the script does not push.
+		signer int
+
+		// wantErr is nil for a record that passes.
+		wantErr error
+	}{{
+		name:   "co-signer in the committed script",
+		signer: 1,
+	}, {
+		name:    "key the script does not push",
+		signer:  2,
+		wantErr: ErrInvalidSignatureRecord,
+	}, {
+		name:         "witness script the output does not pay",
+		scriptSuffix: []byte{txscript.OP_NOP},
+		signer:       1,
+		wantErr:      ErrInvalidSignatureRecord,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a 2-of-2 output, and one signature over the
+			// witness script the input carries.
+			keys := testAuthKeys()
+			witnessScript, pkScript := testP2WSHMultisig(t, keys)
+
+			outsider, _ := btcec.PrivKeyFromBytes(
+				bytes.Repeat([]byte{3}, 32),
+			)
+			signer := [3]*btcec.PrivateKey{
+				keys[0], keys[1], outsider,
+			}[tc.signer]
+
+			utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+			packet, sigHashes, prevOuts := testAuthPacket(
+				t, utxo, txscript.SigHashAll,
+			)
+
+			packet.Inputs[0].WitnessScript = append(
+				bytes.Clone(witnessScript), tc.scriptSuffix...,
+			)
+
+			sig, err := txscript.RawTxInWitnessSignature(
+				packet.UnsignedTx, sigHashes, 0, utxo.Value,
+				packet.Inputs[0].WitnessScript,
+				txscript.SigHashAll, signer,
+			)
+			require.NoError(t, err)
+
+			packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+				PubKey:    signer.PubKey().SerializeCompressed(),
+				Signature: sig,
+			}}
+
+			// Act: authorize the packet's records.
+			err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+			// Assert: only the committed script passes.
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestAuthorizeSignRecordsMalformedPartialSig verifies that a partial
+// signature whose bytes cannot be read is refused rather than trusted.
+func TestAuthorizeSignRecordsMalformedPartialSig(t *testing.T) {
+	t.Parallel()
+
+	key := testAuthKeys()[0].PubKey().SerializeCompressed()
+
+	tests := []struct {
+		name      string
+		pubKey    []byte
+		signature []byte
+	}{{
+		name:      "empty signature",
+		pubKey:    key,
+		signature: []byte{},
+	}, {
+		name:      "not DER",
+		pubKey:    key,
+		signature: []byte{0x30, 0x01, byte(txscript.SigHashAll)},
+	}, {
+		name:      "key that does not parse",
+		pubKey:    bytes.Repeat([]byte{0x05}, 33),
+		signature: []byte{0x30, 0x01, byte(txscript.SigHashAll)},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a P2WPKH input paying the key, carrying the
+			// malformed record.
+			keys := testAuthKeys()
+			utxo := &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, keys[0].PubKey()),
+			}
+			packet, sigHashes, prevOuts := testAuthPacket(
+				t, utxo, txscript.SigHashAll,
+			)
+			packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+				PubKey:    tc.pubKey,
+				Signature: tc.signature,
+			}}
+
+			// Act: authorize the packet's records.
+			err := authorizeSignRecords(packet, sigHashes, prevOuts)
+
+			// Assert: the record is refused.
+			require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+		})
+	}
+}
+
+// TestAuthorizeSignRecordsUnparseableScriptKey verifies that a partial
+// signature naming a key that does not parse is refused, even when the
+// committed witness script pushes those exact bytes.
+func TestAuthorizeSignRecordsUnparseableScriptKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a P2WSH output whose witness script pushes 33 bytes that
+	// are not a key, and a record naming them with a well-formed DER
+	// signature.
+	badKey := bytes.Repeat([]byte{0x05}, 33)
+	witnessScript, err := txscript.NewScriptBuilder().
+		AddData(badKey).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(t, err)
+
+	hash := sha256.Sum256(witnessScript)
+	addr, err := address.NewAddressWitnessScriptHash(hash[:], &chainParams)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+	packet, sigHashes, prevOuts := testAuthPacket(
+		t, utxo, txscript.SigHashAll,
+	)
+	packet.Inputs[0].WitnessScript = witnessScript
+
+	sig, err := txscript.RawTxInWitnessSignature(
+		packet.UnsignedTx, sigHashes, 0, utxo.Value, witnessScript,
+		txscript.SigHashAll, testAuthKeys()[0],
+	)
+	require.NoError(t, err)
+
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+		PubKey:    badKey,
+		Signature: sig,
+	}}
+
+	// Act: authorize the packet's records.
+	err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+	// Assert: the record is refused.
+	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+}
+
+// TestAuthorizeSignRecordsDuplicatePartialSig verifies that two records for one
+// key are refused, even when each would verify on its own.
+func TestAuthorizeSignRecordsDuplicatePartialSig(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the same valid record twice.
+	key := testAuthKeys()[0]
+	utxo := &wire.TxOut{
+		Value: 1000, PkScript: testP2WPKHScript(t, key.PubKey()),
+	}
+	packet, sigHashes, prevOuts := testAuthPacket(
+		t, utxo, txscript.SigHashAll,
+	)
+
+	sig, err := txscript.RawTxInWitnessSignature(
+		packet.UnsignedTx, sigHashes, 0, utxo.Value, utxo.PkScript,
+		txscript.SigHashAll, key,
+	)
+	require.NoError(t, err)
+
+	record := &psbt.PartialSig{
+		PubKey:    key.PubKey().SerializeCompressed(),
+		Signature: sig,
+	}
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{record, record}
+
+	// Act: authorize the packet's records.
+	err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+	// Assert: the duplicate is refused.
+	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+}
+
+// TestAuthorizeSignRecordsPartialSigOnTaproot verifies that an ECDSA record is
+// refused on a Taproot output, where it can never be part of a valid spend.
+func TestAuthorizeSignRecordsPartialSigOnTaproot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a BIP-86 output carrying an ECDSA record.
+	key := testAuthKeys()[0]
+	pkScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootKeyNoScript(key.PubKey()),
+	)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+	packet, sigHashes, prevOuts := testAuthPacket(
+		t, utxo, txscript.SigHashAll,
+	)
+
+	sig, err := txscript.RawTxInWitnessSignature(
+		packet.UnsignedTx, sigHashes, 0, utxo.Value,
+		testP2WPKHScript(t, key.PubKey()), txscript.SigHashAll, key,
+	)
+	require.NoError(t, err)
+
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+		PubKey:    key.PubKey().SerializeCompressed(),
+		Signature: sig,
+	}}
+
+	// Act: authorize the packet's records.
+	err = authorizeSignRecords(packet, sigHashes, prevOuts)
+
+	// Assert: the record is refused.
+	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
 }
 
 // testTapscriptFixture returns a Taproot output with one leaf,
