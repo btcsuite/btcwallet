@@ -355,3 +355,93 @@ func TestSubscribeTxnsRejectsStopped(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrWalletStopped)
 }
+
+// TestTxChanged verifies which committed states a write reports: only the
+// state the write recorded, and only when it differs from the state before.
+func TestTxChanged(t *testing.T) {
+	t.Parallel()
+
+	blockA := chainhash.Hash{0xaa}
+	blockB := chainhash.Hash{0xbb}
+
+	tests := []struct {
+		name   string
+		before txState
+		wrote  *chainhash.Hash
+		after  *TxDetail
+		want   bool
+	}{
+		{
+			name:   "new unconfirmed",
+			before: txState{},
+			after:  &TxDetail{Status: TxStatusPublished},
+			want:   true,
+		},
+		{
+			name:   "known unconfirmed",
+			before: txState{known: true},
+			after:  &TxDetail{Status: TxStatusPublished},
+		},
+		{
+			name:   "unconfirmed write of confirmed tx",
+			before: txState{},
+			after: &TxDetail{
+				Status: TxStatusPublished,
+				Block:  &BlockDetails{Hash: blockA},
+			},
+		},
+		{
+			name:   "new confirmation",
+			before: txState{known: true},
+			wrote:  &blockA,
+			after: &TxDetail{
+				Status: TxStatusPublished,
+				Block:  &BlockDetails{Hash: blockA},
+			},
+			want: true,
+		},
+		{
+			name:   "same confirmation",
+			before: txState{known: true, block: &blockA},
+			wrote:  &blockA,
+			after: &TxDetail{
+				Status: TxStatusPublished,
+				Block:  &BlockDetails{Hash: blockA},
+			},
+		},
+		{
+			name:   "moved confirmation",
+			before: txState{known: true, block: &blockA},
+			wrote:  &blockB,
+			after: &TxDetail{
+				Status: TxStatusPublished,
+				Block:  &BlockDetails{Hash: blockB},
+			},
+			want: true,
+		},
+		{
+			name:   "confirmation not recorded by this write",
+			before: txState{known: true},
+			wrote:  &blockB,
+			after: &TxDetail{
+				Status: TxStatusPublished,
+				Block:  &BlockDetails{Hash: blockA},
+			},
+		},
+		{
+			name:   "invalidated",
+			before: txState{},
+			after:  &TxDetail{Status: TxStatusFailed},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(
+				t, tc.want, txChanged(tc.before, tc.wrote, tc.after),
+			)
+		})
+	}
+}

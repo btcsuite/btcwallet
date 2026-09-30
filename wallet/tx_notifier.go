@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/btcsuite/btcd/chainhash/v2"
 )
 
 // TxSubscriptionQueueLimit is the most undelivered events a transaction
@@ -306,4 +308,37 @@ func cloneTxDetail(detail *TxDetail) *TxDetail {
 	}
 
 	return &clone
+}
+
+// txState is the committed state of one transaction before a write.
+type txState struct {
+	// known is set when the wallet has a record of the transaction.
+	known bool
+
+	// block is the confirming block hash, or nil when unconfirmed.
+	block *chainhash.Hash
+}
+
+// txChanged reports whether after, read once a write committed, is a change
+// that write made and subscribers should see. A write reports only the state
+// it recorded, so the writer that records a confirmation is the one that
+// reports it. An unconfirmed transaction is new only when the wallet had no
+// record of it, and a confirmation is new unless the same block already
+// confirmed it. Invalidated transactions are not reported.
+func txChanged(before txState, wrote *chainhash.Hash, after *TxDetail) bool {
+	switch {
+	case after.Status != TxStatusPending &&
+		after.Status != TxStatusPublished:
+
+		return false
+
+	case wrote == nil:
+		return after.Block == nil && !before.known
+
+	case after.Block == nil || after.Block.Hash != *wrote:
+		return false
+
+	default:
+		return before.block == nil || *before.block != *wrote
+	}
 }
