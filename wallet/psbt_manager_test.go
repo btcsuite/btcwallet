@@ -3481,6 +3481,67 @@ func TestSignPsbtSkipsWalletKeySpendRecord(t *testing.T) {
 	)
 }
 
+// TestSignPsbtRejectsLeafVersionMismatchBeforeKeyLookup tests that a script
+// spend record whose leaf version disagrees with its control block fails the
+// call before any key is looked up, including for a signable input ahead of
+// it, and leaves the caller's packet unchanged.
+func TestSignPsbtRejectsLeafVersionMismatchBeforeKeyLookup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: input 0 is signable. Input 1 spends a Taproot output whose
+	// leaf script states version 0xc2 under its 0xc0 control block, with
+	// a valid signature over that stated leaf.
+	packet := testP2WPKHSignPacket(t, 0)
+
+	keys := testAuthKeys()
+	utxo, _, leafScript := testTapscriptFixture(t, keys)
+	leafScript.LeafVersion = 0xc2
+
+	packet.UnsignedTx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: 1},
+	})
+	packet.Inputs = append(packet.Inputs, psbt.PInput{
+		WitnessUtxo:       utxo,
+		TaprootLeafScript: []*psbt.TaprootTapLeafScript{leafScript},
+	})
+
+	prevOuts, err := PsbtPrevOutputFetcher(packet)
+	require.NoError(t, err)
+
+	stated := txscript.TapLeaf{
+		LeafVersion: leafScript.LeafVersion,
+		Script:      leafScript.Script,
+	}
+	sig, err := txscript.RawTxInTapscriptSignature(
+		packet.UnsignedTx,
+		txscript.NewTxSigHashes(packet.UnsignedTx, prevOuts), 1,
+		utxo.Value, utxo.PkScript, stated, txscript.SigHashDefault,
+		keys[0],
+	)
+	require.NoError(t, err)
+
+	leafHash := stated.TapHash()
+	packet.Inputs[1].TaprootScriptSpendSig = []*psbt.TaprootScriptSpendSig{{
+		XOnlyPubKey: schnorr.SerializePubKey(keys[0].PubKey()),
+		LeafHash:    leafHash[:],
+		Signature:   sig,
+	}}
+
+	before := clonePacket(packet)
+	w, mocks := createUnlockedWalletWithMocks(t)
+
+	// Act: sign the packet.
+	_, err = w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the record is refused, no key was looked up, and the
+	// caller's packet is unchanged.
+	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+	mocks.store.AssertNotCalled(
+		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	)
+	require.Equal(t, before, packet)
+}
+
 // TestSignTaprootPsbtInputErrors tests various error conditions in
 // signTaprootPsbtInput.
 func TestSignTaprootPsbtInputErrors(t *testing.T) {
