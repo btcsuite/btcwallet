@@ -31,9 +31,11 @@ func newManagedWallet(cfg Config, data *walletData) *Wallet {
 		isWatchOnly:       data.isWatchOnly,
 	}
 
-	w.sync = newSyncer(
+	chainSync := newSyncer(
 		cfg, w.addrStore, w.txStore, w, w.store, w.id,
 	)
+	chainSync.txEvents = w
+	w.sync = chainSync
 	w.state = newWalletState(w.sync)
 
 	return w

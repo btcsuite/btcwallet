@@ -6,9 +6,12 @@ package wallet
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
 // TxNotifier provides live notifications of wallet transaction changes.
@@ -25,6 +28,13 @@ var _ TxNotifier = (*Wallet)(nil)
 // SubscribeTxns returns a subscription to the transaction changes made by
 // writes that begin after this call returns. A write already in progress may
 // go unreported, and earlier history is not replayed; use ListTxns for it.
+//
+// The wallet reports a transaction the chain backend relays unconfirmed when
+// it first records it, and reports each block that newly confirms a wallet
+// transaction, including after a reorg. A transaction disconnected by a reorg
+// is not reported until a block confirms it again. Chain backends that do not
+// relay unconfirmed transactions, such as neutrino, only produce
+// confirmations.
 //
 // The subscription lives until ctx ends, Cancel is called, or the wallet
 // stops. The wallet must be started.
@@ -156,6 +166,10 @@ type txNotifier struct {
 
 	// wg tracks the delivery goroutine of each subscription.
 	wg sync.WaitGroup
+
+	// recordMu serializes transaction writes that report events, so two
+	// writers cannot both see a transaction as new.
+	recordMu sync.Mutex
 }
 
 // subscribe registers a subscription that lives until ctx ends, the caller
@@ -275,6 +289,28 @@ type txState struct {
 	block *chainhash.Hash
 }
 
+// txWrite names one transaction a write records and the block it records the
+// transaction in, nil when the write records it unconfirmed.
+type txWrite struct {
+	hash  chainhash.Hash
+	block *chainhash.Hash
+}
+
+// txWritesFromParams returns the transactions a Store batch records.
+func txWritesFromParams(params []db.CreateTxParams) []txWrite {
+	writes := make([]txWrite, 0, len(params))
+	for _, param := range params {
+		write := txWrite{hash: param.Tx.TxHash()}
+		if param.Block != nil {
+			write.block = &param.Block.Hash
+		}
+
+		writes = append(writes, write)
+	}
+
+	return writes
+}
+
 // txChanged reports whether after, read once a write committed, is a change
 // that write made and subscribers should see. A write reports only the state
 // it recorded, so the writer that records a confirmation is the one that
@@ -297,4 +333,137 @@ func txChanged(before txState, wrote *chainhash.Hash, after *TxDetail) bool {
 	default:
 		return before.block == nil || *before.block != *wrote
 	}
+}
+
+// txRecordEntry is one transaction tracked by a txRecord.
+type txRecordEntry struct {
+	txWrite
+
+	// before is the committed state before the write.
+	before txState
+}
+
+// txRecord captures the state of the transactions a write may change so the
+// changes it commits can be delivered afterwards. A record with no subscribers
+// at its start is inactive and delivers nothing.
+type txRecord struct {
+	// w reads committed state and owns the notifier.
+	w *Wallet
+
+	// entries lists the recorded transactions in delivery order. It is
+	// nil for an inactive record.
+	entries []txRecordEntry
+}
+
+// beginTxRecord reads the current state of the written transactions and holds
+// the record lock until release. Call release once the write finishes, then
+// deliver if it committed.
+func (w *Wallet) beginTxRecord(ctx context.Context,
+	writes []txWrite) (*txRecord, error) {
+
+	rec := &txRecord{w: w}
+	if len(writes) == 0 || !w.txEvents.hasSubscribers() {
+		return rec, nil
+	}
+
+	w.txEvents.recordMu.Lock()
+
+	entries := make([]txRecordEntry, 0, len(writes))
+	index := make(map[chainhash.Hash]int, len(writes))
+
+	for _, write := range writes {
+		// A later write of the same transaction decides its final state.
+		if i, ok := index[write.hash]; ok {
+			entries[i].block = write.block
+
+			continue
+		}
+
+		before, err := w.lookupTxState(ctx, write.hash)
+		if err != nil {
+			w.txEvents.recordMu.Unlock()
+
+			return nil, err
+		}
+
+		index[write.hash] = len(entries)
+		entries = append(entries, txRecordEntry{
+			txWrite: write,
+			before:  before,
+		})
+	}
+
+	rec.entries = entries
+
+	return rec, nil
+}
+
+// release lets other writers record transactions.
+func (r *txRecord) release() {
+	if r.entries != nil {
+		r.w.txEvents.recordMu.Unlock()
+	}
+}
+
+// deliver reads the committed state of each recorded transaction and delivers
+// the ones the write changed. Reading and delivering under the record lock
+// keeps events for one transaction in commit order across writers.
+func (r *txRecord) deliver(ctx context.Context) {
+	if r.entries == nil {
+		return
+	}
+
+	r.w.txEvents.recordMu.Lock()
+	defer r.w.txEvents.recordMu.Unlock()
+
+	for _, entry := range r.entries {
+		detail, err := r.w.lookupTxDetail(ctx, entry.hash)
+		if errors.Is(err, ErrTxNotFound) {
+			continue
+		}
+
+		if err != nil {
+			log.Errorf("Unable to read transaction %v for "+
+				"subscribers: %v", entry.hash, err)
+
+			continue
+		}
+
+		if txChanged(entry.before, entry.block, detail) {
+			r.w.txEvents.deliver(detail)
+		}
+	}
+}
+
+// lookupTxState returns the committed state of txHash.
+func (w *Wallet) lookupTxState(ctx context.Context,
+	txHash chainhash.Hash) (txState, error) {
+
+	info, err := w.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	})
+	if errors.Is(err, db.ErrTxNotFound) {
+		return txState{}, nil
+	}
+
+	if err != nil {
+		return txState{}, fmt.Errorf("get tx %v: %w", txHash, err)
+	}
+
+	state := txState{known: true}
+	if info.Block != nil {
+		state.block = &info.Block.Hash
+	}
+
+	return state, nil
+}
+
+// lookupTxDetail returns the committed detail of txHash at the wallet's synced
+// tip.
+func (w *Wallet) lookupTxDetail(ctx context.Context,
+	txHash chainhash.Hash) (*TxDetail, error) {
+
+	//nolint:contextcheck // SyncedTo takes no context.
+	return w.getTxDetail(ctx, txHash, w.SyncedTo().Height)
 }

@@ -5,7 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -273,6 +282,102 @@ func TestSubscribeTxnsRejectsStopped(t *testing.T) {
 	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
+// txEventBackends lists the Store backends a managed wallet runs on in unit
+// tests.
+var txEventBackends = []struct {
+	name       string
+	newManager func(testing.TB) *Manager
+}{
+	{name: "kvdb", newManager: testKVDBManager},
+	{name: "sqlite", newManager: testSQLiteManager},
+}
+
+// txEventFixture is a started, unlocked wallet with a receiving address. Its
+// mock chain never reports synced, so tests drive the syncer's notification
+// handling themselves.
+type txEventFixture struct {
+	w     *Wallet
+	sync  *syncer
+	chain *bwmock.Chain
+	addr  address.Address
+}
+
+// newTxEventFixture creates a txEventFixture on newManager's backend.
+func newTxEventFixture(t *testing.T,
+	newManager func(testing.TB) *Manager) *txEventFixture {
+
+	t.Helper()
+
+	m := newManager(t)
+	chainMock, ok := m.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	chainMock.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+
+	params := sqliteCreateParams(t)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	}))
+
+	const accountName = "events"
+
+	_, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  accountName,
+	})
+	require.NoError(t, err)
+
+	addr, err := w.NewAddress(
+		t.Context(), accountName, waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	return &txEventFixture{w: w, sync: s, chain: chainMock, addr: addr}
+}
+
+// txEventAmount is the value every newTxEventRecord transaction pays.
+const txEventAmount = btcutil.Amount(10_000)
+
+// newTxEventRecord returns a transaction paying addr that spends an outpoint
+// derived from id.
+func newTxEventRecord(t *testing.T, addr address.Address,
+	id byte) *wtxmgr.TxRecord {
+
+	t.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&chainhash.Hash{id}, 0), nil, nil,
+	))
+	tx.AddTxOut(wire.NewTxOut(int64(txEventAmount), pkScript))
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	return rec
+}
+
+// nextTxEventBlock returns metadata for a block extending the wallet's synced
+// tip, identified by id.
+func nextTxEventBlock(w *Wallet, id byte) *wtxmgr.BlockMeta {
+	return &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0xbb, id},
+			Height: w.SyncedTo().Height + 1,
+		},
+		Time: time.Now(),
+	}
+}
+
 // TestTxChanged verifies which committed states a write reports: only the
 // state the write recorded, and only when it differs from the state before.
 func TestTxChanged(t *testing.T) {
@@ -359,6 +464,146 @@ func TestTxChanged(t *testing.T) {
 			require.Equal(
 				t, tc.want, txChanged(tc.before, tc.wrote, tc.after),
 			)
+		})
+	}
+}
+
+// TestSubscribeTxnsChainUnconfirmed verifies that an unconfirmed transaction
+// relayed by the chain backend is reported once, when the wallet first records
+// it.
+func TestSubscribeTxnsChainUnconfirmed(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			first := newTxEventRecord(t, f.addr, 1)
+			second := newTxEventRecord(t, f.addr, 2)
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			for _, rec := range []*wtxmgr.TxRecord{first, first, second} {
+				err = f.sync.processChainUpdate(
+					t.Context(), chain.RelevantTx{TxRecord: rec},
+				)
+				require.NoError(t, err)
+			}
+
+			event := receiveTxEvent(t, sub)
+			require.Equal(t, first.Hash, event.Hash)
+			require.Nil(t, event.Block)
+			require.Equal(t, txEventAmount, event.Value)
+
+			// The repeated relay produced no event, so the next one
+			// reports the second transaction.
+			require.Equal(t, second.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsChainConfirmed verifies that a block confirming wallet
+// transactions reports each of them, whether or not the wallet saw the
+// transaction unconfirmed first.
+func TestSubscribeTxnsChainConfirmed(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			seen := newTxEventRecord(t, f.addr, 1)
+			unseen := newTxEventRecord(t, f.addr, 2)
+			later := newTxEventRecord(t, f.addr, 3)
+
+			err := f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: seen},
+			)
+			require.NoError(t, err)
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			block := nextTxEventBlock(f.w, 1)
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.FilteredBlockConnected{
+					Block: block,
+					RelevantTxs: []*wtxmgr.TxRecord{
+						seen, unseen,
+					},
+				},
+			)
+			require.NoError(t, err)
+
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.RelevantTx{TxRecord: later},
+			)
+			require.NoError(t, err)
+
+			for _, rec := range []*wtxmgr.TxRecord{seen, unseen} {
+				event := receiveTxEvent(t, sub)
+				require.Equal(t, rec.Hash, event.Hash)
+				require.NotNil(t, event.Block)
+				require.Equal(t, block.Hash, event.Block.Hash)
+				require.Equal(t, block.Height, event.Block.Height)
+				require.Equal(t, int32(1), event.Confirmations)
+			}
+
+			// The block produced no other event, so the next one
+			// reports the later transaction.
+			require.Equal(t, later.Hash, receiveTxEvent(t, sub).Hash)
+		})
+	}
+}
+
+// TestSubscribeTxnsReorgReconfirms verifies that a reorg reports only the
+// block that confirms a transaction again, after the stale confirmation and
+// with no event for the disconnect.
+func TestSubscribeTxnsReorgReconfirms(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range txEventBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newTxEventFixture(t, backend.newManager)
+			rec := newTxEventRecord(t, f.addr, 1)
+			forkPoint := f.w.SyncedTo()
+
+			sub, err := f.w.SubscribeTxns(t.Context())
+			require.NoError(t, err)
+
+			stale := nextTxEventBlock(f.w, 1)
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.FilteredBlockConnected{
+					Block:       stale,
+					RelevantTxs: []*wtxmgr.TxRecord{rec},
+				},
+			)
+			require.NoError(t, err)
+
+			require.NoError(t, f.sync.rewindToBlock(t.Context(), forkPoint))
+
+			replacement := nextTxEventBlock(f.w, 2)
+			err = f.sync.processChainUpdate(
+				t.Context(), chain.FilteredBlockConnected{
+					Block:       replacement,
+					RelevantTxs: []*wtxmgr.TxRecord{rec},
+				},
+			)
+			require.NoError(t, err)
+
+			// The next event after the stale confirmation is the
+			// replacement, so the disconnect reported nothing.
+			for _, block := range []*wtxmgr.BlockMeta{stale, replacement} {
+				event := receiveTxEvent(t, sub)
+				require.Equal(t, rec.Hash, event.Hash)
+				require.NotNil(t, event.Block)
+				require.Equal(t, block.Hash, event.Block.Hash)
+			}
 		})
 	}
 }
