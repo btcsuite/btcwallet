@@ -110,11 +110,11 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 	}
 }
 
-// BenchmarkAddressInfoAPI benchmarks AddressInfo API and its deprecated
+// BenchmarkGetAddressInfoAPI benchmarks GetAddressInfo API and its deprecated
 // variant using same key scope and identical test data across multiple
 // dataset sizes. Test names start with dataset size to group API comparisons
 // for benchstat analysis.
-func BenchmarkAddressInfoAPI(b *testing.B) {
+func BenchmarkGetAddressInfoAPI(b *testing.B) {
 	const (
 		// startGrowthIteration is the starting iteration index for the
 		// growth sequence.
@@ -198,7 +198,7 @@ func BenchmarkAddressInfoAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := bw.AddressInfo(b.Context(), testAddr)
+				_, err := bw.GetAddressInfo(b.Context(), testAddr)
 				require.NoError(b, err)
 			}
 		})
