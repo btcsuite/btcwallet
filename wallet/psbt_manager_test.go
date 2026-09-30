@@ -15,6 +15,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -3426,6 +3427,136 @@ func TestSignPsbtRejectsNilTxInput(t *testing.T) {
 
 	// Assert: the packet is refused as malformed.
 	require.ErrorIs(t, err, ErrPacketMalformed)
+}
+
+// TestSignPsbtRejectsInvalidRecordBeforeKeyLookup tests that an existing
+// signature that does not verify fails the call before any key is looked up,
+// including for a signable input ahead of it.
+func TestSignPsbtRejectsInvalidRecordBeforeKeyLookup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: input 0 is signable, and input 1 carries a well-formed
+	// signature for its own key that was made over nothing in particular.
+	packet := testP2WPKHSignPacket(t, 0, 1)
+	walletKey, _ := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+
+	digest := chainhash.DoubleHashB([]byte("unrelated"))
+	sig := ecdsa.Sign(walletKey, digest).Serialize()
+	packet.Inputs[1].PartialSigs = []*psbt.PartialSig{{
+		PubKey:    walletKey.PubKey().SerializeCompressed(),
+		Signature: append(sig, byte(txscript.SigHashAll)),
+	}}
+
+	before := clonePacket(packet)
+	w, mocks := createUnlockedWalletWithMocks(t)
+
+	// Act: sign the packet.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the record is refused, no key was looked up, and the
+	// caller's packet is unchanged.
+	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+	mocks.store.AssertNotCalled(
+		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	)
+	require.Equal(t, before, packet)
+}
+
+// TestSignPsbtKeepsForeignRecord tests that a valid co-signer's signature is
+// kept and does not stop the wallet adding its own.
+func TestSignPsbtKeepsForeignRecord(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a 2-of-2 P2WSH input over the wallet's key and a foreign
+	// key, already carrying the foreign signature.
+	walletKey, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	foreignKey := testAuthKeys()[1]
+	witnessScript, pkScript := testP2WSHMultisig(
+		t, [2]*btcec.PrivateKey{walletKey, foreignKey},
+	)
+
+	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+	packet, sigHashes, _ := testAuthPacket(t, utxo, txscript.SigHashAll)
+	packet.Inputs[0].WitnessScript = witnessScript
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey: walletPub.SerializeCompressed(),
+		Bip32Path: []uint32{
+			hdkeychain.HardenedKeyStart + 84,
+			hdkeychain.HardenedKeyStart + 1,
+			hdkeychain.HardenedKeyStart + 0,
+			0, 0,
+		},
+	}}
+
+	foreignSig, err := txscript.RawTxInWitnessSignature(
+		packet.UnsignedTx, sigHashes, 0, utxo.Value, witnessScript,
+		txscript.SigHashAll, foreignKey,
+	)
+	require.NoError(t, err)
+
+	foreignRecord := &psbt.PartialSig{
+		PubKey:    foreignKey.PubKey().SerializeCompressed(),
+		Signature: foreignSig,
+	}
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{foreignRecord}
+	derivations := clonePacket(packet).Inputs[0].Bip32Derivation
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+		waddrmgr.DerivationPath{InternalAccount: 0},
+	)
+
+	// Act: sign the packet.
+	result, err := w.SignPsbt(
+		t.Context(), &SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: the wallet signed next to the foreign record, which is
+	// unchanged, and the derivation is byte-for-byte what it was.
+	require.NoError(t, err)
+	require.Equal(t, []uint32{0}, result.SignedInputs)
+	require.Len(t, packet.Inputs[0].PartialSigs, 2)
+	require.Equal(t, foreignRecord, packet.Inputs[0].PartialSigs[0])
+	require.Equal(
+		t, walletPub.SerializeCompressed(),
+		packet.Inputs[0].PartialSigs[1].PubKey,
+	)
+	require.Equal(t, derivations, packet.Inputs[0].Bip32Derivation)
+}
+
+// TestSignPsbtSkipsWalletRecord tests that a second signing pass keeps the
+// wallet's own ECDSA signature, adds no duplicate, and looks up no key.
+func TestSignPsbtSkipsWalletRecord(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a packet the wallet has already signed once. The store
+	// lookup is programmed for that first pass only.
+	packet := testP2WPKHSignPacket(t, 0)
+	derivations := clonePacket(packet).Inputs[0].Bip32Derivation
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+		waddrmgr.DerivationPath{InternalAccount: 0},
+	)
+
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+	require.NoError(t, err)
+
+	signed := clonePacket(packet)
+
+	// Act: sign the packet again.
+	result, err := w.SignPsbt(
+		t.Context(), &SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: nothing was signed or changed, and the derivation is
+	// byte-for-byte what it was before either pass.
+	require.NoError(t, err)
+	require.Empty(t, result.SignedInputs)
+	require.Equal(t, signed, packet)
+	require.Equal(t, derivations, packet.Inputs[0].Bip32Derivation)
 }
 
 // TestSignPsbtSkipsWalletKeySpendRecord tests that a second signing pass keeps
