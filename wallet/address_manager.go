@@ -881,12 +881,7 @@ func (w *Wallet) NewBulkAddresses(ctx context.Context, selector AccountSelector,
 // handleNewBulkAddresses commits a batch before registering its destinations.
 // Only the Wallet lifetime can cancel registration of already committed rows.
 func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
-	// Serialize with NewAddress so its oldest-unused selection never races
-	// a concurrent allocation on the same wallet. Registration runs unlocked.
-	w.addrMu.Lock()
 	stored, err := w.allocateDerivedAddresses(r.ctx, r.params, r.count)
-	w.addrMu.Unlock()
-
 	if err != nil {
 		r.respChan <- bulkAddressesResp{err: err}
 
@@ -899,8 +894,6 @@ func (w *Wallet) handleNewBulkAddresses(r newBulkAddressesReq) {
 
 // allocateDerivedAddresses allocates count fresh SQL children and exposes
 // wallet-owned error identities.
-//
-// NOTE: The caller must hold addrMu.
 func (w *Wallet) allocateDerivedAddresses(ctx context.Context,
 	params db.NewDerivedAddressParams, count uint32) ([]db.AddressInfo,
 	error) {
@@ -991,9 +984,7 @@ func (w *Wallet) newAddress(ctx context.Context, selector AccountSelector,
 		return w.newKVDBAddress(ctx, selector, accountName, internal)
 	}
 
-	stored, err := w.oldestUnusedOrNewAddress(
-		ctx, selector, accountName, internal,
-	)
+	stored, err := w.oldestUnusedOrNewAddress(ctx, selector, internal)
 	if err != nil {
 		return AddressInfo{}, err
 	}
@@ -1045,93 +1036,22 @@ func (w *Wallet) receivingAccountName(ctx context.Context,
 }
 
 // oldestUnusedOrNewAddress returns the unused SQL child with the lowest index
-// on the selected branch, or allocates exactly one when none exists. It owns
-// addrMu for the whole selection so concurrent callers on an empty branch
-// observe one allocation and return the same child.
+// on the selected branch, or allocates exactly one when none exists. The Store
+// makes the check and the allocation atomic, so concurrent callers on an empty
+// branch return the same child without wallet-side locking.
 func (w *Wallet) oldestUnusedOrNewAddress(ctx context.Context,
-	selector AccountSelector, accountName string,
-	internal bool) (db.AddressInfo, error) {
-
-	w.addrMu.Lock()
-	defer w.addrMu.Unlock()
-
-	// Waiting for the lock may outlast the caller; do no work for it then.
-	err := ctx.Err()
-	if err != nil {
-		return db.AddressInfo{}, err
-	}
-
-	oldest, found, err := w.oldestUnusedAddressLocked(
-		ctx, selector.keyScope, accountName, internal,
-	)
-	if err != nil {
-		return db.AddressInfo{}, err
-	}
-
-	if found {
-		return oldest, nil
-	}
+	selector AccountSelector, internal bool) (db.AddressInfo, error) {
 
 	// Keep the original selector so the Store resolves the same account the
 	// public batch API would, including numbered selectors.
-	stored, err := w.allocateDerivedAddresses(
-		ctx, w.newDerivedAddressParams(selector, internal), 1,
+	stored, err := w.store.OldestUnusedOrNewAddress(
+		ctx, w.newDerivedAddressParams(selector, internal),
 	)
 	if err != nil {
-		return db.AddressInfo{}, err
+		return db.AddressInfo{}, bulkAddressErr(err)
 	}
 
-	return stored[0], nil
-}
-
-// oldestUnusedAddressLocked scans every stored address of the account and
-// returns the unused derived child with the lowest index on the requested
-// branch. Iteration follows row IDs rather than child indexes, so all pages
-// are inspected.
-//
-// NOTE: The caller must hold addrMu.
-func (w *Wallet) oldestUnusedAddressLocked(ctx context.Context,
-	scope waddrmgr.KeyScope, accountName string,
-	internal bool) (db.AddressInfo, bool, error) {
-
-	req, err := addressPageRequest()
-	if err != nil {
-		return db.AddressInfo{}, false, err
-	}
-
-	dbScope := db.KeyScope(scope)
-	addresses := w.store.IterAddresses(ctx, db.ListAddressesQuery{
-		WalletID:    w.id,
-		AccountName: &accountName,
-		Scope:       &dbScope,
-		Page:        req,
-	})
-
-	var (
-		oldest db.AddressInfo
-		found  bool
-	)
-
-	for storeAddr, err := range addresses {
-		if err != nil {
-			return db.AddressInfo{}, false, err
-		}
-
-		if !storeAddr.HasDerivationPath || storeAddr.IsUsed ||
-			(storeAddr.Branch == 1) != internal {
-
-			continue
-		}
-
-		if found && storeAddr.Index >= oldest.Index {
-			continue
-		}
-
-		oldest = storeAddr
-		found = true
-	}
-
-	return oldest, found, nil
+	return *stored, nil
 }
 
 // newKVDBAddress allocates and notifies the next kvdb child. Kvdb has no batch
