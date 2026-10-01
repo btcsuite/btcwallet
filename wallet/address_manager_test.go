@@ -12,7 +12,6 @@ import (
 	"iter"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -34,13 +33,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAddressManagerFallbackDuringStop keeps oldest-unused selection, fallback
-// allocation, and registration inside the accepted request during shutdown.
+// TestAddressManagerFallbackDuringStop keeps the Store's reuse-or-allocate
+// request and registration inside the accepted request during shutdown.
 func TestAddressManagerFallbackDuringStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Pause an unused-address scan until shutdown closes admission.
-	// An empty result then forces allocation through the accepted request.
+	// Arrange: Pause the Store request until shutdown closes admission, then
+	// let it return a child that must still be registered.
 	w, deps := createSQLWalletWithMocks(t)
 	startLoadedWalletForTest(t, w)
 
@@ -54,17 +53,15 @@ func TestAddressManagerFallbackDuringStop(t *testing.T) {
 	expectReceivingAccount(t, w, deps, selector, &db.AccountInfo{
 		AccountName: name,
 	})
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084).
+	addr, stored := storeChild(
+		t, storeDerivationAccountPubKey(t), db.WitnessPubKey, false, 0,
+	)
+	expectOldestUnusedOrNew(t, w, deps, selector, false, stored).
 		Run(func(mock.Arguments) {
 			close(enteredChan)
 
 			<-releaseChan
 		})
-
-	addr, stored := storeChild(
-		t, storeDerivationAccountPubKey(t), db.WitnessPubKey, false, 0,
-	)
-	expectFreshAddress(t, w, deps, selector, false, stored)
 	deps.chain.On(
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
@@ -78,14 +75,14 @@ func TestAddressManagerFallbackDuringStop(t *testing.T) {
 
 	<-enteredChan
 
-	// Act: Begin shutdown while the accepted scan is paused. Its fallback
-	// must still allocate and register an address without another admission.
+	// Act: Begin shutdown while the accepted request is paused. It must still
+	// register its address without another admission.
 	stoppedChan := make(chan error, 1)
 	go func() { stoppedChan <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 
-	// Assert: Stop waits for accepted work, and release permits the fallback
+	// Assert: Stop waits for accepted work, and release permits the request
 	// to return its address. Fixture cleanup verifies chain registration.
 	select {
 	case err := <-stoppedChan:
@@ -367,39 +364,17 @@ func expectReceivingAccount(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	}).Return(account, nil).Once()
 }
 
-// expectAddressScan configures one oldest-unused scan of the resolved account.
-func expectAddressScan(t *testing.T, w *Wallet, deps *mockWalletDeps,
-	accountName string, scope waddrmgr.KeyScope,
-	items ...db.AddressInfo) *mock.Call {
-
-	t.Helper()
-
-	req, err := addressPageRequest()
-	require.NoError(t, err)
-
-	dbScope := db.KeyScope(scope)
-
-	return deps.store.On("IterAddresses", mock.Anything,
-		db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: &accountName,
-			Scope:       &dbScope,
-			Page:        req,
-		},
-	).Return(addressIter(items...)).Once()
-}
-
-// expectFreshAddress configures the count-one batch allocation NewAddress
-// performs when the selected branch has no unused child.
-func expectFreshAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
+// expectOldestUnusedOrNew configures one reuse-or-allocate Store request for
+// the selector's branch, returning stored as the child the Store chose.
+func expectOldestUnusedOrNew(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	selector AccountSelector, internal bool,
 	stored db.AddressInfo) *mock.Call {
 
 	t.Helper()
 
-	return deps.store.On("NewDerivedAddresses", mock.Anything,
-		w.newDerivedAddressParams(selector, internal), uint32(1),
-	).Return([]db.AddressInfo{stored}, nil).Once()
+	return deps.store.On("OldestUnusedOrNewAddress", mock.Anything,
+		w.newDerivedAddressParams(selector, internal),
+	).Return(&stored, nil).Once()
 }
 
 // storeChild derives one real BIP0084 account child and returns its address
@@ -546,9 +521,9 @@ func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	).Return(info, nil).Once()
 }
 
-// TestNewAddress verifies that an empty branch allocates exactly one child for
-// name and number selectors, and that the returned metadata is truthful for
-// the account's stored address schema and the requested branch.
+// TestNewAddress verifies name and number selectors reach the Store's
+// reuse-or-allocate request unchanged, and that the returned metadata is
+// truthful for the account's stored address schema and the requested branch.
 func TestNewAddress(t *testing.T) {
 	t.Parallel()
 
@@ -611,9 +586,8 @@ func TestNewAddress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: resolve the selected account, scan only used or
-			// other-branch children, then allocate exactly one child
-			// through the batch path and register it on the lifetime.
+			// Arrange: resolve the selected account, let the Store return
+			// one child for its branch, and register it on the lifetime.
 			w, deps := createStartedSQLWalletWithMocks(t)
 
 			selector := NewAccountSelectorByName(tc.scope, tc.accountName)
@@ -627,32 +601,25 @@ func TestNewAddress(t *testing.T) {
 				AccountNumber: &number,
 			})
 
-			key := storeDerivationAccountPubKey(t)
-			_, used := storeChild(t, key, tc.storeType, tc.internal, 0)
-			used.IsUsed = true
-			_, otherBranch := storeChild(
-				t, key, tc.storeType, !tc.internal, 0,
-			)
-			expectAddressScan(
-				t, w, deps, tc.accountName, tc.scope, used, otherBranch,
-			)
-
 			addr, stored := storeChild(
-				t, key, tc.storeType, tc.internal, 1,
+				t, storeDerivationAccountPubKey(t), tc.storeType,
+				tc.internal, 1,
 			)
 			stored.KeyScope = db.KeyScope(tc.scope)
-			expectFreshAddress(t, w, deps, selector, tc.internal, stored)
+			expectOldestUnusedOrNew(
+				t, w, deps, selector, tc.internal, stored,
+			)
 			deps.chain.On(
 				"WatchAddrsFromTip", w.lifetimeCtx,
 				[]address.Address{addr},
 			).Return(nil).Once()
 
-			// Act: request a receiving address on the empty branch.
+			// Act: request a receiving address on the branch.
 			info, err := w.NewAddress(t.Context(), selector, tc.internal)
 
-			// Assert: the allocated child is returned with metadata taken
+			// Assert: the Store's child is returned with metadata taken
 			// from its stored schema and branch. Strict mocks prove one
-			// lookup, one scan, one allocation, and one registration.
+			// account lookup, one Store request, and one registration.
 			require.NoError(t, err)
 			require.Equal(t, addr, info.Addr)
 			require.IsType(t, tc.wantAddrType, info.Addr)
@@ -715,7 +682,7 @@ func TestNewAddressRejectsBeforeDependencies(t *testing.T) {
 
 // TestNewAddressMapsAccountLookup verifies account resolution failures use the
 // public account errors and that a numbered selector resolving to the
-// raw-import bucket is refused before any scan or allocation.
+// raw-import bucket is refused before any Store request.
 func TestNewAddressMapsAccountLookup(t *testing.T) {
 	t.Parallel()
 
@@ -749,7 +716,7 @@ func TestNewAddressMapsAccountLookup(t *testing.T) {
 			t.Parallel()
 
 			// Arrange: fail or redirect only the account lookup; strict
-			// mocks forbid scans, allocation, and registration.
+			// mocks forbid Store requests and registration.
 			w, deps := createStartedWalletWithMocks(t)
 			selector := NewAccountSelectorByNumber(
 				waddrmgr.KeyScopeBIP0084, 7,
@@ -769,96 +736,46 @@ func TestNewAddressMapsAccountLookup(t *testing.T) {
 	}
 }
 
-// TestNewAddressReusesOldestUnused verifies SQL selection returns the unused
-// child with the lowest index on the exact branch even when row order differs
-// from index order, and never allocates while such a child exists.
+// TestNewAddressReusesOldestUnused verifies SQL NewAddress returns the child
+// the Store selects on the exact branch for every call. The Store's database
+// integration tests own selection order, filtering, and allocation.
 func TestNewAddressReusesOldestUnused(t *testing.T) {
 	t.Parallel()
 
 	key := storeDerivationAccountPubKey(t)
-	child := func(internal bool, index uint32, used bool) db.AddressInfo {
-		_, info := storeChild(t, key, db.WitnessPubKey, internal, index)
-		info.IsUsed = used
-
-		return info
-	}
-	rawImport := db.AddressInfo{
-		AddrType:     db.WitnessPubKey,
-		ScriptPubKey: child(false, 99, false).ScriptPubKey,
-	}
-
-	// Many rows in descending index order place the oldest child on the
-	// final page, so selection must inspect every row of the scan.
-	var manyRows []db.AddressInfo
-	for index := uint32(2*addressManagerPageLimit + 1); index > 0; index-- {
-		manyRows = append(manyRows, child(false, index-1, false))
-	}
 
 	testCases := []struct {
-		name      string
-		internal  bool
-		rows      []db.AddressInfo
-		wantIndex uint32
+		name     string
+		internal bool
 	}{
-		{
-			name:     "lower external hole wins over row order",
-			internal: false,
-			rows: []db.AddressInfo{
-				child(false, 0, true), child(false, 5, false),
-				child(true, 1, false), rawImport,
-				child(false, 2, false), child(false, 3, false),
-			},
-			wantIndex: 2,
-		},
-		{
-			name:     "used child rotates to next oldest",
-			internal: false,
-			rows: []db.AddressInfo{
-				child(false, 0, true), child(false, 5, false),
-				child(true, 1, false), child(false, 2, true),
-				child(false, 3, false),
-			},
-			wantIndex: 3,
-		},
-		{
-			name:     "internal branch is isolated",
-			internal: true,
-			rows: []db.AddressInfo{
-				child(false, 0, false), child(true, 4, false),
-				child(true, 1, false), child(true, 0, true),
-			},
-			wantIndex: 1,
-		},
-		{
-			name:      "oldest child on last page",
-			rows:      manyRows,
-			wantIndex: 0,
-		},
+		{name: "external branch", internal: false},
+		{name: "internal branch", internal: true},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: scan the same stored rows for two calls. Strict
-			// mocks allow no allocation, only two registrations.
+			// Arrange: the Store reports the same unused child for two
+			// calls, each registered once.
 			w, deps := createStartedSQLWalletWithMocks(t)
 			name := waddrmgr.DefaultAccountName
 			selector := NewAccountSelectorByName(
 				waddrmgr.KeyScopeBIP0084, name,
 			)
 
-			wantAddr, _ := storeChild(
-				t, key, db.WitnessPubKey, tc.internal, tc.wantIndex,
+			const wantIndex = 3
+
+			wantAddr, stored := storeChild(
+				t, key, db.WitnessPubKey, tc.internal, wantIndex,
 			)
 			for range 2 {
 				expectReceivingAccount(
 					t, w, deps, selector,
 					&db.AccountInfo{AccountName: name},
 				)
-				expectAddressScan(
-					t, w, deps, name, waddrmgr.KeyScopeBIP0084,
-					tc.rows...,
+				expectOldestUnusedOrNew(
+					t, w, deps, selector, tc.internal, stored,
 				)
 			}
 
@@ -873,11 +790,11 @@ func TestNewAddressReusesOldestUnused(t *testing.T) {
 			second, err := w.NewAddress(t.Context(), selector, tc.internal)
 			require.NoError(t, err)
 
-			// Assert: both calls reuse the lowest unused child.
+			// Assert: both calls reuse the selected unused child.
 			require.Equal(t, wantAddr, first.Addr)
 			require.Equal(t, first, second)
 			require.Equal(t, tc.internal, first.Internal)
-			require.Equal(t, tc.wantIndex, first.Derivation.Index)
+			require.Equal(t, uint32(wantIndex), first.Derivation.Index)
 			deps.store.AssertExpectations(t)
 			deps.chain.AssertExpectations(t)
 		})
@@ -904,7 +821,7 @@ func TestNewAddressImportedXpubChild(t *testing.T) {
 	)
 	stored.IsImported = true
 	stored.AccountNumber = nil
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084, stored)
+	expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
 	deps.chain.On(
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
@@ -922,7 +839,7 @@ func TestNewAddressImportedXpubChild(t *testing.T) {
 }
 
 // TestNewAddressNoChainSync verifies receiving rejection for populated and
-// empty NoChainSync accounts on both branches before any scan, allocation, or
+// empty NoChainSync accounts on both branches before any Store request or
 // registration.
 func TestNewAddressNoChainSync(t *testing.T) {
 	t.Parallel()
@@ -960,7 +877,7 @@ func TestNewAddressNoChainSync(t *testing.T) {
 			info, err := w.NewAddress(t.Context(), selector, tc.internal)
 
 			// Assert: reject with the public diagnostic and no address;
-			// strict mocks forbid scans, allocation and watching.
+			// strict mocks forbid Store requests and watching.
 			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
 			require.NotErrorIs(t, err, db.ErrAccountOperationUnsupported)
 			require.ErrorContains(t, err, accountName)
@@ -972,9 +889,10 @@ func TestNewAddressNoChainSync(t *testing.T) {
 	}
 }
 
-// TestNewAddressMapsFallbackFailure verifies an empty-branch allocation keeps
-// the batch path's error identities and never registers a watch.
-func TestNewAddressMapsFallbackFailure(t *testing.T) {
+// TestNewAddressMapsStoreFailure verifies a failed reuse-or-allocate request
+// keeps the batch path's error identities, never leaks Store identities, and
+// never registers a watch.
+func TestNewAddressMapsStoreFailure(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -999,14 +917,18 @@ func TestNewAddressMapsFallbackFailure(t *testing.T) {
 			),
 			wantErr: ErrIndeterminateCommit,
 		},
+		{
+			name:     "lookup failure",
+			storeErr: errDBMock,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: an empty scan reaches exactly one failing
-			// allocation; no chain expectation is registered.
+			// Arrange: the Store request fails; no chain expectation is
+			// registered.
 			w, deps := createStartedSQLWalletWithMocks(t)
 			name := "batch"
 			selector := NewAccountSelectorByName(
@@ -1014,16 +936,22 @@ func TestNewAddressMapsFallbackFailure(t *testing.T) {
 			)
 			expectReceivingAccount(t, w, deps, selector,
 				&db.AccountInfo{AccountName: name})
-			expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084)
-			deps.store.On("NewDerivedAddresses", mock.Anything,
-				w.newDerivedAddressParams(selector, false), uint32(1),
+			deps.store.On("OldestUnusedOrNewAddress", mock.Anything,
+				w.newDerivedAddressParams(selector, false),
 			).Return(nil, tc.storeErr).Once()
 
-			// Act: request a receiving address on the empty branch.
+			// Act: request a receiving address.
 			info, err := w.NewAddress(t.Context(), selector, false)
 
-			// Assert: only the wallet-owned failure escapes.
-			require.ErrorIs(t, err, tc.wantErr)
+			// Assert: only the wallet-owned failure escapes, and an
+			// unmapped failure keeps its message without its identity.
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.ErrorContains(t, err, tc.storeErr.Error())
+			}
+
+			require.NotErrorIs(t, err, tc.storeErr)
 			require.NotErrorIs(t, err, context.Canceled)
 			require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
 			require.Zero(t, info)
@@ -1033,41 +961,15 @@ func TestNewAddressMapsFallbackFailure(t *testing.T) {
 	}
 }
 
-// TestNewAddressScanFailure verifies an iteration error is returned instead of
-// being treated as an empty branch that needs allocation.
-func TestNewAddressScanFailure(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: the scan fails; strict mocks forbid allocation.
-	w, deps := createStartedSQLWalletWithMocks(t)
-	name := waddrmgr.DefaultAccountName
-	selector := NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, name)
-	expectReceivingAccount(t, w, deps, selector,
-		&db.AccountInfo{AccountName: name})
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084).
-		Return(iter.Seq2[db.AddressInfo, error](
-			func(yield func(db.AddressInfo, error) bool) {
-				yield(db.AddressInfo{}, errDBMock)
-			},
-		))
-
-	// Act: request a receiving address.
-	info, err := w.NewAddress(t.Context(), selector, false)
-
-	// Assert: the scan error escapes with no address.
-	require.ErrorIs(t, err, errDBMock)
-	require.Zero(t, info)
-	deps.store.AssertExpectations(t)
-}
-
 // TestNewAddressWatchFailureReusesChild verifies failed registration returns
-// no address and that a retry registers the same committed child instead of
-// allocating a replacement.
+// no address and that a retry asks the Store again and registers the child it
+// returns. The Store's integration tests prove the retry reuses the committed
+// child rather than allocating a replacement.
 func TestNewAddressWatchFailureReusesChild(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: the first call allocates on an empty branch and fails to
-	// register; the retry then scans the committed child.
+	// Arrange: both calls receive the same committed child; only the first
+	// registration fails.
 	w, deps := createStartedSQLWalletWithMocks(t)
 	name := waddrmgr.DefaultAccountName
 	selector := NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, name)
@@ -1078,11 +980,9 @@ func TestNewAddressWatchFailureReusesChild(t *testing.T) {
 	for range 2 {
 		expectReceivingAccount(t, w, deps, selector,
 			&db.AccountInfo{AccountName: name})
+		expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
 	}
 
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084)
-	expectFreshAddress(t, w, deps, selector, false, stored)
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084, stored)
 	deps.chain.On(
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
 	).Return(errDBMock).Once()
@@ -1095,7 +995,7 @@ func TestNewAddressWatchFailureReusesChild(t *testing.T) {
 	retried, retryErr := w.NewAddress(t.Context(), selector, false)
 
 	// Assert: the failure exposes no address, and the retry returns the
-	// same child. Strict mocks prove exactly one allocation.
+	// same child.
 	require.ErrorIs(t, failErr, errDBMock)
 	require.Zero(t, failed)
 	require.NoError(t, retryErr)
@@ -1134,7 +1034,7 @@ func TestNewAddressCancellation(t *testing.T) {
 	t.Run("after commit", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: cancel the caller when the allocation commits. The
+		// Arrange: cancel the caller when the Store request commits. The
 		// joined registration still runs on the live wallet lifetime.
 		w, deps := createStartedSQLWalletWithMocks(t)
 		name := waddrmgr.DefaultAccountName
@@ -1154,12 +1054,9 @@ func TestNewAddressCancellation(t *testing.T) {
 				&db.AccountInfo{AccountName: name})
 		}
 
-		expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084)
-		expectFreshAddress(t, w, deps, selector, false, stored).
+		expectOldestUnusedOrNew(t, w, deps, selector, false, stored).
 			Run(func(mock.Arguments) { cancel() })
-		expectAddressScan(
-			t, w, deps, name, waddrmgr.KeyScopeBIP0084, stored,
-		)
+		expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
 		deps.chain.On(
 			"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
 		).Run(func(mock.Arguments) {
@@ -1171,7 +1068,7 @@ func TestNewAddressCancellation(t *testing.T) {
 		retried, retryErr := w.NewAddress(t.Context(), selector, false)
 
 		// Assert: the canceled call exposes nothing, yet the retry
-		// returns the same committed child without another allocation.
+		// returns the same committed child.
 		require.ErrorIs(t, cancelErr, context.Canceled)
 		require.Zero(t, canceled)
 		require.NoError(t, retryErr)
@@ -1179,85 +1076,6 @@ func TestNewAddressCancellation(t *testing.T) {
 		deps.store.AssertExpectations(t)
 		deps.chain.AssertExpectations(t)
 	})
-}
-
-// TestNewAddressConcurrentEmptyBranch verifies callers that race the first
-// caller's empty-branch lookup share its single allocation instead of each
-// allocating a child.
-func TestNewAddressConcurrentEmptyBranch(t *testing.T) {
-	t.Parallel()
-
-	const competitors = 8
-
-	// Arrange: the first scan has already read the empty branch when it
-	// blocks until every caller has resolved the account, so competitors
-	// contend while its lookup is still in progress.
-	w, deps := createStartedSQLWalletWithMocks(t)
-	name := waddrmgr.DefaultAccountName
-	selector := NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, name)
-	addr, stored := storeChild(
-		t, storeDerivationAccountPubKey(t), db.WitnessPubKey, false, 0,
-	)
-
-	var lookups sync.WaitGroup
-	lookups.Add(competitors + 1)
-	expectReceivingAccount(t, w, deps, selector,
-		&db.AccountInfo{AccountName: name},
-	).Run(func(mock.Arguments) { lookups.Done() }).Times(competitors + 1)
-
-	firstScanning := make(chan struct{})
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084).
-		Run(func(mock.Arguments) {
-			close(firstScanning)
-			lookups.Wait()
-		})
-
-	// Later scans see the branch as it is when they iterate, so a scan
-	// that runs before the allocation commits finds it empty.
-	var committed atomic.Bool
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084).
-		Return(iter.Seq2[db.AddressInfo, error](
-			func(yield func(db.AddressInfo, error) bool) {
-				if committed.Load() {
-					yield(stored, nil)
-				}
-			},
-		)).Times(competitors)
-
-	deps.store.On("NewDerivedAddresses", mock.Anything,
-		w.newDerivedAddressParams(selector, false), uint32(1),
-	).Run(func(mock.Arguments) {
-		committed.Store(true)
-	}).Return([]db.AddressInfo{stored}, nil)
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
-	).Return(nil).Times(competitors + 1)
-
-	results := make(chan addressInfoResp, competitors+1)
-	request := func() {
-		info, err := w.NewAddress(t.Context(), selector, false)
-		results <- addressInfoResp{info: info, err: err}
-	}
-
-	// Act: start the competitors once the first lookup is in progress.
-	go request()
-
-	<-firstScanning
-
-	for range competitors {
-		go request()
-	}
-
-	// Assert: every caller returns the child of the only allocation.
-	for range competitors + 1 {
-		result := <-results
-		require.NoError(t, result.err)
-		require.Equal(t, addr, result.info.Addr)
-	}
-
-	// The mock returns the same child for every allocation, so equal
-	// addresses alone cannot reveal a second allocation; count them.
-	deps.store.AssertNumberOfCalls(t, "NewDerivedAddresses", 1)
 }
 
 // TestNewAddressBlockedWatch verifies a pending registration withholds the
@@ -1277,7 +1095,7 @@ func TestNewAddressBlockedWatch(t *testing.T) {
 	)
 	expectReceivingAccount(t, w, deps, selector,
 		&db.AccountInfo{AccountName: name})
-	expectAddressScan(t, w, deps, name, waddrmgr.KeyScopeBIP0084, stored)
+	expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
 
 	enteredChan := make(chan struct{})
 	deps.chain.On(
