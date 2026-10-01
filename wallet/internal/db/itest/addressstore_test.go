@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/stretchr/testify/require"
@@ -3853,4 +3854,434 @@ func TestNewDerivedAddressesRejectsNoChainSync(t *testing.T) {
 	require.Zero(t, account.ExternalKeyCount)
 	require.NoError(t, rowsErr)
 	require.Empty(t, rows.Items)
+}
+
+// unusedAccount names the account every oldest-unused test allocates in.
+const unusedAccount = "reuse"
+
+// newUnusedAddressWallet creates a wallet with one empty derived account named
+// unusedAccount, so each test starts from an empty branch.
+func newUnusedAddressWallet(t *testing.T, store db.Store) uint32 {
+	t.Helper()
+
+	walletID := newWallet(t, store, "wallet-"+t.Name())
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, unusedAccount)
+
+	return walletID
+}
+
+// oldestUnusedOrNewParams builds a receiving reuse-or-allocate request for one
+// branch of unusedAccount.
+func oldestUnusedOrNewParams(walletID uint32,
+	change bool) db.NewDerivedAddressParams {
+
+	return db.NewDerivedAddressParams{
+		WalletID:         walletID,
+		Scope:            db.KeyScopeBIP0084,
+		AccountName:      unusedAccount,
+		Change:           change,
+		RequireChainSync: true,
+	}
+}
+
+// externalKeyCount returns the external derivation counter of unusedAccount,
+// which shows how many external children were ever allocated.
+func externalKeyCount(t *testing.T, store db.AccountStore,
+	walletID uint32) uint32 {
+
+	t.Helper()
+
+	return getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, unusedAccount,
+	).ExternalKeyCount
+}
+
+// markAddressUsed credits one output to the address so the store records a
+// utxo for it, which is what makes an address used under ADR 0011.
+func markAddressUsed(t *testing.T, store db.TxStore, walletID uint32,
+	addr *db.AddressInfo) {
+
+	t.Helper()
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000300, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+}
+
+// TestOldestUnusedOrNewAddressAllocatesOnEmptyBranch verifies an empty branch
+// gets exactly one new child at index 0.
+func TestOldestUnusedOrNewAddressAllocatesOnEmptyBranch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an account with no children.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+
+	// Act: request a receiving address.
+	got, err := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, false),
+	)
+
+	// Assert: the new child is external index 0 and only one was allocated.
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), got.Branch)
+	require.Equal(t, uint32(0), got.Index)
+	require.Equal(t, unusedAccount, got.AccountName)
+	require.True(t, got.HasDerivationPath)
+	require.Equal(t, uint32(1), externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressReusesUnusedChild verifies repeated requests,
+// by name or by number, return the same unused child without allocating.
+func TestOldestUnusedOrNewAddressReusesUnusedChild(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: one unused child already exists.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	byNameParams := oldestUnusedOrNewParams(walletID, false)
+
+	first, err := store.OldestUnusedOrNewAddress(t.Context(), byNameParams)
+	require.NoError(t, err)
+
+	byNumberParams := byNameParams
+	byNumberParams.AccountName = ""
+	byNumberParams.AccountNumber = first.AccountNumber
+	require.NotNil(t, byNumberParams.AccountNumber)
+
+	// Act: request again by name and by account number.
+	byName, nameErr := store.OldestUnusedOrNewAddress(
+		t.Context(), byNameParams,
+	)
+	byNumber, numberErr := store.OldestUnusedOrNewAddress(
+		t.Context(), byNumberParams,
+	)
+
+	// Assert: both return the first child and the counter did not move.
+	require.NoError(t, nameErr)
+	require.NoError(t, numberErr)
+	require.Equal(t, first.ID, byName.ID)
+	require.Equal(t, first.ID, byNumber.ID)
+	require.Equal(t, uint32(1), externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressPicksLowestIndex verifies the lowest derivation
+// index wins even when a higher index has the lower row ID.
+func TestOldestUnusedOrNewAddressPicksLowestIndex(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: insert index 5 first, then indexes 2..4, so row order and
+	// index order disagree.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	queries := store.Queries()
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, unusedAccount)
+
+	newChild := func() *db.AddressInfo {
+		return newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, unusedAccount, false,
+		)
+	}
+
+	UpdateAccountNextExternalIndex(t, store.DB(), accountID, 5)
+
+	five := newChild()
+
+	UpdateAccountNextExternalIndex(t, store.DB(), accountID, 2)
+
+	two := newChild()
+	newChild()
+	newChild()
+	require.Less(t, five.ID, two.ID)
+
+	// Act: request a receiving address.
+	got, err := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, false),
+	)
+
+	// Assert: index 2 is returned and nothing new was allocated.
+	require.NoError(t, err)
+	require.Equal(t, two.ID, got.ID)
+	require.Equal(t, uint32(2), got.Index)
+	require.Equal(t, uint32(5), externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressSkipsUsedChildren verifies used children are
+// never returned, and that a branch with only used children allocates.
+func TestOldestUnusedOrNewAddressSkipsUsedChildren(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: three children where the first two are used.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	params := oldestUnusedOrNewParams(walletID, false)
+
+	children, err := store.NewDerivedAddresses(t.Context(), params, 3)
+	require.NoError(t, err)
+
+	markAddressUsed(t, store, walletID, &children[0])
+	markAddressUsed(t, store, walletID, &children[1])
+
+	// Act and assert: the only unused child is returned.
+	got, err := store.OldestUnusedOrNewAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.Equal(t, children[2].ID, got.ID)
+
+	// Act and assert: once it is used too, the next child is allocated.
+	markAddressUsed(t, store, walletID, &children[2])
+
+	got, err = store.OldestUnusedOrNewAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.Equal(t, uint32(3), got.Index)
+	require.Equal(t, uint32(4), externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressIgnoresOtherAddresses verifies children on the
+// other branch, children of a sibling account, and raw imports are never
+// returned for the requested branch.
+func TestOldestUnusedOrNewAddressIgnoresOtherAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the external branch is empty, but an internal child, a
+	// sibling account child, and a raw import all exist and are unused.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "sibling")
+
+	internal := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, unusedAccount, true,
+	)
+	sibling := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "sibling", false,
+	)
+	rawImport, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(22),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	// Act: request the external branch, then the internal branch.
+	external, externalErr := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, false),
+	)
+	gotInternal, internalErr := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, true),
+	)
+
+	// Assert: the external request allocates its own child instead of
+	// returning any of the others, while the internal request reuses the
+	// internal child.
+	require.NoError(t, externalErr)
+	require.NoError(t, internalErr)
+	require.Equal(t, uint32(0), external.Branch)
+	require.Equal(t, uint32(0), external.Index)
+	require.NotContains(t, []uint32{internal.ID, sibling.ID, rawImport.ID},
+		external.ID)
+	require.Equal(t, internal.ID, gotInternal.ID)
+}
+
+// TestOldestUnusedOrNewAddressSurvivesReopen verifies a fresh connection
+// reuses the child committed before the store was closed.
+func TestOldestUnusedOrNewAddressSurvivesReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: allocate one child, then close and reopen the store.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID := newUnusedAddressWallet(t, store)
+	params := oldestUnusedOrNewParams(walletID, false)
+
+	first, err := store.OldestUnusedOrNewAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	store = reopen()
+
+	// Act: request a receiving address through the new connection.
+	got, err := store.OldestUnusedOrNewAddress(t.Context(), params)
+
+	// Assert: the committed child is reused.
+	require.NoError(t, err)
+	require.Equal(t, first.ID, got.ID)
+	require.Equal(t, uint32(1), externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressUnknownAccount verifies a request for a missing
+// account reports ErrAccountNotFound.
+func TestOldestUnusedOrNewAddressUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a wallet without the requested account.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-"+t.Name())
+
+	// Act: request a receiving address.
+	got, err := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, false),
+	)
+
+	// Assert: the missing account is reported with no address.
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.Nil(t, got)
+}
+
+// TestOldestUnusedOrNewAddressChainSyncDisabled verifies a receiving request
+// on an account excluded from chain sync is refused without allocating.
+func TestOldestUnusedOrNewAddressChainSyncDisabled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an empty account with chain sync disabled.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-"+t.Name())
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			Name:        unusedAccount,
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	// Act: request a receiving address.
+	got, err := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, false),
+	)
+
+	// Assert: the request is refused and no child was allocated.
+	require.ErrorIs(t, err, db.ErrAccountOperationUnsupported)
+	require.Nil(t, got)
+	require.Zero(t, externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressExhaustedBranch verifies an empty branch whose
+// counter is past the last normal child reports exhaustion and stores no
+// address.
+func TestOldestUnusedOrNewAddressExhaustedBranch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: move the empty branch's counter past the last normal child.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	queries := store.Queries()
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, unusedAccount)
+	UpdateAccountNextExternalIndex(
+		t, store.DB(), accountID, db.MaxAddressIndex+1,
+	)
+
+	// Act: request a receiving address.
+	got, err := store.OldestUnusedOrNewAddress(
+		t.Context(), oldestUnusedOrNewParams(walletID, false),
+	)
+
+	// Assert: exhaustion is reported and the counter did not move.
+	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
+	require.Nil(t, got)
+	require.Equal(t, db.MaxAddressIndex+1, externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressConcurrentEmptyBranch verifies concurrent
+// requests on an empty branch commit one allocation and all return its child.
+// This is the guarantee the wallet used to enforce with a process-local
+// mutex, so it must hold for independent Store transactions.
+func TestOldestUnusedOrNewAddressConcurrentEmptyBranch(t *testing.T) {
+	t.Parallel()
+
+	const competitors = 8
+
+	// Arrange: every competitor targets the same empty external branch.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	params := oldestUnusedOrNewParams(walletID, false)
+
+	// Act: run all requests at once and wait for every one, so no
+	// transaction outlives the store.
+	got := make([]*db.AddressInfo, competitors)
+	errs := make([]error, competitors)
+
+	var wg sync.WaitGroup
+	for i := range competitors {
+		wg.Go(func() {
+			got[i], errs[i] = store.OldestUnusedOrNewAddress(
+				t.Context(), params,
+			)
+		})
+	}
+
+	wg.Wait()
+
+	// Assert: every request returns the same child, and the counter shows
+	// only one allocation.
+	for i := range competitors {
+		require.NoError(t, errs[i])
+		require.Equal(t, got[0].ID, got[i].ID)
+	}
+
+	require.Equal(t, uint32(1), externalKeyCount(t, store, walletID))
+}
+
+// TestOldestUnusedOrNewAddressConcurrentBatch verifies a request racing a
+// batch allocation on the same empty branch returns index 0 and wastes no
+// child, whichever transaction commits first.
+func TestOldestUnusedOrNewAddressConcurrentBatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: one reuse request and one three-child batch target the same
+	// empty external branch.
+	store := NewTestStore(t)
+	walletID := newUnusedAddressWallet(t, store)
+	params := oldestUnusedOrNewParams(walletID, false)
+
+	var (
+		wg       sync.WaitGroup
+		reused   *db.AddressInfo
+		batch    []db.AddressInfo
+		reuseErr error
+		batchErr error
+	)
+
+	// Act: run both requests at once and wait for both.
+	wg.Go(func() {
+		reused, reuseErr = store.OldestUnusedOrNewAddress(t.Context(), params)
+	})
+	wg.Go(func() {
+		batch, batchErr = store.NewDerivedAddresses(t.Context(), params, 3)
+	})
+	wg.Wait()
+
+	// Assert: the reused child is index 0. Either it is the batch's first
+	// child or it was allocated before the batch; in both cases the stored
+	// children are exactly 0..count-1, so none was allocated twice or
+	// skipped.
+	require.NoError(t, reuseErr)
+	require.NoError(t, batchErr)
+	require.Equal(t, uint32(0), reused.Index)
+
+	indexes := map[uint32]bool{reused.Index: true}
+	for _, child := range batch {
+		indexes[child.Index] = true
+	}
+
+	count := externalKeyCount(t, store, walletID)
+	require.Len(t, indexes, int(count))
+
+	for index := range count {
+		require.True(t, indexes[index], "missing index %d", index)
+	}
 }
