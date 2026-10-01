@@ -291,6 +291,105 @@ func (q *Queries) GetAddressSecretByID(ctx context.Context, arg GetAddressSecret
 	return i, err
 }
 
+const GetOldestUnusedAddress = `-- name: GetOldestUnusedAddress :one
+SELECT
+    a.id,
+    da.address_id AS derived_address_id,
+    da.account_id,
+    acc.account_number,
+    acc.account_name,
+    acc.no_chain_sync,
+    ks.purpose,
+    ks.coin_type,
+    a.script_type_id,
+    da.address_branch,
+    da.address_index,
+    a.is_derived,
+    acc.is_derived AS account_is_derived,
+    a.script_pub_key,
+    a.pub_key,
+    a.created_at,
+    acc.master_fingerprint,
+    w.is_watch_only AS wallet_is_watch_only,
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+FROM derived_addresses AS da
+INNER JOIN addresses AS a ON da.address_id = a.id
+INNER JOIN accounts AS acc ON da.account_id = acc.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE
+    da.account_id = $1
+    AND da.address_branch = $2::SMALLINT
+    AND NOT EXISTS (
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = da.address_id
+    )
+ORDER BY da.address_index
+LIMIT 1
+`
+
+type GetOldestUnusedAddressParams struct {
+	AccountID     int64
+	AddressBranch int16
+}
+
+type GetOldestUnusedAddressRow struct {
+	ID                int64
+	DerivedAddressID  int64
+	AccountID         int64
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	NoChainSync       bool
+	Purpose           int64
+	CoinType          int64
+	ScriptTypeID      int16
+	AddressBranch     int16
+	AddressIndex      int64
+	IsDerived         bool
+	AccountIsDerived  bool
+	ScriptPubKey      []byte
+	PubKey            []byte
+	CreatedAt         time.Time
+	MasterFingerprint sql.NullInt64
+	WalletIsWatchOnly bool
+	HasScript         bool
+}
+
+// Returns the unused HD-derived child with the lowest derivation index on one
+// branch of an already resolved account. An address is used once any utxo row
+// references it (see ADR 0011), so only children without utxos are eligible.
+// The scan walks the account/branch/index unique index in order and stops at
+// the first unused child. Reuse-aware allocation runs it in the transaction
+// that resolved the account, so it sees the row the index counter belongs to.
+func (q *Queries) GetOldestUnusedAddress(ctx context.Context, arg GetOldestUnusedAddressParams) (GetOldestUnusedAddressRow, error) {
+	row := q.queryRow(ctx, q.getOldestUnusedAddressStmt, GetOldestUnusedAddress, arg.AccountID, arg.AddressBranch)
+	var i GetOldestUnusedAddressRow
+	err := row.Scan(
+		&i.ID,
+		&i.DerivedAddressID,
+		&i.AccountID,
+		&i.AccountNumber,
+		&i.AccountName,
+		&i.NoChainSync,
+		&i.Purpose,
+		&i.CoinType,
+		&i.ScriptTypeID,
+		&i.AddressBranch,
+		&i.AddressIndex,
+		&i.IsDerived,
+		&i.AccountIsDerived,
+		&i.ScriptPubKey,
+		&i.PubKey,
+		&i.CreatedAt,
+		&i.MasterFingerprint,
+		&i.WalletIsWatchOnly,
+		&i.HasScript,
+	)
+	return i, err
+}
+
 const InsertAddressSecret = `-- name: InsertAddressSecret :exec
 INSERT INTO address_secrets (
     address_id,

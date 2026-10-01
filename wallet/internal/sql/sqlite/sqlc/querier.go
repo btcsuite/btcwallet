@@ -220,6 +220,13 @@ type Querier interface {
 	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
+	// Returns the unused HD-derived child with the lowest derivation index on one
+	// branch of an already resolved account. An address is used once any utxo row
+	// references it (see ADR 0011), so only children without utxos are eligible.
+	// The scan walks the account/branch/index unique index in order and stops at
+	// the first unused child. Reuse-aware allocation runs it in the transaction
+	// that resolved the account, so it sees the row the index counter belongs to.
+	GetOldestUnusedAddress(ctx context.Context, arg GetOldestUnusedAddressParams) (GetOldestUnusedAddressRow, error)
 	// Retrieves the full transaction row along with optional block metadata.
 	//
 	// How:
