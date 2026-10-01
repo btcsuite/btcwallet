@@ -52,6 +52,7 @@ func addressSecretByIDRowToSecret(
 type addressInfoRow interface {
 	sqlc.GetAddressByScriptPubKeyRow |
 		sqlc.ListAddressesByAccountRow |
+		sqlc.GetOldestUnusedAddressRow |
 		sqlc.ListAddressesByScriptPubKeysRow |
 		sqlc.ListRawImportedAddressesRow
 }
@@ -116,6 +117,34 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 
 		// The existing account join supplies receiving policy without a
 		// separate lookup or hiding this child from ordinary address lists.
+		info.NoChainSync = base.NoChainSync
+
+		return info, nil
+
+	case sqlc.GetOldestUnusedAddressRow:
+		// The query only returns children without utxos, so the row is
+		// unused by construction.
+		info, err := addressFieldsToInfo(
+			base.ID,
+			sql.NullInt64{Int64: base.DerivedAddressID, Valid: true},
+			sql.NullInt64{Int64: base.AccountID, Valid: true},
+			base.AccountNumber,
+			sql.NullString{String: base.AccountName, Valid: true},
+			base.MasterFingerprint,
+			sql.NullInt64{Int64: base.Purpose, Valid: true},
+			sql.NullInt64{Int64: base.CoinType, Valid: true},
+			base.ScriptTypeID,
+			sql.NullInt64{Int64: base.AddressBranch, Valid: true},
+			sql.NullInt64{Int64: base.AddressIndex, Valid: true},
+			base.IsDerived,
+			sql.NullBool{Bool: base.AccountIsDerived, Valid: true},
+			base.ScriptPubKey, base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, false,
+		)
+		if err != nil {
+			return nil, err
+		}
+
 		info.NoChainSync = base.NoChainSync
 
 		return info, nil

@@ -191,6 +191,19 @@ func NewDerivedAddressesWithOps(ctx context.Context,
 		return nil, false, err
 	}
 
+	return newDerivedAddressesForAccount(
+		ctx, params, count, account, number, ops, deriveFn,
+	)
+}
+
+// newDerivedAddressesForAccount allocates a complete batch for an account the
+// caller already resolved and admitted in the same write transaction, so
+// reuse-aware allocation does not load the account twice.
+func newDerivedAddressesForAccount(ctx context.Context,
+	params NewDerivedAddressParams, count uint32,
+	account DerivedAddressAccount, number *uint32, ops NewDerivedAddressOps,
+	deriveFn AddressDerivationFunc) ([]AddressInfo, bool, error) {
+
 	candidates, exhausted, err := derivedAddressCandidates(
 		ctx, params, count, account, number, ops, deriveFn,
 	)
