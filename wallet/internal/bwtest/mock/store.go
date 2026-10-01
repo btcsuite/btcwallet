@@ -286,6 +286,18 @@ func (m *Store) ListAddresses(ctx context.Context,
 	return result, args.Error(1)
 }
 
+// OldestUnusedOrNewAddress implements the db.AddressStore interface.
+func (m *Store) OldestUnusedOrNewAddress(ctx context.Context,
+	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
+
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.AddressInfo), args.Error(1)
+}
+
 // IterAddresses implements the db.AddressStore interface.
 func (m *Store) IterAddresses(ctx context.Context,
 	query db.ListAddressesQuery) iter.Seq2[db.AddressInfo, error] {
