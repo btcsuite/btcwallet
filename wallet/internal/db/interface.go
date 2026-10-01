@@ -344,6 +344,8 @@ type DerivedAccountData struct {
 }
 
 // AddressStore defines the database actions for managing addresses.
+//
+//nolint:interfacebloat // Address reads and writes share one Store boundary.
 type AddressStore interface {
 	// NewDerivedAddresses atomically allocates count fresh children in order.
 	// Errors return no addresses. Terminal exhaustion commits all attempted
@@ -401,6 +403,19 @@ type AddressStore interface {
 	// yields addresses one by one until exhaustion or error.
 	IterAddresses(ctx context.Context,
 		query ListAddressesQuery) iter.Seq2[AddressInfo, error]
+
+	// OldestUnusedOrNewAddress returns the unused HD-derived child with the
+	// lowest index on the selected branch, or allocates exactly one when the
+	// branch has none. The check and the fallback allocation are atomic
+	// against every allocation on the account, including from other
+	// processes, so concurrent callers on an empty branch receive the same
+	// child. Account resolution and RequireChainSync follow
+	// NewDerivedAddresses. A found child is read without taking the
+	// allocation lock; only a miss pays for a write transaction. Errors
+	// return no address, and the allocation path reports the same error
+	// identities as NewDerivedAddresses.
+	OldestUnusedOrNewAddress(ctx context.Context,
+		params NewDerivedAddressParams) (*AddressInfo, error)
 
 	// GetAddressSecret retrieves the encrypted secret material for a given
 	// address. Returns the AddressSecret containing encrypted private key
