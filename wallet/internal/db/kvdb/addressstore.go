@@ -488,6 +488,14 @@ func (s *Store) IterAddresses(ctx context.Context,
 	)
 }
 
+// OldestUnusedOrNewAddress is unsupported because legacy kvdb wallets always
+// allocate the next child instead of reusing unused ones.
+func (s *Store) OldestUnusedOrNewAddress(context.Context,
+	db.NewDerivedAddressParams) (*db.AddressInfo, error) {
+
+	return nil, db.ErrAccountOperationUnsupported
+}
+
 // addressSecretReader is the narrow slice of *waddrmgr.ScopedKeyManager that
 // GetAddressSecret needs. ManagedAddressSecret lives on the concrete type
 // rather than the AccountStore interface, so kvdb asserts to this local
