@@ -468,6 +468,18 @@ var allTestCases = []*testCase{
 		TestFunc: testBroadcastWalletState,
 	},
 	{
+		Name:     "txnotifier receive unconfirmed",
+		TestFunc: testTxNotifierReceiveUnconfirmed,
+	},
+	{
+		Name:     "txnotifier receive confirmed",
+		TestFunc: testTxNotifierReceiveConfirmed,
+	},
+	{
+		Name:     "txnotifier broadcast transaction",
+		TestFunc: testTxNotifierBroadcastTransaction,
+	},
+	{
 		Name:     "txreader empty history",
 		TestFunc: testListTxnsEmptyHistory,
 	},

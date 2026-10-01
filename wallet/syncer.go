@@ -261,6 +261,10 @@ type syncer struct {
 	// request does not unnecessarily block the calling goroutine.
 	scanReqChan chan *scanReq
 
+	// txEvents reports committed transaction changes to subscribers. It is
+	// nil for a syncer that has no Wallet.
+	txEvents txEventRecorder
+
 	// publisher is the component responsible for broadcasting transactions
 	// to the network. It is primarily used during the maintenance phase to
 	// ensure unmined transactions remain in the mempool.
@@ -301,6 +305,14 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 	}
 
 	return s.cfg.Chain.NotifySpent(outpoints)
+}
+
+// txEventRecorder records transaction writes whose committed changes are
+// reported to subscribers.
+type txEventRecorder interface {
+	// beginTxRecord captures the state of the transactions about to be
+	// written.
+	beginTxRecord(ctx context.Context, writes []txWrite) (*txRecord, error)
 }
 
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
@@ -923,18 +935,40 @@ func (s *syncer) applyStoreTxBatch(ctx context.Context,
 		})
 	}
 
-	err := s.store.ApplyTxBatch(
+	rec, err := s.beginTxRecord(ctx, transactions)
+	if err != nil {
+		return err
+	}
+
+	err = s.store.ApplyTxBatch(
 		ctx, db.TxBatchParams{
 			WalletID:     s.walletID,
 			Transactions: transactions,
 			SyncedTo:     syncedTo,
 		},
 	)
+
+	rec.release()
+
 	if err != nil {
 		return fmt.Errorf("apply tx batch: %w", err)
 	}
 
+	rec.deliver(ctx)
+
 	return nil
+}
+
+// beginTxRecord captures the state of the transactions a Store write records,
+// returning an inactive record when no recorder is set.
+func (s *syncer) beginTxRecord(ctx context.Context,
+	transactions []db.CreateTxParams) (*txRecord, error) {
+
+	if s.txEvents == nil {
+		return &txRecord{}, nil
+	}
+
+	return s.txEvents.beginTxRecord(ctx, txWritesFromParams(transactions))
 }
 
 // txNotificationState returns the status and label to use for a relevant tx
@@ -980,6 +1014,11 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 		return err
 	}
 
+	rec, err := s.beginTxRecord(ctx, params.Transactions)
+	if err != nil {
+		return err
+	}
+
 	refreshWatches := len(params.Horizons) > 0 || len(params.Transactions) > 0
 	if refreshWatches {
 		// Clear readiness before publishing the tip. Normal catch-up
@@ -993,9 +1032,14 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	// loop makes forward progress regardless of whether a given backend
 	// also mirrors the tip into the legacy addrStore.
 	err = s.store.ApplyScanBatch(ctx, params)
+
+	rec.release()
+
 	if err != nil {
 		return fmt.Errorf("apply sync scan batch: %w", err)
 	}
+
+	rec.deliver(ctx)
 
 	// A committed horizon or credit can introduce watches after startup;
 	// finish registration before catch-up reports this batch complete.
@@ -1015,11 +1059,19 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 		return err
 	}
 
+	rec, err := s.beginTxRecord(ctx, params.Transactions)
+	if err != nil {
+		return err
+	}
+
 	// Cover the commit boundary as well as registration: Info treats an
 	// ordinary rescan as live-ready even when both tips match.
 	s.state.Store(uint32(syncStateSyncing))
 
 	err = s.store.ApplyScanBatch(ctx, params)
+
+	rec.release()
+
 	if err != nil {
 		// An unknown commit outcome may have persisted new watches. Keep
 		// readiness revoked so initialization rereads them; only definite
@@ -1030,6 +1082,8 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 
 		return fmt.Errorf("apply targeted scan batch: %w", err)
 	}
+
+	rec.deliver(ctx)
 
 	// Targeted scans can also store new addresses and outputs. Register
 	// them after the commit using the scan worker's lifetime context.
