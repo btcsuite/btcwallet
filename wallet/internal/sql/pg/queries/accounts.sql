@@ -385,6 +385,16 @@ SET next_internal_index = next_internal_index + 1
 WHERE id = $1
 RETURNING (next_internal_index - 1)::BIGINT AS address_index;
 
+-- name: LockAccountForAllocation :exec
+-- Takes the same row lock as GetAndIncrementNext*Index without advancing the
+-- next_external_index/next_internal_index derivation counters, so no child
+-- address index is used up. A caller can then inspect the account's children
+-- while concurrent allocations on that account wait for its transaction.
+SELECT id
+FROM accounts
+WHERE id = $1
+FOR UPDATE;
+
 -- name: AccountBalance :one
 -- AccountBalance returns the confirmed/unconfirmed balance for one account,
 -- summed from the wallet's well-formed derived-address UTXO set at read time.
