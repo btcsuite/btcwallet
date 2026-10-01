@@ -162,6 +162,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getKeyScopeSecretsStmt, err = db.PrepareContext(ctx, GetKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query GetKeyScopeSecrets: %w", err)
 	}
+	if q.getOldestUnusedAddressStmt, err = db.PrepareContext(ctx, GetOldestUnusedAddress); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOldestUnusedAddress: %w", err)
+	}
 	if q.getTransactionByHashStmt, err = db.PrepareContext(ctx, GetTransactionByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query GetTransactionByHash: %w", err)
 	}
@@ -296,6 +299,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
+	}
+	if q.lockAccountForAllocationStmt, err = db.PrepareContext(ctx, LockAccountForAllocation); err != nil {
+		return nil, fmt.Errorf("error preparing query LockAccountForAllocation: %w", err)
 	}
 	if q.markUtxoSpentStmt, err = db.PrepareContext(ctx, MarkUtxoSpent); err != nil {
 		return nil, fmt.Errorf("error preparing query MarkUtxoSpent: %w", err)
@@ -562,6 +568,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getKeyScopeSecretsStmt: %w", cerr)
 		}
 	}
+	if q.getOldestUnusedAddressStmt != nil {
+		if cerr := q.getOldestUnusedAddressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOldestUnusedAddressStmt: %w", cerr)
+		}
+	}
 	if q.getTransactionByHashStmt != nil {
 		if cerr := q.getTransactionByHashStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getTransactionByHashStmt: %w", cerr)
@@ -787,6 +798,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
+	if q.lockAccountForAllocationStmt != nil {
+		if cerr := q.lockAccountForAllocationStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing lockAccountForAllocationStmt: %w", cerr)
+		}
+	}
 	if q.markUtxoSpentStmt != nil {
 		if cerr := q.markUtxoSpentStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing markUtxoSpentStmt: %w", cerr)
@@ -922,6 +938,7 @@ type Queries struct {
 	getKeyScopeByIDStmt                           *sql.Stmt
 	getKeyScopeByWalletAndScopeStmt               *sql.Stmt
 	getKeyScopeSecretsStmt                        *sql.Stmt
+	getOldestUnusedAddressStmt                    *sql.Stmt
 	getTransactionByHashStmt                      *sql.Stmt
 	getTransactionMetaByHashStmt                  *sql.Stmt
 	getUtxoByOutpointStmt                         *sql.Stmt
@@ -967,6 +984,7 @@ type Queries struct {
 	listUnminedTransactionsStmt                   *sql.Stmt
 	listUtxosStmt                                 *sql.Stmt
 	listWalletsStmt                               *sql.Stmt
+	lockAccountForAllocationStmt                  *sql.Stmt
 	markUtxoSpentStmt                             *sql.Stmt
 	releaseUtxoLeaseStmt                          *sql.Stmt
 	rewindWalletSyncStateHeightsForRollbackStmt   *sql.Stmt
@@ -1029,6 +1047,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getKeyScopeByIDStmt:                           q.getKeyScopeByIDStmt,
 		getKeyScopeByWalletAndScopeStmt:               q.getKeyScopeByWalletAndScopeStmt,
 		getKeyScopeSecretsStmt:                        q.getKeyScopeSecretsStmt,
+		getOldestUnusedAddressStmt:                    q.getOldestUnusedAddressStmt,
 		getTransactionByHashStmt:                      q.getTransactionByHashStmt,
 		getTransactionMetaByHashStmt:                  q.getTransactionMetaByHashStmt,
 		getUtxoByOutpointStmt:                         q.getUtxoByOutpointStmt,
@@ -1074,6 +1093,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUnminedTransactionsStmt:                   q.listUnminedTransactionsStmt,
 		listUtxosStmt:                                 q.listUtxosStmt,
 		listWalletsStmt:                               q.listWalletsStmt,
+		lockAccountForAllocationStmt:                  q.lockAccountForAllocationStmt,
 		markUtxoSpentStmt:                             q.markUtxoSpentStmt,
 		releaseUtxoLeaseStmt:                          q.releaseUtxoLeaseStmt,
 		rewindWalletSyncStateHeightsForRollbackStmt:   q.rewindWalletSyncStateHeightsForRollbackStmt,
