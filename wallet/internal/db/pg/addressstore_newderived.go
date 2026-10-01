@@ -55,14 +55,68 @@ func (s *Store) NewDerivedAddresses(ctx context.Context,
 	return addresses, nil
 }
 
+// OldestUnusedOrNewAddress reads the oldest unused child first so a hit never
+// waits on allocation. A miss repeats the lookup in a write transaction that
+// LockAccount serializes with allocation, and allocates there when the branch
+// is still empty.
+func (s *Store) OldestUnusedOrNewAddress(ctx context.Context,
+	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
+
+	var oldest *db.AddressInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		var err error
+
+		oldest, err = db.OldestUnusedDerivedAddressWithOps(
+			ctx, params, newDerivedAddressOps{q: q},
+		)
+
+		// A miss is the expected trigger for the write path, not a failed
+		// read.
+		if errors.Is(err, db.ErrAddressNotFound) {
+			return nil
+		}
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if oldest != nil {
+		return oldest, nil
+	}
+
+	var exhausted bool
+
+	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		var err error
+
+		oldest, exhausted, err = db.OldestUnusedOrNewDerivedAddressWithOps(
+			ctx, params, newDerivedAddressOps{q: qtx}, s.deriveAddress,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if exhausted {
+		return nil, db.ErrMaxAddressIndexReached
+	}
+
+	return oldest, nil
+}
+
 // newDerivedAddressOps adapts PostgreSQL sqlc queries to the shared
 // NewDerivedAddress workflow.
 type newDerivedAddressOps struct {
 	q *sqlc.Queries
 }
 
-// Verify newDerivedAddressOps implements db.NewDerivedAddressOps.
-var _ db.NewDerivedAddressOps = newDerivedAddressOps{}
+// Verify newDerivedAddressOps implements db.UnusedDerivedAddressOps.
+var _ db.UnusedDerivedAddressOps = newDerivedAddressOps{}
 
 // GetAccount implements db.NewDerivedAddressOps.
 func (o newDerivedAddressOps) GetAccount(ctx context.Context,
@@ -152,6 +206,42 @@ func (o newDerivedAddressOps) AddressOwned(ctx context.Context, walletID int64,
 	default:
 		return false, err
 	}
+}
+
+// LockAccount implements db.UnusedDerivedAddressOps. It takes the account row
+// lock that address index allocation takes, so a concurrent allocation on the
+// account waits for this transaction and the following lookup sees every
+// allocation that committed before the lock was granted.
+func (o newDerivedAddressOps) LockAccount(ctx context.Context,
+	accountID int64) error {
+
+	return o.q.LockAccountForAllocation(ctx, accountID)
+}
+
+// OldestUnusedAddress implements db.UnusedDerivedAddressOps.
+func (o newDerivedAddressOps) OldestUnusedAddress(ctx context.Context,
+	accountID int64, change bool) (*db.AddressInfo, error) {
+
+	var branch int16
+	if change {
+		branch = 1
+	}
+
+	row, err := o.q.GetOldestUnusedAddress(
+		ctx, sqlc.GetOldestUnusedAddressParams{
+			AccountID:     accountID,
+			AddressBranch: branch,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrAddressNotFound
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return addressRowToInfo(row)
 }
 
 // NextIndex implements db.NewDerivedAddressOps.
