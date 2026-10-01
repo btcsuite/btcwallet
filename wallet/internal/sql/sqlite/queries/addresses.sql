@@ -220,6 +220,50 @@ WHERE
 ORDER BY da.address_id
 LIMIT sqlc.arg('page_limit');
 
+-- name: GetOldestUnusedAddress :one
+-- Returns the unused HD-derived child with the lowest derivation index on one
+-- branch of an already resolved account. An address is used once any utxo row
+-- references it (see ADR 0011), so only children without utxos are eligible.
+-- The scan walks the account/branch/index unique index in order and stops at
+-- the first unused child. Reuse-aware allocation runs it in the transaction
+-- that resolved the account, so it sees the row the index counter belongs to.
+SELECT
+    a.id,
+    da.address_id AS derived_address_id,
+    da.account_id,
+    acc.account_number,
+    acc.account_name,
+    acc.no_chain_sync,
+    ks.purpose,
+    ks.coin_type,
+    a.script_type_id,
+    da.address_branch,
+    da.address_index,
+    a.is_derived,
+    acc.is_derived AS account_is_derived,
+    a.script_pub_key,
+    a.pub_key,
+    a.created_at,
+    acc.master_fingerprint,
+    w.is_watch_only AS wallet_is_watch_only,
+    s.encrypted_script IS NOT NULL AS has_script
+FROM derived_addresses AS da
+INNER JOIN addresses AS a ON da.address_id = a.id
+INNER JOIN accounts AS acc ON da.account_id = acc.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE
+    da.account_id = sqlc.arg('account_id')
+    AND da.address_branch = sqlc.arg('address_branch')
+    AND NOT EXISTS (
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = da.address_id
+    )
+ORDER BY da.address_index
+LIMIT 1;
+
 -- name: ListRawImportedAddresses :many
 -- Lists raw imported addresses in a wallet, ordered by address ID.
 SELECT
