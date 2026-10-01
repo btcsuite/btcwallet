@@ -617,10 +617,7 @@ func (w *Wallet) newChangeScriptFunc(ctx context.Context,
 		}
 
 		return func() ([]byte, error) {
-			w.addrMu.Lock()
 			stored, err := w.allocateDerivedAddresses(ctx, params, 1)
-			w.addrMu.Unlock()
-
 			if err != nil {
 				return nil, err
 			}
