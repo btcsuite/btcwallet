@@ -457,6 +457,23 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 	if blockValue == nil {
 		err = putBlockRecord(ns, block, &rec.Hash)
 	} else {
+		// A height can only describe one block. The caller must roll
+		// back the old block before inserting its replacement.
+		var stored blockRecord
+
+		err = readRawBlockRecord(blockKey, blockValue, &stored)
+		if err != nil {
+			return err
+		}
+
+		if stored.Hash != block.Hash {
+			str := fmt.Sprintf("block %v at height %d conflicts with "+
+				"recorded block %v", block.Hash, block.Height,
+				stored.Hash)
+
+			return storeError(ErrInput, str, nil)
+		}
+
 		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
 		if err != nil {
 			return err
