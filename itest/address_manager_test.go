@@ -10,7 +10,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -686,4 +689,416 @@ func testAddressManagerRejectKVDBBatch(h *bwtest.HarnessTest) {
 			require.Equal(h, want.Addr, next.Addr)
 		})
 	}
+}
+
+// testAddressManagerNewAddress proves the first receiving address of a fresh
+// account carries the account schema's type and complete HD metadata on both
+// branches of every default scope.
+func testAddressManagerNewAddress(h *bwtest.HarnessTest) {
+	tests := []struct {
+		name     string
+		scope    waddrmgr.KeyScope
+		internal bool
+		byNumber bool
+	}{
+		{
+			name:  "bip44 external",
+			scope: waddrmgr.KeyScopeBIP0044,
+		},
+		{
+			name:     "bip44 internal",
+			scope:    waddrmgr.KeyScopeBIP0044,
+			internal: true,
+		},
+		{
+			name:  "bip49 external",
+			scope: waddrmgr.KeyScopeBIP0049Plus,
+		},
+		{
+			name:     "bip49 internal",
+			scope:    waddrmgr.KeyScopeBIP0049Plus,
+			internal: true,
+		},
+		{
+			name:  "bip84 external",
+			scope: waddrmgr.KeyScopeBIP0084,
+		},
+		{
+			name:     "bip84 internal",
+			scope:    waddrmgr.KeyScopeBIP0084,
+			internal: true,
+		},
+		{
+			name:     "bip84 external by number",
+			scope:    waddrmgr.KeyScopeBIP0084,
+			byNumber: true,
+		},
+		{
+			name:  "bip86 external",
+			scope: waddrmgr.KeyScopeBIP0086,
+		},
+		{
+			name:     "bip86 internal",
+			scope:    waddrmgr.KeyScopeBIP0086,
+			internal: true,
+		},
+	}
+
+	// Each row owns its wallet, so no row can observe another's allocation.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: derive child zero from the fresh account's XPub
+			// before any receiving call, so the result is checked against
+			// an oracle independent of the allocator.
+			const accountName = "receiving account"
+
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			account := h.CreateTestAccount(w, tc.scope, accountName)
+			want := createTestAddressInfos(h, account, tc.internal, 1)[0]
+
+			selector := wallet.NewAccountSelectorByName(
+				tc.scope, accountName,
+			)
+			if tc.byNumber {
+				selector = wallet.NewAccountSelectorByNumber(
+					tc.scope, *account.AccountNumber,
+				)
+			}
+
+			// Act: request one receiving address from the chosen branch.
+			info, err := w.NewAddress(ctx, selector, tc.internal)
+
+			// Assert: complete equality detects a wrong child, branch,
+			// type, or origin.
+			require.NoError(h, err)
+			require.Equal(
+				h, withoutFingerprint(want), withoutFingerprint(info),
+			)
+		})
+	}
+}
+
+// testAddressManagerRejectNewAddress proves selectors that name no derivable
+// account fail with stable error identities and return no address.
+func testAddressManagerRejectNewAddress(h *bwtest.HarnessTest) {
+	// Only the reserved imported name has a documented identity; how a
+	// backend resolves the reserved number is not part of the contract.
+	tests := []struct {
+		name     string
+		selector wallet.AccountSelector
+		wantErr  error
+	}{
+		{
+			name: "unknown account name",
+			selector: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084, "missing account",
+			),
+			wantErr: wallet.ErrAccountNotFound,
+		},
+		{
+			name: "unknown account number",
+			selector: wallet.NewAccountSelectorByNumber(
+				waddrmgr.KeyScopeBIP0084, 7,
+			),
+			wantErr: wallet.ErrAccountNotFound,
+		},
+		{
+			name: "unknown scope",
+			selector: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScope{Purpose: 1017, Coin: 1},
+				waddrmgr.DefaultAccountName,
+			),
+			wantErr: wallet.ErrAccountNotFound,
+		},
+		{
+			name: "imported account name",
+			selector: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084,
+				waddrmgr.ImportedAddrAccountName,
+			),
+			wantErr: wallet.ErrImportedAccountNoAddrGen,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: a started wallet with only its default accounts.
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+			// Act: request an external address for the selector.
+			info, err := w.NewAddress(ctx, tc.selector, false)
+
+			// Assert: every error returns the zero AddressInfo, so a
+			// caller cannot mistake a partial result for an address.
+			require.ErrorIs(h, err, tc.wantErr)
+			require.Zero(h, info)
+		})
+	}
+}
+
+// testAddressManagerRotateUsedAddress proves a funded address is durably
+// recorded as used, so the first receiving call after reopening returns the
+// next child rather than the used one.
+func testAddressManagerRotateUsedAddress(h *bwtest.HarnessTest) {
+	// Arrange: funding pays the default account's first external child and
+	// waits for the wallet to sync the confirming block.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	want := createTestAddressInfos(h, account, false, 2)
+
+	// The oracle is only meaningful if funding paid exactly child zero.
+	wantScript, err := txscript.PayToAddrScript(want[0].Addr)
+	require.NoError(h, err)
+
+	funded := funding.Tx.TxOut[funding.WalletOutpoints[0].Index]
+	require.Equal(h, wantScript, funded.PkScript)
+
+	// Reopening drops in-memory state, so only durable used state and branch
+	// progress can explain the next result. The reopened wallet is locked,
+	// which a receiving call must not require changing.
+	w = h.ReloadWallet(w)
+
+	// Act: request the next external receiving address.
+	info, err := w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), false,
+	)
+
+	// Assert: the used child is skipped and the next one is returned with
+	// its full metadata.
+	require.NoError(h, err)
+	require.Equal(h, withoutFingerprint(want[1]), withoutFingerprint(info))
+}
+
+// testAddressManagerListAddresses proves the account listing reports every
+// allocated address with its balance, before and after reopening the wallet.
+func testAddressManagerListAddresses(h *bwtest.HarnessTest) {
+	// Arrange: one funded external child and one unfunded internal child
+	// give the listing both branches and both a non-zero and zero balance.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	external := createTestAddressInfos(h, account, false, 1)[0]
+	internal := createTestAddressInfos(h, account, true, 1)[0]
+
+	_, err = w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), true,
+	)
+	require.NoError(h, err)
+
+	// The expected addresses come from the account XPub, not from the
+	// allocation results, so the listing is checked against an oracle.
+	wantList := []wallet.AddressProperty{
+		{Address: external.Addr, Balance: oneBTC},
+		{Address: internal.Addr},
+	}
+
+	// Check the live wallet first, then a fresh one loaded from durable
+	// data, so cached state cannot stand in for persisted rows.
+	for _, reopen := range []bool{false, true} {
+		if reopen {
+			w = h.ReloadWallet(w)
+		}
+
+		// Act: list the account's addresses for its address type.
+		listed, err := w.ListAddresses(
+			ctx, waddrmgr.DefaultAccountName, waddrmgr.WitnessPubKey,
+		)
+
+		// Assert: exactly the allocated addresses and balances, with no
+		// ordering contract.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantList, listed)
+	}
+}
+
+// testAddressManagerGetAddressInfo proves point lookups return complete
+// metadata for allocated addresses on both branches, before and after
+// reopening the wallet.
+func testAddressManagerGetAddressInfo(h *bwtest.HarnessTest) {
+	// Arrange: a funded external child and an unfunded internal child cover
+	// both branches and both used and unused state.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	wantInfo := []wallet.AddressInfo{
+		createTestAddressInfos(h, account, false, 1)[0],
+		createTestAddressInfos(h, account, true, 1)[0],
+	}
+
+	_, err = w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), true,
+	)
+	require.NoError(h, err)
+
+	// Check the live wallet first, then a fresh one loaded from durable
+	// data, so cached state cannot stand in for persisted rows.
+	for _, reopen := range []bool{false, true} {
+		if reopen {
+			w = h.ReloadWallet(w)
+		}
+
+		for _, want := range wantInfo {
+			// Act: look up one allocated address.
+			info, err := w.GetAddressInfo(ctx, want.Addr)
+
+			// Assert: complete metadata derived from the account XPub.
+			require.NoError(h, err)
+			require.Equal(
+				h, withoutFingerprint(want), withoutFingerprint(info),
+			)
+		}
+	}
+}
+
+// testAddressManagerLookupUnknownAddress proves point lookups of addresses the
+// wallet never stored fail with ErrAddressNotFound.
+func testAddressManagerLookupUnknownAddress(h *bwtest.HarnessTest) {
+	// Arrange: an underived child of the wallet's own fresh account must
+	// stay unknown until allocated, and a child of an XPub the wallet never
+	// imported is never known.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, "lookup account")
+	own := createTestAddressInfos(h, account, false, 1)[0]
+
+	foreignBranch, err := deterministicImportedAccountKeys(h).accountKey.
+		Derive(waddrmgr.ExternalBranch)
+	require.NoError(h, err)
+	foreignChild, err := foreignBranch.Derive(0)
+	require.NoError(h, err)
+	foreignKey, err := foreignChild.ECPubKey()
+	require.NoError(h, err)
+	foreign, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		foreignKey.SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	for _, addr := range []address.Address{own.Addr, foreign} {
+		// Act: look up the address in the wallet under test.
+		info, err := w.GetAddressInfo(ctx, addr)
+
+		// Assert: the stable miss identity and no partial metadata.
+		require.ErrorIs(h, err, wallet.ErrAddressNotFound)
+		require.Zero(h, info)
+	}
+}
+
+// testAddressManagerNewAddressFingerprint proves SQL receiving results carry
+// the account's root fingerprint, the field the shared cases leave out.
+func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
+	// Modern kvdb deliberately reports a zero fingerprint for derived address
+	// metadata, so only SQL can supply the account's value here.
+	//nolint:staticcheck // This guard excludes the deprecated backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("derived address fingerprints require SQL")
+	}
+
+	// Arrange: the oracle takes the fingerprint from the account read, so
+	// address metadata must agree with the account it was derived from.
+	const accountName = "fingerprint account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.CreateTestAccount(w, scope, accountName)
+	account, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.NotZero(h, *account.MasterKeyFingerprint)
+	want := createTestAddressInfos(h, account, false, 1)[0]
+
+	// Act: request the account's first receiving address.
+	info, err := w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(scope, accountName), false,
+	)
+
+	// Assert: full equality, fingerprint included.
+	require.NoError(h, err)
+	require.Equal(h, want, info)
+}
+
+// testAddressManagerGetAddressInfoFingerprint proves SQL point lookups carry
+// the account's root fingerprint, which GetDerivationInfo hands to PSBTs.
+func testAddressManagerGetAddressInfoFingerprint(h *bwtest.HarnessTest) {
+	// Modern kvdb deliberately reports a zero fingerprint for derived address
+	// metadata, so only SQL can supply the account's value here.
+	//nolint:staticcheck // This guard excludes the deprecated backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("derived address fingerprints require SQL")
+	}
+
+	// Arrange: allocate the account's first receiving address; the oracle
+	// takes the fingerprint from the account read.
+	const accountName = "fingerprint account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.CreateTestAccount(w, scope, accountName)
+	account, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.NotZero(h, *account.MasterKeyFingerprint)
+	want := createTestAddressInfos(h, account, false, 1)[0]
+
+	_, err = w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(scope, accountName), false,
+	)
+	require.NoError(h, err)
+
+	// Act: look up the persisted address.
+	info, err := w.GetAddressInfo(ctx, want.Addr)
+
+	// Assert: full equality, fingerprint included.
+	require.NoError(h, err)
+	require.Equal(h, want, info)
+}
+
+// withoutFingerprint returns a copy of info with the root fingerprint cleared.
+// Modern kvdb deliberately reports zero for derived address metadata while
+// SQL reports the account's fingerprint, so a backend-neutral comparison must
+// leave that one field out; every other field remains part of the contract.
+func withoutFingerprint(info wallet.AddressInfo) wallet.AddressInfo {
+	if info.Derivation == nil {
+		return info
+	}
+
+	derivation := *info.Derivation
+	derivation.MasterKeyFingerprint = 0
+	info.Derivation = &derivation
+
+	return info
 }
