@@ -52,6 +52,10 @@ var allTestCases = []*testCase{
 		Name:     "address manager rotate used address",
 		TestFunc: testAddressManagerRotateUsedAddress,
 	},
+	{
+		Name:     "address manager list addresses",
+		TestFunc: testAddressManagerListAddresses,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
