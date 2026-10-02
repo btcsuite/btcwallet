@@ -884,6 +884,57 @@ func testAddressManagerRotateUsedAddress(h *bwtest.HarnessTest) {
 	require.Equal(h, withoutFingerprint(want[1]), withoutFingerprint(info))
 }
 
+// testAddressManagerListAddresses proves the account listing reports every
+// allocated address with its balance, before and after reopening the wallet.
+func testAddressManagerListAddresses(h *bwtest.HarnessTest) {
+	// Arrange: one funded external child and one unfunded internal child
+	// give the listing both branches and both a non-zero and zero balance.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	external := createTestAddressInfos(h, account, false, 1)[0]
+	internal := createTestAddressInfos(h, account, true, 1)[0]
+
+	_, err = w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), true,
+	)
+	require.NoError(h, err)
+
+	// The expected addresses come from the account XPub, not from the
+	// allocation results, so the listing is checked against an oracle.
+	wantList := []wallet.AddressProperty{
+		{Address: external.Addr, Balance: oneBTC},
+		{Address: internal.Addr},
+	}
+
+	// Check the live wallet first, then a fresh one loaded from durable
+	// data, so cached state cannot stand in for persisted rows.
+	for _, reopen := range []bool{false, true} {
+		if reopen {
+			w = h.ReloadWallet(w)
+		}
+
+		// Act: list the account's addresses for its address type.
+		listed, err := w.ListAddresses(
+			ctx, waddrmgr.DefaultAccountName, waddrmgr.WitnessPubKey,
+		)
+
+		// Assert: exactly the allocated addresses and balances, with no
+		// ordering contract.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantList, listed)
+	}
+}
+
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
 // Modern kvdb deliberately reports zero for derived address metadata while
 // SQL reports the account's fingerprint, so a backend-neutral comparison must
