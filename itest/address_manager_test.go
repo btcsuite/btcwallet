@@ -10,12 +10,19 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
+
+// addressManagerFundingType is the address type funded address cases pay to.
+// Each case resolves its key scope from this value, so the funded scope has a
+// single authority: the address type owns that mapping.
+const addressManagerFundingType = waddrmgr.WitnessPubKey
 
 // createTestAddressInfo independently derives address metadata from the
 // fixture account and requested branch; only the chosen child index comes from
@@ -874,6 +881,51 @@ func testAddressManagerRejectNewAddress(h *bwtest.HarnessTest) {
 			require.Equal(h, want.Addr, next.Addr)
 		})
 	}
+}
+
+// testAddressManagerRotateUsedAddress proves a funded address is durably
+// recorded as used, so the first receiving call after reopening returns the
+// next child rather than the used one.
+func testAddressManagerRotateUsedAddress(h *bwtest.HarnessTest) {
+	// Arrange: funding pays the default account's first external child and
+	// waits for the wallet to sync the confirming block.
+	ctx := h.Context()
+	scope, err := addressManagerFundingType.KeyScope()
+	require.NoError(h, err)
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: addressManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	want := createTestAddressInfos(h, account, false, 2)
+
+	// The oracle is only meaningful if funding paid exactly child zero.
+	wantScript, err := txscript.PayToAddrScript(want[0].Addr)
+	require.NoError(h, err)
+
+	funded := funding.Tx.TxOut[funding.WalletOutpoints[0].Index]
+	require.Equal(h, wantScript, funded.PkScript)
+
+	// Reopening drops in-memory state, so only durable used state and branch
+	// progress can explain the next result. The reopened wallet is locked,
+	// which a receiving call must not require changing.
+	w = h.ReloadWallet(w)
+
+	// Act: request the next external receiving address.
+	info, err := w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), false,
+	)
+
+	// Assert: the used child is skipped and the next one is returned with
+	// its full metadata.
+	require.NoError(h, err)
+	require.Equal(h, withoutFingerprint(want[1]), withoutFingerprint(info))
 }
 
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
