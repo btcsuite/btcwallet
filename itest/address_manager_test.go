@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -980,6 +981,40 @@ func testAddressManagerGetAddressInfo(h *bwtest.HarnessTest) {
 				h, withoutFingerprint(want), withoutFingerprint(info),
 			)
 		}
+	}
+}
+
+// testAddressManagerLookupUnknownAddress proves point lookups of addresses the
+// wallet never stored fail with ErrAddressNotFound.
+func testAddressManagerLookupUnknownAddress(h *bwtest.HarnessTest) {
+	// Arrange: an underived child of the wallet's own fresh account must
+	// stay unknown until allocated, and a child of an XPub the wallet never
+	// imported is never known.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, "lookup account")
+	own := createTestAddressInfos(h, account, false, 1)[0]
+
+	foreignBranch, err := deterministicImportedAccountKeys(h).accountKey.
+		Derive(waddrmgr.ExternalBranch)
+	require.NoError(h, err)
+	foreignChild, err := foreignBranch.Derive(0)
+	require.NoError(h, err)
+	foreignKey, err := foreignChild.ECPubKey()
+	require.NoError(h, err)
+	foreign, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		foreignKey.SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	for _, addr := range []address.Address{own.Addr, foreign} {
+		// Act: look up the address in the wallet under test.
+		info, err := w.GetAddressInfo(ctx, addr)
+
+		// Assert: the stable miss identity and no partial metadata.
+		require.ErrorIs(h, err, wallet.ErrAddressNotFound)
+		require.Zero(h, info)
 	}
 }
 
