@@ -687,3 +687,209 @@ func testAddressManagerRejectKVDBBatch(h *bwtest.HarnessTest) {
 		})
 	}
 }
+
+// testAddressManagerNewAddress proves the first receiving address of a fresh
+// account carries the account schema's type and complete HD metadata on both
+// branches of every default scope.
+func testAddressManagerNewAddress(h *bwtest.HarnessTest) {
+	tests := []struct {
+		name     string
+		scope    waddrmgr.KeyScope
+		internal bool
+		byNumber bool
+	}{
+		{
+			name:  "bip44 external",
+			scope: waddrmgr.KeyScopeBIP0044,
+		},
+		{
+			name:     "bip44 internal",
+			scope:    waddrmgr.KeyScopeBIP0044,
+			internal: true,
+		},
+		{
+			name:  "bip49 external",
+			scope: waddrmgr.KeyScopeBIP0049Plus,
+		},
+		{
+			name:     "bip49 internal",
+			scope:    waddrmgr.KeyScopeBIP0049Plus,
+			internal: true,
+		},
+		{
+			name:  "bip84 external",
+			scope: waddrmgr.KeyScopeBIP0084,
+		},
+		{
+			name:     "bip84 internal",
+			scope:    waddrmgr.KeyScopeBIP0084,
+			internal: true,
+		},
+		{
+			name:     "bip84 external by number",
+			scope:    waddrmgr.KeyScopeBIP0084,
+			byNumber: true,
+		},
+		{
+			name:  "bip86 external",
+			scope: waddrmgr.KeyScopeBIP0086,
+		},
+		{
+			name:     "bip86 internal",
+			scope:    waddrmgr.KeyScopeBIP0086,
+			internal: true,
+		},
+	}
+
+	// Each row owns its wallet, so no row can observe another's allocation.
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: derive child zero from the fresh account's XPub
+			// before any receiving call, so the result is checked against
+			// an oracle independent of the allocator.
+			const accountName = "receiving account"
+
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			account := h.CreateTestAccount(w, tc.scope, accountName)
+			want := createTestAddressInfos(h, account, tc.internal, 1)[0]
+
+			selector := wallet.NewAccountSelectorByName(
+				tc.scope, accountName,
+			)
+			if tc.byNumber {
+				selector = wallet.NewAccountSelectorByNumber(
+					tc.scope, *account.AccountNumber,
+				)
+			}
+
+			// Act: request one receiving address from the chosen branch.
+			info, err := w.NewAddress(ctx, selector, tc.internal)
+
+			// Assert: complete equality detects a wrong child, branch,
+			// type, or origin.
+			require.NoError(h, err)
+			require.Equal(
+				h, withoutFingerprint(want), withoutFingerprint(info),
+			)
+		})
+	}
+}
+
+// testAddressManagerRejectNewAddress proves selectors that name no derivable
+// account fail with stable error identities, return no address, and leave
+// every account and branch cursor unchanged across a reopen.
+func testAddressManagerRejectNewAddress(h *bwtest.HarnessTest) {
+	// Only the reserved imported name has a documented identity; how a
+	// backend resolves the reserved number is not part of the contract.
+	tests := []struct {
+		name     string
+		selector wallet.AccountSelector
+		wantErr  error
+	}{
+		{
+			name: "unknown account name",
+			selector: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084, "missing account",
+			),
+			wantErr: wallet.ErrAccountNotFound,
+		},
+		{
+			name: "unknown account number",
+			selector: wallet.NewAccountSelectorByNumber(
+				waddrmgr.KeyScopeBIP0084, 7,
+			),
+			wantErr: wallet.ErrAccountNotFound,
+		},
+		{
+			name: "unknown scope",
+			selector: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScope{Purpose: 1017, Coin: 1},
+				waddrmgr.DefaultAccountName,
+			),
+			wantErr: wallet.ErrAccountNotFound,
+		},
+		{
+			name: "imported account name",
+			selector: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084,
+				waddrmgr.ImportedAddrAccountName,
+			),
+			wantErr: wallet.ErrImportedAccountNoAddrGen,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: a fresh wallet plus one named account whose child
+			// zero witnesses cursor progress. Snapshot every account
+			// before the rejected call; SQL materializes defaults lazily,
+			// so the snapshot also catches a rejection that creates one.
+			const accountName = "rejected address account"
+
+			ctx := h.Context()
+			scope := waddrmgr.KeyScopeBIP0084
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			account, err := w.NewAccount(ctx, wallet.NewAccountParams{
+				Scope: scope,
+				Name:  accountName,
+			})
+			require.NoError(h, err)
+			want := createTestAddressInfos(h, account, false, 1)[0]
+
+			before, err := w.ListAccounts(ctx)
+			require.NoError(h, err)
+
+			// Act: request an external address for the selector.
+			info, err := w.NewAddress(ctx, tc.selector, false)
+
+			// Assert: every error returns the zero AddressInfo, so a
+			// caller cannot mistake a partial result for an address.
+			require.ErrorIs(h, err, tc.wantErr)
+			require.Zero(h, info)
+
+			// The live and reopened views must expose no account or
+			// cursor change, so a rejection cannot persist progress.
+			for _, reopen := range []bool{false, true} {
+				if reopen {
+					w = h.ReloadWallet(w)
+				}
+
+				after, err := w.ListAccounts(ctx)
+				require.NoError(h, err)
+				require.ElementsMatch(h, before, after)
+			}
+
+			// Child zero after reopen proves the rejection did not
+			// silently consume a derivable account's cursor.
+			next, err := w.NewAddress(
+				ctx, wallet.NewAccountSelectorByName(scope, accountName),
+				false,
+			)
+			require.NoError(h, err)
+			require.Equal(h, want.Addr, next.Addr)
+		})
+	}
+}
+
+// withoutFingerprint returns a copy of info with the root fingerprint cleared.
+// Modern kvdb deliberately reports zero for derived address metadata while
+// SQL reports the account's fingerprint, so a backend-neutral comparison must
+// leave that one field out; every other field remains part of the contract.
+//
+// TODO: remove this helper once the kvdb backend is removed.
+func withoutFingerprint(info wallet.AddressInfo) wallet.AddressInfo {
+	if info.Derivation == nil {
+		return info
+	}
+
+	derivation := *info.Derivation
+	derivation.MasterKeyFingerprint = 0
+	info.Derivation = &derivation
+
+	return info
+}
