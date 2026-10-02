@@ -56,6 +56,10 @@ var allTestCases = []*testCase{
 		Name:     "address manager list addresses",
 		TestFunc: testAddressManagerListAddresses,
 	},
+	{
+		Name:     "address manager get address info",
+		TestFunc: testAddressManagerGetAddressInfo,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
