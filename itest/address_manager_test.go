@@ -396,6 +396,7 @@ func testAddressManagerAllocateBatch(h *bwtest.HarnessTest) {
 
 			account, err := w.GetAccount(ctx, scope, accountName)
 			require.NoError(h, err)
+			require.NotZero(h, *account.MasterKeyFingerprint)
 			require.Zero(h, account.ExternalKeyCount)
 			require.Zero(h, account.InternalKeyCount)
 
@@ -1064,6 +1065,39 @@ func testAddressManagerLookupUnknownAddress(h *bwtest.HarnessTest) {
 		require.ErrorIs(h, err, wallet.ErrAddressNotFound)
 		require.Zero(h, info)
 	}
+}
+
+// testAddressManagerNewAddressFingerprint proves SQL receiving results carry
+// the account's root fingerprint, the field the shared cases leave out.
+func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
+	// Modern kvdb deliberately reports a zero fingerprint for derived address
+	// metadata, so only SQL can supply the account's value here.
+	//nolint:staticcheck // This guard excludes the deprecated backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("derived address fingerprints require SQL")
+	}
+
+	// Arrange: the oracle takes the fingerprint from the account read, so
+	// address metadata must agree with the account it was derived from.
+	const accountName = "fingerprint account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.CreateTestAccount(w, scope, accountName)
+	account, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.NotZero(h, *account.MasterKeyFingerprint)
+	want := createTestAddressInfos(h, account, false, 1)[0]
+
+	// Act: request the account's first receiving address.
+	info, err := w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(scope, accountName), false,
+	)
+
+	// Assert: full equality, fingerprint included.
+	require.NoError(h, err)
+	require.Equal(h, want, info)
 }
 
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
