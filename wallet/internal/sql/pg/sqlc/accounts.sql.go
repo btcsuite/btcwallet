@@ -1209,6 +1209,22 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 	return items, nil
 }
 
+const LockAccountForAllocation = `-- name: LockAccountForAllocation :exec
+SELECT id
+FROM accounts
+WHERE id = $1
+FOR UPDATE
+`
+
+// Takes the same row lock as GetAndIncrementNext*Index without advancing the
+// next_external_index/next_internal_index derivation counters, so no child
+// address index is used up. A caller can then inspect the account's children
+// while concurrent allocations on that account wait for its transaction.
+func (q *Queries) LockAccountForAllocation(ctx context.Context, id int64) error {
+	_, err := q.exec(ctx, q.lockAccountForAllocationStmt, LockAccountForAllocation, id)
+	return err
+}
+
 const UpdateAccountNameByWalletScopeAndName = `-- name: UpdateAccountNameByWalletScopeAndName :execrows
 UPDATE accounts
 SET account_name = $1
