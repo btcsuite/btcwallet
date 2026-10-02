@@ -935,6 +935,54 @@ func testAddressManagerListAddresses(h *bwtest.HarnessTest) {
 	}
 }
 
+// testAddressManagerGetAddressInfo proves point lookups return complete
+// metadata for allocated addresses on both branches, before and after
+// reopening the wallet.
+func testAddressManagerGetAddressInfo(h *bwtest.HarnessTest) {
+	// Arrange: a funded external child and an unfunded internal child cover
+	// both branches and both used and unused state.
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	wantInfo := []wallet.AddressInfo{
+		createTestAddressInfos(h, account, false, 1)[0],
+		createTestAddressInfos(h, account, true, 1)[0],
+	}
+
+	_, err = w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(
+			scope, waddrmgr.DefaultAccountName,
+		), true,
+	)
+	require.NoError(h, err)
+
+	// Check the live wallet first, then a fresh one loaded from durable
+	// data, so cached state cannot stand in for persisted rows.
+	for _, reopen := range []bool{false, true} {
+		if reopen {
+			w = h.ReloadWallet(w)
+		}
+
+		for _, want := range wantInfo {
+			// Act: look up one allocated address.
+			info, err := w.GetAddressInfo(ctx, want.Addr)
+
+			// Assert: complete metadata derived from the account XPub.
+			require.NoError(h, err)
+			require.Equal(
+				h, withoutFingerprint(want), withoutFingerprint(info),
+			)
+		}
+	}
+}
+
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
 // Modern kvdb deliberately reports zero for derived address metadata while
 // SQL reports the account's fingerprint, so a backend-neutral comparison must
