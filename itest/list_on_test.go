@@ -64,6 +64,10 @@ var allTestCases = []*testCase{
 		Name:     "address manager lookup unknown address",
 		TestFunc: testAddressManagerLookupUnknownAddress,
 	},
+	{
+		Name:     "address manager new address fingerprint",
+		TestFunc: testAddressManagerNewAddressFingerprint,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
