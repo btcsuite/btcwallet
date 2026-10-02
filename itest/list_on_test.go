@@ -40,6 +40,14 @@ var allTestCases = []*testCase{
 		Name:     "address manager reject kvdb batch",
 		TestFunc: testAddressManagerRejectKVDBBatch,
 	},
+	{
+		Name:     "address manager new address",
+		TestFunc: testAddressManagerNewAddress,
+	},
+	{
+		Name:     "address manager reject new address",
+		TestFunc: testAddressManagerRejectNewAddress,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
