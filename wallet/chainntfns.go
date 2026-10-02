@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"bytes"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -276,50 +275,47 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 	return nil
 }
 
-// disconnectBlock handles a chain server reorganize by rolling back all
-// block history from the reorged block for a wallet in-sync with the chain
-// server.
-func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+// disconnectBlock handles a chain server reorganize by rolling back the
+// disconnected block and its descendants, even while the wallet is syncing.
+func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
+	b wtxmgr.BlockMeta) error {
+
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
-	if !w.ChainSynced() {
+	// A stale sync tip must not override a newer block in the store.
+	storedHash, err := w.TxStore.BlockHash(txmgrNs, b.Height)
+	if err != nil {
+		return err
+	}
+
+	if storedHash != nil && *storedHash != b.Hash {
 		return nil
 	}
 
-	// Disconnect the removed block and all blocks after it if we know about
-	// the disconnected block. Otherwise, the block is in the future.
-	if b.Height <= w.Manager.SyncedTo().Height {
-		hash, err := w.Manager.BlockHash(addrmgrNs, b.Height)
+	previous, err := w.disconnectedBlockStamp(addrmgrNs, &b.Block)
+	if err != nil {
+		return err
+	}
+
+	if previous != nil {
+		// Rewind the known chain even if the disconnected block itself
+		// contains no wallet transactions.
+		err := w.TxStore.Rollback(txmgrNs, b.Height)
 		if err != nil {
 			return err
 		}
-		if bytes.Equal(hash[:], b.Hash[:]) {
-			bs := waddrmgr.BlockStamp{
-				Height: b.Height - 1,
-			}
-			hash, err = w.Manager.BlockHash(addrmgrNs, bs.Height)
-			if err != nil {
-				return err
-			}
-			b.Hash = *hash
 
-			client := w.ChainClient()
-			header, err := client.GetBlockHeader(hash)
-			if err != nil {
-				return err
-			}
-
-			bs.Timestamp = header.Timestamp
-			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
-			if err != nil {
-				return err
-			}
-
-			err = w.TxStore.Rollback(txmgrNs, b.Height)
-			if err != nil {
-				return err
-			}
+		err = w.Manager.SetSyncedTo(addrmgrNs, previous)
+		if err != nil {
+			return err
+		}
+	} else if storedHash != nil {
+		// Relevant transactions may arrive ahead of the sync tip. Their
+		// stored hash already proves this disconnect applies to them.
+		err := w.TxStore.Rollback(txmgrNs, b.Height)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -327,6 +323,46 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 	w.NtfnServer.notifyDetachedBlock(&b.Hash)
 
 	return nil
+}
+
+// disconnectedBlockStamp returns the preceding sync stamp only when the
+// address manager knows the exact disconnected block. Transaction history may
+// be ahead of, or on a different chain from, the manager during a rescan.
+//
+//nolint:nilnil // An unknown block does not require rewinding the manager.
+func (w *Wallet) disconnectedBlockStamp(ns walletdb.ReadBucket,
+	block *wtxmgr.Block) (*waddrmgr.BlockStamp, error) {
+
+	if block.Height > w.Manager.SyncedTo().Height {
+		return nil, nil
+	}
+
+	hash, err := w.Manager.BlockHash(ns, block.Height)
+	if err != nil {
+		return nil, err
+	}
+
+	if *hash != block.Hash {
+		return nil, nil
+	}
+
+	height := block.Height - 1
+
+	hash, err = w.Manager.BlockHash(ns, height)
+	if err != nil {
+		return nil, err
+	}
+
+	header, err := w.ChainClient().GetBlockHeader(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &waddrmgr.BlockStamp{
+		Height:    height,
+		Hash:      *hash,
+		Timestamp: header.Timestamp,
+	}, nil
 }
 
 func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
