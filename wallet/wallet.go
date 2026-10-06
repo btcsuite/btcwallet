@@ -2866,22 +2866,35 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 
 		syncBlock := w.Manager.SyncedTo()
 
-		// Fill out all account info except for the balances.
+		// Fill out all account info except for the balances. A removed
+		// account leaves a gap in the account number sequence, since
+		// account numbers are never reused, so a missing account is
+		// skipped rather than treated as an error.
 		lastAcct, err := manager.LastAccount(addrmgrNs)
 		if err != nil {
 			return err
 		}
-		results = make([]AccountBalanceResult, lastAcct+2)
-		for i := range results[:len(results)-1] {
-			accountName, err := manager.AccountName(addrmgrNs, uint32(i))
+		results = make([]AccountBalanceResult, 0, lastAcct+2)
+		resultIdx := make(map[uint32]int, lastAcct+2)
+		for i := uint32(0); i <= lastAcct; i++ {
+			accountName, err := manager.AccountName(addrmgrNs, i)
+			if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
-			results[i].AccountNumber = uint32(i)
-			results[i].AccountName = accountName
+			resultIdx[i] = len(results)
+			results = append(results, AccountBalanceResult{
+				AccountNumber: i,
+				AccountName:   accountName,
+			})
 		}
-		results[len(results)-1].AccountNumber = waddrmgr.ImportedAddrAccount
-		results[len(results)-1].AccountName = waddrmgr.ImportedAddrAccountName
+		resultIdx[waddrmgr.ImportedAddrAccount] = len(results)
+		results = append(results, AccountBalanceResult{
+			AccountNumber: waddrmgr.ImportedAddrAccount,
+			AccountName:   waddrmgr.ImportedAddrAccountName,
+		})
 
 		// Fetch all unspent outputs, and iterate over them tallying each
 		// account's balance where the output script pays to an account address
@@ -2917,15 +2930,17 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 			if err != nil {
 				continue
 			}
-			switch {
-			case outputAcct == waddrmgr.ImportedAddrAccount:
-				results[len(results)-1].AccountBalance += output.Amount
-			case outputAcct > lastAcct:
+			if outputAcct != waddrmgr.ImportedAddrAccount &&
+				outputAcct > lastAcct {
+
 				return errors.New("waddrmgr.Manager.AddrAccount returned " +
 					"account beyond recorded last account")
-			default:
-				results[outputAcct].AccountBalance += output.Amount
 			}
+			idx, ok := resultIdx[outputAcct]
+			if !ok {
+				continue
+			}
+			results[idx].AccountBalance += output.Amount
 		}
 		return nil
 	})
