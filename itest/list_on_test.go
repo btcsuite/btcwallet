@@ -40,6 +40,38 @@ var allTestCases = []*testCase{
 		Name:     "address manager reject kvdb batch",
 		TestFunc: testAddressManagerRejectKVDBBatch,
 	},
+	{
+		Name:     "address manager new address",
+		TestFunc: testAddressManagerNewAddress,
+	},
+	{
+		Name:     "address manager reject new address",
+		TestFunc: testAddressManagerRejectNewAddress,
+	},
+	{
+		Name:     "address manager rotate used address",
+		TestFunc: testAddressManagerRotateUsedAddress,
+	},
+	{
+		Name:     "address manager list addresses",
+		TestFunc: testAddressManagerListAddresses,
+	},
+	{
+		Name:     "address manager get address info",
+		TestFunc: testAddressManagerGetAddressInfo,
+	},
+	{
+		Name:     "address manager lookup unknown address",
+		TestFunc: testAddressManagerLookupUnknownAddress,
+	},
+	{
+		Name:     "address manager new address fingerprint",
+		TestFunc: testAddressManagerNewAddressFingerprint,
+	},
+	{
+		Name:     "address manager get address info fingerprint",
+		TestFunc: testAddressManagerGetAddressInfoFingerprint,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
