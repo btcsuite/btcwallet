@@ -525,3 +525,31 @@ func TestReservedImportedAliasNameRejected(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, info.AccountName)
 }
+
+// TestPathBoundAccountShape admits supplied numbered accounts while retaining
+// the schema's requirement that root-derived accounts have a real number.
+func TestPathBoundAccountShape(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: one watch-only scope makes both raw inserts otherwise valid.
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(t, store, "account-shape")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084,
+		"numberless", true)
+
+	// Act: vary provenance with identical missing-number defaults, then admit
+	// the newly supported supplied shape with an explicit account number.
+	_, rootErr := store.DB().ExecContext(t.Context(), `
+		INSERT INTO accounts (wallet_id, scope_id, account_name, is_derived)
+		SELECT wallet_id, id, 'missing-number', TRUE FROM key_scopes
+	`)
+	_, suppliedErr := store.DB().ExecContext(t.Context(), `
+		INSERT INTO accounts
+			(wallet_id, scope_id, account_name, is_derived, account_number)
+		SELECT wallet_id, id, 'supplied-number', FALSE, 7 FROM key_scopes
+	`)
+
+	// Assert: the relaxed provenance shape does not weaken the root invariant.
+	requireDriverConstraintError(t, rootErr)
+	require.NoError(t, suppliedErr)
+}
