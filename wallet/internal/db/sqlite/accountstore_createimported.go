@@ -79,12 +79,28 @@ func (o createImportedAccountOps) EnsureKeyScope(ctx context.Context,
 func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 	req db.CreateImportedAccountInsertRequest) (int64, error) {
 
+	// Nil overrides bind SQL NULL so reads inherit the scope via coalesce.
+	// Explicit branch types survive scope reuse as account-local metadata.
+	var internalType, externalType sql.NullInt64
+	if req.AddrSchema != nil {
+		internalType = sql.NullInt64{
+			Int64: int64(req.AddrSchema.InternalAddrType),
+			Valid: true,
+		}
+		externalType = sql.NullInt64{
+			Int64: int64(req.AddrSchema.ExternalAddrType),
+			Valid: true,
+		}
+	}
+
 	row, err := o.q.CreateImportedAccount(
 		ctx, sqlc.CreateImportedAccountParams{
-			ScopeID:     req.ScopeID,
-			AccountName: req.Name,
-			NoChainSync: req.NoChainSync,
-			PublicKey:   req.PublicKey,
+			ScopeID:        req.ScopeID,
+			AccountName:    req.Name,
+			NoChainSync:    req.NoChainSync,
+			PublicKey:      req.PublicKey,
+			InternalTypeID: internalType,
+			ExternalTypeID: externalType,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(req.MasterFingerprint),
 				Valid: true,
