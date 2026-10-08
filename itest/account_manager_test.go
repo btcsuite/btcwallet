@@ -2051,3 +2051,121 @@ func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
 		})
 	}
 }
+
+// testAccountManagerAllocatePathBoundKey verifies that supplied XPub allocation
+// retains declared origins and resumes at the next unused child after reopen.
+func testAccountManagerAllocatePathBoundKey(h *bwtest.HarnessTest) {
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("supplied numbered accounts require SQL")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		purpose uint32
+	}{
+		{
+			name:    "canonical",
+			purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		},
+		{
+			name:    "custom",
+			purpose: 1017,
+		},
+	} {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: a rootless wallet declares a scope independently of
+			// the key's ancestors, with chain synchronization excluded.
+			keys := deterministicImportedAccountKeys(h)
+			scope := keys.scope
+			scope.Purpose = tc.purpose
+			schema := waddrmgr.ScopeAddrMap[keys.scope]
+			number := wallet.AccountNumber(0)
+			fingerprint := wallet.MasterFingerprint(
+				keys.masterKeyFingerprint,
+			)
+			w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+			params := wallet.NewAccountParams{
+				Scope:                scope,
+				Name:                 "supplied",
+				AddrSchema:           &schema,
+				AccountNumber:        &number,
+				AccountPubKey:        keys.accountKey,
+				MasterKeyFingerprint: &fingerprint,
+				NoChainSync:          true,
+			}
+			created, err := w.NewAccount(h.Context(), params)
+			require.NoError(h, err)
+			require.Equal(h, &number, created.AccountNumber)
+			require.Equal(
+				h, []byte(keys.accountKey.String()), created.PublicKey,
+			)
+			require.Equal(h, scope, created.KeyScope)
+			require.Equal(h, schema, created.AddrSchema)
+			require.Equal(h, &fingerprint, created.MasterKeyFingerprint)
+			require.NotZero(h, fingerprint)
+			require.True(h, created.IsImported)
+			require.True(h, created.IsWatchOnly)
+			require.True(h, created.NoChainSync)
+
+			selector := wallet.NewAccountSelectorByNumber(scope, number)
+			branch, err := keys.accountKey.Derive(0)
+			require.NoError(h, err)
+
+			// Act: allocate on either side of the same reopen boundary. Direct
+			// child derivation is an independent oracle for the supplied XPub.
+			for index := range uint32(2) {
+				allocated, err := w.AllocateNextKey(
+					h.Context(), selector, false,
+				)
+
+				// Assert: each returned key has the actual unused child index
+				// and complete caller-declared origin, including fingerprint.
+				require.NoError(h, err)
+				child, err := branch.Derive(index)
+				require.NoError(h, err)
+				pub, err := child.ECPubKey()
+				require.NoError(h, err)
+				require.Equal(h, pub, allocated.PubKey)
+				require.Zero(h, allocated.Branch)
+				require.Equal(h, index, allocated.Index)
+				require.Equal(h, &wallet.KeyOrigin{
+					KeyScope:             scope,
+					Account:              uint32(number),
+					MasterKeyFingerprint: uint32(fingerprint),
+				}, allocated.Origin)
+
+				if index == 0 {
+					// Snapshot after allocation so the complete account,
+					// with its advanced cursor, must survive reopening.
+					before, err := w.GetAccount(
+						h.Context(), scope, params.Name,
+					)
+					require.NoError(h, err)
+
+					// Assert: compare stored identity to
+					// the request so agreeing reads cannot
+					// hide the same persistence mistake.
+					require.Equal(h, &number, before.AccountNumber)
+					require.Equal(h, created.PublicKey, before.PublicKey)
+					require.Equal(h, scope, before.KeyScope)
+					require.Equal(h, schema, before.AddrSchema)
+					require.Equal(h, &fingerprint, before.MasterKeyFingerprint)
+					require.True(h, before.IsImported)
+					require.True(h, before.IsWatchOnly)
+					require.True(h, before.NoChainSync)
+
+					w = h.ReloadWallet(w)
+					after, err := w.GetAccount(
+						h.Context(), scope, params.Name,
+					)
+					require.NoError(h, err)
+					require.Equal(h, before, after)
+				}
+			}
+		})
+	}
+}

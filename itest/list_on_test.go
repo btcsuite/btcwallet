@@ -140,6 +140,11 @@ var allTestCases = []*testCase{
 		Name:     "account manager derive path bound address",
 		TestFunc: testAccountManagerDerivePathBoundAddress,
 	},
+	// Key-only accounts must resume with the same declared origin.
+	{
+		Name:     "account manager allocate path bound key",
+		TestFunc: testAccountManagerAllocatePathBoundKey,
+	},
 	{
 		Name:     "account manager create exact account",
 		TestFunc: testAccountManagerCreateExactAccount,
