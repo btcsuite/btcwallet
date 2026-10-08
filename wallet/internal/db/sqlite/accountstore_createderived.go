@@ -15,7 +15,8 @@ import (
 // private key, master-key fingerprint, optional address schema) which is
 // persisted together with the row. If the key scope does not exist, it is
 // created with NULL public/private key fields using the address schema
-// provided by the caller.
+// provided by the caller. Supplied public material bypasses deriveFn and
+// retains non-root provenance and the caller's optional fingerprint.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
@@ -26,7 +27,8 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		var err error
 
 		info, err = db.CreateDerivedAccountWithOps(
-			ctx, params, createDerivedAccountOps{q: qtx}, deriveFn,
+			ctx, params, createDerivedAccountOps{q: qtx, params: params},
+			deriveFn,
 		)
 		if err != nil {
 			return err
@@ -46,6 +48,10 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 // CreateDerivedAccount workflow.
 type createDerivedAccountOps struct {
 	q *sqlc.Queries
+
+	// params retains supplied provenance and nullable fingerprint for this
+	// transaction; the existing ops contract still carries key material.
+	params db.CreateDerivedAccountParams
 }
 
 // WalletWatchOnly implements db.CreateDerivedAccountOps.
@@ -98,20 +104,25 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 		return db.CreateDerivedAccountRow{}, db.ErrNilDerivedAccountData
 	}
 
+	// Root derivation always supplies a fingerprint; a caller-supplied key
+	// must preserve unknown separately from an explicit zero.
+	fingerprint := &derived.MasterKeyFingerprint
+	if len(o.params.PublicKey) > 0 {
+		fingerprint = o.params.MasterKeyFingerprint
+	}
+
 	row, err := o.q.CreateDerivedAccount(
 		ctx, sqlc.CreateDerivedAccountParams{
 			ScopeID:     scopeID,
+			IsImported:  len(o.params.PublicKey) > 0,
 			NoChainSync: noChainSync,
 			AccountNumber: sql.NullInt64{
 				Int64: accountNumber,
 				Valid: true,
 			},
-			AccountName: name,
-			PublicKey:   derived.PublicKey,
-			MasterFingerprint: sql.NullInt64{
-				Int64: int64(derived.MasterKeyFingerprint),
-				Valid: true,
-			},
+			AccountName:       name,
+			PublicKey:         derived.PublicKey,
+			MasterFingerprint: db.NullableUint32ToSQLInt64(fingerprint),
 		},
 	)
 	if err != nil {

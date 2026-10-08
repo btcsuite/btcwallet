@@ -90,67 +90,84 @@ func TestCreateDerivedAccountRejectsInvalidPath(t *testing.T) {
 func TestCreateDerivedAccountWithOps(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: request a sparse exact number and bind that same selector to
-	// the allocator expectation, so shared orchestration cannot drop it.
-	number := uint32(12)
-	params := CreateDerivedAccountParams{
-		WalletID: 7,
-		Scope: KeyScope{
-			Purpose: 49,
-			Coin:    0,
-		},
-		Name:          "savings",
-		AccountNumber: &number,
-		NoChainSync:   true,
+	// Both material sources must use the same ordered persistence contract.
+	for _, supplied := range []bool{false, true} {
+		// Arrange: request a sparse exact number and bind that same selector to
+		// the allocator expectation, so shared orchestration cannot drop it.
+		number := uint32(12)
+		params := CreateDerivedAccountParams{
+			WalletID: 7,
+			Scope: KeyScope{
+				Purpose: 49,
+				Coin:    0,
+			},
+			Name:          "savings",
+			AccountNumber: &number,
+			NoChainSync:   true,
+		}
+		// Supplied keys use the same exact cursor and insertion, but must not
+		// enter the root callback or invent an unknown fingerprint.
+		deriveFn := testValidWatchOnlyDeriveFn()
+		if supplied {
+			params.PublicKey = []byte("supplied account public key")
+			deriveFn = nil
+		}
+
+		createdAt := time.Unix(123, 0)
+		expectedRow := CreateDerivedAccountRow{
+			AccountNumber: sql.NullInt64{
+				Int64: 12,
+				Valid: true,
+			},
+			CreatedAt: createdAt,
+		}
+
+		ops := &mockCreateDerivedAccountOps{}
+		walletCall := ops.On(
+			"WalletWatchOnly", mock.Anything, uint32(7),
+		).Return(true, nil).Once()
+		ensureScopeCall := ops.On(
+			"EnsureScope", mock.Anything, uint32(7), params.Scope,
+			params.AddrSchema,
+		).Return(int64(11), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
+		allocateCall := ops.On(
+			"AllocateAccountNumber", mock.Anything, int64(11),
+			params.AccountNumber,
+		).Return(int64(12), nil).Once()
+		createCall := ops.On(
+			"CreateDerivedAccount", mock.Anything, int64(11), int64(12),
+			"savings", true, mock.Anything,
+		).Return(expectedRow, nil).Once()
+
+		mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
+
+		// Act: use the shared workflow with valid derived material so the
+		// allocator result reaches the persisted account and returned view.
+		ctx := t.Context()
+		info, err := CreateDerivedAccountWithOps(
+			ctx, params, ops, deriveFn,
+		)
+
+		// Assert: the exact identity and normalized account facts survive the
+		// workflow; expectations verify each required adapter call once.
+		require.NoError(t, err)
+		require.NotNil(t, info.AccountNumber)
+		require.Equal(t, uint32(12), *info.AccountNumber)
+		require.Equal(t, params.Name, info.AccountName)
+		require.Equal(t, supplied, info.IsImported)
+		require.True(t, info.IsWatchOnly)
+		require.Equal(t, createdAt, info.CreatedAt)
+		require.Equal(t, params.Scope, info.KeyScope)
+		require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
+		require.True(t, info.NoChainSync)
+
+		if supplied {
+			require.Equal(t, params.PublicKey, info.PublicKey)
+			require.Nil(t, info.MasterKeyFingerprint)
+		}
+
+		ops.AssertExpectations(t)
 	}
-	createdAt := time.Unix(123, 0)
-	expectedRow := CreateDerivedAccountRow{
-		AccountNumber: sql.NullInt64{
-			Int64: 12,
-			Valid: true,
-		},
-		CreatedAt: createdAt,
-	}
-
-	ops := &mockCreateDerivedAccountOps{}
-	walletCall := ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
-		true, nil,
-	).Once()
-	ensureScopeCall := ops.On(
-		"EnsureScope", mock.Anything, uint32(7), params.Scope,
-		params.AddrSchema,
-	).Return(int64(11), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	allocateCall := ops.On(
-		"AllocateAccountNumber", mock.Anything, int64(11),
-		params.AccountNumber,
-	).Return(int64(12), nil).Once()
-	createCall := ops.On(
-		"CreateDerivedAccount", mock.Anything, int64(11), int64(12),
-		"savings", true, mock.Anything,
-	).Return(expectedRow, nil).Once()
-
-	mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
-
-	// Act: use the shared workflow with valid derived material so the
-	// allocator result reaches the persisted account and returned view.
-	ctx := t.Context()
-	info, err := CreateDerivedAccountWithOps(
-		ctx, params, ops, testValidWatchOnlyDeriveFn(),
-	)
-
-	// Assert: the exact identity and normalized account facts survive the
-	// complete workflow; expectations verify each required adapter call once.
-	require.NoError(t, err)
-	require.NotNil(t, info.AccountNumber)
-	require.Equal(t, uint32(12), *info.AccountNumber)
-	require.Equal(t, params.Name, info.AccountName)
-	require.False(t, info.IsImported)
-	require.True(t, info.IsWatchOnly)
-	require.Equal(t, createdAt, info.CreatedAt)
-	require.Equal(t, params.Scope, info.KeyScope)
-	require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
-	require.True(t, info.NoChainSync)
-	ops.AssertExpectations(t)
 }
 
 // TestCreateDerivedAccountWithOpsRejectsInvalidParams verifies that the shared
@@ -869,5 +886,29 @@ func TestCreateDerivedAccountRejectsScopeConflict(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidParam)
 	require.Nil(t, info)
 	require.Empty(t, derive.calls)
+	ops.AssertExpectations(t)
+}
+
+// TestCreateDerivedAccountSuppliedCustody refuses supplied public material
+// before a spendable wallet's scope or allocation can be changed.
+func TestCreateDerivedAccountSuppliedCustody(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the persisted wallet is spendable, so no scope or insert
+	// expectations exist. A nil callback cannot bypass this custody guard.
+	number := uint32(7)
+	params := testCreateDerivedAccountParams()
+	params.AccountNumber = &number
+	params.PublicKey = []byte("supplied account public key")
+	ops := &mockCreateDerivedAccountOps{}
+	ops.On("WalletWatchOnly", t.Context(), params.WalletID).
+		Return(false, nil).Once()
+
+	// Act: request supplied account creation through the SQL shared workflow.
+	info, err := CreateDerivedAccountWithOps(t.Context(), params, ops, nil)
+
+	// Assert: refusal has the canonical identity, no result, and no mutation.
+	require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+	require.Nil(t, info)
 	ops.AssertExpectations(t)
 }

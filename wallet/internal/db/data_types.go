@@ -517,8 +517,8 @@ type ScopeAddrSchema struct {
 	InternalAddrType AddressType
 }
 
-// CreateDerivedAccountParams contains the parameters for creating a new derived
-// account.
+// CreateDerivedAccountParams creates a numbered account from root derivation
+// or supplied public material in a watch-only SQL wallet.
 type CreateDerivedAccountParams struct {
 	// WalletID is the ID of the wallet to create the account in.
 	//
@@ -540,6 +540,14 @@ type CreateDerivedAccountParams struct {
 	// Nil allocates the next account; exact creation leaves lower holes free.
 	// The legacy kvdb store does not support exact selection.
 	AccountNumber *uint32
+
+	// PublicKey supplies validated account public material instead of invoking
+	// root derivation. It requires exact selection and watch-only SQL custody.
+	PublicKey []byte
+
+	// MasterKeyFingerprint accompanies PublicKey. Nil preserves absence;
+	// a non-nil zero is a declared fingerprint, not an unknown value.
+	MasterKeyFingerprint *uint32
 
 	// NoChainSync requests that automatic chain synchronization skip this
 	// account. The legacy kvdb backend ignores this field.
