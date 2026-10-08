@@ -19,6 +19,8 @@ type Account struct {
 	AccountNumber     sql.NullInt64
 	MasterFingerprint sql.NullInt64
 	PublicKey         []byte
+	InternalTypeID    sql.NullInt16
+	ExternalTypeID    sql.NullInt16
 	CreatedAt         time.Time
 	NextExternalIndex int64
 	NextInternalIndex int64
