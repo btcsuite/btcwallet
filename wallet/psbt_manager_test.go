@@ -1024,6 +1024,175 @@ func TestDecorateInputsErrDecorationFailed(t *testing.T) {
 	require.ErrorIs(t, err, errDb)
 }
 
+// TestFundPsbtImportedAccountSchema verifies strict and hybrid BIP49 change
+// from numberless XPub accounts uses the account's branch type without
+// inventing an origin. The input has a known origin; Task 482 owns funding
+// imported inputs whose origin is unknown.
+func TestFundPsbtImportedAccountSchema(t *testing.T) {
+	t.Parallel()
+
+	// Both cases share a scope but require different internal scripts. The
+	// redeem-script oracle also checks the known facts of nested change.
+	tests := []struct {
+		name        string
+		addrType    db.AddressType
+		scriptClass txscript.ScriptClass
+		redeemClass txscript.ScriptClass
+	}{
+		{
+			name:        "preserve strict change",
+			addrType:    db.NestedWitnessPubKey,
+			scriptClass: txscript.ScriptHashTy,
+			redeemClass: txscript.WitnessV0PubKeyHashTy,
+		},
+		{
+			name:        "preserve hybrid change",
+			addrType:    db.WitnessPubKey,
+			scriptClass: txscript.WitnessV0PubKeyHashTy,
+			redeemClass: txscript.NonStandardTy,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Use a mature known-origin input so input decoration
+			// remains outside this regression. The explicit BIP49 change
+			// account has no account number, while its public child key
+			// still establishes the nested or native script facts.
+			w, deps := createStartedSQLWalletWithMocks(t)
+			deps.syncer.On("syncState").Return(syncStateSynced).Once()
+
+			var stamp waddrmgr.BlockStamp
+
+			stamp.Height = 100
+			deps.chain.On("BlockStamp").Return(
+				&stamp, nil,
+			).Once()
+
+			inputAddr, inputScript, inputKey := expectedStoreAddress(
+				t, storeDerivationAccountPubKey(t), db.WitnessPubKey,
+				0, 0,
+			)
+			pubKey, err := btcec.ParsePubKey(inputKey)
+			require.NoError(t, err)
+
+			input := wire.NewTxOut(100_000, inputScript)
+			utxo := testStoreUtxoInfo(validUTXO, input)
+			deps.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+				WalletID: w.id,
+				OutPoint: validUTXO,
+			}).Return(utxo, nil).Times(2)
+			deps.store.On("GetTxDetail", mock.Anything,
+				db.GetTxDetailQuery{
+					WalletID: w.id,
+					Txid:     validUTXO.Hash,
+				},
+			).Return(testStoreTxDetail(validUTXO.Hash, input), nil).
+				Once()
+			expectSignerDerivedAddressInfo(
+				t, w, deps, inputAddr, db.WitnessPubKey, pubKey,
+			)
+			deps.store.ExpectedCalls[len(deps.store.ExpectedCalls)-1].
+				Once()
+
+			accountName := "schema change"
+			scope := waddrmgr.KeyScopeBIP0049Plus
+			// Leave origin and identity fields at zero: this account is
+			// known only by name/scope and the selected branch schema.
+			account := new(db.AccountInfo)
+			account.AccountName = accountName
+			account.IsImported = true
+			account.KeyScope = db.KeyScope(scope)
+			account.AddrSchema = db.ScopeAddrSchema{
+				ExternalAddrType: db.NestedWitnessPubKey,
+				InternalAddrType: test.addrType,
+			}
+
+			deps.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID:      w.id,
+					Scope:         db.KeyScope(scope),
+					Name:          &accountName,
+					AccountNumber: nil,
+					SkipBalance:   false,
+				},
+			).Return(account, nil).Once()
+			changeScript := expectFreshChangeAddress(
+				t, w, deps, accountName, scope, test.addrType,
+			)
+			_, _, changeKey := expectedStoreAddress(
+				t, storeDerivationAccountPubKey(t), test.addrType, 1, 0,
+			)
+			// HD coordinates and a public key establish script facts;
+			// the zero account-number pointer keeps the root origin absent.
+			changeInfo := new(db.AddressInfo)
+			changeInfo.AddrType = test.addrType
+			changeInfo.HasDerivationPath = true
+			changeInfo.KeyScope = db.KeyScope(scope)
+			changeInfo.Branch = 1
+			changeInfo.ScriptPubKey = changeScript
+			changeInfo.PubKey = changeKey
+
+			deps.store.On("GetAddress", mock.Anything,
+				db.GetAddressQuery{
+					WalletID:     w.id,
+					ScriptPubKey: changeScript,
+				},
+			).Return(changeInfo, nil).Once()
+
+			tx := wire.NewMsgTx(wire.TxVersion)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: validUTXO,
+				SignatureScript:  nil,
+				Witness:          nil,
+				Sequence:         0,
+			})
+			tx.AddTxOut(wire.NewTxOut(50_000, inputScript))
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			// Act: Fund the selected input through the public API and
+			// direct its remaining value to the numberless account.
+			funded, changeIndex, err := w.FundPsbt(t.Context(),
+				&FundIntent{
+					Packet:  packet,
+					FeeRate: defaultFeeRate,
+					Policy:  nil,
+					Label:   "",
+					ChangeSource: &ScopedAccount{
+						AccountName: accountName,
+						KeyScope:    scope,
+					},
+				},
+			)
+
+			// Assert: Check the allocated change's script and nested
+			// redeem facts without a fabricated root origin. The input
+			// retains its known UTXO/origin, and each mock must consume
+			// only the calls required by this public funding operation.
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, changeIndex, int32(0))
+			change := funded.UnsignedTx.TxOut[changeIndex]
+			require.Equal(t, changeScript, change.PkScript)
+			require.Equal(t, test.scriptClass,
+				txscript.GetScriptClass(change.PkScript))
+
+			output := funded.Outputs[changeIndex]
+			require.Equal(t, test.redeemClass,
+				txscript.GetScriptClass(output.RedeemScript))
+			require.Empty(t, output.Bip32Derivation)
+			require.Empty(t, output.TaprootBip32Derivation)
+			require.Equal(t, input, funded.Inputs[0].WitnessUtxo)
+			require.Len(t, funded.Inputs[0].Bip32Derivation, 1)
+			deps.store.AssertExpectations(t)
+			deps.chain.AssertExpectations(t)
+			deps.syncer.AssertExpectations(t)
+		})
+	}
+}
+
 // TestFundPsbtExplicitPolicy verifies the public PSBT wrapper prepares sources,
 // authors the transaction, and publishes the funded packet itself.
 func TestFundPsbtExplicitPolicy(t *testing.T) {
