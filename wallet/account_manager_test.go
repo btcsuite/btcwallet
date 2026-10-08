@@ -1014,6 +1014,7 @@ func TestNewAccountStoreErrors(t *testing.T) {
 		name     string
 		storeErr error
 		want     error
+		supplied bool
 	}{
 		// A Store collision must expose only the wallet-owned identity.
 		{
@@ -1060,6 +1061,14 @@ func TestNewAccountStoreErrors(t *testing.T) {
 			storeErr: db.ErrAccountNotFound,
 			want:     ErrAccountNotFound,
 		},
+		{
+			name: "supplied indeterminate commit",
+			storeErr: &dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			},
+			want:     ErrIndeterminateCommit,
+			supplied: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -1073,22 +1082,37 @@ func TestNewAccountStoreErrors(t *testing.T) {
 			scope := waddrmgr.KeyScopeBIP0084
 
 			expectAccountNameAvailable(deps, scope, testAccountName)
-			expectAccountDeriveSetup(t, deps, stub)
+
+			params := NewAccountParams{
+				Scope: scope,
+				Name:  testAccountName,
+			}
+			if test.supplied {
+				// Supplied material must reach the same uncertainty boundary
+				// without root preparation or a second Store write.
+				w.isWatchOnly, w.addrStore = true, nil
+				number := AccountNumber(0)
+				params.AccountNumber = &number
+				params.AccountPubKey = deriveAcctPubKey(
+					t, stub.masterKey, scope, hardenedKey(0),
+				)
+			} else {
+				expectAccountDeriveSetup(t, deps, stub)
+			}
+
 			deps.store.On(
 				"CreateDerivedAccount", mock.Anything, mock.Anything,
 				mock.Anything,
 			).Return(&db.AccountInfo{}, test.storeErr).Once()
 
 			// Act: Create through the public boundary, not the mapper.
-			info, err := w.NewAccount(t.Context(), NewAccountParams{
-				Scope: scope,
-				Name:  testAccountName,
-			})
+			info, err := w.NewAccount(t.Context(), params)
 
 			// Assert: Expose the public outcome and strip the Store cause.
 			require.Nil(t, info)
 			require.ErrorIs(t, err, test.want)
 			require.NotErrorIs(t, err, test.storeErr)
+			deps.store.AssertExpectations(t)
 		})
 	}
 }
@@ -2546,5 +2570,197 @@ func TestNewAccountExistingScopeSchema(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.persisted, info.AddrSchema)
 		})
+	}
+}
+
+// TestNewAccountSuppliedKey verifies public admission passes the declared key
+// and path unchanged, without preparing any wallet-root secrets.
+func TestNewAccountSuppliedKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a watch-only SQL wallet has no expected vault access. Match the
+	// complete Store input so the public request cannot silently drop metadata.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+	scope := waddrmgr.KeyScopeBIP0084
+	number, fingerprint := AccountNumber(0), MasterFingerprint(19)
+	key := deriveAcctPubKey(t, newStubAccountDeriveFn(t).masterKey,
+		scope, hardenedKey(0))
+	expectAccountNameAvailable(deps, scope, testAccountName)
+
+	storedNumber, storedFingerprint := uint32(number), uint32(fingerprint)
+	deps.store.On("CreateDerivedAccount", mock.Anything,
+		db.CreateDerivedAccountParams{
+			Scope:                db.KeyScope(scope),
+			Name:                 testAccountName,
+			AccountNumber:        &storedNumber,
+			PublicKey:            []byte(key.String()),
+			MasterKeyFingerprint: &storedFingerprint,
+		}, mock.MatchedBy(func(derive db.AccountDerivationFunc) bool {
+			return derive == nil
+		})).Return(&db.AccountInfo{
+		AccountNumber:        &storedNumber,
+		IsImported:           true,
+		MasterKeyFingerprint: &storedFingerprint,
+	}, nil).Once()
+
+	// Act: install public material through the existing serialized request.
+	info, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope:                scope,
+		Name:                 testAccountName,
+		AccountNumber:        &number,
+		AccountPubKey:        key,
+		MasterKeyFingerprint: &fingerprint,
+	})
+
+	// Assert: origin remains supplied and the expected Store write occurs once.
+	// Missing dependency expectations reject any root or chain preparation.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Equal(t, number, *info.AccountNumber)
+	require.Equal(t, fingerprint, *info.MasterKeyFingerprint)
+	deps.store.AssertExpectations(t)
+}
+
+// TestNewAccountSuppliedKeyValidation rejects malformed key/path combinations
+// before any Store access can create scope, cursor, or account state.
+func TestNewAccountSuppliedKeyValidation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: vary only facts encoded by the key and the new request fields.
+	// The existing key fixture derives depth and hardened-child control values.
+	root := newStubAccountDeriveFn(t).masterKey
+	scope := waddrmgr.KeyScopeBIP0084
+	key := deriveAcctPubKey(t, root, scope, hardenedKey(0))
+	wrongNet, err := key.CloneWithVersion(
+		chaincfg.MainNetParams.HDPublicKeyID[:],
+	)
+	require.NoError(t, err)
+
+	number, other := AccountNumber(0), AccountNumber(1)
+	fingerprint := MasterFingerprint(0)
+
+	for _, tc := range []struct {
+		name        string
+		key         *hdkeychain.ExtendedKey
+		number      *AccountNumber
+		fingerprint *MasterFingerprint
+		want        error
+	}{
+		{
+			name:   "wrong network",
+			key:    wrongNet,
+			number: &number,
+			want:   ErrInvalidAccountKey,
+		},
+		{
+			name:   "wrong depth",
+			key:    deriveAcctPubKey(t, root, scope),
+			number: &number,
+			want:   ErrInvalidAccountKey,
+		},
+		{
+			name:   "non hardened child",
+			key:    deriveAcctPubKey(t, root, scope, 0),
+			number: &number,
+			want:   ErrInvalidAccountKey,
+		},
+		{
+			name:   "mismatched child",
+			key:    key,
+			number: &other,
+			want:   ErrInvalidAccountKey,
+		},
+		{
+			name:   "private key",
+			key:    root,
+			number: &number,
+			want:   ErrInvalidAccountKey,
+		},
+		{
+			name: "numberless supplied key",
+			key:  key,
+			want: ErrInvalidParam,
+		},
+		{
+			name:        "fingerprint without key",
+			fingerprint: &fingerprint,
+			want:        ErrInvalidParam,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: no dependency calls are expected for invalid input.
+			w, _ := createStartedSQLWalletWithMocks(t)
+			w.isWatchOnly = true
+
+			// Act: validate through the public creation boundary.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope:                scope,
+				Name:                 testAccountName,
+				AccountNumber:        tc.number,
+				AccountPubKey:        tc.key,
+				MasterKeyFingerprint: tc.fingerprint,
+			})
+
+			// Assert: the canonical refusal returns no account; strict shared
+			// cleanup catches any attempted read or mutation.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestNewAccountSuppliedKeyUnsupported preserves name-conflict precedence over
+// kvdb and locked spendable custody without touching secrets or creating rows.
+func TestNewAccountSuppliedKeyUnsupported(t *testing.T) {
+	t.Parallel()
+
+	for _, kvdb := range []bool{false, true} {
+		// Arrange: a valid supplied key targets an occupied and then a free
+		// name. Only admission reads are allowed for either unsupported mode.
+		w, deps := createStartedWalletWithMocks(t)
+		w.state.toLocked()
+		w.isWatchOnly = kvdb
+
+		if !kvdb {
+			w.addrStore = nil
+		}
+
+		scope := waddrmgr.KeyScopeBIP0084
+		number := AccountNumber(0)
+		key := deriveAcctPubKey(t, newStubAccountDeriveFn(t).masterKey,
+			scope, hardenedKey(0))
+		occupied := "occupied"
+		deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+			Scope:       db.KeyScope(scope),
+			Name:        &occupied,
+			SkipBalance: true,
+		}).Return(&db.AccountInfo{}, nil).Once()
+		expectAccountNameAvailable(deps, scope, testAccountName)
+		params := NewAccountParams{
+			Scope:         scope,
+			Name:          occupied,
+			AccountNumber: &number,
+			AccountPubKey: key,
+		}
+
+		// Act: submit the occupied name before reaching the custody check.
+		info, err := w.NewAccount(t.Context(), params)
+
+		// Assert: name precedence is independent of lock state or backend.
+		require.ErrorIs(t, err, ErrAccountAlreadyExists)
+		require.Nil(t, info)
+
+		// Act: a free name reaches refusal with the same key and exact path.
+		params.Name = testAccountName
+		info, err = w.NewAccount(t.Context(), params)
+
+		// Assert: refusal has the public unsupported identity and the required
+		// admission reads occur; mutations have no expectation.
+		require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+		require.Nil(t, info)
+		deps.store.AssertExpectations(t)
 	}
 }
