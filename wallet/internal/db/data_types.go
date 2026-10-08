@@ -449,10 +449,8 @@ type AccountInfo struct {
 	// derivation path and the default address schema.
 	KeyScope KeyScope
 
-	// AddrSchema is the effective address schema for the account. SQL backends
-	// expose the key-scope schema because they do not currently model legacy
-	// per-account schema overrides; kvdb uses the waddrmgr account override
-	// when one is present.
+	// AddrSchema is the effective branch schema, using an account override
+	// when present and otherwise inheriting the key-scope schema.
 	AddrSchema ScopeAddrSchema
 
 	// PublicKey is the account-level extended public key in plaintext.
@@ -490,29 +488,23 @@ type AccountSecret struct {
 	EncryptedPrivateKey []byte
 }
 
-// ScopeAddrSchema is the address schema of a particular KeyScope. It is
-// persisted on the key_scopes row and consulted when deriving any keys
-// for a particular scope to know how to encode the public keys as
-// addresses.
+// ScopeAddrSchema describes branch address types for a scope or account.
+// SQL stores scope defaults on key_scopes and optional imported-account
+// overrides on accounts; allocation uses the effective account schema.
 //
 // Asymmetric schemas (ExternalAddrType != InternalAddrType) are *not*
 // BIP-spec compliant — every standardized derivation BIP (44, 49, 84,
 // 86) assigns a single address type to both branches. The asymmetry
 // exists in btcwallet only for KeyScopeBIP0049Plus, which deliberately
 // derives change as P2WPKH (cheaper to spend) while keeping the BIP-49
-// nested-SegWit external addresses. Self-derived BIP-0049Plus accounts
-// always use that schema.
+// nested-SegWit external addresses.
 //
 // waddrmgr also supports a per-account override that flips a
 // BIP-0049Plus account back to the strict BIP-49 nested-everywhere
 // schema (KeyScopeBIP0049AddrSchema) so the wallet can faithfully scan
 // a strict-BIP-49 xpub imported from an external wallet (Trezor,
-// Ledger, etc.). The SQL backends in this package do not model that
-// override; every account exposes its scope's default schema, so a
-// strict-BIP-49 watch-only import scans at btcwallet's Plus default
-// (internal=P2WPKH) and misses the source wallet's internal change
-// UTXOs (which live at P2SH-P2WPKH) until the scanner is taught to
-// derive both branch variants — a follow-up to this stack.
+// Ledger, etc.). SQL stores the same account override independently of
+// the scope so both branches keep the imported wallet's script types.
 type ScopeAddrSchema struct {
 	// ExternalAddrType is the address type for all keys within branch 0.
 	ExternalAddrType AddressType
