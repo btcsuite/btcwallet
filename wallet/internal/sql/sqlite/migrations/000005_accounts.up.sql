@@ -37,6 +37,11 @@ CREATE TABLE accounts (
     -- (docs/developer/adr/0009-single-passphrase-encryption.md).
     public_key BLOB,
 
+    -- Account-specific branch types preserve imported schemas when accounts
+    -- share a scope. NULL inherits that scope's corresponding address type.
+    internal_type_id INTEGER,
+    external_type_id INTEGER,
+
     -- Timestamp when the account was created. Automatically set by the database.
     created_at DATETIME NOT NULL DEFAULT current_timestamp,
 
@@ -73,7 +78,11 @@ CREATE TABLE accounts (
     -- DELETE RESTRICT to ensure that the wallet/scope cannot be deleted if
     -- accounts still exist.
     FOREIGN KEY (wallet_id, scope_id)
-    REFERENCES key_scopes (wallet_id, id) ON DELETE RESTRICT
+    REFERENCES key_scopes (wallet_id, id) ON DELETE RESTRICT,
+
+    -- Overrides must name an existing script type; NULL retains scope defaults.
+    FOREIGN KEY (internal_type_id) REFERENCES address_types (id) ON DELETE RESTRICT,
+    FOREIGN KEY (external_type_id) REFERENCES address_types (id) ON DELETE RESTRICT
 );
 
 -- Index on foreign scope_id for faster lookups and joins.
