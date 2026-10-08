@@ -1416,30 +1416,41 @@ func TestRenameAccountStoreErrors(t *testing.T) {
 func TestImportAccount(t *testing.T) {
 	t.Parallel()
 
+	// Independent DB defaults let the exact Store expectation check that
+	// each public request resolves its schema before a scope can be reused.
+	witnessSchema := db.ScopeAddrMap[db.KeyScopeBIP0084]
+	hybridSchema := db.ScopeAddrMap[db.KeyScopeBIP0049Plus]
+	taprootSchema := db.ScopeAddrMap[db.KeyScopeBIP0086]
 	tests := []struct {
 		name       string
 		purpose    uint32
+		version    waddrmgr.HDVersion
 		scope      waddrmgr.KeyScope
 		addrType   waddrmgr.AddressType
 		addrSchema *db.ScopeAddrSchema
 		dryRun     bool
 	}{
 		{
-			name:     "persist account",
-			purpose:  84,
-			scope:    waddrmgr.KeyScopeBIP0084,
-			addrType: waddrmgr.WitnessPubKey,
+			name:       "persist account",
+			purpose:    84,
+			version:    waddrmgr.HDVersionTestNetBIP0044,
+			scope:      waddrmgr.KeyScopeBIP0084,
+			addrType:   waddrmgr.WitnessPubKey,
+			addrSchema: &witnessSchema,
 		},
 		{
-			name:     "preview account",
-			purpose:  84,
-			scope:    waddrmgr.KeyScopeBIP0084,
-			addrType: waddrmgr.WitnessPubKey,
-			dryRun:   true,
+			name:       "preview account",
+			purpose:    84,
+			version:    waddrmgr.HDVersionTestNetBIP0044,
+			scope:      waddrmgr.KeyScopeBIP0084,
+			addrType:   waddrmgr.WitnessPubKey,
+			addrSchema: &witnessSchema,
+			dryRun:     true,
 		},
 		{
 			name:     "override address schema",
 			purpose:  49,
+			version:  waddrmgr.HDVersionTestNetBIP0049,
 			scope:    waddrmgr.KeyScopeBIP0049Plus,
 			addrType: waddrmgr.NestedWitnessPubKey,
 			addrSchema: &db.ScopeAddrSchema{
@@ -1447,16 +1458,43 @@ func TestImportAccount(t *testing.T) {
 				InternalAddrType: db.NestedWitnessPubKey,
 			},
 		},
+		{
+			// A BIP49-version key selects the hybrid scope even though
+			// the requested native witness type does not identify BIP49.
+			name:       "preserve hybrid schema",
+			purpose:    49,
+			version:    waddrmgr.HDVersionTestNetBIP0049,
+			scope:      waddrmgr.KeyScopeBIP0049Plus,
+			addrType:   waddrmgr.WitnessPubKey,
+			addrSchema: &hybridSchema,
+			dryRun:     false,
+		},
+		{
+			name:       "resolve taproot schema",
+			purpose:    86,
+			version:    waddrmgr.HDVersionTestNetBIP0044,
+			scope:      waddrmgr.KeyScopeBIP0086,
+			addrType:   waddrmgr.TaprootPubKey,
+			addrSchema: &taprootSchema,
+			dryRun:     false,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Require the derived scope, key, and import options
-			// in one exact Store call after name preflight succeeds.
+			// Arrange: Clone the fixture key to the row's HD version so
+			// scope selection sees the caller's serialized identity. After
+			// name preflight, require one exact Store call carrying the
+			// strict override or resolved canonical branch schema.
 			w, deps := createStartedWalletWithMocks(t)
 			key, fingerprint := importAccountTestKey(t, test.purpose)
+			version := make([]byte, 4)
+			binary.BigEndian.PutUint32(version, uint32(test.version))
+			key, err := key.CloneWithVersion(version)
+			require.NoError(t, err)
+
 			expectAccountNameAvailable(deps, test.scope, testAccountName)
 			deps.store.On("CreateImportedAccount", mock.Anything,
 				db.CreateImportedAccountParams{
@@ -1470,17 +1508,19 @@ func TestImportAccount(t *testing.T) {
 				AccountName: testAccountName,
 			}, nil).Once()
 
-			// Act: Import through the public API with the selected options.
+			// Act: Import with the versioned XPub and requested address
+			// type so the public path resolves the per-account schema.
 			info, err := w.ImportAccount(
 				t.Context(), testAccountName, key, fingerprint,
 				test.addrType, test.dryRun,
 			)
 
-			// Assert: Return the Store result after the exact call above;
-			// fixture cleanup checks that every expectation was consumed.
+			// Assert: Check the returned identity and consume the exact
+			// single insert expectation, including its branch schema.
 			require.NoError(t, err)
 			require.False(t, info.NoChainSync)
 			require.Equal(t, testAccountName, info.AccountName)
+			deps.store.AssertExpectations(t)
 		})
 	}
 }

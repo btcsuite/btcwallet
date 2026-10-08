@@ -553,12 +553,9 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 	// by-name lookup both rejects an unknown account up front and supplies
 	// the account's effective AddrSchema. Use that schema instead of the
 	// scope default so strict BIP49 imports (and any other per-account
-	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
-	// produce change scripts the external signer expects. SQL backends
-	// currently store schema at the key-scope level only and surface the
-	// effective scope schema here; per-account-only overrides under a shared
-	// scope still fall through to the scope default and are tracked as a
-	// known limitation in the AddrSchema docstring.
+	// override) produce change scripts the external signer expects. SQL
+	// account queries and kvdb's account properties both expose the effective
+	// branch types without changing the account's derivation scope.
 	default:
 		accountInfo, err := w.cache.GetAccount(
 			ctx, db.GetAccountQuery{

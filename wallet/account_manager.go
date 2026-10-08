@@ -1257,6 +1257,15 @@ func (w *Wallet) importAccountParams(name string,
 		return params, err
 	}
 
+	// A reused scope may carry an earlier strict import's schema. Resolve
+	// this import's canonical default before persistence so it cannot inherit
+	// that override. Keep the key-selected scope; script types do not define
+	// the XPub's derivation identity.
+	if addrSchema == nil {
+		schema := waddrmgr.ScopeAddrMap[keyScope]
+		addrSchema = &schema
+	}
+
 	dbAddrSchema, err := dbScopeAddrSchema(addrSchema)
 	if err != nil {
 		return params, err

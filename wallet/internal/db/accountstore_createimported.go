@@ -23,6 +23,10 @@ type CreateImportedAccountInsertRequest struct {
 	// NoChainSync is the immutable automatic synchronization policy to store
 	// with this account row.
 	NoChainSync bool
+
+	// AddrSchema overrides this account's branch types. Nil inherits the
+	// scope schema, including for direct Store callers.
+	AddrSchema *ScopeAddrSchema
 }
 
 // Validate validates required fields for creating an imported account.
@@ -177,12 +181,15 @@ func CreateImportedAccountWithOps(ctx context.Context,
 		return nil, fmt.Errorf("ensure scope: %w", err)
 	}
 
+	// Persist the account override even when EnsureKeyScope reused a scope
+	// with different branch types; scope creation alone cannot retain it.
 	insertReq := CreateImportedAccountInsertRequest{
 		ScopeID:           scopeID,
 		Name:              params.Name,
 		PublicKey:         params.PublicKey,
 		MasterFingerprint: params.MasterFingerprint,
 		NoChainSync:       params.NoChainSync,
+		AddrSchema:        params.AddrSchema,
 	}
 
 	accountID, err := ops.CreateImportedAccount(ctx, insertReq)
