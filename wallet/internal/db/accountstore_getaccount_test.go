@@ -83,10 +83,11 @@ func TestGetAccountWithOpsValidationFailure(t *testing.T) {
 
 // TestGetAccountWithOpsPassesThroughLoadedAccount verifies that after
 // successful load, the shared helper forwards the account to balance attachment
-// for derived accounts (avoiding the code path where the rejection applies).
+// for supplied accounts that retain a real BIP44 number.
 func TestGetAccountWithOpsPassesThroughLoadedAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a numbered supplied account must reach balance attachment.
 	accountNumber := uint32(5)
 	ctx := t.Context()
 	query := GetAccountQuery{
@@ -97,15 +98,15 @@ func TestGetAccountWithOpsPassesThroughLoadedAccount(t *testing.T) {
 	rowID := int64(11)
 	loaded := &AccountInfo{
 		AccountNumber: &accountNumber,
-		AccountName:   "derived",
-		IsImported:    false,
+		AccountName:   "supplied",
+		IsImported:    true,
 		KeyScope:      query.Scope,
 		rowID:         rowID,
 	}
 	balanced := &AccountInfo{
 		AccountNumber:      &accountNumber,
-		AccountName:        "derived",
-		IsImported:         false,
+		AccountName:        "supplied",
+		IsImported:         true,
 		KeyScope:           query.Scope,
 		ConfirmedBalance:   btcutil.Amount(50),
 		UnconfirmedBalance: btcutil.Amount(75),
@@ -124,10 +125,13 @@ func TestGetAccountWithOpsPassesThroughLoadedAccount(t *testing.T) {
 	).Return(balanced, nil).Once()
 	mock.InOrder(loadCall, attachCall)
 
+	// Act: select by semantic number through the normal shared read.
 	info, err := GetAccountWithOps(ctx, query, ops)
 
+	// Assert: the balanced account retains supplied provenance and identity.
 	require.NoError(t, err)
 	require.Equal(t, balanced, info)
+	ops.AssertExpectations(t)
 }
 
 // TestGetAccountWithOpsRejectsImportedByNumber verifies number-based lookups
@@ -143,8 +147,8 @@ func TestGetAccountWithOpsRejectsImportedByNumber(t *testing.T) {
 		Scope:         KeyScope{Purpose: 84, Coin: 0},
 		AccountNumber: &accountNumber,
 	}
-	// The importedness flag is authoritative even when the backend uses an
-	// internal account number for imported rows.
+	// Numberless imports must stay masked even when a backend uses an
+	// internal account ID to resolve the lookup.
 	loaded := &AccountInfo{
 		AccountName: "imported",
 		IsImported:  true,

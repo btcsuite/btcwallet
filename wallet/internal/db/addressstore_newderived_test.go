@@ -84,7 +84,7 @@ func TestNewDerivedAddressesWithOpsBuildsInfo(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Expect one lookup, counter advance and insert for a non-default
-	// account, so the returned locator must use the resolved account number.
+	// supplied account, so the locator must keep its declared account number.
 	now := time.Unix(1710005000, 0).UTC()
 	params := NewDerivedAddressParams{
 		WalletID:    7,
@@ -97,7 +97,7 @@ func TestNewDerivedAddressesWithOpsBuildsInfo(t *testing.T) {
 		AccountName:   params.AccountName,
 		Purpose:       int64(params.Scope.Purpose),
 		CoinType:      int64(params.Scope.Coin),
-		IsDerived:     true,
+		IsDerived:     false,
 		AddrSchema: ScopeAddrSchema{
 			ExternalAddrType: WitnessPubKey,
 			InternalAddrType: WitnessPubKey,
@@ -155,6 +155,7 @@ func TestNewDerivedAddressesWithOpsBuildsInfo(t *testing.T) {
 	require.Equal(t, params.AccountName, info.AccountName)
 	require.Equal(t, params.Scope, info.KeyScope)
 	require.Equal(t, uint32(3), *info.AccountNumber)
+	require.True(t, info.IsImported)
 	ops.AssertExpectations(t)
 }
 

@@ -35,8 +35,8 @@ type DerivedAddressAccount struct {
 	// AccountID is the backend account row ID.
 	AccountID int64
 
-	// AccountNumber is the BIP44 account number; NULL for non-derived
-	// (imported) accounts.
+	// AccountNumber is the known BIP44 account number. Only numberless
+	// imports leave it NULL; root provenance does not determine presence.
 	AccountNumber sql.NullInt64
 
 	// AccountName is the human-readable account name.
@@ -157,8 +157,8 @@ func derivedAddressAccount(ctx context.Context, params NewDerivedAddressParams,
 		)
 	}
 
-	// Non-derived accounts have a NULL account_number; their derivation uses
-	// AccountPubKey directly so a BIP44 number is not available.
+	// Derivation always uses the account XPub. Preserve a known number for
+	// returned path metadata, including caller-supplied account keys.
 	accountNumValue, errAccount := DerivedAddressAccountNumber(
 		account.AccountNumber,
 	)
@@ -401,7 +401,7 @@ func derivedAddressInput(ctx context.Context,
 }
 
 // resolveAccountNumber maps the account-number lookup result to the optional
-// BIP44 account number, enforcing the wallet-derived/imported shape invariant.
+// BIP44 account number, requiring one only for wallet-derived accounts.
 func resolveAccountNumber(accountIsDerived bool, accountNumValue uint32,
 	errAccount error) (*uint32, error) {
 
@@ -409,11 +409,6 @@ func resolveAccountNumber(accountIsDerived bool, accountNumValue uint32,
 
 	switch {
 	case errAccount == nil:
-		if !accountIsDerived {
-			return nil, fmt.Errorf("%w: non-derived account has "+
-				"derived account number", errAccountShapeCorruption)
-		}
-
 		accountNumber = &accountNumValue
 
 	case errors.Is(errAccount, ErrNilDBAccountNumber):

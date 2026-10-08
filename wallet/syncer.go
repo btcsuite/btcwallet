@@ -2595,16 +2595,16 @@ func (s *syncer) resolveScanTargets(ctx context.Context,
 // scanTargetNames indexes one account snapshot by the (scope, number) identity
 // a rescan caller names, mapping each to the account's durable name.
 //
-// A derived account is indexed by its public AccountNumber on every backend.
-// An imported account exposes no public number, so it is indexed by its store
+// An account with a known path is indexed by its public AccountNumber,
+// regardless of root provenance. A numberless import uses its store
 // AccountID -- but only for kvdb, recognized by the legacy address manager
 // being present. There AccountID is waddrmgr's own internal, non-masked account
 // number, which is exactly the selector the caller supplies, so this is a
 // format-boundary adaptation rather than a store-identity selector. SQL sets
 // AccountID from a relational row ID unrelated to any BIP44 number, so matching
 // it would let a request for a nonexistent account select an unrelated imported
-// row; there an unmatched numeric target is simply not found, and targeting an
-// imported account by number stays unsupported. A derived row always wins if a
+// row; there an unmatched numeric target is simply not found, and targeting a
+// numberless import by number stays unsupported. A numbered row wins if a
 // malformed snapshot ever presents both.
 func (s *syncer) scanTargetNames(
 	ctx context.Context) (map[waddrmgr.AccountScope]string, error) {
@@ -2628,7 +2628,7 @@ func (s *syncer) scanTargetNames(
 
 		scope := waddrmgr.KeyScope(info.KeyScope)
 
-		if !info.IsImported && info.AccountNumber != nil {
+		if info.AccountNumber != nil {
 			names[waddrmgr.AccountScope{
 				Scope:   scope,
 				Account: *info.AccountNumber,

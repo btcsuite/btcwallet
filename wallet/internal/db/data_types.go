@@ -379,9 +379,8 @@ type UpdateWalletSecretsParams struct {
 type AccountInfo struct {
 	// AccountID is the durable per-account store identity, set for every
 	// account regardless of type. It is distinct from the BIP44
-	// AccountNumber: AccountNumber is nil for imported xpub accounts and is
-	// masked to 0 for them by both backends, whereas AccountID is always
-	// populated. SQL backends set it from accounts.id; kvdb sets it from
+	// AccountNumber: numberless imports leave AccountNumber nil, whereas
+	// AccountID is always populated. SQL uses accounts.id; kvdb uses
 	// waddrmgr's internal account number.
 	//
 	// AccountID is unique only within a key scope, not across a whole
@@ -394,19 +393,15 @@ type AccountInfo struct {
 	// AccountNumber or AccountID alone.
 	AccountID *uint32
 
-	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported accounts do not have a wallet-derived account number, so this is
-	// nil for imported xpub accounts and any backend that cannot expose one.
+	// AccountNumber is the known BIP44 account index, including a supplied
+	// key with a declared path. Numberless imports leave it nil.
 	AccountNumber *uint32
 
 	// AccountName is the human-readable name of the account.
 	AccountName string
 
-	// IsImported reports whether this account was imported rather than derived
-	// from the wallet seed. Imported accounts have no wallet-derived BIP44
-	// account
-	// number, so callers that need AccountNumber must check this and the
-	// AccountNumber pointer.
+	// IsImported reports supplied key provenance rather than derivation from
+	// the wallet seed. AccountNumber independently records a known path.
 	IsImported bool
 
 	// ExternalKeyCount is the number of external keys that have been
@@ -732,10 +727,8 @@ type AddressInfo struct {
 	// account row identity.
 	AccountID *uint32
 
-	// AccountNumber is the BIP44 account index used for derived accounts.
-	// It is nil for raw imports and imported-xpub HD children because those
-	// addresses must not be routed through wallet-seed account-number
-	// derivation.
+	// AccountNumber is the known BIP44 account index, independent of root
+	// provenance. Raw imports and numberless account children leave it nil.
 	AccountNumber *uint32
 
 	// AccountName is the human-readable account name that owns the address.
@@ -759,10 +752,8 @@ type AddressInfo struct {
 	// wallet-seed-derived addresses report false.
 	IsImported bool
 
-	// HasDerivationPath reports whether this address has BIP44 branch/index
-	// path
-	// metadata. Imported-xpub children have a path even though AccountNumber is
-	// nil because they are not derived from the wallet seed.
+	// HasDerivationPath reports stored branch/index metadata. Supplied-XPub
+	// children have this path even when their account number is unknown.
 	HasDerivationPath bool
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).

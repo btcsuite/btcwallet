@@ -331,26 +331,12 @@ func validateRawAddressAccountShape[TypeID any](
 	return nil
 }
 
-// validateAddressAccountNumberShape verifies address account metadata uses
-// account numbers only for wallet-derived accounts.
+// validateAddressAccountNumberShape applies the same account identity rule to
+// address joins as to direct account reads, including supplied numbered keys.
 func validateAddressAccountNumberShape(accountIsDerived bool,
 	accountNumber sql.NullInt64) error {
 
-	if !accountIsDerived {
-		if accountNumber.Valid {
-			return fmt.Errorf("%w: non-derived account has derived "+
-				"account number", errAccountShapeCorruption)
-		}
-
-		return nil
-	}
-
-	if !accountNumber.Valid {
-		return fmt.Errorf("%w: derived account missing account number",
-			errAccountShapeCorruption)
-	}
-
-	return nil
+	return validateAccountShape(accountIsDerived, accountNumber)
 }
 
 // ApplyAddressAccountMetadata converts and copies raw account metadata onto an
