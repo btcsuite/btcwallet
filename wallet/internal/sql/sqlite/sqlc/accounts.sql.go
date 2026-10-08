@@ -52,8 +52,8 @@ WHERE
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
     AND (
-        (acc.is_derived AND acc.account_number IS NOT NULL)
-        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+        -- Only root-derived accounts require a known path.
+        acc.is_derived = FALSE OR acc.account_number IS NOT NULL
     )
 `
 
@@ -117,8 +117,8 @@ WHERE
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
     AND (
-        (acc.is_derived AND acc.account_number IS NOT NULL)
-        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+        -- Only root-derived accounts require a known path.
+        acc.is_derived = FALSE OR acc.account_number IS NOT NULL
     )
 GROUP BY da.account_id
 `
@@ -251,18 +251,20 @@ SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     ?1 AS account_name,
-    TRUE AS is_derived,
-    ?2 AS no_chain_sync,
-    ?3 AS account_number,
-    ?4 AS public_key,
-    ?5 AS master_fingerprint
+    -- Omitted provenance retains root creation for existing callers.
+    coalesce(?2, FALSE) = FALSE AS is_derived,
+    ?3 AS no_chain_sync,
+    ?4 AS account_number,
+    ?5 AS public_key,
+    ?6 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = ?6
+WHERE ks.id = ?7
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
 	AccountName       string
+	IsImported        interface{}
 	NoChainSync       bool
 	AccountNumber     sql.NullInt64
 	PublicKey         []byte
@@ -282,6 +284,7 @@ type CreateDerivedAccountRow struct {
 func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
 		arg.AccountName,
+		arg.IsImported,
 		arg.NoChainSync,
 		arg.AccountNumber,
 		arg.PublicKey,
@@ -436,7 +439,7 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE a.scope_id = ? AND a.account_number = ? AND a.is_derived
+WHERE a.scope_id = ? AND a.account_number = ?
 `
 
 type GetAccountByScopeAndNumberParams struct {
@@ -592,7 +595,6 @@ WHERE
     AND ks.purpose = ?
     AND ks.coin_type = ?
     AND a.account_number = ?
-    AND a.is_derived
 `
 
 type GetAccountByWalletScopeAndNumberParams struct {
@@ -1266,7 +1268,6 @@ WHERE
             AND key_scopes.coin_type = ?4
     )
     AND account_number = ?5
-    AND is_derived
 `
 
 type UpdateAccountNameByWalletScopeAndNumberParams struct {
