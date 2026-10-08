@@ -7,6 +7,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -1917,4 +1919,135 @@ func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
 	require.NoError(h, err)
 	require.Zero(h, owner.ExternalKeyCount)
 	require.Zero(h, owner.InternalKeyCount)
+}
+
+// testAccountManagerDerivePathBoundAddress preserves supplied path identity
+// through receiving, balance lookup, and the supported reopen lifecycle.
+func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("supplied numbered accounts require SQL")
+	}
+
+	zero := wallet.MasterFingerprint(0)
+	for _, tc := range []struct {
+		name        string
+		purpose     uint32
+		fingerprint *wallet.MasterFingerprint
+	}{
+		{
+			name:    "canonical",
+			purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		},
+		{
+			name:        "custom",
+			purpose:     1017,
+			fingerprint: &zero,
+		},
+	} {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: declare ancestors independently of the supplied XPub.
+			// Each rootless wallet receives one account with receiving enabled.
+			keys := deterministicImportedAccountKeys(h)
+			scope := keys.scope
+			scope.Purpose = tc.purpose
+			schema := waddrmgr.ScopeAddrMap[keys.scope]
+			number := wallet.AccountNumber(0)
+			w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+			params := wallet.NewAccountParams{
+				Scope:                scope,
+				Name:                 "supplied",
+				AddrSchema:           &schema,
+				AccountNumber:        &number,
+				AccountPubKey:        keys.accountKey,
+				MasterKeyFingerprint: tc.fingerprint,
+			}
+			created, err := w.NewAccount(h.Context(), params)
+			require.NoError(h, err)
+			require.Equal(h, &number, created.AccountNumber)
+			require.Equal(
+				h, []byte(keys.accountKey.String()), created.PublicKey,
+			)
+			require.Equal(h, scope, created.KeyScope)
+			require.Equal(h, schema, created.AddrSchema)
+			require.Equal(h, tc.fingerprint, created.MasterKeyFingerprint)
+			require.True(h, created.IsImported)
+			require.True(h, created.IsWatchOnly)
+			require.False(h, created.NoChainSync)
+
+			selector := wallet.NewAccountSelectorByNumber(scope, number)
+
+			// Act: derive through normal receiving, which must admit supplied
+			// provenance without dropping the declared account path.
+			info, err := w.NewAddress(h.Context(), selector, false)
+
+			// Assert: point reads expose the same complete identity. Both an
+			// absent and a present-zero account fingerprint map to scalar zero.
+			require.NoError(h, err)
+			require.Equal(h, &wallet.AddressDerivation{
+				KeyScope: scope,
+				Account:  uint32(number),
+			}, info.Derivation)
+			stored, err := w.GetAddressInfo(h.Context(), info.Addr)
+			require.NoError(h, err)
+			require.Equal(h, info, stored)
+
+			// Fund the returned address through the existing miner boundary.
+			// The mined-block wait makes later balance reads authoritative.
+			script, err := txscript.PayToAddrScript(info.Addr)
+			require.NoError(h, err)
+
+			const amount = btcutil.Amount(17000)
+
+			txid := h.SendOutput(&wire.TxOut{
+				Value:    int64(amount),
+				PkScript: script,
+			}, bwtest.MinerFeeRate)
+			h.MineBlockWithTx(h.AssertTxInMempool(*txid))
+			before, err := w.GetAccount(
+				h.Context(), scope, params.Name,
+			)
+			require.NoError(h, err)
+
+			// Compare durable reads to the declared identity, rather than only
+			// to another read that could repeat a persistence mistake. The
+			// fingerprint comparison distinguishes absence from present zero.
+			require.Equal(h, &number, before.AccountNumber)
+			require.Equal(h, created.PublicKey, before.PublicKey)
+			require.Equal(h, scope, before.KeyScope)
+			require.Equal(h, schema, before.AddrSchema)
+			require.Equal(h, tc.fingerprint, before.MasterKeyFingerprint)
+			require.True(h, before.IsImported)
+			require.True(h, before.IsWatchOnly)
+			require.False(h, before.NoChainSync)
+
+			// Reopen after receipt so both identity and credited ownership must
+			// survive; the harness owns replacement registration and cleanup.
+			w = h.ReloadWallet(w)
+			after, err := w.GetAccount(
+				h.Context(), scope, params.Name,
+			)
+			require.NoError(h, err)
+			require.Equal(h, before, after)
+			stored, err = w.GetAddressInfo(h.Context(), info.Addr)
+			require.NoError(h, err)
+			require.Equal(h, info, stored)
+
+			// ListAddresses selects a canonical scope by address type, so its
+			// existing public selector can observe only the canonical row.
+			if scope == keys.scope {
+				listed, err := w.ListAddresses(
+					h.Context(), params.Name, keys.addrType,
+				)
+				require.NoError(h, err)
+				require.Contains(h, listed, wallet.AddressProperty{
+					Address: info.Addr,
+					Balance: amount,
+				})
+			}
+		})
+	}
 }

@@ -135,6 +135,11 @@ var allTestCases = []*testCase{
 		Name:     "account manager create custom scope account",
 		TestFunc: testAccountManagerCreateCustomScopeAccount,
 	},
+	// Receiving must retain the declared path for supplied public material.
+	{
+		Name:     "account manager derive path bound address",
+		TestFunc: testAccountManagerDerivePathBoundAddress,
+	},
 	{
 		Name:     "account manager create exact account",
 		TestFunc: testAccountManagerCreateExactAccount,
