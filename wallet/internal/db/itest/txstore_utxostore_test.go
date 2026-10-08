@@ -2626,10 +2626,23 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 func TestListUTXOsFiltersByAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: fund one root-derived and one supplied numbered owner.
+	// Their distinct outputs expose any provenance-based filtering.
 	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-list-utxos-account")
+	walletID := newWatchOnlyWallet(t, store, "wallet-list-utxos-account")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
-	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "savings")
+
+	account := uint32(1)
+	_, err := store.CreateDerivedAccount(t.Context(),
+		db.CreateDerivedAccountParams{
+			WalletID:      walletID,
+			Scope:         db.KeyScopeBIP0084,
+			Name:          "savings",
+			AccountNumber: &account,
+			PublicKey:     RandomBytes(33),
+		}, nil,
+	)
+	require.NoError(t, err)
 
 	defaultAddr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
@@ -2647,7 +2660,7 @@ func TestListUTXOsFiltersByAccount(t *testing.T) {
 		[]*wire.TxOut{{Value: 17000, PkScript: savingsAddr.ScriptPubKey}},
 	)
 
-	err := store.CreateTx(t.Context(), db.CreateTxParams{
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       txDefault,
 		Received: time.Unix(1710001600, 0),
@@ -2665,22 +2678,44 @@ func TestListUTXOsFiltersByAccount(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Act: query numeric ownership independently of key provenance.
 	scope := db.KeyScopeBIP0084
-	account := uint32(1)
 	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID: walletID,
 		Scope:    &scope,
 		Account:  &account,
 	})
 
+	// Assert: address conversion and all numeric balance filters retain
+	// the supplied owner and its value without reporting false corruption.
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, txSavings.TxHash(), utxos[0].OutPoint.Hash)
+	require.Equal(t, "savings", utxos[0].AccountName)
+	require.Equal(t, account, *savingsAddr.AccountNumber)
+	require.True(t, savingsAddr.IsImported)
+
+	info, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		WalletID:      walletID,
+		Scope:         scope,
+		AccountNumber: &account,
+	})
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(17000), info.UnconfirmedBalance)
+	require.True(t, info.IsImported)
+
+	balance, err := store.Balance(t.Context(), db.BalanceParams{
+		WalletID: walletID,
+		Scope:    &scope,
+		Account:  &account,
+	})
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(17000), balance.Total)
 }
 
 // TestAccountNumberFiltersExcludeImportedAccounts verifies that numeric account
-// filters do not match imported-xpub accounts even if corrupt metadata gives
-// the imported account an account number.
+// filters do not match numberless imports or permit assigning them a number
+// after creation.
 func TestAccountNumberFiltersExcludeImportedAccounts(t *testing.T) {
 	t.Parallel()
 

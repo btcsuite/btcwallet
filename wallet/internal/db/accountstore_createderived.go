@@ -43,7 +43,8 @@ var (
 	)
 )
 
-// Validate validates required fields for creating a derived account.
+// Validate checks account identity and supplied-material combinations before
+// scope or cursor mutation.
 func (params *CreateDerivedAccountParams) Validate() error {
 	if params.Name == "" {
 		return ErrMissingAccountName
@@ -68,6 +69,20 @@ func (params *CreateDerivedAccountParams) Validate() error {
 		if *params.AccountNumber > MaxAccountNumber {
 			return fmt.Errorf("exact account number: %w", ErrInvalidParam)
 		}
+	}
+
+	return validateDerivedAccountMaterial(params)
+}
+
+// validateDerivedAccountMaterial keeps supplied identity and branch-schema
+// checks together so Validate can check path bounds before inspecting material.
+func validateDerivedAccountMaterial(params *CreateDerivedAccountParams) error {
+	// Supplied material has no root from which to infer an account number;
+	// a fingerprint alone cannot create an account or establish provenance.
+	if len(params.PublicKey) > 0 && params.AccountNumber == nil ||
+		len(params.PublicKey) == 0 && params.MasterKeyFingerprint != nil {
+
+		return fmt.Errorf("supplied account identity: %w", ErrInvalidParam)
 	}
 
 	// Account branches must be derivable from one key; script-bearing and
@@ -245,7 +260,8 @@ func derivedAccountNumber(accountNumber sql.NullInt64) (uint32, error) {
 // The helper owns the end-to-end sequencing so postgres and sqlite both:
 // validate the public request first, allocate from the same scope counter only
 // after that scope exists, invoke the wallet-supplied derivation callback to
-// build the per-account material, preserve the same account-number overflow
+// build root-derived material (or reuse supplied public material), preserve
+// the same account-number overflow
 // mapping, and build the same normalized AccountInfo result from the inserted
 // row.
 func CreateDerivedAccountWithOps(ctx context.Context,
@@ -253,18 +269,13 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 	ops CreateDerivedAccountOps,
 	deriveFn AccountDerivationFunc) (*AccountInfo, error) {
 
-	if deriveFn == nil {
-		return nil, errNilAccountDerivationFunc
-	}
-
-	err := params.Validate()
+	// Validate custody before scope or cursor mutation; supplied material must
+	// not inherit a signing wallet's mode merely by bypassing root derivation.
+	walletIsWatchOnly, err := validateDerivedAccountCreation(
+		ctx, params, ops, deriveFn,
+	)
 	if err != nil {
 		return nil, err
-	}
-
-	walletIsWatchOnly, err := ops.WalletWatchOnly(ctx, params.WalletID)
-	if err != nil {
-		return nil, fmt.Errorf("wallet watch only: %w", err)
 	}
 
 	scopeID, addrSchema, err := ensureDerivedAccountScope(ctx, params, ops)
@@ -279,11 +290,20 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, err
 	}
 
-	derived, err := deriveAndValidate(
-		ctx, params.Scope, accNumPreview, walletIsWatchOnly, deriveFn,
-	)
-	if err != nil {
-		return nil, err
+	// Reuse the same insertion and collision transaction for supplied keys,
+	// without invoking root derivation or fabricating a root fingerprint.
+	derived := &DerivedAccountData{PublicKey: params.PublicKey}
+
+	fingerprint := params.MasterKeyFingerprint
+	if len(params.PublicKey) == 0 {
+		derived, err = deriveAndValidate(
+			ctx, params.Scope, accNumPreview, walletIsWatchOnly, deriveFn,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		fingerprint = &derived.MasterKeyFingerprint
 	}
 
 	row, err := ops.CreateDerivedAccount(
@@ -303,15 +323,42 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, err
 	}
 
-	masterFingerprint := derived.MasterKeyFingerprint
-
 	return BuildAccountInfo(
-		accountID, &accNumber, params.Name, false, 0, 0, 0,
+		accountID, &accNumber, params.Name, len(params.PublicKey) > 0, 0, 0, 0,
 		walletIsWatchOnly, params.NoChainSync, row.CreatedAt, params.Scope,
 		addrSchema,
-		derived.PublicKey, &masterFingerprint,
+		derived.PublicKey, fingerprint,
 		0, 0,
 	), nil
+}
+
+// validateDerivedAccountCreation preserves callback, request, and persisted
+// custody error precedence before the creation transaction mutates any rows.
+func validateDerivedAccountCreation(ctx context.Context,
+	params CreateDerivedAccountParams, ops CreateDerivedAccountOps,
+	deriveFn AccountDerivationFunc) (bool, error) {
+
+	if deriveFn == nil && len(params.PublicKey) == 0 {
+		return false, errNilAccountDerivationFunc
+	}
+
+	err := params.Validate()
+	if err != nil {
+		return false, err
+	}
+
+	walletIsWatchOnly, err := ops.WalletWatchOnly(ctx, params.WalletID)
+	if err != nil {
+		return false, fmt.Errorf("wallet watch only: %w", err)
+	}
+
+	// Supplied public material cannot furnish a spendable account's secret.
+	// Check persisted custody before creating a scope or advancing its cursor.
+	if len(params.PublicKey) > 0 && !walletIsWatchOnly {
+		return false, ErrAccountOperationUnsupported
+	}
+
+	return walletIsWatchOnly, nil
 }
 
 // ensureDerivedAccountScope checks the persisted schema in the creation

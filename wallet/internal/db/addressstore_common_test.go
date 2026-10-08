@@ -26,12 +26,13 @@ func TestAddressRowToInfoRejectsWalletDerivedWithoutPath(t *testing.T) {
 	require.ErrorIs(t, err, errAddressShapeCorruption)
 }
 
-// TestAddressRowToInfoRejectsImportedAccountNumber verifies that imported-xpub
-// addresses cannot expose a BIP44 account number from corrupt account metadata.
-func TestAddressRowToInfoRejectsImportedAccountNumber(t *testing.T) {
+// TestAddressRowToInfoPreservesSuppliedAccountNumber verifies that supplied
+// children retain a declared BIP44 path without claiming wallet-root origin.
+func TestAddressRowToInfoPreservesSuppliedAccountNumber(t *testing.T) {
 	t.Parallel()
 
-	_, err := AddressRowToInfo(AddressInfoRow[int64]{
+	// Arrange: a supplied account owns a child with a complete declared path.
+	row := AddressInfoRow[int64]{
 		ID:               1,
 		DerivedAddressID: sqlNullInt64(1),
 		AccountID:        sqlNullInt64(2),
@@ -52,8 +53,16 @@ func TestAddressRowToInfoRejectsImportedAccountNumber(t *testing.T) {
 		IDToAddrType: func(int64) (AddressType, error) {
 			return WitnessPubKey, nil
 		},
-	})
-	require.ErrorIs(t, err, errAccountShapeCorruption)
+	}
+
+	// Act: convert the joined row used by SQL point and list reads.
+	info, err := AddressRowToInfo(row)
+
+	// Assert: the real number survives alongside supplied provenance.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.True(t, info.HasDerivationPath)
+	require.Equal(t, uint32(3), *info.AccountNumber)
 }
 
 // sqlNullInt64 creates a valid nullable integer for address conversion tests.

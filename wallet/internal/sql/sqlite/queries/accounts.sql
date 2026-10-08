@@ -16,7 +16,8 @@ SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     sqlc.arg('account_name') AS account_name,
-    TRUE AS is_derived,
+    -- Omitted provenance retains root creation for existing callers.
+    coalesce(sqlc.narg('is_imported'), FALSE) = FALSE AS is_derived,
     sqlc.arg('no_chain_sync') AS no_chain_sync,
     sqlc.arg('account_number') AS account_number,
     sqlc.arg('public_key') AS public_key,
@@ -118,7 +119,7 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE a.scope_id = ? AND a.account_number = ? AND a.is_derived;
+WHERE a.scope_id = ? AND a.account_number = ?;
 
 -- name: GetAccountByWalletScopeAndName :one
 -- Returns a single account by wallet id, scope tuple, and account name.
@@ -172,8 +173,7 @@ WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
     AND ks.coin_type = ?
-    AND a.account_number = ?
-    AND a.is_derived;
+    AND a.account_number = ?;
 
 -- name: GetAccountPropsById :one
 -- Returns full account properties by account id.
@@ -348,8 +348,7 @@ WHERE
             AND key_scopes.purpose = sqlc.arg('purpose')
             AND key_scopes.coin_type = sqlc.arg('coin_type')
     )
-    AND account_number = sqlc.arg('account_number')
-    AND is_derived;
+    AND account_number = sqlc.arg('account_number');
 
 -- name: UpdateAccountNameByWalletScopeAndName :execrows
 -- Renames an account identified by wallet id, scope tuple, and current name.
@@ -424,8 +423,8 @@ WHERE
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
     AND (
-        (acc.is_derived AND acc.account_number IS NOT NULL)
-        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+        -- Only root-derived accounts require a known path.
+        acc.is_derived = FALSE OR acc.account_number IS NOT NULL
     );
 
 -- name: AccountBalancesByIDs :many
@@ -472,8 +471,8 @@ WHERE
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
     AND (
-        (acc.is_derived AND acc.account_number IS NOT NULL)
-        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+        -- Only root-derived accounts require a known path.
+        acc.is_derived = FALSE OR acc.account_number IS NOT NULL
     )
 GROUP BY da.account_id;
 

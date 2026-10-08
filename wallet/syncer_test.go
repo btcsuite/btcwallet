@@ -2980,6 +2980,73 @@ func TestResolveScanTargetsDoesNotUseSQLAccountID(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestResolveScanTargetsSuppliedPath distinguishes a declared account number
+// from a numberless import even when SQL happens to assign the same row ID.
+func TestResolveScanTargetsSuppliedPath(t *testing.T) {
+	t.Parallel()
+
+	number := uint32(7)
+	for _, tc := range []struct {
+		name   string
+		number *uint32
+		want   error
+	}{
+		{
+			name:   "declared path",
+			number: &number,
+		},
+		{
+			name: "numberless import",
+			want: db.ErrAccountNotFound,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: return one SQL account; its row ID cannot substitute
+			// for a missing semantic number when resolving the scan target.
+			store := &walletmock.Store{}
+			s := newSyncer(Config{}, nil, nil, &mockTxPublisher{}, store, 3)
+			scope := waddrmgr.KeyScopeBIP0084
+			store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
+				WalletID:      3,
+				SkipBalance:   true,
+				ChainSyncOnly: true,
+			}).Return([]db.AccountInfo{
+				{
+					AccountID:     &number,
+					AccountNumber: tc.number,
+					AccountName:   "supplied",
+					KeyScope:      db.KeyScope(scope),
+					IsImported:    true,
+				},
+			}, nil).Once()
+
+			// Act: request the declared path through targeted scan resolution.
+			resolved, err := s.resolveScanTargets(t.Context(),
+				[]waddrmgr.AccountScope{
+					{
+						Scope:   scope,
+						Account: number,
+					},
+				},
+			)
+
+			// Assert: only a real number resolves to the durable account name.
+			require.ErrorIs(t, err, tc.want)
+
+			if tc.want == nil {
+				require.Len(t, resolved, 1)
+				require.Equal(t, "supplied", resolved[0].AccountName)
+			} else {
+				require.Empty(t, resolved)
+			}
+
+			store.AssertExpectations(t)
+		})
+	}
+}
+
 // TestStampRecoveryAccountIDsCarriesStableID verifies that the scan state keeps
 // the stable account ID registered from the loaded account snapshot, so horizon
 // emission does not need a later name lookup that could race an account rename.

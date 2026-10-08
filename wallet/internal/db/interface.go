@@ -266,7 +266,9 @@ type AccountStore interface {
 	// advance the cursor without consuming lower holes; kvdb rejects exact
 	// selection. After allocating the account number, the store
 	// invokes deriveFn to obtain the wallet-derived account material
-	// and persists it with the row.
+	// and persists it with the row. For supplied PublicKey, only watch-only
+	// SQL custody is supported: deriveFn is unused and may be nil, while
+	// optional fingerprint and non-root provenance are persisted verbatim.
 	//
 	// If the key scope does not exist, it will be automatically created
 	// using AddrSchema or the ScopeAddrMap default with no coin public/private

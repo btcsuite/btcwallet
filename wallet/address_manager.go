@@ -141,13 +141,13 @@ type AddressDerivation struct {
 	MasterKeyFingerprint uint32
 }
 
-// KeyOrigin identifies the wallet-root account from which a key is derived.
+// KeyOrigin records a known account path, either derived or caller-declared.
 // Child coordinates belong to AllocatedKey so they are not repeated here.
 type KeyOrigin struct {
 	// KeyScope identifies the account's purpose and coin type.
 	KeyScope waddrmgr.KeyScope
 
-	// Account is the wallet-derived BIP44 account number within KeyScope.
+	// Account is the BIP44 account number within KeyScope.
 	Account uint32
 
 	// MasterKeyFingerprint preserves the account's stored root fingerprint.
@@ -166,7 +166,7 @@ type AllocatedKey struct {
 	// Index is the allocated child index within Branch.
 	Index uint32
 
-	// Origin is nil for imported accounts without a wallet-root account path.
+	// Origin is nil for numberless imports without a declared account path.
 	// Callers can use their account selector with Branch and Index to derive
 	// the same child again even when Origin is nil.
 	Origin *KeyOrigin
@@ -355,14 +355,8 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	// A derivation describes a wallet BIP44 path, so it needs a
-	// wallet-derived account number. Raw single imports have none, and
-	// neither do imported-xpub children: the store masks an imported
-	// account's number to 0, which is the wallet's own default derived
-	// account, so publishing a derivation for them would hand callers a
-	// path into the wrong account. Both cases expose no derivation at all,
-	// and signing refuses them with ErrNoAssocPrivateKey before any secret
-	// lookup.
+	// A path requires a real account number, regardless of root provenance.
+	// Numberless imports cannot safely publish a wallet-relative account path.
 	if storeAddr.AccountNumber == nil {
 		return info, nil
 	}

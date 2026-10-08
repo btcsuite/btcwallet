@@ -153,21 +153,10 @@ func ValidateUtxoAddressShape(shape UtxoAddressShape) error {
 			errAddressShapeCorruption)
 	}
 
-	if !shape.AccountIsDerived.Bool {
-		if shape.AccountNumber.Valid {
-			return fmt.Errorf("%w: non-derived account has derived "+
-				"account number", errAccountShapeCorruption)
-		}
-
-		return nil
-	}
-
-	if !shape.AccountNumber.Valid {
-		return fmt.Errorf("%w: derived account missing account number",
-			errAccountShapeCorruption)
-	}
-
-	return nil
+	// Ownership joins retain the account's path independently of its origin.
+	return validateAccountShape(
+		shape.AccountIsDerived.Bool, shape.AccountNumber,
+	)
 }
 
 // BuildUtxoInfo converts the normalized base SQL result fields into the public

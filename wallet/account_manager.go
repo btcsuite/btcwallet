@@ -132,7 +132,8 @@ func newAccountErr(err error) error {
 		publicErr = ErrAccountIdentityCollision
 
 	case errors.Is(err, errWatchOnlyAccountDerivation),
-		errors.Is(err, ErrAccountOperationUnsupported):
+		errors.Is(err, ErrAccountOperationUnsupported),
+		errors.Is(err, db.ErrAccountOperationUnsupported):
 
 		publicErr = ErrAccountOperationUnsupported
 
@@ -279,11 +280,22 @@ type NewAccountParams struct {
 	// Name must be valid and unique within Scope.
 	Name string
 
-	// AccountNumber requests this exact root-derived SQL account, leaving
+	// AccountNumber requests this exact SQL account, leaving
 	// lower holes available. Nil selects the next account in an existing or
 	// canonical scope.
 	// Modern kvdb rejects exact selection with ErrAccountOperationUnsupported.
 	AccountNumber *AccountNumber
+
+	// AccountPubKey supplies a public depth-three key instead of deriving
+	// from the wallet root. Only watch-only SQL wallets support it, with an
+	// exact AccountNumber matching the hardened child and the correct network.
+	// Scope is declared: a key cannot prove its purpose or coin ancestor.
+	AccountPubKey *hdkeychain.ExtendedKey
+
+	// MasterKeyFingerprint optionally declares the root fingerprint for
+	// AccountPubKey. Nil means unknown; a non-nil zero is preserved as given.
+	// Supplying a fingerprint without AccountPubKey returns ErrInvalidParam.
+	MasterKeyFingerprint *MasterFingerprint
 
 	// NoChainSync requests exclusion from automatic chain synchronization.
 	// True requires exact SQL selection; other requests return
@@ -495,13 +507,17 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 	return err
 }
 
-// NewAccount creates the next or requested exact root-derived account and
+// NewAccount creates the next or requested exact account and
 // returns its persisted info. The name and number must be unused in the scope.
 // A new custom SQL scope requires AddrSchema and an exact AccountNumber.
 // Exact selection leaves lower holes free; existing schemas must match.
 // NoChainSync=true excludes automatic synchronization and recovery only with
 // exact SQL selection. Sequential exclusion and exact kvdb requests return
 // ErrAccountOperationUnsupported before preparing secrets.
+// AccountPubKey installs a numbered supplied key only in watch-only SQL
+// wallets. Occupied names take precedence over unsupported custody/backend
+// errors. Invalid key material returns ErrInvalidAccountKey; invalid request
+// combinations return ErrInvalidParam.
 // Overlapping XPub identities return ErrAccountIdentityCollision.
 // Failures return no account; ErrIndeterminateCommit means persistence may
 // have succeeded. Once admitted, the call waits for the Store outcome even
@@ -547,13 +563,13 @@ func (w *Wallet) NewAccount(ctx context.Context,
 		return nil, err
 	}
 
-	// Spendable derivation requires an unlocked wallet; watch-only wallets
-	// instead report their mode refusal after checking name availability.
-	if !w.IsWatchOnly() {
-		err = w.state.canSign()
-		if err != nil {
-			return nil, err
-		}
+	// Snapshot public material before admission so the handler cannot observe
+	// later caller mutation of the key or optional fingerprint.
+	err = w.validateNewAccountKey(
+		&dbParams, params.AccountPubKey, params.MasterKeyFingerprint,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	req := newAccountReq{
@@ -596,41 +612,24 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 		return
 	}
 
-	if w.IsWatchOnly() {
-		req.resp <- accountResp{err: errWatchOnlyAccountDerivation}
-
-		return
-	}
-
-	// When an account does not watch for on-chain synchronization, its
-	// account number must be specified; sequential allocation is unsupported.
-	switch {
-	case req.params.AccountNumber == nil:
-		if req.params.NoChainSync {
-			req.resp <- accountResp{
-				err: fmt.Errorf("no-chain-sync account creation: %w",
-					ErrAccountOperationUnsupported),
-			}
-
-			return
-		}
-
-	// Wallet assembly supplies addrStore only for the sequential kvdb subset.
-	// Reject exact selection after admission but before root preparation.
-	case w.addrStore != nil:
-		req.resp <- accountResp{
-			err: fmt.Errorf("kvdb exact account creation: %w",
-				ErrAccountOperationUnsupported),
-		}
-
-		return
-	}
-
-	deriveFn, err := w.buildAccountDeriveFn(req.ctx)
+	// Mode refusal follows name availability and precedes secret preparation.
+	err = w.validateNewAccountMode(req.params)
 	if err != nil {
 		req.resp <- accountResp{err: err}
 
 		return
+	}
+
+	// The Store uses supplied material directly. Only root-derived creation
+	// prepares a callback that can access encrypted wallet secrets.
+	var deriveFn db.AccountDerivationFunc
+	if len(req.params.PublicKey) == 0 {
+		deriveFn, err = w.buildAccountDeriveFn(req.ctx)
+		if err != nil {
+			req.resp <- accountResp{err: err}
+
+			return
+		}
 	}
 
 	info, err := w.store.CreateDerivedAccount(req.ctx, req.params, deriveFn)
@@ -645,6 +644,90 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 		info: account,
 		err:  err,
 	}
+}
+
+// validateNewAccountMode keeps backend and custody refusals after name checks
+// while allowing the admitted handler to prepare secrets only for valid modes.
+func (w *Wallet) validateNewAccountMode(
+	params db.CreateDerivedAccountParams) error {
+
+	// Name availability is checked by the caller before mode refusal.
+	// Supplied keys need no vault access but cannot provide spendable custody.
+	supplied := len(params.PublicKey) > 0
+	if supplied && !w.IsWatchOnly() {
+		return ErrAccountOperationUnsupported
+	}
+
+	if !supplied && w.IsWatchOnly() {
+		return errWatchOnlyAccountDerivation
+	}
+
+	// When an account does not watch for on-chain synchronization, its
+	// account number must be specified; sequential allocation is unsupported.
+	switch {
+	case params.AccountNumber == nil:
+		if params.NoChainSync {
+			return fmt.Errorf("no-chain-sync account creation: %w",
+				ErrAccountOperationUnsupported)
+		}
+
+	// Wallet assembly supplies addrStore only for the sequential kvdb subset.
+	// Reject exact selection after admission but before root preparation.
+	case w.addrStore != nil:
+		return fmt.Errorf("kvdb exact account creation: %w",
+			ErrAccountOperationUnsupported)
+	}
+
+	return nil
+}
+
+// validateNewAccountKey snapshots supplied account material and checks the one
+// path component encoded by a depth-three XPub. Scope ancestors stay declared.
+// An absent key checks root signing readiness before admission; supplied keys
+// leave custody refusal to the handler so occupied names retain precedence.
+func (w *Wallet) validateNewAccountKey(params *db.CreateDerivedAccountParams,
+	key *hdkeychain.ExtendedKey, fingerprint *MasterFingerprint) error {
+
+	// An absent key retains root derivation; its fingerprint is not an input.
+	if key == nil {
+		if fingerprint != nil {
+			return fmt.Errorf("fingerprint without account key: %w",
+				ErrInvalidParam)
+		}
+
+		// Only local-root creation requires an unlocked signing wallet.
+		if !w.IsWatchOnly() {
+			return w.state.canSign()
+		}
+
+		return nil
+	}
+
+	if params.AccountNumber == nil {
+		return fmt.Errorf("supplied key requires account number: %w",
+			ErrInvalidParam)
+	}
+
+	// Reuse import validation for network, public material, depth and hardened
+	// derivation. Check the exact child only after that validation succeeds.
+	snapshot, err := snapshotExtendedPubKey(key, true, w.cfg.ChainParams)
+	if err != nil {
+		return err
+	}
+
+	child := snapshot.ChildIndex() - hdkeychain.HardenedKeyStart
+	if child != *params.AccountNumber {
+		return fmt.Errorf("account key child mismatch: %w",
+			ErrInvalidAccountKey)
+	}
+
+	params.PublicKey = []byte(snapshot.String())
+	if fingerprint != nil {
+		value := uint32(*fingerprint)
+		params.MasterKeyFingerprint = &value
+	}
+
+	return nil
 }
 
 // validateNewAccountSchema checks branch types and the complete path without

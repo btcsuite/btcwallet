@@ -194,8 +194,8 @@ WHERE
     AND (
         sqlc.narg('account_number')::BIGINT IS NULL
         OR (
-            acc.is_derived
-            AND acc.account_number = sqlc.narg('account_number')::BIGINT
+            -- Numeric selection follows path identity, not root provenance.
+            acc.account_number = sqlc.narg('account_number')::BIGINT
         )
     )
     AND (
@@ -282,8 +282,8 @@ WHERE
             AND da.address_id IS NOT NULL
             AND acc.id IS NOT NULL
             AND (
-                (acc.is_derived AND acc.account_number IS NOT NULL)
-                OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+                -- Supplied keys may carry either numbered or numberless identity.
+                acc.is_derived = FALSE OR acc.account_number IS NOT NULL
             )
         )
     )
@@ -298,8 +298,8 @@ WHERE
     AND (
         sqlc.narg('account_number')::BIGINT IS NULL
         OR (
-            acc.is_derived
-            AND acc.account_number = sqlc.narg('account_number')::BIGINT
+            -- Numeric selection follows path identity, not root provenance.
+            acc.account_number = sqlc.narg('account_number')::BIGINT
         )
     )
     AND (

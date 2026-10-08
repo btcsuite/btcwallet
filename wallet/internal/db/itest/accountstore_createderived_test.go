@@ -730,16 +730,27 @@ func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		scope  db.KeyScope
-		number uint32
-		want   error
+		name     string
+		scope    db.KeyScope
+		number   uint32
+		want     error
+		supplied bool
 	}{
 		{
 			name:   "vacant custom scope",
 			scope:  db.KeyScope{Purpose: 100, Coin: 0},
 			number: 7,
 			want:   db.ErrAccountIdentityCollision,
+		},
+		{
+			name: "supplied collision",
+			scope: db.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			},
+			number:   7,
+			want:     db.ErrAccountIdentityCollision,
+			supplied: true,
 		},
 		{
 			name:  "occupied number wins",
@@ -754,7 +765,15 @@ func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
 			// Arrange: a childless root account owns the callback's XPub.
 			// Reusing its XPub forces a collision after allocation.
 			store := NewTestStore(t)
-			walletID := newWallet(t, store, "derived-identity")
+
+			var walletID uint32
+
+			if tc.supplied {
+				walletID = newWatchOnlyWallet(t, store, "supplied-identity")
+			} else {
+				walletID = newWallet(t, store, "derived-identity")
+			}
+
 			key, err := hdkeychain.NewMaster(
 				RandomBytes(32), &chaincfg.SimNetParams,
 			)
@@ -775,6 +794,17 @@ func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
 				Scope:    db.KeyScopeBIP0084,
 				Name:     "owner",
 			}
+			// Supplied custody uses the same collision transaction without
+			// creating a secret or invoking the root callback.
+			expectedSecrets := 1
+			if tc.supplied {
+				number := uint32(0)
+				params.AccountNumber = &number
+				params.PublicKey = []byte(pub.String())
+				derive = nil
+				expectedSecrets = 0
+			}
+
 			_, err = store.CreateDerivedAccount(t.Context(), params, derive)
 			require.NoError(t, err)
 
@@ -801,12 +831,13 @@ func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
 			`).Scan(&accounts, &secrets, &scopes, &addresses, &next)
 			require.NoError(t, err)
 			require.Equal(t, 1, accounts)
-			require.Equal(t, 1, secrets)
+			require.Equal(t, expectedSecrets, secrets)
 			require.Equal(t, 1, scopes)
 			require.Zero(t, addresses)
 			require.Equal(t, 1, next)
 
 			params.Scope, params.AccountNumber = db.KeyScopeBIP0084, nil
+			params.PublicKey = nil
 			created, err := store.CreateDerivedAccount(
 				t.Context(), params, SpendableDeriveFn(),
 			)

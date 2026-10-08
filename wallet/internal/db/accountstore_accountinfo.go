@@ -43,7 +43,7 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	// RowID is the backend-local account row identifier.
 	RowID int64
 
-	// AccountNumber is the nullable BIP44 number for derived accounts.
+	// AccountNumber is the known BIP44 number, independent of root provenance.
 	AccountNumber sql.NullInt64
 
 	// AccountName is the human-readable account name.
@@ -174,18 +174,14 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 func validateAccountShape(isDerived bool,
 	accountNumber sql.NullInt64) error {
 
-	switch {
-	case isDerived && !accountNumber.Valid:
+	// Only root derivation guarantees a known account number. A supplied
+	// key may retain a declared path or remain a numberless import.
+	if isDerived && !accountNumber.Valid {
 		return fmt.Errorf("%w: derived account missing account number",
 			errAccountShapeCorruption)
-
-	case !isDerived && accountNumber.Valid:
-		return fmt.Errorf("%w: non-derived account has derived account number",
-			errAccountShapeCorruption)
-
-	default:
-		return nil
 	}
+
+	return nil
 }
 
 // DerivedAddressAccountNumber converts a derived account number from an
@@ -456,7 +452,7 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	// RowID is the backend-local account row identifier.
 	RowID int64
 
-	// AccountNumber is the nullable BIP44 number for derived accounts.
+	// AccountNumber is the known BIP44 number, independent of root provenance.
 	AccountNumber sql.NullInt64
 
 	// AccountName is the human-readable account name.
