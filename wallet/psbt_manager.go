@@ -2506,18 +2506,38 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}}
 }
 
-// createOutputInfoFromAddressInfo creates the BIP32 derivation info for an
-// output from wallet-owned address metadata.
+// createOutputInfoFromAddressInfo creates change-output metadata, retaining
+// known script facts when an HD child's root origin is unavailable.
 func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
 	addr AddressInfo) (*psbt.POutput, error) {
 
-	// We don't know the public derivation path for imported keys. Those
-	// shouldn't be selected as change outputs in the first place, but just
-	// to make sure we don't run into an issue, we return early for imported
-	// keys.
-	if addr.Derivation == nil || addr.PubKey == nil {
+	// Raw imported keys cannot supply account change. Numberless XPub
+	// children are HD addresses, however, and still have a known public key.
+	if addr.PubKey == nil || (addr.Imported && addr.Derivation == nil) {
 		return nil, fmt.Errorf("error adding output info to PSBT: %w",
 			ErrImportedAddrNoDerivation)
+	}
+
+	// Keep the child's script facts without inventing its root fingerprint
+	// or account path. Existing script construction supplies nested redeem
+	// information independently of that optional origin.
+	if addr.Derivation == nil {
+		_, redeemScript, _, err := buildScriptsForAddressInfo(
+			addr, txOut.PkScript, nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		out := new(psbt.POutput)
+		out.RedeemScript = redeemScript
+
+		// Taproot's internal key is known even when its root origin is not.
+		if txscript.IsPayToTaproot(txOut.PkScript) {
+			out.TaprootInternalKey = addr.PubKey.SerializeCompressed()[1:]
+		}
+
+		return out, nil
 	}
 
 	// Include the derivation path for this output.
