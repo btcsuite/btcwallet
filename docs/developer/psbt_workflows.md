@@ -62,11 +62,13 @@ flowchart LR
     ```
     
     The `fundedPacket` now contains the necessary inputs (fully decorated) and a change output.
+    `FundPsbt` does not modify the packet it was given, so the remaining steps
+    work on `fundedPacket`.
     
 3.  **Sign the PSBT:** The wallet signs all inputs it has the keys for.
 
     ```go
-    signParams := &wallet.SignPsbtParams{Packet: packet}
+    signParams := &wallet.SignPsbtParams{Packet: fundedPacket}
     _, err = aliceWallet.SignPsbt(ctx, signParams)
     ```
 
@@ -74,8 +76,8 @@ flowchart LR
     valid transaction and broadcasts it.
 
     ```go
-    err = aliceWallet.FinalizePsbt(ctx, packet)
-    finalTx, err := psbt.Extract(packet)
+    err = aliceWallet.FinalizePsbt(ctx, fundedPacket)
+    finalTx, err := psbt.Extract(fundedPacket)
     err = aliceWallet.Broadcast(ctx, finalTx, "Payment to Carol")
     ```
 

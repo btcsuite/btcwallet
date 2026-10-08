@@ -1,6 +1,8 @@
 package waddrmgr
 
 import (
+	"bytes"
+	"errors"
 	"math"
 	"testing"
 
@@ -10,6 +12,315 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
+
+// TestNewAccountCachesAccountInfo verifies that creating a new account makes it
+// visible in the scoped-manager cache without requiring a follow-up read.
+func TestNewAccountCachesAccountInfo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then fetch the scoped manager.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	var account uint32
+
+	// Act: Create the new account through the scoped manager.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		account, err = scopedMgr.NewAccount(ns, "acct-1")
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Contains(t, scopedMgr.ActiveAccounts(), account)
+
+	// Assert: The new account is immediately visible in the cache.
+	scopedMgr.mtx.RLock()
+	acctInfo, ok := scopedMgr.acctInfo[account]
+	scopedMgr.mtx.RUnlock()
+	require.True(t, ok)
+	require.Equal(t, "acct-1", acctInfo.acctName)
+	require.Equal(t, uint32(0), acctInfo.nextExternalIndex)
+	require.Equal(t, uint32(0), acctInfo.nextInternalIndex)
+}
+
+// TestNewAccountWatchingOnlyCachesAccountInfo verifies that importing a
+// watch-only account updates the scoped-manager cache immediately.
+func TestNewAccountWatchingOnlyCachesAccountInfo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create the manager, fetch the scoped manager, and derive the
+	// account public key to import.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	accountKey := deriveTestAccountKey(t)
+	require.NotNil(t, accountKey)
+
+	acctKeyPub, err := accountKey.Neuter()
+	require.NoError(t, err)
+
+	var account uint32
+
+	// Act: Import the watching-only account.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		account, err = scopedMgr.NewAccountWatchingOnly(
+			ns, "watch-1", acctKeyPub, 123, nil,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Contains(t, scopedMgr.ActiveAccounts(), account)
+
+	// Assert: The imported account metadata is immediately visible in the
+	// cache.
+	scopedMgr.mtx.RLock()
+	acctInfo, ok := scopedMgr.acctInfo[account]
+	scopedMgr.mtx.RUnlock()
+	require.True(t, ok)
+	require.Equal(t, "watch-1", acctInfo.acctName)
+	require.Equal(t, uint32(123), acctInfo.masterKeyFingerprint)
+	require.Nil(t, acctInfo.addrSchema)
+}
+
+// TestIsImportedAccountAcceptsLegacyImportedAccount verifies that the legacy
+// imported-address pseudo-account does not go through account-row loading.
+func TestIsImportedAccountAcceptsLegacyImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create the manager and fetch the scoped manager.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	// Act: Classify the legacy imported-address pseudo-account.
+	var imported bool
+
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		imported, err = scopedMgr.IsImportedAccount(
+			ns, ImportedAddrAccount,
+		)
+
+		return err
+	})
+
+	// Assert: The classifier handles the pseudo-account without attempting
+	// to load account-row key material that does not exist for it.
+	require.NoError(t, err)
+	require.True(t, imported)
+}
+
+// TestScopedManagerAddressCacheBounded verifies that the scoped-manager address
+// cache stays within its configured capacity while still reloading evicted
+// addresses from disk.
+func TestScopedManagerAddressCacheBounded(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then replace the scoped address
+	// cache with a one-entry cache.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	scopedMgr.addrs = newAddrCache(1)
+
+	var firstAddr ManagedAddress
+
+	// Act: Derive two addresses so the first is evicted, then load the first
+	// address again from disk.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		addrs, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 2)
+		if err != nil {
+			return err
+		}
+
+		firstAddr = addrs[0]
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+
+	// Assert: The evicted address can still be reloaded and the cache remains
+	// bounded.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		addr, err := scopedMgr.Address(ns, firstAddr.Address())
+		require.NoError(t, err)
+		require.Equal(t, firstAddr.Address().String(), addr.Address().String())
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+}
+
+// TestForEachActiveAddressIgnoresCacheEviction verifies that active-address
+// iteration still walks the full DB-backed address set after cache eviction.
+func TestForEachActiveAddressIgnoresCacheEviction(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then force the scoped address cache
+	// down to one entry.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	scopedMgr.addrs = newAddrCache(1)
+
+	// Act: Derive two addresses so one is evicted, then iterate the active
+	// addresses from the DB-backed manager state.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		_, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 2)
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+
+	var seen []string
+
+	// Assert: Iteration still sees both active addresses even though the cache
+	// only holds one entry.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		return scopedMgr.ForEachActiveAddress(
+			ns, func(addr address.Address) error {
+				seen = append(seen, addr.String())
+				return nil
+			},
+		)
+	})
+	require.NoError(t, err)
+	require.Len(t, seen, 2)
+}
+
+// TestScopedManagerAddressEvictionLocksSecrets verifies that evicting an
+// address from the bounded cache zeroes any cleartext private key bytes held by
+// that managed address.
+func TestScopedManagerAddressEvictionLocksSecrets(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then force the scoped address cache
+	// down to one entry.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	scopedMgr.addrs = newAddrCache(1)
+
+	var firstAddr *managedAddress
+
+	// Act: Derive one address, capture its cleartext key bytes, then derive a
+	// second address so the first is evicted.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		addrs, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 1)
+		if err != nil {
+			return err
+		}
+
+		var ok bool
+
+		firstAddr, ok = addrs[0].(*managedAddress)
+		if !ok {
+			return nil
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, firstAddr)
+	require.NotEmpty(t, firstAddr.privKeyCT)
+
+	firstPrivKeyCT := firstAddr.privKeyCT
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		_, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 1)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	// Assert: Eviction zeroes and clears the original managed address's
+	// cleartext private key bytes.
+	require.Nil(t, firstAddr.privKeyCT)
+	require.True(t, bytes.Equal(
+		firstPrivKeyCT, make([]byte, len(firstPrivKeyCT)),
+	))
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+}
 
 // TestDeriveAddrs verifies that DeriveAddrs correctly derives addresses using
 // in-memory state, producing the same results as database-backed derivation.
@@ -296,6 +607,417 @@ func TestDeriveAddr(t *testing.T) {
 			managedAddr.Address(),
 		)
 		require.Equal(t, expectedScript, script)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestEvictDerivedAddressesUnlocked verifies that EvictDerivedAddresses removes
+// exactly the addresses derived over the given range from the recent-address
+// cache, leaving addresses outside the range cached. This is the in-memory undo
+// a rolled-back scan-batch horizon extension relies on so unpersisted
+// scan-derived addresses do not stay observable through the cache.
+func TestEvictDerivedAddressesUnlocked(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an unlocked manager with a handful of derived external
+	// addresses cached.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	const lastIndex = 4
+
+	var derived []ManagedAddress
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Re-derive the addresses for indices [0, lastIndex] so the test
+		// can address the exact cache keys ExtendAddresses inserted.
+		for index := uint32(0); index <= lastIndex; index++ {
+			addr, _, err := scopedMgr.DeriveAddr(
+				DefaultAccountNum, ExternalBranch, index,
+			)
+			if err != nil {
+				return err
+			}
+
+			ma, err := scopedMgr.Address(ns, addr)
+			if err != nil {
+				return err
+			}
+
+			derived = append(derived, ma)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, derived, lastIndex+1)
+
+	// Sanity check: every derived address starts out cached.
+	for _, ma := range derived {
+		_, err := scopedMgr.addrs.Get(addrKey(ma.Address().ScriptAddress()))
+		require.NoError(t, err)
+	}
+
+	// Act: evict the addresses derived over the upper part of the range using
+	// the same full-account upper bound a horizon rollback uses. Eviction must
+	// be bounded by the current cache contents, not by this large index span.
+	const evictFrom = 1
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, evictFrom,
+		MaxAddressesPerAccount+1,
+	)
+
+	// Assert: indices in [evictFrom, lastIndex] are gone from the cache while
+	// index 0 stays cached, proving the eviction is bounded to the range.
+	for index, ma := range derived {
+		key := addrKey(ma.Address().ScriptAddress())
+		_, err := scopedMgr.addrs.Get(key)
+
+		if index < evictFrom {
+			require.NoError(t, err)
+			continue
+		}
+
+		require.Error(t, err)
+	}
+}
+
+// TestEvictDerivedAddressesLockedDropsPending verifies that
+// EvictDerivedAddresses discards the pending unlock-derivation entries an
+// extension queued while the manager was locked. A rolled-back scan batch must
+// not leave addresses queued for private-key derivation on the next unlock when
+// their persisted rows were rolled back.
+func TestEvictDerivedAddressesLockedDropsPending(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a locked manager. Extending addresses while locked queues the
+	// derived children for derivation on the next unlock.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	require.True(t, mgr.IsLocked())
+
+	const lastIndex = 3
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		return scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+	})
+	require.NoError(t, err)
+
+	// Sanity check: the locked extension queued the children for unlock-time
+	// derivation.
+	require.NotEmpty(t, scopedMgr.deriveOnUnlock)
+
+	// Act: evict the queued range.
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, 0, lastIndex+1,
+	)
+
+	// Assert: no pending unlock-derivation entries remain for the evicted
+	// branch range.
+	for _, info := range scopedMgr.deriveOnUnlock {
+		stillQueued := info.branch == ExternalBranch &&
+			info.index <= lastIndex
+		require.False(t, stillQueued)
+	}
+}
+
+// TestEvictDerivedAddressesMultipleBranches verifies that a second branch
+// eviction for the same account still removes branch-specific cached and
+// pending state after the first eviction invalidates the account cache.
+func TestEvictDerivedAddressesMultipleBranches(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+	require.True(t, mgr.IsLocked())
+
+	const lastIndex = 2
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if err != nil {
+			return err
+		}
+
+		return scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, InternalBranch,
+		)
+	})
+	require.NoError(t, err)
+
+	countPending := func(branch uint32) int {
+		count := 0
+		for _, info := range scopedMgr.deriveOnUnlock {
+			match := pendingDeriveMatches(
+				info, DefaultAccountNum, branch, 0, lastIndex+1,
+			)
+			if match {
+				count++
+			}
+		}
+
+		return count
+	}
+
+	countCached := func(branch uint32) int {
+		count := 0
+		scopedMgr.addrs.Range(func(_ addrKey, cachedAddr *cachedAddr) bool {
+			if cachedAddr == nil {
+				return true
+			}
+
+			match := derivedAddressMatches(
+				cachedAddr.addr, DefaultAccountNum, branch, 0,
+				lastIndex+1,
+			)
+			if match {
+				count++
+			}
+
+			return true
+		})
+
+		return count
+	}
+
+	require.GreaterOrEqual(t, countPending(ExternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countPending(InternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countCached(ExternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countCached(InternalBranch), int(lastIndex+1))
+
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, 0, lastIndex+1,
+	)
+	require.Zero(t, countPending(ExternalBranch))
+	require.Zero(t, countCached(ExternalBranch))
+	require.GreaterOrEqual(t, countPending(InternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countCached(InternalBranch), int(lastIndex+1))
+
+	scopedMgr.mtx.RLock()
+	_, cached := scopedMgr.acctInfo[DefaultAccountNum]
+	scopedMgr.mtx.RUnlock()
+	require.False(t, cached)
+
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, InternalBranch, 0, lastIndex+1,
+	)
+	require.Zero(t, countPending(InternalBranch))
+	require.Zero(t, countCached(InternalBranch))
+}
+
+// TestEvictDerivedAddressesLockedKeepsOtherAccountsPending verifies that
+// EvictDerivedAddresses only removes pending unlock-derivation entries for the
+// requested account. A rolled-back scan batch for one account must not discard
+// pending private-key derivations queued by another account at the same branch
+// and child indexes.
+func TestEvictDerivedAddressesLockedKeepsOtherAccountsPending(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	var otherAccount uint32
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := mgr.Unlock(ns, privPassphrase)
+		if err != nil {
+			return err
+		}
+
+		otherAccount, err = scopedMgr.NewAccount(ns, "acct-1")
+
+		return err
+	})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Lock())
+	require.True(t, mgr.IsLocked())
+
+	const lastIndex = 2
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if err != nil {
+			return err
+		}
+
+		return scopedMgr.ExtendAddresses(
+			ns, otherAccount, lastIndex, ExternalBranch,
+		)
+	})
+	require.NoError(t, err)
+
+	countPending := func(account uint32) int {
+		count := 0
+		for _, info := range scopedMgr.deriveOnUnlock {
+			matches := info.managedAddr.InternalAccount() == account &&
+				info.branch == ExternalBranch &&
+				info.index <= lastIndex
+			if matches {
+				count++
+			}
+		}
+
+		return count
+	}
+
+	defaultPending := countPending(DefaultAccountNum)
+	otherPending := countPending(otherAccount)
+
+	require.GreaterOrEqual(t, defaultPending, int(lastIndex+1))
+	require.Equal(t, int(lastIndex+1), otherPending)
+
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, 0, lastIndex+1,
+	)
+
+	require.Zero(t, countPending(DefaultAccountNum))
+	require.Equal(t, otherPending, countPending(otherAccount))
+}
+
+// errForcedRollback is a static sentinel used by the rolled-back-extension
+// test to force its walletdb transaction to roll back.
+var errForcedRollback = errors.New("forced rollback")
+
+// TestEvictDerivedAddressesInvalidatesAccountCache verifies that, after a
+// rolled-back horizon extension, EvictDerivedAddresses invalidates the cached
+// account info so the account's external key count no longer reports the
+// uncommitted horizon. extendAddresses bumps the in-memory next-index before
+// the transaction commits, so a rollback leaves the cache ahead of the
+// persisted state until the cache is invalidated.
+func TestEvictDerivedAddressesInvalidatesAccountCache(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	// Record the committed external key count before any extension.
+	var committedKeyCount uint32
+
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		props, err := scopedMgr.AccountProperties(ns, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
+
+		committedKeyCount = props.ExternalKeyCount
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Extend the external branch inside a transaction that then fails, so the
+	// persisted rows roll back while extendAddresses leaves the in-memory
+	// next-index bumped.
+	const lastIndex = 5
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		extErr := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if extErr != nil {
+			return extErr
+		}
+
+		return errForcedRollback
+	})
+	require.ErrorIs(t, err, errForcedRollback)
+
+	// The cache now reports the uncommitted horizon: the extension advanced
+	// the cached next-external-index past the committed key count.
+	scopedMgr.mtx.RLock()
+	cachedInfo, cached := scopedMgr.acctInfo[DefaultAccountNum]
+	require.True(t, cached)
+	require.Greater(t, cachedInfo.nextExternalIndex, committedKeyCount)
+	scopedMgr.mtx.RUnlock()
+
+	// Undo the rolled-back extension's in-memory traces.
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, committedKeyCount, lastIndex+1,
+	)
+
+	// AccountProperties reloads the committed state, so the external key
+	// count no longer reflects the uncommitted horizon.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		props, err := scopedMgr.AccountProperties(ns, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
+
+		require.Equal(t, committedKeyCount, props.ExternalKeyCount)
 
 		return nil
 	})
