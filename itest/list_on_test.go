@@ -192,6 +192,11 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerImportAccountZeroFingerprint,
 	},
 	{
+		// Exercise effective branch schema durability on every backend.
+		Name:     "account manager preserve imported schema",
+		TestFunc: testAccountManagerPreserveImportedSchema,
+	},
+	{
 		Name:     "account manager preview account import",
 		TestFunc: testAccountManagerPreviewAccountImport,
 	},

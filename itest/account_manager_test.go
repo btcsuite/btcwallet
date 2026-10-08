@@ -3,10 +3,12 @@
 package itest
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -1585,6 +1587,174 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 	durable, err := w.GetAccount(ctx, keys.scope, accountName)
 	require.NoError(h, err, "failed to read imported account after reload")
 	require.Equal(h, want, *durable)
+}
+
+// testAccountManagerPreserveImportedSchema verifies strict and hybrid BIP49
+// imports sharing a scope retain their branch schemas across address allocation
+// and manager reopen, with BIP84/BIP86 controls. Imported-input PSBT funding is
+// Task 482/470's contract; this case observes persisted address script types.
+func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
+	// Versioned BIP49 keys distinguish hybrid scope selection from a native
+	// BIP84 request. The conflicting initial schema exposes scope fallback in
+	// both directions; the canonical controls use the network's normal XPub.
+	version49 := make([]byte, 4)
+	binary.BigEndian.PutUint32(version49, uint32(
+		waddrmgr.HDVersionTestNetBIP0049,
+	))
+	tests := []struct {
+		name            string
+		version         []byte
+		addrType        waddrmgr.AddressType
+		initialAddrType waddrmgr.AddressType
+		scope           waddrmgr.KeyScope
+		schema          waddrmgr.ScopeAddrSchema
+		externalClass   txscript.ScriptClass
+		internalClass   txscript.ScriptClass
+	}{
+		{
+			name:            "preserve strict bip49",
+			version:         version49,
+			addrType:        waddrmgr.NestedWitnessPubKey,
+			initialAddrType: waddrmgr.WitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0049Plus,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+				InternalAddrType: waddrmgr.NestedWitnessPubKey,
+			},
+			externalClass: txscript.ScriptHashTy,
+			internalClass: txscript.ScriptHashTy,
+		},
+		{
+			name:            "preserve hybrid bip49",
+			version:         version49,
+			addrType:        waddrmgr.WitnessPubKey,
+			initialAddrType: waddrmgr.NestedWitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0049Plus,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+			externalClass: txscript.ScriptHashTy,
+			internalClass: txscript.WitnessV0PubKeyHashTy,
+		},
+		{
+			name:            "preserve native bip84",
+			version:         h.NetParams().HDPublicKeyID[:],
+			addrType:        waddrmgr.WitnessPubKey,
+			initialAddrType: waddrmgr.WitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0084,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+			externalClass: txscript.WitnessV0PubKeyHashTy,
+			internalClass: txscript.WitnessV0PubKeyHashTy,
+		},
+		{
+			name:            "preserve taproot bip86",
+			version:         h.NetParams().HDPublicKeyID[:],
+			addrType:        waddrmgr.TaprootPubKey,
+			initialAddrType: waddrmgr.WitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0086,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.TaprootPubKey,
+				InternalAddrType: waddrmgr.TaprootPubKey,
+			},
+			externalClass: txscript.WitnessV1TaprootTy,
+			internalClass: txscript.WitnessV1TaprootTy,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: Seed the BIP49 scope with the fixture's other XPub
+			// so strict and hybrid imports encounter conflicting stored
+			// defaults. Clone only key versions; the requested scope and
+			// serialized public identity must survive unchanged.
+			const accountName = "schema import"
+
+			keys := deterministicImportedAccountKeys(h)
+			initialKey, err := keys.otherAccountKey.CloneWithVersion(
+				version49,
+			)
+			require.NoError(h, err)
+			accountKey, err := keys.accountKey.CloneWithVersion(tc.version)
+			require.NoError(h, err)
+
+			var fixture bwtest.WalletFixture
+
+			fixture.InitialAccounts = []wallet.WatchOnlyAccount{
+				{
+					Scope:                waddrmgr.KeyScopeBIP0049Plus,
+					XPub:                 initialKey,
+					MasterKeyFingerprint: keys.masterKeyFingerprint,
+					Name:                 "schema seed",
+					AddrType:             tc.initialAddrType,
+				},
+			}
+			w, _ := h.NewWallet(fixture)
+			ctx := h.Context()
+			selector := wallet.NewAccountSelectorByName(tc.scope, accountName)
+
+			// Act: Import and request both address branches, then snapshot
+			// the account after allocation. Cross the harness-owned manager
+			// reopen, read that durable snapshot, and request both branches
+			// again through the same public selector.
+			imported, err := w.ImportAccount(
+				ctx, accountName, accountKey, keys.masterKeyFingerprint,
+				tc.addrType, false,
+			)
+			require.NoError(h, err)
+			external, err := w.NewAddress(ctx, selector, false)
+			require.NoError(h, err)
+			internal, err := w.NewAddress(ctx, selector, true)
+			require.NoError(h, err)
+			before, err := w.GetAccount(ctx, tc.scope, accountName)
+			require.NoError(h, err)
+			w = h.ReloadWallet(w)
+			durable, err := w.GetAccount(ctx, tc.scope, accountName)
+			require.NoError(h, err)
+			reopenedExternal, err := w.NewAddress(ctx, selector, false)
+			require.NoError(h, err)
+			reopenedInternal, err := w.NewAddress(ctx, selector, true)
+			require.NoError(h, err)
+
+			// Assert: The public import keeps the selected schema and true
+			// scope/XPub identity without an invented account number. Full
+			// account equality across reopen catches lost metadata; the same
+			// independent script oracle checks both sets of addresses.
+			require.Equal(h, tc.schema, imported.AddrSchema)
+			require.Equal(h, tc.scope, imported.KeyScope)
+			require.Equal(h, []byte(accountKey.String()), imported.PublicKey)
+			require.Nil(h, imported.AccountNumber)
+			require.Equal(h, tc.schema, before.AddrSchema)
+			require.Equal(h, before, durable)
+
+			for _, pair := range [][2]wallet.AddressInfo{
+				{
+					external,
+					internal,
+				},
+				{
+					reopenedExternal,
+					reopenedInternal,
+				},
+			} {
+				require.Equal(h, tc.schema.ExternalAddrType, pair[0].AddrType)
+				require.Equal(h, tc.schema.InternalAddrType, pair[1].AddrType)
+				externalScript, err := txscript.PayToAddrScript(pair[0].Addr)
+				require.NoError(h, err)
+				internalScript, err := txscript.PayToAddrScript(pair[1].Addr)
+				require.NoError(h, err)
+				require.Equal(h, tc.externalClass,
+					txscript.GetScriptClass(externalScript))
+				require.Equal(h, tc.internalClass,
+					txscript.GetScriptClass(internalScript))
+			}
+		})
+	}
 }
 
 // testAccountManagerImportAccountZeroFingerprint verifies an import declaring
