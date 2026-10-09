@@ -422,8 +422,8 @@ func convertAddressPath(hasDerivedPath bool, branch,
 // AddressRowToInfo converts raw database field values into an AddressInfo
 // struct. It handles type conversion and validation for each field.
 //
-// Watch-only state is copied directly from the wallet-level flag. Address
-// secret presence is not used to infer public watch-only state.
+// HD children inherit imported account custody in addition to wallet mode.
+// Raw imports retain wallet mode; secret presence does not infer custody.
 func AddressRowToInfo[TypeID any](
 	row AddressInfoRow[TypeID]) (*AddressInfo, error) {
 
@@ -471,10 +471,17 @@ func AddressRowToInfo[TypeID any](
 		return nil, err
 	}
 
-	isImported := !row.IsDerived
-	if row.IsDerived {
-		isImported = !row.AccountIsDerived.Bool
-	}
+	// Validated HD children have present account provenance; raw imports have
+	// none. A present true value identifies local accounts, while a present
+	// false value adds external custody without changing raw-import policy.
+	isImported := row.AccountIsDerived != (sql.NullBool{
+		Bool:  true,
+		Valid: true,
+	})
+	watchOnly := row.WalletIsWatchOnly || row.AccountIsDerived == (sql.NullBool{
+		Bool:  false,
+		Valid: true,
+	})
 
 	return &AddressInfo{
 		ID:                   id,
@@ -492,7 +499,7 @@ func AddressRowToInfo[TypeID any](
 		ScriptPubKey:         row.ScriptPubKey,
 		PubKey:               row.PubKey,
 		HasScript:            row.HasScript,
-		IsWatchOnly:          row.WalletIsWatchOnly,
+		IsWatchOnly:          watchOnly,
 		IsUsed:               row.IsUsed,
 	}, nil
 }

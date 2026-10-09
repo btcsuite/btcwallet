@@ -26,6 +26,8 @@ import (
 func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a real root-derived account in a signing wallet so its child
+	// provides the local-custody control for imported XPub addresses.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -35,6 +37,7 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 		t, dbConn, addrStore, waddrmgr.KeyScopeBIP0084, "addr",
 	)
 
+	// Act by allocating through the normal named Store account selector.
 	info, err := store.NewDerivedAddress(
 		t.Context(), db.NewDerivedAddressParams{
 			WalletID:    0,
@@ -42,9 +45,13 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
 		},
 	)
+
+	// Assert the child retains local signing custody and its real account
+	// identity, including through point and account-scoped ownership reads.
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), info.ID)
 	require.False(t, info.IsImported)
+	require.False(t, info.IsWatchOnly)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, "addr", info.AccountName)
 	require.Nil(t, info.AccountID)
@@ -136,11 +143,12 @@ func TestAddressStoreNewDerivedAddressByNumber(t *testing.T) {
 // TestAddressStoreImportedXpubChildHasNoAccountNumber verifies that kvdb
 // matches SQL's imported-xpub contract: the address is imported key material,
 // but its account number is not exposed as a wallet-derived BIP44 account
-// number.
+// number, and allocation and ownership reads retain external custody.
 func TestAddressStoreImportedXpubChildHasNoAccountNumber(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Import an xpub that can derive but has no root account number.
+	// Arrange: Import an independent XPub into a signing wallet. Its children
+	// must remain external even though the wallet root has signing material.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -170,23 +178,52 @@ func TestAddressStoreImportedXpubChildHasNoAccountNumber(t *testing.T) {
 	params.AccountNumber = nil
 	info, err = store.NewDerivedAddress(t.Context(), params)
 
-	// Assert: Existing imported metadata and lookup are preserved.
+	// Assert: The child retains external custody and has no public wallet-root
+	// account number, even while the wallet root can sign.
 	require.NoError(t, err)
 	require.Zero(t, info.Index)
 	require.True(t, info.IsImported)
+	require.True(t, info.IsWatchOnly)
 	require.Nil(t, info.AccountNumber)
 	require.Equal(t, accountName, info.AccountName)
 
+	// Act: Resolve the persisted child by its script instead of the legacy
+	// account number to exercise the public ownership read.
 	got, err := store.GetAddress(
 		t.Context(), db.GetAddressQuery{
 			WalletID:     0,
 			ScriptPubKey: info.ScriptPubKey,
 		},
 	)
+
+	// Assert: Re-reading retains imported ownership and external custody;
+	// the signing root must not make this child locally signable.
 	require.NoError(t, err)
 	require.True(t, got.IsImported)
+	require.True(t, got.IsWatchOnly)
 	require.Nil(t, got.AccountNumber)
 	require.Equal(t, accountName, got.AccountName)
+
+	// Arrange an account-scoped page so the list observes only this imported
+	// account's allocated child, using the existing ownership selector.
+	pageReq, err := page.NewRequest[uint32](10)
+	require.NoError(t, err)
+
+	// Act: Read the same persisted child through the paged ownership API.
+	listed, err := store.ListAddresses(
+		t.Context(), db.ListAddressesQuery{
+			WalletID:    0,
+			AccountName: &accountName,
+			Scope:       &params.Scope,
+			Page:        pageReq,
+		},
+	)
+
+	// Assert: Listing the tracked child reports the same external custody
+	// as allocation and the point read, without a separate wallet.
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 1)
+	require.True(t, listed.Items[0].IsWatchOnly)
 }
 
 // TestAddressStoreNewDerivedAddressWatchOnlyWallet verifies that derived

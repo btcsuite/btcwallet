@@ -46,8 +46,8 @@ type AccountInfo struct {
 	// transactions.
 	UnconfirmedBalance btcutil.Amount
 
-	// IsWatchOnly reports the wallet-level watch-only state associated with
-	// the account snapshot.
+	// IsWatchOnly reports whether the account has no local signing path,
+	// including an imported XPub account within a signing wallet.
 	IsWatchOnly bool
 
 	// NoChainSync is the stored, immutable policy excluding the account from

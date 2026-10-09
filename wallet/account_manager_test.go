@@ -1579,11 +1579,6 @@ func TestImportAccountStoreErrors(t *testing.T) {
 			want:     ErrAccountAlreadyExists,
 		},
 		{
-			name:     "spendable wallet",
-			storeErr: db.ErrSpendableWalletNeedsAccountPrivKey,
-			want:     ErrAccountOperationUnsupported,
-		},
-		{
 			name:     "absent legacy scope",
 			storeErr: db.ErrKeyScopeNotFound,
 			want:     ErrAccountNotFound,

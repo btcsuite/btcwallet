@@ -124,10 +124,9 @@ func createDerivedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 
 // CreateImportedAccount creates a new imported account with the given name,
 // scope, and wallet ID using the provided account store. The caller passes the
-// wallet's watch-only state explicitly (it already knows the shape it created):
-// a spendable wallet (watchOnly == false) gets an EncryptedPrivateKey to
-// satisfy the ADR 0012 spendable-wallet invariant; a watch-only wallet gets a
-// public-only account to satisfy the symmetric invariant.
+// wallet's watch-only state explicitly to keep optional secret fixtures out
+// of watch-only wallets. Signing-wallet fixtures retain optional encrypted
+// material; imported provenance remains external in either case.
 func CreateImportedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 	scope db.KeyScope, name string, watchOnly bool) {
 
