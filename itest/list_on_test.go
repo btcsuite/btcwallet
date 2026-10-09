@@ -188,6 +188,12 @@ var allTestCases = []*testCase{
 		Name:     "account manager reject account identity",
 		TestFunc: testAccountManagerRejectAccountIdentity,
 	},
+	// Mixed custody must survive the same public wallet lifecycle on every
+	// backend, including the existing kvdb import mechanism.
+	{
+		Name:     "account manager mix account custody",
+		TestFunc: testAccountManagerMixAccountCustody,
+	},
 	{
 		Name:     "account manager import account",
 		TestFunc: testAccountManagerImportAccount,
