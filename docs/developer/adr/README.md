@@ -54,7 +54,9 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
 - [ADR 0010: Keyvault Encryption Layer](./0010-keyvault-encryption-layer.md) - Defines an in-memory keyvault boundary for lock state, key lifecycle, and encryption orchestration between domain logic and SQL persistence.
 - [ADR 0011: No `used` Column on the Addresses Table](./0011-no-addresses-used-column.md) - Records the decision that the SQL backend derives address used-ness from the utxos table (monotonic by ADR 0006's soft-delete schema) rather than persisting a separate column. The kvdb backend continues to use waddrmgr's legacy sticky-bit because wtxmgr deletes credit records on reorg.
-- [ADR 0012: Wallet-Level Watch-Only as a Uniform Invariant](./0012-wallet-level-watch-only-uniformity.md) - Records that SQL wallets are uniformly watch-only or uniformly spendable, with wallet-level mode enforced at the store boundary.
+- [ADR 0012: Wallet-Level Watch-Only as a Uniform Invariant](./0012-wallet-level-watch-only-uniformity.md)
+  records the original uniform SQL wallet policy; amended by ADR 0016 for
+  imported XPub account custody within a signing wallet.
 - [ADR 0013: Normalized Account and Address Identity](./0013-normalized-account-address-identity.md) - Normalizes SQL account/address identity around nullable account numbers, derived-address path rows, and accountless raw imports.
 - [ADR 0014: Durable SQL Database Identity](./0014-sql-database-identity.md) -
   Defines the durable role-wallet identity and identity-first initialization
@@ -63,3 +65,6 @@ relationship metadata, but do not rewrite its historical decision body.
   Ownership](./0015-sql-shared-chain-ownership.md) supersedes ADR 0002, applies
   aggregate lifecycle and admission to every maintained Manager, and assigns
   SQL shared-chain ownership.
+- [ADR 0016: Mixed Imported XPub and Local Account Custody](./0016-mixed-account-custody.md)
+  amends ADR 0012 to permit external account tracking alongside local signing,
+  using existing provenance and per-output spendability.

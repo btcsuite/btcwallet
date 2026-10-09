@@ -1,5 +1,16 @@
 # ADR 0012: Wallet-Level Watch-Only as a Uniform Invariant
 
+## Status
+
+- **Status:** Accepted
+
+## Relationships
+
+- **Amends:** None.
+- **Supersedes:** None.
+- **Amended by:** [ADR 0016](./0016-mixed-account-custody.md).
+- **Superseded by:** None.
+
 ## 1. Context
 
 The legacy `waddrmgr` address-manager supports a richer watch-only model than
