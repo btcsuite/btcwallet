@@ -442,10 +442,9 @@ func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
 		return nil, err
 	}
 
-	if !derivedKey.IsPrivate() {
-		// Add the managed address to the list of addresses that need
-		// their private keys derived when the address manager is next
-		// unlocked.
+	// External children remain public-only; only local children can acquire
+	// private material when the signing manager is later unlocked.
+	if !derivedKey.IsPrivate() && acctInfo.acctType != accountWatchOnly {
 		info := unlockDeriveInfo{
 			managedAddr: ma,
 			branch:      derivationPath.Branch,
@@ -1548,7 +1547,10 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	// Choose the account key to used based on whether the address manager
 	// is locked.
 	acctKey := acctInfo.acctKeyPub
-	watchOnly := s.rootManager.WatchOnly() || acctInfo.acctKeyPriv != nil
+	// Recovery can extend an external account in either lock state. Its
+	// provenance forbids selecting a private key or queuing private derivation.
+	watchOnly := s.rootManager.WatchOnly() || acctInfo.acctKeyPriv != nil ||
+		acctInfo.acctType == accountWatchOnly
 	if !s.rootManager.IsLocked() && !watchOnly {
 		acctKey = acctInfo.acctKeyPriv
 	}
