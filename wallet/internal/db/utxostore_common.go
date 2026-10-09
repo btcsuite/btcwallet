@@ -118,6 +118,22 @@ type UtxoAddressShape struct {
 	AccountNumber sql.NullInt64
 }
 
+// SpendabilityOverride returns the custody override for a validated UTXO shape.
+// Call ValidateUtxoAddressShape first. A nil result leaves spendability to the
+// Wallet's existing root-mode default; false marks an imported account child
+// that has no local signing path even when the Wallet itself can sign.
+func (s UtxoAddressShape) SpendabilityOverride() *bool {
+	// Validation distinguishes raw imports from HD children and guarantees
+	// account provenance for children, so local and raw outputs keep nil.
+	if !s.IsDerived || s.AccountIsDerived.Bool {
+		return nil
+	}
+
+	spendable := false
+
+	return &spendable
+}
+
 // validateImportedUtxoShape verifies that a raw imported address carries no
 // derived path row or account metadata.
 func validateImportedUtxoShape(shape UtxoAddressShape) error {

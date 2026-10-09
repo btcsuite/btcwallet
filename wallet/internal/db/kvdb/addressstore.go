@@ -1207,7 +1207,12 @@ func managedAddressInfo(
 
 	rawImported := managedAddr.Imported()
 
+	// Only HD accounts contribute account custody. Raw imports retain their
+	// own private-key classification even when the bucket is imported.
+	accountWatchOnly := accountImported
+
 	if rawImported {
+		accountWatchOnly = false
 		accountNumber = 0
 		accountName = db.DefaultImportedAccountName
 	} else {
@@ -1244,7 +1249,7 @@ func managedAddressInfo(
 		ScriptPubKey:         scriptPubKey,
 		PubKey:               derivation.pubKey,
 		HasScript:            addrType.HasScript,
-		IsWatchOnly:          isWatchOnly,
+		IsWatchOnly:          isWatchOnly || accountWatchOnly,
 		IsUsed:               managedAddr.Used(ns),
 	}, nil
 }
