@@ -73,13 +73,16 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 		return nil, fmt.Errorf("key scope: %w", err)
 	}
 
-	err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
+	// Retain the validated join metadata for the shared custody decision.
+	shape := db.UtxoAddressShape{
 		IsDerived:        row.AddressIsDerived,
 		DerivedAddressID: row.DerivedAddressID,
 		AccountID:        row.AccountID,
 		AccountIsDerived: row.AccountIsDerived,
 		AccountNumber:    row.AccountNumber,
-	})
+	}
+
+	err = db.ValidateUtxoAddressShape(shape)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +107,8 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 	utxo.AddrType = addrType
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked
+
+	utxo.Spendable = shape.SpendabilityOverride()
 
 	if hasScope {
 		utxo.KeyScope = keyScope

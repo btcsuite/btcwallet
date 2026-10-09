@@ -68,7 +68,8 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	// MasterFingerprint is the nullable account master key fingerprint.
 	MasterFingerprint sql.NullInt64
 
-	// IsWatchOnly reports the wallet-level watch-only state.
+	// IsWatchOnly is the persisted wallet mode before account provenance
+	// determines whether this account has a local signing path.
 	IsWatchOnly bool
 
 	// CreatedAt is the account creation timestamp.
@@ -273,6 +274,8 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 		return nil, fmt.Errorf("address schema: %w", err)
 	}
 
+	// External account keys have no wallet-root signing path, even when the
+	// containing wallet can sign for its locally derived accounts.
 	return &AccountInfo{
 		AccountID:            accountID,
 		AccountNumber:        accountNum,
@@ -288,7 +291,7 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 			Coin:    coinTypeNum,
 		},
 		AddrSchema:  addrSchema,
-		IsWatchOnly: row.IsWatchOnly,
+		IsWatchOnly: row.IsWatchOnly || !row.IsDerived,
 		NoChainSync: row.NoChainSync,
 		CreatedAt:   row.CreatedAt,
 	}, nil
@@ -481,7 +484,8 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	// MasterFingerprint is the nullable account master key fingerprint.
 	MasterFingerprint sql.NullInt64
 
-	// IsWatchOnly reports the wallet-level watch-only state.
+	// IsWatchOnly is the persisted wallet mode before account provenance
+	// determines whether this account has a local signing path.
 	IsWatchOnly bool
 
 	// CreatedAt is the account creation timestamp.
@@ -557,10 +561,11 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		return nil, fmt.Errorf("address schema: %w", err)
 	}
 
+	// Derivation provenance preserves external custody in mixed wallets.
 	info := BuildAccountInfo(
 		accountID, accountNum, row.AccountName, !row.IsDerived,
 		externalKeyCount,
-		internalKeyCount, importedKeyCount, row.IsWatchOnly,
+		internalKeyCount, importedKeyCount, row.IsWatchOnly || !row.IsDerived,
 		row.NoChainSync,
 		row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum}, addrSchema,

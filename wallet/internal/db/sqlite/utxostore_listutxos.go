@@ -44,13 +44,16 @@ func (s *Store) ListUTXOs(ctx context.Context,
 
 		utxos = make([]db.UtxoInfo, len(rows))
 		for i, row := range rows {
-			err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
+			// Retain validated joins for the shared custody override.
+			shape := db.UtxoAddressShape{
 				IsDerived:        row.AddressIsDerived,
 				DerivedAddressID: row.DerivedAddressID,
 				AccountID:        row.AccountID,
 				AccountIsDerived: row.AccountIsDerived,
 				AccountNumber:    row.AccountNumber,
-			})
+			}
+
+			err = db.ValidateUtxoAddressShape(shape)
 			if err != nil {
 				return err
 			}
@@ -69,6 +72,7 @@ func (s *Store) ListUTXOs(ctx context.Context,
 				return err
 			}
 
+			utxo.Spendable = shape.SpendabilityOverride()
 			utxos[i] = *utxo
 		}
 
