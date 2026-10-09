@@ -435,6 +435,8 @@ func TestListAccounts(t *testing.T) {
 func TestListAccountsWatchOnlyMapping(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a signing wallet with both a local account and an external
+	// public-only account so wallet mode cannot determine both custody flags.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-list-watch")
 	scope := db.KeyScopeBIP0084
@@ -443,15 +445,15 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:            walletID,
-			Name:                "imported-xpub",
-			Scope:               scope,
-			PublicKey:           RandomBytes(32),
-			EncryptedPrivateKey: RandomBytes(32),
+			WalletID:  walletID,
+			Name:      "imported-xpub",
+			Scope:     scope,
+			PublicKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)
 
+	// Act by listing the shared scope through its normal Store query.
 	accounts, err := store.ListAccounts(
 		t.Context(), db.ListAccountsQuery{
 			WalletID: walletID,
@@ -473,10 +475,10 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 		},
 	)
 
+	// Assert the external account remains watch-only while the same wallet's
+	// locally derived account retains its signing custody.
 	require.False(t, derived.IsWatchOnly)
-	// ADR 0012: an imported account on a spendable wallet carries
-	// private-key material, so it inherits the wallet's spendable state.
-	require.False(t, imported.IsWatchOnly)
+	require.True(t, imported.IsWatchOnly)
 }
 
 // TestListAccountsOrdering verifies that ListAccounts returns derived accounts

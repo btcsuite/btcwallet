@@ -198,12 +198,15 @@ func NewDerivedAddressesWithOps(ctx context.Context,
 		return nil, exhausted, err
 	}
 
+	// Report external custody immediately, before a later address read can
+	// reconstruct it from account provenance.
 	// Use count-one insertion and metadata assembly for every candidate.
 	// Any insert failure rolls back all rows and counter advances together.
 	addresses := make([]AddressInfo, 0, count)
 	for _, candidate := range candidates {
 		info, err := insertDerivedAddress(
-			ctx, candidate, number, account.WalletWatchOnly, ops,
+			ctx, candidate, number,
+			account.WalletWatchOnly || !account.IsDerived, ops,
 		)
 		if err != nil {
 			return nil, false, err

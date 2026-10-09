@@ -3,10 +3,14 @@
 package itest
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -1866,4 +1870,193 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 	accounts, err = w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts after rejection")
 	require.Len(h, accounts, wantCount, "rejection changed account count")
+}
+
+// testAccountManagerMixAccountCustody verifies that one signing wallet tracks
+// external XPub children across reopen without treating them as local keys.
+func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
+	// Arrange a local signing account and an independent external XPub in the
+	// same wallet. Retain public identities as the oracles for reopen/signing.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	localAddr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	local, err := w.GetAddressInfo(ctx, localAddr)
+	require.NoError(h, err)
+	require.NotNil(h, local.Derivation)
+	localAccount, err := w.GetAccount(
+		ctx, local.Derivation.KeyScope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err)
+	require.False(h, localAccount.IsWatchOnly)
+	require.NotNil(h, localAccount.AccountNumber)
+	require.Equal(
+		h, uint32(*localAccount.AccountNumber), local.Derivation.Account,
+	)
+
+	// Act by importing public material through the existing AccountManager,
+	// then allocating its first external child through the public selector.
+	keys := deterministicImportedAccountKeys(h)
+	externalAccount, err := w.ImportAccount(
+		ctx, "external custody", keys.accountKey, keys.masterKeyFingerprint,
+		keys.addrType, false,
+	)
+	require.NoError(h, err)
+	require.True(h, externalAccount.IsWatchOnly)
+	external, err := w.NewAddress(ctx, wallet.NewAccountSelectorByName(
+		keys.scope, externalAccount.AccountName,
+	), false)
+	require.NoError(h, err)
+
+	// Assert the child belongs to the supplied XPub, rather than account zero
+	// of this wallet. It is an HD child without a wallet-root signing path.
+	branch, err := keys.accountKey.Derive(0)
+	require.NoError(h, err)
+	child, err := branch.Derive(0)
+	require.NoError(h, err)
+	expectedPubKey, err := child.ECPubKey()
+	require.NoError(h, err)
+	require.Equal(h, expectedPubKey, external.PubKey)
+	require.False(h, external.Imported)
+	require.Nil(h, external.Derivation)
+
+	// Arrange one confirmed output for each custodian. The miner transaction
+	// supplies independent outpoints, avoiding assumptions about output order.
+	cases := []struct {
+		account   *wallet.AccountInfo
+		address   wallet.AddressInfo
+		amount    btcutil.Amount
+		watchOnly bool
+		script    []byte
+		outpoint  wire.OutPoint
+	}{
+		{
+			account:   localAccount,
+			address:   local,
+			amount:    oneBTC,
+			watchOnly: false,
+		},
+		{
+			account:   externalAccount,
+			address:   external,
+			amount:    2 * oneBTC,
+			watchOnly: true,
+		},
+	}
+
+	outputs := make([]*wire.TxOut, len(cases))
+	for i := range cases {
+		cases[i].script, err = txscript.PayToAddrScript(cases[i].address.Addr)
+		require.NoError(h, err)
+
+		outputs[i] = wire.NewTxOut(int64(cases[i].amount), cases[i].script)
+	}
+
+	txid := h.SendOutputs(outputs, bwtest.MinerFeeRate)
+	funding := h.AssertTxInMempool(*txid)
+	h.MineBlockWithTx(funding)
+
+	for i := range cases {
+		for index, output := range funding.TxOut {
+			if bytes.Equal(output.PkScript, cases[i].script) {
+				cases[i].outpoint = wire.OutPoint{
+					Hash:  *txid,
+					Index: uint32(index),
+				}
+			}
+		}
+	}
+
+	for phase := range 2 {
+		// Act with the original wallet as the control, then close and reopen
+		// it through the harness on the second pass. Unlocking restores the
+		// fixture mode before observing the same confirmed outputs.
+		if phase == 1 {
+			w = h.ReloadWallet(w)
+			h.UnlockWallet(w)
+		}
+
+		// Assert retained account/address ownership and per-output custody
+		// match the original custodians on both sides of the transition.
+		require.False(h, w.IsWatchOnly())
+		listed, err := w.ListUnspent(ctx, wallet.UtxoQuery{
+			MinConfs: 1,
+			MaxConfs: 100,
+		})
+		require.NoError(h, err)
+		require.Len(h, listed, 2)
+
+		for _, tc := range cases {
+			account, err := w.GetAccount(
+				ctx, tc.account.KeyScope, tc.account.AccountName,
+			)
+			require.NoError(h, err)
+			require.Equal(h, tc.watchOnly, account.IsWatchOnly)
+			require.Equal(h, tc.account.AccountNumber, account.AccountNumber)
+			require.Equal(h, tc.account.PublicKey, account.PublicKey)
+			address, err := w.GetAddressInfo(ctx, tc.address.Addr)
+			require.NoError(h, err)
+			require.Equal(h, tc.address, address)
+			utxo, err := w.GetUtxo(ctx, tc.outpoint)
+			require.NoError(h, err)
+			require.Equal(h, tc.amount, utxo.Amount)
+			require.Equal(h, tc.account.AccountName, utxo.Account)
+			require.Equal(h, !tc.watchOnly, utxo.Spendable)
+			require.Contains(h, listed, utxo)
+		}
+	}
+
+	// Arrange valid signing requests on the reopened wallet. The local path
+	// comes from retained public metadata; the external request targets its
+	// actual funded output, without inventing a numeric account origin.
+	derivation := local.Derivation
+	accountChild := hdkeychain.HardenedKeyStart + derivation.Account
+	path := wallet.BIP32Path{
+		KeyScope: derivation.KeyScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount:      derivation.Account,
+			Account:              accountChild,
+			Branch:               derivation.Branch,
+			Index:                derivation.Index,
+			MasterKeyFingerprint: derivation.MasterKeyFingerprint,
+		},
+	}
+	digest := chainhash.HashB([]byte("mixed account custody"))
+
+	// Act through the local signer with the retained path and deterministic
+	// digest, using the wallet reopened by the preceding lifecycle action.
+	result, err := w.SignDigest(ctx, path, &wallet.SignDigestIntent{
+		Digest:  digest,
+		SigType: wallet.SigTypeECDSA,
+	})
+
+	// Assert the local account still produces a valid signature after reopen.
+	require.NoError(h, err)
+
+	signature, ok := result.(wallet.ECDSASignature)
+	require.True(h, ok)
+	require.True(h, signature.Verify(digest, local.PubKey))
+
+	// Arrange a valid spend of the tracked external output, including its
+	// actual previous-output amount and script for signature-hash calculation.
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&cases[1].outpoint, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(int64(oneBTC), cases[0].script))
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		cases[1].script, int64(cases[1].amount),
+	)
+
+	// Act through output-based signing so refusal depends on external custody
+	// rather than a fabricated numeric account path or malformed request.
+	unlocking, err := w.ComputeUnlockingScript(
+		ctx, &wallet.UnlockingScriptParams{
+			Tx:        tx,
+			Output:    outputs[1],
+			SigHashes: txscript.NewTxSigHashes(tx, fetcher),
+			HashType:  txscript.SigHashAll,
+		},
+	)
+
+	// Assert ownership never grants local signing authority for external keys.
+	require.ErrorIs(h, err, wallet.ErrNoAssocPrivateKey)
+	require.Nil(h, unlocking)
 }

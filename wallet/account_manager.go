@@ -39,8 +39,7 @@ var (
 
 	// ErrAccountOperationUnsupported is returned when the requested account
 	// operation cannot be served by the wallet in its current mode, such as
-	// deriving a new account on a watch-only wallet or importing an
-	// XPub-only account into a spendable SQL wallet.
+	// deriving a new account on a watch-only wallet.
 	ErrAccountOperationUnsupported = errors.New(
 		"account operation unsupported by this wallet",
 	)
@@ -357,10 +356,8 @@ type AccountManager interface {
 	// Invalid or private keys return ErrInvalidAccountKey. The key scope is
 	// derived from the version bytes of the extended key. The account name
 	// must be unique within the derived scope. If dryRun is true, the import
-	// is validated but not persisted. SQL wallets accept this XPub-only
-	// material only when the wallet is watch-only under ADR 0012. The
-	// legacy kvdb backend retains its grandfathered mixed-mode import
-	// behavior until migration; neither path imports signing material.
+	// is validated but not persisted. Imported accounts remain watch-only
+	// alongside local signing accounts; no signing material is imported.
 	ImportAccount(ctx context.Context, name string,
 		accountKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
@@ -1119,10 +1116,8 @@ type importAccountReq struct {
 // bytes of the extended key. The account name must be unique within the
 // derived scope. Invalid account keys return ErrInvalidAccountKey.
 //
-// SQL wallets accept this XPub-only material only when the wallet is
-// watch-only under ADR 0012. The legacy kvdb backend retains its grandfathered
-// mixed-mode import behavior until migration; neither path imports signing
-// material.
+// Imported accounts remain watch-only alongside local signing accounts.
+// Their addresses and outputs are tracked without a local signing path.
 //
 // dryRun=true validates the import through the store and rolls the transaction
 // back; no account row is persisted.

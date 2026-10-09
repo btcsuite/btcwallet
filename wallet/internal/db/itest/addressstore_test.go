@@ -2206,15 +2206,14 @@ func TestNewDerivedAddressDerivesByAccountNumber(t *testing.T) {
 func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a signing wallet with a locally derived address as the control
+	// and a public-only imported account under the same key scope.
 	store := NewTestStore(t)
-	// ADR 0012: a public-only xpub import requires a watch-only wallet;
-	// the spendable-wallet invariant rejects the same import.
-	walletID := newWatchOnlyWallet(
-		t, store, "wallet-imported-derive",
+	walletID := newWallet(t, store, "wallet-imported-derive")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "local")
+	local := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "local", false,
 	)
-
-	// Create an imported xpub account: real PublicKey, no encrypted
-	// private key (watch-only xpub import).
 	name := "imported-xpub"
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
@@ -2226,6 +2225,7 @@ func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	// Act through normal allocation, then read and list the persisted child.
 	info, err := store.NewDerivedAddress(
 		t.Context(), db.NewDerivedAddressParams{
 			WalletID:    walletID,
@@ -2237,9 +2237,10 @@ func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 
-	// Imported xpub children are imported key material, but still have child
-	// address path facts. The wallet-derived account signal remains
-	// AccountNumber != nil.
+	// Assert external custody in the allocation result without losing child
+	// path facts; the local control must remain locally signable.
+	require.False(t, local.IsWatchOnly)
+	require.True(t, info.IsWatchOnly)
 	require.True(t, info.IsImported)
 	require.Nil(t, info.AccountNumber)
 
@@ -2250,11 +2251,21 @@ func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+	require.True(t, read.IsWatchOnly)
 	require.True(t, read.IsImported)
 	require.Nil(t, read.AccountNumber)
 	require.Equal(t, name, read.AccountName)
 	require.Equal(t, info.Branch, read.Branch)
 	require.Equal(t, info.Index, read.Index)
+
+	// List the same account to cover the separate projection used by lists.
+	listed, err := store.ListAddresses(t.Context(), listAccountAddressesQuery(
+		t, walletID, db.KeyScopeBIP0084, name, 10,
+	))
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 1)
+	require.True(t, listed.Items[0].IsWatchOnly)
+	require.Equal(t, info.ID, listed.Items[0].ID)
 }
 
 // TestGetAddressRejectsDerivedParentWithoutPath verifies that imported-xpub
