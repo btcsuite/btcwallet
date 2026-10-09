@@ -1280,7 +1280,8 @@ func (m *Manager) Lock() error {
 // even if it was already unlocked prior to calling this function.
 //
 // This function will return an error if invoked on a watching-only address
-// manager.
+// manager. Imported watch-only accounts remain public-only when a signing
+// manager unlocks its local accounts.
 func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// A watching-only address manager can't be unlocked.
 	if m.WatchOnly() {
@@ -1331,6 +1332,12 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// extended keys.
 	for _, manager := range m.scopedManagers {
 		for account, acctInfo := range manager.acctInfo {
+			// Imported accounts have no local private ciphertext to restore.
+			// Keep local-account decryption and its corruption checks intact.
+			if acctInfo.acctType == accountWatchOnly {
+				continue
+			}
+
 			decrypted, err := m.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
 			if err != nil {
 				m.lock()
