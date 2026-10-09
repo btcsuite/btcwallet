@@ -1126,19 +1126,19 @@ func TestPublishTx(t *testing.T) {
 			name:        "already in mempool",
 			notifyErr:   nil,
 			sendErr:     chain.ErrTxAlreadyInMempool,
-			expectedErr: nil,
+			expectedErr: errAlreadyBroadcasted,
 		},
 		{
 			name:        "already known",
 			notifyErr:   nil,
 			sendErr:     chain.ErrTxAlreadyKnown,
-			expectedErr: nil,
+			expectedErr: errAlreadyBroadcasted,
 		},
 		{
 			name:        "already confirmed",
 			notifyErr:   nil,
 			sendErr:     chain.ErrTxAlreadyConfirmed,
-			expectedErr: nil,
+			expectedErr: errAlreadyBroadcasted,
 		},
 	}
 
