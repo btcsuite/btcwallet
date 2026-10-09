@@ -77,9 +77,10 @@ has no number and is selected by its mutable name within its scope.
 All numbered accounts in one wallet scope share the same account-number
 namespace regardless of provenance. A numbered caller-supplied account
 occupies its `(scope, account_number)` slot, and another account that declares
-the same pair is rejected. Public-only caller-supplied and wallet-root-derived
-accounts cannot coexist under the SQL custody rule, but the numbered namespace
-does not acquire a separate caller-supplied domain.
+the same pair is rejected. Wallet-root-derived and caller-supplied accounts may
+coexist under the custody policy in
+[ADR 0012](0012-wallet-level-watch-only-uniformity.md).
+The numbered namespace does not acquire a separate caller-supplied domain.
 
 Account provenance, account-number presence and value, master-fingerprint
 presence and value, scope, effective address schema, `NoChainSync`, and XPub
@@ -92,7 +93,7 @@ cross the Store boundary as semantic identity.
 Wallet-root provenance and account-number presence are orthogonal. The
 accepted account shapes are:
 
-| Source | SQL custody | Provenance | Number | Fingerprint |
+| Source | Account custody | Provenance | Number | Fingerprint |
 | --- | --- | --- | --- | --- |
 | Generated seed | spendable | wallet-root | required | computed |
 | Imported private root | spendable | wallet-root | required | computed |
@@ -370,7 +371,7 @@ Cons:
 - [ADR 0006](0006-wtxmgr-sql-schema.md): SQL transaction schema.
 - [ADR 0011](0011-no-addresses-used-column.md): SQL derives address used-ness
   from wallet transaction state.
-- [ADR 0012](0012-wallet-level-watch-only-uniformity.md): wallet-level
-  watch-only invariant. This ADR supersedes its SQL imported-address bucket
-  shape: raw imports now use the reserved name only as an alias, not as a stored
-  account row.
+- [ADR 0012](0012-wallet-level-watch-only-uniformity.md): wallet root mode and
+  effective account custody. This ADR supersedes its SQL imported-address
+  bucket shape: raw imports now use the reserved name only as an alias, not as
+  a stored account row.
