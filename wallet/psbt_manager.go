@@ -229,7 +229,7 @@ type SignPsbtResult struct {
 	// successfully signed.
 	SignedInputs []uint32
 
-	// Packet is the modified PSBT packet. This is the same pointer as
+	// Packet is the signed PSBT packet. This is the same pointer as
 	// passed in the params, returned for convenience.
 	Packet *psbt.Packet
 }
@@ -1015,6 +1015,13 @@ func (w *Wallet) createTxIntent(packet *psbt.Packet,
 //     generate the raw ECDSA or Schnorr signature using the underlying
 //     `Signer`.
 //
+// The packet is validated, and every existing signature record must verify
+// against its input or the call fails with ErrInvalidSignatureRecord. Records
+// are checked against the prevout data the packet itself carries. Valid
+// records are kept; one for the wallet's key means that input is not signed
+// again. The packet is then signed as a copy: the caller's packet is updated
+// only if the call succeeds.
+//
 // Accepted signing finishes before return, including partial signatures and
 // supplied input tweakers, even if the caller cancels after admission.
 func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
@@ -1050,7 +1057,17 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 // handleSignPsbt completes its accepted operation with the caller's packet.
 // The admitted caller waits for this result before reusing its inputs.
 func (w *Wallet) handleSignPsbt(r signPsbtReq) {
-	packet := r.params.Packet
+	// Validate before cloning: cloning panics on the nil transaction
+	// entries that validation refuses.
+	err := validatePacket(r.params.Packet)
+	if err != nil {
+		r.respChan <- signPsbtResp{err: err}
+
+		return
+	}
+
+	// Sign a clone, copied back to the caller only on success.
+	packet := clonePacket(r.params.Packet)
 
 	// signedInputs will track the indices of all inputs that we
 	// successfully sign during this operation. This is useful for callers
@@ -1063,7 +1080,7 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// has at least a WitnessUtxo or NonWitnessUtxo, which is crucial for
 	// signature generation. If this check fails, it indicates a malformed
 	// or incomplete PSBT that cannot be signed.
-	err := psbt.InputsReadyToSign(packet)
+	err = psbt.InputsReadyToSign(packet)
 	if err != nil {
 		r.respChan <- signPsbtResp{
 			err: fmt.Errorf("psbt inputs not ready: %w", err),
@@ -1090,6 +1107,15 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	sigHashes := txscript.NewTxSigHashes(
 		packet.UnsignedTx, prevOutFetcher,
 	)
+
+	// Existing records are kept and can stop an input being signed, so
+	// they must verify first.
+	err = authorizeSignRecords(packet, sigHashes, prevOutFetcher)
+	if err != nil {
+		r.respChan <- signPsbtResp{err: err}
+
+		return
+	}
 
 	// Iterate through each input in the PSBT. For each input, we attempt
 	// to sign it if the wallet can provide the necessary key material and
@@ -1119,13 +1145,15 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 		}
 	}
 
+	*r.params.Packet = *packet
+
 	// Finally, return the result, which includes the list of inputs that
-	// were successfully signed and the modified (partially) signed PSBT
-	// packet.
+	// were successfully signed and the caller's now (partially) signed
+	// PSBT packet.
 	r.respChan <- signPsbtResp{
 		result: &SignPsbtResult{
 			SignedInputs: signedInputs,
-			Packet:       packet,
+			Packet:       r.params.Packet,
 		},
 	}
 }

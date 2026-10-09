@@ -711,3 +711,64 @@ func TestValidateFundPacketRejectsSighashSingle(t *testing.T) {
 		})
 	}
 }
+
+// TestValidatePacketAcceptsUnknowns verifies that the structural check does
+// not refuse unclassified fields, so signing can carry them through.
+func TestValidatePacketAcceptsUnknowns(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an unclassified field at every level a packet has one.
+	packet := testPacket(t)
+	unknown := []*psbt.Unknown{{Key: []byte{0xfc}, Value: []byte{0x01}}}
+	packet.Unknowns = unknown
+	packet.Inputs[0].Unknowns = unknown
+	packet.Outputs[0].Unknowns = unknown
+
+	// Act: run the structural check.
+	err := validatePacket(packet)
+
+	// Assert: the fields do not fail it.
+	require.NoError(t, err)
+}
+
+// TestValidateFundPacketRejectsUnknowns verifies that funding refuses an
+// unclassified field wherever it sits.
+func TestValidateFundPacketRejectsUnknowns(t *testing.T) {
+	t.Parallel()
+
+	unknown := []*psbt.Unknown{{Key: []byte{0xfc}, Value: []byte{0x01}}}
+
+	tests := []struct {
+		name   string
+		global []*psbt.Unknown
+		input  []*psbt.Unknown
+		output []*psbt.Unknown
+	}{{
+		name:   "global field",
+		global: unknown,
+	}, {
+		name:  "input field",
+		input: unknown,
+	}, {
+		name:   "output field",
+		output: unknown,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: add the field at the level under test only.
+			packet := testPacket(t)
+			packet.Unknowns = tc.global
+			packet.Inputs[0].Unknowns = tc.input
+			packet.Outputs[0].Unknowns = tc.output
+
+			// Act: run the funding gate.
+			err := validateFundPacket(packet)
+
+			// Assert: the field is refused.
+			require.ErrorIs(t, err, ErrUnclassifiedField)
+		})
+	}
+}
