@@ -1,125 +1,97 @@
-# ADR 0012: Wallet-Level Watch-Only as a Uniform Invariant
+# ADR 0012: Wallet Root Mode and Account Custody
 
 ## 1. Context
 
-The legacy `waddrmgr` address-manager supports a richer watch-only model than
-modern descriptor wallets:
+Revision note: [PR #1411][mixed-account-pr] replaces this ADR's original
+wallet-wide custody uniformity rule with immutable wallet/root mode and
+per-account custody, allowing imported XPub accounts alongside local signing
+accounts. The raw-import admission rules remain unchanged.
 
-- The wallet carries a top-level `is_watch_only` flag.
-- Individual accounts can additionally be watch-only (e.g. an imported
-  xpub-only account inside an otherwise-spendable wallet).
-- Reports such as `AccountProperties().IsWatchOnly` compute an "effective"
-  per-account watch-only state by combining the wallet flag with the
-  presence of account-level private-key material.
+A wallet can track an external signer's imported account XPub alongside
+accounts whose private keys derive from the wallet root. Importing the XPub
+grants tracking authority, while the external signer retains custody. Local
+accounts must continue signing, and both kinds of accounts must retain their
+ownership and custody across close/reopen.
 
-This per-account nuance has wide-ranging consequences for the SQL store and
-the wallet API:
+The legacy `waddrmgr` already permits an imported XPub account inside a
+signing wallet. The SQL store records immutable wallet mode in
+`wallets.is_watch_only` and distinguishes root-derived accounts from imported
+accounts through existing provenance. Those fields can express the same
+custody boundary without joining `account_secrets` in public account, address,
+or UTXO reads.
 
-- Read paths compute watch-only state via joins against the encrypted
-  secrets table (`account_secrets`), creating cross-cutting dependencies
-  between read flows and the signer surface. UTXO listing, transaction
-  listing, and address listing all become coupled to a table whose only
-  legitimate consumer is the signer.
-- Balance reporting has to distinguish a wallet's "spendable" total from
-  its "watch-only" total, with separate accumulation paths and separate
-  API shapes for the two categories.
-- Importing or removing a watch-only account changes a wallet's effective
-  signing capability at runtime, complicating audit, caching, and the
-  wallet's lifecycle reasoning.
+SQL UTXO results already carry an optional spendability override. Wallet uses
+that override before applying coinbase maturity. A wallet-level flag alone is
+insufficient for an external account's outputs inside a signing wallet.
 
-Bitcoin Core introduced descriptor wallets in v0.21.0 and made them the
-default for new wallets in v23.0. In that descriptor-wallet model:
-
-- Is created with `disable_private_keys` set to true or false; the flag
-  is immutable after creation.
-- Rejects descriptor imports whose mode conflicts with the wallet:
-  > Cannot import descriptor without private keys to a wallet with
-  > private keys enabled.
-- Surfaces the wallet's mode through `getwalletinfo`'s
-  `private_keys_enabled` field and emits a single `mine` bucket from
-  `getbalances` — the `watchonly` sub-bucket only persists for
-  deprecated pre-descriptor wallets.
+Bitcoin Core descriptor wallets provide context for immutable root mode
+through `disable_private_keys`, but their descriptor-import admission policy
+does not express btcwallet's mixed account requirement.
 
 ## 2. Decision
 
-A btcwallet wallet is uniformly watch-only or uniformly spendable. The
-state is recorded in `wallets.is_watch_only`, set at wallet creation, and
-immutable thereafter. Imports whose mode conflicts with the wallet are
-rejected at the store boundary by application-level validation that runs
-uniformly on both SQL backends.
+`Wallet.IsWatchOnly()` reports immutable wallet/root mode, set at creation and
+recorded in `wallets.is_watch_only`. A signing wallet may also track
+public-only imported XPub accounts. Watch-only wallets continue rejecting
+private-key material at the store boundary on both SQL backends.
 
-Implications:
+Effective account custody is watch-only when either the wallet is watch-only
+or the account key was imported rather than derived from its root. HD child
+addresses inherit that account custody. Public reads use the existing wallet
+mode and account provenance rather than inferring custody from secret
+presence.
 
-- A non-watch-only wallet rejects imports that would introduce
-  watch-only-only material (an imported xpub account without matching
-  encrypted account private-key material, or an imported address
-  without encrypted private-key material).
-- A watch-only wallet symmetrically rejects imports that would introduce
-  spendable material.
-- Balance reporting on the wallet-internal surface returns a single
-  category. There is no `watchonly` sub-bucket. The wallet's watch-only
-  state is surfaced via `Wallet.IsWatchOnly()`.
-- Users that want to track watch-only material alongside a spendable
-  wallet create a second wallet for that purpose, matching Core.
-- Read paths (UTXO listing, transaction listing, address listing) do not
-  consult `account_secrets`. Watch-only state is a wallet-level
-  constant cached on the `Wallet` struct at startup.
+Imported account outputs remain visible through normal ownership and UTXO
+queries, with `Spendable` set to false. Local account outputs retain the
+existing wallet default and maturity rules. Callers use
+`AccountInfo.IsWatchOnly` for account custody and `Utxo.Spendable` for output
+signability; a signing wallet's root mode does not imply that every account
+can sign locally.
 
-The legacy JSON-RPC contract (`getbalance`, `listaccounts`,
-`includeWatchOnly`) keeps emitting and accepting its historical fields so
-external consumers do not break. Wallet-internal callers migrate to the
-single-bucket shape.
+Balance reporting retains its existing shape. The legacy JSON-RPC contract
+(`getbalance`, `listaccounts`, `includeWatchOnly`) retains its historical
+fields. This decision adds no signing API, secret-table join, persisted
+custody flag, or new balance category. Raw imports retain the policy below.
 
 ### Supplied account XPub custody
 
-The public account-creation operations in ADR 0013 supply no matching private
-account material. SQL therefore accepts their unnumbered and numbered
-caller-supplied XPub shapes only in a uniformly watch-only wallet. This
-does not change the Store-level rule that a spendable wallet may contain
-externally sourced account material only when matching encrypted private
-account material is supplied.
+Public account imports supply no matching private account material. SQL
+accepts these imported XPubs in signing and watch-only wallets, and reports
+their external custody at creation, child allocation, ownership reads, and
+reopen. The existing signer refuses an external child without a local
+wallet-root path; importing its XPub does not make the child locally signable.
 
-These public-only caller-supplied account shapes cannot coexist in one SQL
-wallet with wallet-root-derived accounts. The supplied shapes require a
-uniformly watch-only wallet, while wallet-root account derivation uses the
-spendable wallet's private root. The immutable wallet custody mode prevents
-those paths from being combined.
+Optional low-level account secret storage remains supported, but does not
+establish a wallet-root path for a numberless imported account. Importing a
+private wallet root is different: accounts derived from that root remain
+wallet-root-derived and may be spendable.
 
-Importing a private wallet root is different from supplying an account XPub.
-Accounts derived from that root remain wallet-root-derived and may be
-spendable.
+An account's immutable `NoChainSync` value is independent of custody. Signing
+and watch-only wallets may each contain accounts with either value; excluding
+an account from automatic chain synchronization neither adds nor removes
+signing capability.
 
-An account's immutable `NoChainSync` value is independent of this custody
-rule. Spendable and uniformly watch-only wallets may each contain accounts
-with either value; excluding an account from automatic chain synchronization
-neither adds nor removes signing capability.
+ADR 0013 owns account identity, supported creation shapes, and chain-sync
+policy. This custody decision does not expand backend capabilities for
+supplied numbered accounts or alter per-account address schemas, PSBT
+metadata, or coin selection.
 
-The legacy kvdb mixed-mode exception remains limited to arbitrary, unnumbered,
-watch-chain account imports; it does not provide path-bound identity or SQL
-parity. ADR 0013 owns the account identity and chain-sync decisions.
+### Raw imported addresses use per-address custody
 
-### Imported addresses land in a reserved wallet-level bucket
+SQL raw imports follow [ADR 0013](0013-normalized-account-address-identity.md):
+they are wallet-local `addresses` rows without an account, scope, or
+`derived_addresses` row. The name `imported`
+(`db.DefaultImportedAccountName`) is a compatibility alias, not a stored SQL
+account row. Importing a raw address does not create an account bucket.
 
-An imported address — with or without private-key material — is never
-treated as a member of a derived (HD) account. The store holds every
-imported address in a single per-scope, wallet-level **imported bucket**:
-the account named `imported` (`db.DefaultImportedAccountName`), keyed by the
-address's `(wallet_id, purpose, coin_type)` only. The bucket is internal
-infrastructure, not an imported xpub account — it is **keyless** (no
-account-level public key, no master fingerprint, and no `account_secrets`
-row) and merely holds individually-imported address rows. Each imported
-address row carries its own secret material when the wallet is spendable.
+The alias remains reserved: `CreateDerivedAccount` and
+`CreateImportedAccount` reject `DefaultImportedAccountName` with
+`ErrReservedAccountName`. Raw imported addresses cannot be retargeted into an
+HD account. kvdb retains its legacy per-scope imported-address pseudo-account;
+that bucket does not represent an imported XPub account.
 
-The bucket is materialized lazily: the first import into a scope
-auto-creates it inside the same write transaction, and later imports reuse
-it. The bucket name is **reserved** — `CreateDerivedAccount` and
-`CreateImportedAccount` both reject `DefaultImportedAccountName` with
-`ErrReservedAccountName`, so neither a derived account nor a true imported
-xpub account can occupy the slot, and an imported address can never be
-retargeted into a derived account.
-
-Because the bucket is keyless, the spendable-wallet invariant does not apply
-to the bucket account itself; it applies **per imported address**:
+Raw-import admission applies per address, independently of XPub account
+custody:
 
 - On a spendable wallet, an imported address must carry its own
   `encrypted_priv_key`. A public-only or script-only address import is
@@ -130,7 +102,7 @@ to the bucket account itself; it applies **per imported address**:
 
 Derived addresses are unaffected: they inherit their key material from the
 account xpub/xpriv and are reached through `AccountKeyFromParams` (the
-caller-supplied account name), never through the imported bucket.
+caller-supplied account name), rather than the raw-import alias.
 
 ### P2A / anchor outputs are transaction state, not imports
 
@@ -154,88 +126,54 @@ model.
 
 ## 3. Consequences
 
-- `db.UtxoInfo` does **not** carry an `IsWatchOnly` field. Wallet-level
-  state, cached on the `Wallet` struct, applies uniformly to every UTXO
-  row.
-- `db.AccountInfo.IsWatchOnly` and `db.AddressInfo.IsWatchOnly` are
-  retained as wallet-level convenience copies. They are documented as
-  identical across every account or address belonging to the same
-  wallet. A future cleanup task may remove them; callers that want the
-  canonical reading use `Wallet.IsWatchOnly()`.
-- `NewImportedAddressParams.IsWatchOnly()` is removed. The params struct
-  does not carry wallet-level state, and the per-row "watch-only because
-  no private key" condition cannot occur in a spendable wallet under
-  this invariant.
-- Per-account `is_watch_only` computations in account-read queries
-  (`GetAccountByWalletScopeAndName` and its equivalents) drop their
-  `LEFT JOIN account_secrets` clause; the value is projected directly
-  from `wallets.is_watch_only`.
-- A new symmetric invariant — enforced by application-level validation at
-  the store boundary, uniformly on both SQL backends — asserts that a
-  spendable wallet's true imported (xpub) accounts and its imported
-  addresses carry the matching secret material. The existing
-  one-directional checks (watch-only wallets cannot store secrets) are
-  preserved. The invariant is deliberately **not** backed by a database
-  trigger: a trigger cannot be expressed identically on SQLite (whose
-  triggers are not deferrable), would duplicate the application-level check,
-  and is bypassable by out-of-band writes — so one application-level check
-  for both backends is the single source of truth.
-- The symmetric secret requirement applies to **imported** material and
-  exempts the keyless imported-address bucket by design. The account-level
-  check (`requireAccountPrivKeyOnSpendable`) runs in `CreateImportedAccount`,
-  the path for true imported (xpub) accounts, and requires account-level
-  secret material on a spendable wallet. The keyless imported bucket does not
-  travel that path — it is materialized by a dedicated keyless insert and
-  holds no account-level secret — so it is exempt; the per-address check is
-  what enforces spendability for the addresses it holds.
-- Derived accounts are not watch-only just because they are read without
-  looking at `account_secrets`: the wallet-level flag is the public
-  watch-only signal. Spendable derived accounts may persist encrypted
-  account private-key material in `account_secrets`; the unlocked signing
-  material used at runtime is derived from wallet key material. Derived
-  addresses still do not store per-address private keys in `address_secrets`.
-  Requiring a per-address secret for a derived row would contradict the HD
-  design — a derived address in a spendable wallet is spendable because the
-  wallet holds the relevant wallet/account key material, so absence of an
-  address secret is not a watch-only signal. Only an *imported* row lacking
-  the secret material required by this invariant indicates watch-only-only
-  material, which is what the invariant forbids on a spendable wallet.
-- This ADR does not remove `account_secrets` or `key_scope_secrets`; it only
-  removes account/address secret presence as a public watch-only inference
-  source.
-- The invariant is enforced at imported-account / imported-address
-  **create time**, application-side and uniformly on both SQL backends (the
-  `ValidateWatchOnly` and spendable-secret checks at the store boundary).
-  Because the wallet-level `is_watch_only` flag is immutable after creation
-  (no `UpdateWallet` path mutates it), the new SQL store cannot reach the
-  legacy mixed-mode shape, so no load-boundary re-check is required.
-  The legacy kvdb backend is grandfathered: its data model still
-  permits an imported watch-only account inside a spendable wallet (the
-  historical `importpubkey` / `importaddress` flow). This ADR's uniform
-  invariant is a property of the new SQL store, not a retrofit onto
-  kvdb.
+- Signing wallets can track external account XPubs while local accounts retain
+  their existing signing behavior. Reopen preserves the custody distinction.
+- `db.AccountInfo.IsWatchOnly` and `db.AddressInfo.IsWatchOnly` describe
+  effective account/HD-child custody. They need not equal
+  `Wallet.IsWatchOnly()` in a signing wallet with an imported account.
+- `db.UtxoInfo` needs no new watch-only field. Its existing optional
+  `Spendable` override marks imported HD children non-spendable; local
+  children and raw imports retain their existing conversion and wallet-default
+  behavior.
+- Account/address/UTXO reads do not consult `account_secrets` to infer
+  custody. Existing account provenance identifies external accounts without
+  mutable capability state or requiring a second wallet.
+- `CreateImportedAccount` permits public-only imports in signing wallets and
+  retains the watch-only/private-material guard. Optional encrypted account
+  secrets may still be persisted; their presence does not change imported
+  provenance into local root custody.
+- Raw-import per-address secret checks remain separate from XPub account
+  admission. The raw-import policy above is unchanged.
+- Local accounts use wallet-root signing material. HD addresses do not require
+  per-address private keys in `address_secrets`; absence of an address secret
+  alone does not imply external custody.
+- `account_secrets` and `key_scope_secrets` remain available to their existing
+  consumers. This decision changes neither their storage nor the signer path.
+- The kvdb backend reuses its account/output custody mechanisms. Unlock and
+  recovery skip private derivation for imported watch-only accounts in either
+  lock state, while retaining local account derivation.
+- External accounts require their external signer. Funding and PSBT decoration
+  semantics remain outside this decision.
 
 ## 4. References
 
 - [ADR 0006](0006-wtxmgr-sql-schema.md): wtxmgr SQL schema (related).
 - [ADR 0011](0011-no-addresses-used-column.md): addresses table omits the
-  `used` column (related — also a "compute, don't persist" choice; this ADR
-  makes the opposite call by persisting wallet-level watch-only).
+  `used` column (related).
 - [ADR 0013](0013-normalized-account-address-identity.md): defines account
   provenance, optional number and fingerprint, scope, schema, and chain-sync
   policy independently of wallet custody.
-- [Bitcoin Core v23.0 release notes][btc-core-v23-release]: documents
-  descriptor wallets becoming the default wallet type for new wallets.
+- [PR #1411][mixed-account-pr]: mixed imported XPub and local signing accounts.
+- [Bitcoin Core v23.0 release notes][btc-core-v23-release]: descriptor wallets
+  become the default wallet type for new wallets.
 - [Bitcoin Core `createwallet` documentation][btc-core-createwallet]:
-  documents the `disable_private_keys` flag whose immutable wallet-level
-  semantics this ADR matches.
+  describes the `disable_private_keys` flag used as context for immutable root
+  mode.
 - [Bitcoin Core descriptor import implementation][btc-core-importdescriptors]:
-  `wallet/rpc/backup.cpp` `ProcessDescriptorImport()` is the source for
-  the rejection btcwallet mirrors — a descriptor without private keys
-  cannot be imported into a wallet with private keys enabled (and the
-  symmetric direction). The matching error string lives in the same
-  function.
+  provides the descriptor admission policy for comparison; btcwallet permits
+  public account tracking alongside local signing accounts.
 
+[mixed-account-pr]: https://github.com/btcsuite/btcwallet/pull/1411
 [btc-core-v23-release]: https://bitcoincore.org/en/releases/23.0/
 [btc-core-createwallet]: https://bitcoincore.org/en/doc/31.0.0/rpc/wallet/createwallet/
 [btc-core-importdescriptors]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/wallet/rpc/backup.cpp
