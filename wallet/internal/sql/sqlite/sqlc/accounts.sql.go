@@ -301,7 +301,9 @@ INSERT INTO accounts (
     is_derived,
     no_chain_sync,
     public_key,
-    master_fingerprint
+    master_fingerprint,
+    internal_type_id,
+    external_type_id
 )
 SELECT
     ks.wallet_id,
@@ -310,9 +312,12 @@ SELECT
     FALSE AS is_derived,
     ?2 AS no_chain_sync,
     ?3 AS public_key,
-    ?4 AS master_fingerprint
+    ?4 AS master_fingerprint,
+    -- Optional branch types override the scope schema only for this account.
+    ?5 AS internal_type_id,
+    ?6 AS external_type_id
 FROM key_scopes AS ks
-WHERE ks.id = ?5
+WHERE ks.id = ?7
 RETURNING id, created_at
 `
 
@@ -321,6 +326,8 @@ type CreateImportedAccountParams struct {
 	NoChainSync       bool
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
+	InternalTypeID    sql.NullInt64
+	ExternalTypeID    sql.NullInt64
 	ScopeID           int64
 }
 
@@ -339,6 +346,8 @@ func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedA
 		arg.NoChainSync,
 		arg.PublicKey,
 		arg.MasterFingerprint,
+		arg.InternalTypeID,
+		arg.ExternalTypeID,
 		arg.ScopeID,
 	)
 	var i CreateImportedAccountRow
@@ -356,13 +365,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -383,13 +395,13 @@ type GetAccountByScopeAndNameRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Returns a single account by scope id and account name.
@@ -405,13 +417,13 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 	)
 	return i, err
 }
@@ -426,13 +438,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -453,13 +468,13 @@ type GetAccountByScopeAndNumberRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Returns a single derived account by scope id and account number.
@@ -475,13 +490,13 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 	)
 	return i, err
 }
@@ -496,13 +511,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -529,13 +547,13 @@ type GetAccountByWalletScopeAndNameRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Returns a single account by wallet id, scope tuple, and account name.
@@ -556,13 +574,13 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 	)
 	return i, err
 }
@@ -577,13 +595,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -611,13 +632,13 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Returns a single derived account by wallet id, scope tuple, and account number.
@@ -638,13 +659,13 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 	)
 	return i, err
 }
@@ -660,11 +681,14 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -681,11 +705,11 @@ type GetAccountPropsByIdRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Returns full account properties by account id.
@@ -702,11 +726,11 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.WalletIsWatchOnly,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 	)
 	return i, err
 }
@@ -722,11 +746,14 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -748,11 +775,11 @@ type GetAccountPropsByWalletAndIdRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Returns full account properties by wallet id and account id.
@@ -769,11 +796,11 @@ func (q *Queries) GetAccountPropsByWalletAndId(ctx context.Context, arg GetAccou
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.WalletIsWatchOnly,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 	)
 	return i, err
 }
@@ -854,13 +881,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -877,13 +907,13 @@ type ListAccountsByScopeRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
@@ -905,13 +935,13 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
-			&i.InternalTypeID,
-			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 		); err != nil {
 			return nil, err
 		}
@@ -936,13 +966,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -969,13 +1002,13 @@ type ListAccountsByWalletRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Lists all accounts for a wallet.
@@ -998,13 +1031,13 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, arg ListAccountsByWa
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
-			&i.InternalTypeID,
-			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 		); err != nil {
 			return nil, err
 		}
@@ -1029,13 +1062,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -1063,13 +1099,13 @@ type ListAccountsByWalletAndNameRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Lists all accounts for a wallet filtered by account name.
@@ -1092,13 +1128,13 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
-			&i.InternalTypeID,
-			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 		); err != nil {
 			return nil, err
 		}
@@ -1123,13 +1159,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -1160,13 +1199,13 @@ type ListAccountsByWalletScopeRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int64
-	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 // Lists all accounts for a wallet and scope tuple.
@@ -1194,13 +1233,13 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
-			&i.InternalTypeID,
-			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 		); err != nil {
 			return nil, err
 		}
