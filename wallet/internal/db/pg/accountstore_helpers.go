@@ -1,7 +1,10 @@
 package pg
 
 import (
+	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
@@ -54,4 +57,32 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 			ExternalTypeID:    base.ExternalTypeID,
 		},
 	)
+}
+
+// checkAccountIdentity checks all wallet peers before the write can commit.
+func checkAccountIdentity(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, candidate *db.AccountInfo) error {
+
+	accounts, err := (accountListQueries{q: qtx}).ListAll(
+		ctx, db.ListAccountsQuery{WalletID: walletID},
+	)
+	if err != nil {
+		return fmt.Errorf("list account identities: %w", err)
+	}
+
+	return db.CheckAccountIdentity(*candidate, accounts)
+}
+
+// getWalletForAccountCreation locks the wallet before any scope write, making
+// imported and derived admission atomic across scopes and connections.
+func getWalletForAccountCreation(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32) (bool, error) {
+
+	watchOnly, err := qtx.GetWalletForAccountCreation(ctx, int64(walletID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("wallet %d: %w", walletID,
+			db.ErrWalletNotFound)
+	}
+
+	return watchOnly, err
 }

@@ -1867,3 +1867,54 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to list accounts after rejection")
 	require.Len(h, accounts, wantCount, "rejection changed account count")
 }
+
+// testAccountManagerRejectAccountIdentity verifies ordinary imports expose the
+// wallet-owned collision error while retaining duplicate-name precedence.
+func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
+	// Arrange: import one childless account into a started watch-only wallet
+	// and snapshot its inventory through the public API.
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	_, err := w.ImportAccount(
+		ctx, "owner", keys.accountKey, keys.masterKeyFingerprint,
+		keys.addrType, false,
+	)
+	require.NoError(h, err)
+
+	before, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+
+	// Act: request the same XPub under a vacant name without deriving any
+	// children. The import must fail at account admission.
+	info, err := w.ImportAccount(
+		ctx, "candidate", keys.accountKey, keys.masterKeyFingerprint+1,
+		keys.addrType, false,
+	)
+
+	// Assert: the caller sees the wallet sentinel and no candidate account.
+	require.ErrorIs(h, err, wallet.ErrAccountIdentityCollision)
+	require.Nil(h, info)
+
+	// Act: repeat the occupied name so name precedence is stable on retries.
+	for range 2 {
+		info, err = w.ImportAccount(
+			ctx, "owner", keys.accountKey, keys.masterKeyFingerprint,
+			keys.addrType, false,
+		)
+
+		// Assert: retries retain the established public name classification.
+		require.ErrorIs(h, err, wallet.ErrAccountAlreadyExists)
+		require.Nil(h, info)
+	}
+
+	// Assert: refusals leave the public inventory and all child counts intact.
+	after, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+	require.Equal(h, before, after)
+
+	owner, err := w.GetAccount(ctx, keys.scope, "owner")
+	require.NoError(h, err)
+	require.Zero(h, owner.ExternalKeyCount)
+	require.Zero(h, owner.InternalKeyCount)
+}

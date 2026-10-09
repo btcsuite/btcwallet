@@ -837,6 +837,22 @@ func (q *Queries) GetAndIncrementNextInternalIndex(ctx context.Context, id int64
 	return address_index, err
 }
 
+const GetWalletForAccountCreation = `-- name: GetWalletForAccountCreation :one
+SELECT is_watch_only
+FROM wallets
+WHERE id = $1
+FOR NO KEY UPDATE
+`
+
+// Serializes account admission across all scopes of a wallet. NO KEY UPDATE
+// permits foreign-key checks while holding the lock until the write completes.
+func (q *Queries) GetWalletForAccountCreation(ctx context.Context, id int64) (bool, error) {
+	row := q.queryRow(ctx, q.getWalletForAccountCreationStmt, GetWalletForAccountCreation, id)
+	var is_watch_only bool
+	err := row.Scan(&is_watch_only)
+	return is_watch_only, err
+}
+
 const ListAccountsByScope = `-- name: ListAccountsByScope :many
 SELECT
     a.id,

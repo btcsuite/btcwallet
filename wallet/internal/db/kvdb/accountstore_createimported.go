@@ -117,8 +117,32 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 		addrSchema = &converted
 	}
 
-	scopedMgr, err := s.scopedManagerOrCreate(
-		ns, scope, addrSchema, params.DryRun,
+	// Resolve once so admission and registration use the same scope schema.
+	scopedMgr, scopeSchema, err := s.resolveImportedAccountScope(
+		scope, addrSchema, params.DryRun,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	schema, err := effectiveAddrSchema(scopeSchema, addrSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	err = checkAccountIdentity(ns, s.addrStore, db.AccountInfo{
+		KeyScope:    params.Scope,
+		AccountName: params.Name,
+		PublicKey:   params.PublicKey,
+		AddrSchema:  schema,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Register after admission so a collision cannot publish a scope.
+	scopedMgr, err = s.scopedManagerOrCreate(
+		ns, scope, scopedMgr, scopeSchema,
 	)
 	if err != nil {
 		return nil, err
@@ -151,40 +175,16 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 	)
 }
 
-// scopedManagerOrCreate returns the scoped key manager for the given scope.
-// It falls back to creating the scope on persisted imports, but not on dry
-// runs because NewScopedKeyManager mutates the in-memory manager before the
-// surrounding walletdb transaction can roll back.
+// scopedManagerOrCreate registers a missing scope after admission succeeds.
 func (s *Store) scopedManagerOrCreate(ns walletdb.ReadWriteBucket,
-	scope waddrmgr.KeyScope,
-	addrSchema *waddrmgr.ScopeAddrSchema,
-	dryRun bool) (waddrmgr.AccountStore, error) {
+	scope waddrmgr.KeyScope, scopedMgr waddrmgr.AccountStore,
+	schema waddrmgr.ScopeAddrSchema) (waddrmgr.AccountStore, error) {
 
-	scopedMgr, err := s.addrStore.FetchScopedKeyManager(scope)
-	if err == nil {
+	if scopedMgr != nil {
 		return scopedMgr, nil
 	}
 
-	if !waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
-		return nil, translateAccountErr(err, db.ErrAccountNotFound)
-	}
-
-	if dryRun {
-		return nil, translateAccountErr(err, db.ErrKeyScopeNotFound)
-	}
-
-	if addrSchema == nil {
-		defaultSchema, ok := waddrmgr.ScopeAddrMap[scope]
-		if !ok {
-			return nil, fmt.Errorf("%w %s", errNoDefaultSchema, scope)
-		}
-
-		addrSchema = &defaultSchema
-	}
-
-	scopedMgr, err = s.addrStore.NewScopedKeyManager(
-		ns, scope, *addrSchema,
-	)
+	scopedMgr, err := s.addrStore.NewScopedKeyManager(ns, scope, schema)
 	if err != nil {
 		return nil, fmt.Errorf("new scoped key manager: %w", err)
 	}
@@ -214,4 +214,39 @@ func dryRunImportedAccount(ns walletdb.ReadWriteBucket,
 	return loadAccountInfo(
 		ns, scopedMgr, accountNumber, walletIsWatchOnly,
 	)
+}
+
+// resolveImportedAccountScope returns the existing manager or the schema for
+// a missing scope, letting admission finish before registration mutates it.
+func (s *Store) resolveImportedAccountScope(scope waddrmgr.KeyScope,
+	override *waddrmgr.ScopeAddrSchema, dryRun bool) (
+	waddrmgr.AccountStore, waddrmgr.ScopeAddrSchema, error) {
+
+	existing, err := s.addrStore.FetchScopedKeyManager(scope)
+	if err == nil {
+		return existing, existing.AddrSchema(), nil
+	}
+
+	var empty waddrmgr.ScopeAddrSchema
+
+	if !waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+		return nil, empty, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	// Dry runs cannot create scopes because walletdb rollback would leave
+	// NewScopedKeyManager's in-memory registration behind.
+	if dryRun {
+		return nil, empty, translateAccountErr(err, db.ErrKeyScopeNotFound)
+	}
+
+	if override != nil {
+		return nil, *override, nil
+	}
+
+	schema, ok := waddrmgr.ScopeAddrMap[scope]
+	if !ok {
+		return nil, empty, fmt.Errorf("%w %s", errNoDefaultSchema, scope)
+	}
+
+	return nil, schema, nil
 }
