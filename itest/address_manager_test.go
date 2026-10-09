@@ -7,15 +7,320 @@
 package itest
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// rawImportWatchMock injects registration failures while preserving the real
+// backend's lifecycle, notification delivery, and successful registrations.
+type rawImportWatchMock struct {
+	chain.Interface
+	mock.Mock
+}
+
+// Embedding the real client keeps failure injection limited to registration.
+var _ chain.Interface = (*rawImportWatchMock)(nil)
+
+// WatchAddrsFromTip returns an arranged failure or installs the real live
+// watch, so later payment assertions exercise the selected full-node backend.
+func (m *rawImportWatchMock) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	args := m.Called(ctx, addrs)
+
+	err := args.Error(0)
+	if err != nil {
+		return err
+	}
+
+	return m.Interface.WatchAddrsFromTip(ctx, addrs)
+}
+
+// testAddressManagerRawImportPublicKey proves a failed watch preserves the
+// committed key and concurrent retries establish live delivery without rows
+// being duplicated on either SQL dialect.
+func testAddressManagerRawImportPublicKey(h *bwtest.HarnessTest) {
+	// The contract under test concerns SQL live full-node registration;
+	// legacy kvdb and SPV retain their existing import behavior.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("raw import live registration requires SQL")
+	}
+
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("raw import live registration requires SQL and a full node")
+	}
+
+	// Arrange: let the empty watch-only Wallet finish startup through the
+	// real client before injecting a failure into its first raw import.
+	ctx := h.Context()
+	client := &rawImportWatchMock{
+		Interface: h.ChainClient,
+	}
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address(nil)).
+		Return(nil).Once()
+	h.ChainClient = client
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		WatchOnly: true,
+		Unlocked:  true,
+	})
+	h.AssertWalletSynced(w)
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(h, err)
+
+	addr, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		key.PubKey().SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	watchErr := errors.New("injected raw import registration failure")
+	visible := make(chan error, 3)
+
+	// A joined public lookup inside each watch proves persistence is already
+	// visible. Send its result to the owner, avoiding assertions in workers.
+	checkCommitted := func(mock.Arguments) {
+		_, err := w.GetAddressInfo(ctx, addr)
+		visible <- err
+	}
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Run(checkCommitted).Return(watchErr).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Run(checkCommitted).Return(nil).Times(2)
+	// Once the three import calls finish, normal block synchronization may
+	// replay the address watch. Delegate those optional refreshes so cleanup
+	// mining does not turn this scenario into a test of sync worker counts.
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Return(nil).Maybe()
+
+	// Act: fail after commit, then repeat concurrently through the public
+	// API. Joining both callers makes their results safe to inspect below.
+	err = w.ImportPublicKey(ctx, key.PubKey(), waddrmgr.WitnessPubKey)
+	require.ErrorIs(h, err, watchErr)
+
+	stored, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			results <- w.ImportPublicKey(
+				ctx, key.PubKey(), waddrmgr.WitnessPubKey,
+			)
+		}()
+	}
+
+	// Assert: every watch saw committed data, retries succeeded on the still
+	// running Wallet, and public lookup/list preserve one canonical address.
+	for range 2 {
+		require.NoError(h, <-results)
+	}
+
+	for range 3 {
+		require.NoError(h, <-visible)
+	}
+
+	got, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+	require.Equal(h, stored, got)
+
+	listed, err := w.ListAddresses(
+		ctx, waddrmgr.ImportedAddrAccountName, waddrmgr.WitnessPubKey,
+	)
+	require.NoError(h, err)
+	require.Len(h, listed, 1)
+	require.Equal(h, addr, listed[0].Address)
+	client.AssertExpectations(h)
+
+	// Act: pay only after retry success, so receipt must come from the live
+	// watch rather than startup reconstruction or a historical scan.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: pkScript,
+	}, bwtest.MinerFeeRate)
+
+	// Assert: asynchronous notification reaches the public transaction view
+	// before mining; empty the shared mempool only after that assertion.
+	err = wait.NoError(func() error {
+		_, err := w.GetTx(ctx, *payment)
+		return err
+	}, pollTimeout)
+	require.NoError(h, err)
+
+	received, err := w.GetTx(ctx, *payment)
+	require.NoError(h, err)
+	require.Nil(h, received.Block)
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+}
+
+// testAddressManagerRawImportTaprootScript proves repeated imports retain the
+// original encrypted script despite an output-key-only retry, then receive a
+// future unmined payment through the real full-node watch.
+func testAddressManagerRawImportTaprootScript(h *bwtest.HarnessTest) {
+	// SQL full nodes supply the live-registration contract; existing tests
+	// continue to cover legacy kvdb and SPV imports.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("raw import live registration requires SQL")
+	}
+
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("raw import live registration requires SQL and a full node")
+	}
+
+	// Arrange: use an unlocked watch-only Wallet with one revealed spending
+	// leaf. A later key-only representation must not replace that secret.
+	ctx := h.Context()
+	client := &rawImportWatchMock{
+		Interface: h.ChainClient,
+	}
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address(nil)).
+		Return(nil).Once()
+	h.ChainClient = client
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		WatchOnly: true,
+		Unlocked:  true,
+	})
+	h.AssertWalletSynced(w)
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(h, err)
+
+	leafScript := []byte{txscript.OP_TRUE}
+	tapscript := waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypePartialReveal,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: key.PubKey(),
+			LeafVersion: txscript.BaseLeafVersion,
+		},
+		RevealedScript: leafScript,
+	}
+
+	outputKey, err := tapscript.TaprootKey()
+	require.NoError(h, err)
+
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	watchErr := errors.New("injected raw import registration failure")
+	visible := make(chan error, 3)
+	checkCommitted := func(mock.Arguments) {
+		// Public visibility at the watch boundary proves the SQL transaction
+		// has committed; the owner checks these results after joining calls.
+		_, err := w.GetAddressInfo(ctx, addr)
+		visible <- err
+	}
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Run(checkCommitted).Return(watchErr).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Run(checkCommitted).Return(nil).Times(2)
+	// Mining can reconstruct this watch after the three required import
+	// registrations; these optional refreshes still use the real backend.
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Return(nil).Maybe()
+
+	repeat := waddrmgr.Tapscript{
+		Type:          waddrmgr.TaprootFullKeyOnly,
+		FullOutputKey: outputKey,
+	}
+
+	// Act: inject failure after the first script commits, then race two
+	// equivalent key-only repeats against that already stored address.
+	info, err := w.ImportTaprootScript(ctx, tapscript)
+	require.ErrorIs(h, err, watchErr)
+	require.Zero(h, info)
+
+	stored, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+
+	type importResult struct {
+		info wallet.AddressInfo
+		err  error
+	}
+
+	results := make(chan importResult, 2)
+	for range 2 {
+		go func() {
+			info, err := w.ImportTaprootScript(ctx, repeat)
+			results <- importResult{
+				info: info,
+				err:  err,
+			}
+		}()
+	}
+
+	// Assert: retries return stored script metadata and leave exactly one
+	// address. Resolving its output proves the original secret still exists.
+	for range 2 {
+		got := <-results
+		require.NoError(h, got.err)
+		require.Equal(h, stored, got.info)
+	}
+
+	for range 3 {
+		require.NoError(h, <-visible)
+	}
+
+	listed, err := w.ListAddresses(
+		ctx, waddrmgr.ImportedAddrAccountName, waddrmgr.TaprootScript,
+	)
+	require.NoError(h, err)
+	require.Len(h, listed, 1)
+	require.Equal(h, addr, listed[0].Address)
+
+	script, err := w.ScriptForOutput(ctx, wire.TxOut{
+		PkScript: pkScript,
+	})
+	require.NoError(h, err)
+	require.Equal(h, leafScript, script.Script)
+	client.AssertExpectations(h)
+
+	// Act: broadcast after successful registration so no import-time scan
+	// can supply the future payment to the Wallet.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: pkScript,
+	}, bwtest.MinerFeeRate)
+
+	// Assert: public GetTx observes the still-unmined payment. Mine only
+	// afterwards to clean the shared harness mempool for the next scenario.
+	err = wait.NoError(func() error {
+		_, err := w.GetTx(ctx, *payment)
+		return err
+	}, pollTimeout)
+	require.NoError(h, err)
+
+	received, err := w.GetTx(ctx, *payment)
+	require.NoError(h, err)
+	require.Nil(h, received.Block)
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+}
 
 // createTestAddressInfo independently derives address metadata from the
 // fixture account and requested branch; only the chosen child index comes from

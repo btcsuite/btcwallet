@@ -15,6 +15,16 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
+	// SQL raw imports must retain committed keys and retry live registration.
+	{
+		Name:     "address manager raw import public key",
+		TestFunc: testAddressManagerRawImportPublicKey,
+	},
+	// Equivalent script repeats must preserve secrets and receive payments.
+	{
+		Name:     "address manager raw import taproot script",
+		TestFunc: testAddressManagerRawImportTaprootScript,
+	},
 	// Key-only allocation must retain ownership without receiving activity.
 	{
 		Name:     "address manager allocate key",
