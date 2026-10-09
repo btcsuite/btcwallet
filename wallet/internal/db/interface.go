@@ -26,16 +26,6 @@ var (
 	// material and cannot sign transactions.
 	ErrWatchOnlyViolation = errors.New("watch-only invariant violation")
 
-	// ErrSpendableWalletNeedsAccountPrivKey is returned when a non-watch-only
-	// wallet receives an imported account whose payload omits the encrypted
-	// account private key. Spendable wallets must hold matching key material
-	// for every imported account; the symmetric counterpart of
-	// ErrWatchOnlyViolation.
-	ErrSpendableWalletNeedsAccountPrivKey = errors.New(
-		"spendable wallet must not contain an imported account without " +
-			"private-key material",
-	)
-
 	// ErrSpendableWalletNeedsAddressPrivKey is returned when a non-watch-only
 	// wallet receives an imported address whose payload omits the encrypted
 	// address private key. Symmetric counterpart of ErrWatchOnlyViolation for
