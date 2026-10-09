@@ -435,12 +435,9 @@ type Wallet struct {
 }
 
 // IsWatchOnly reports whether this wallet was created without private-key
-// material. The value is the canonical wallet-level watch-only flag from
-// ADR 0012: it is set once at wallet construction and immutable thereafter.
-// Callers SHOULD prefer IsWatchOnly over the per-account or per-address
-// IsWatchOnly fields on db.AccountInfo / db.AddressInfo — those fields
-// are wallet-level convenience copies that may be removed in a future
-// cleanup task.
+// material. This immutable root mode does not describe imported account
+// custody: a signing wallet can track external XPub accounts. Use
+// AccountInfo.IsWatchOnly for account custody and Utxo.Spendable for outputs.
 func (w *Wallet) IsWatchOnly() bool {
 	return w.isWatchOnly
 }

@@ -119,6 +119,13 @@ func applyListRowEnrichment(utxo *db.UtxoInfo,
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked
 
+	// Imported HD children are tracked without a local signing path. Leave
+	// other outputs to the wallet default and existing raw-import policy.
+	if row.AddressIsDerived && !row.AccountIsDerived.Bool {
+		spendable := false
+		utxo.Spendable = &spendable
+	}
+
 	if hasScope {
 		utxo.KeyScope = keyScope
 	}

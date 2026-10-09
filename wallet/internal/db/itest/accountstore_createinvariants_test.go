@@ -357,9 +357,9 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 		},
 		{
 			name: "standard wallet imported account with " +
-				"private key is spendable",
+				"private key remains external",
 			walletParams:  CreateWalletParamsFixture,
-			wantWatchOnly: false,
+			wantWatchOnly: true,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
@@ -382,9 +382,9 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 		},
 		{
 			name: "standard wallet imported account without " +
-				"private key is rejected",
-			walletParams: CreateWalletParamsFixture,
-			wantErr:      db.ErrSpendableWalletNeedsAccountPrivKey,
+				"private key is watch-only",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: true,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
@@ -457,6 +457,7 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Arrange the persisted wallet mode selected by this case.
 			store := NewTestStore(t)
 
 			walletInfo, err := store.CreateWallet(
@@ -464,7 +465,10 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			)
 			require.NoError(t, err)
 
+			// Act through the account creation API for the chosen provenance.
 			isWatchOnly, err := tc.createAccountFn(t, store, walletInfo.ID)
+			// Assert custody separately from admission: signing wallets admit
+			// external keys, while watch-only wallets still refuse secrets.
 			require.ErrorIs(t, err, tc.wantErr)
 
 			if tc.wantErr != nil {

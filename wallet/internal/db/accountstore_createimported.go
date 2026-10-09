@@ -38,14 +38,8 @@ func (params *CreateImportedAccountParams) Validate() error {
 	return requireUnreservedAccountName(params.Name)
 }
 
-// ValidateWatchOnly validates watch-only invariants for creating an imported
-// account. A watch-only wallet must not receive private-key material. The
-// symmetric direction (a spendable wallet must not receive an imported
-// account without private-key material) is enforced at the SQL-backend
-// entry through requireAccountPrivKeyOnSpendable; kvdb's data model cannot
-// persist account-level private keys at all, so the symmetric check would
-// conflict with the legitimate watch-only-account-in-spendable-wallet flow
-// that kvdb supports today (a grandfathered legacy shape).
+// ValidateWatchOnly prevents private-key material from entering a watch-only
+// wallet. Signing wallets may also track externally held XPub accounts.
 func (params *CreateImportedAccountParams) ValidateWatchOnly(
 	walletIsWatchOnly bool) error {
 
@@ -56,21 +50,6 @@ func (params *CreateImportedAccountParams) ValidateWatchOnly(
 	}
 
 	return nil
-}
-
-// requireAccountPrivKeyOnSpendable enforces the ADR 0012 symmetric
-// invariant for SQL backends: a spendable wallet must not contain an
-// imported account without encrypted private-key material. Called from
-// the SQL-only CreateImportedAccount workflow below.
-func requireAccountPrivKeyOnSpendable(walletID uint32, name string,
-	walletIsWatchOnly bool, encryptedPrivKey []byte) error {
-
-	if walletIsWatchOnly || len(encryptedPrivKey) > 0 {
-		return nil
-	}
-
-	return fmt.Errorf("wallet %d cannot create imported account %q: %w",
-		walletID, name, ErrSpendableWalletNeedsAccountPrivKey)
 }
 
 // CreateImportedAccountOps is the backend adapter the shared
@@ -133,19 +112,6 @@ func validateCreateImportedParams(ctx context.Context,
 	}
 
 	err = params.ValidateWatchOnly(walletIsWatchOnly)
-	if err != nil {
-		return err
-	}
-
-	// ADR 0012 invariant: a spendable wallet must not hold an imported
-	// account without encrypted private-key material. Applies to the SQL
-	// backends only — kvdb's data model cannot persist account-level
-	// private keys, and its legacy watch-only-account-in-spendable-wallet
-	// flow is grandfathered.
-	err = requireAccountPrivKeyOnSpendable(
-		params.WalletID, params.Name, walletIsWatchOnly,
-		params.EncryptedPrivateKey,
-	)
 	if err != nil {
 		return err
 	}

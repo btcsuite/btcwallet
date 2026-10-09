@@ -100,6 +100,14 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked != 0
 
+	// Shape validation reserves present account provenance for HD children.
+	// Match an imported account, leaving NULL raw imports and local accounts
+	// to the existing wallet default.
+	if row.AccountIsDerived == (sql.NullBool{Bool: false, Valid: true}) {
+		spendable := false
+		utxo.Spendable = &spendable
+	}
+
 	if hasScope {
 		utxo.KeyScope = keyScope
 	}

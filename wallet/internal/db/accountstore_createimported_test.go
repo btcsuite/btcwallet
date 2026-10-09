@@ -165,58 +165,75 @@ func TestCreateImportedAccountWithOpsRejectsWatchOnlyViolation(t *testing.T) {
 	ops.AssertNotCalled(t, "GetAccountInfoByID")
 }
 
-// TestCreateImportedAccountWithOpsSkipsSecretInsertion verifies that the
-// shared helper omits the secret write when no encrypted private key exists.
+// TestCreateImportedAccountWithOpsSkipsSecretInsertion verifies public-only
+// admission in either wallet mode without storing signing material.
 func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 	t.Parallel()
 
-	params := testCreateImportedAccountParams()
-	// A watch-only wallet legitimately has no account private-key
-	// material, so the secret-insertion step is skipped. A spendable
-	// wallet without a private key would instead be rejected by the
-	// ADR 0012 invariant, so the no-secret path is exercised here
-	// against a watch-only wallet.
-	params.EncryptedPrivateKey = nil
-	expectedInfo := &AccountInfo{
-		AccountName:          params.Name,
-		IsImported:           true,
-		IsWatchOnly:          true,
-		KeyScope:             params.Scope,
-		AddrSchema:           ScopeAddrMap[params.Scope],
-		PublicKey:            params.PublicKey,
-		MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
+	tests := []struct {
+		name              string
+		walletIsWatchOnly bool
+	}{
+		{
+			name:              "signing wallet",
+			walletIsWatchOnly: false,
+		},
+		{
+			name:              "watch-only wallet",
+			walletIsWatchOnly: true,
+		},
 	}
 
-	ops := &mockCreateImportedAccountOps{}
-	t.Cleanup(func() {
-		ops.AssertExpectations(t)
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	walletCall := ops.On("IsWalletWatchOnly", mock.Anything,
-		params.WalletID,
-	).Return(true, nil).Once()
-	ensureScopeCall := ops.On("EnsureKeyScope", mock.Anything,
-		params.WalletID, params.Scope, params.AddrSchema,
-	).Return(int64(11), nil).Once()
-	createCall := ops.On("CreateImportedAccount", mock.Anything,
-		CreateImportedAccountInsertRequest{
-			ScopeID:           11,
-			Name:              params.Name,
-			PublicKey:         params.PublicKey,
-			MasterFingerprint: params.MasterFingerprint,
-		},
-	).Return(int64(22), nil).Once()
-	reloadCall := ops.On("GetAccountInfoByID", mock.Anything,
-		int64(22),
-	).Return(expectedInfo, nil).Once()
+			// Arrange a public-only request and the exact ordered backend
+			// calls. No secret-write expectation exists in either wallet mode.
+			params := testCreateImportedAccountParams()
+			params.EncryptedPrivateKey = nil
+			expectedInfo := &AccountInfo{
+				AccountName:          params.Name,
+				IsImported:           true,
+				IsWatchOnly:          true,
+				KeyScope:             params.Scope,
+				AddrSchema:           ScopeAddrMap[params.Scope],
+				PublicKey:            params.PublicKey,
+				MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
+			}
+			ops := &mockCreateImportedAccountOps{}
+			walletCall := ops.On("IsWalletWatchOnly", mock.Anything,
+				params.WalletID,
+			).Return(tc.walletIsWatchOnly, nil).Once()
+			ensureScopeCall := ops.On("EnsureKeyScope", mock.Anything,
+				params.WalletID, params.Scope, params.AddrSchema,
+			).Return(int64(11), nil).Once()
+			createCall := ops.On("CreateImportedAccount", mock.Anything,
+				CreateImportedAccountInsertRequest{
+					ScopeID:           11,
+					Name:              params.Name,
+					PublicKey:         params.PublicKey,
+					MasterFingerprint: params.MasterFingerprint,
+				},
+			).Return(int64(22), nil).Once()
+			reloadCall := ops.On("GetAccountInfoByID", mock.Anything,
+				int64(22),
+			).Return(expectedInfo, nil).Once()
+			mock.InOrder(walletCall, ensureScopeCall, createCall, reloadCall)
 
-	mock.InOrder(walletCall, ensureScopeCall, createCall, reloadCall)
+			// Act through the shared creation path, including persisted mode
+			// validation and the final account reload.
+			info, err := CreateImportedAccountWithOps(
+				t.Context(), params, ops,
+			)
 
-	info, err := CreateImportedAccountWithOps(t.Context(), params, ops)
-
-	require.NoError(t, err)
-	require.Same(t, expectedInfo, info)
-	ops.AssertNotCalled(t, "CreateAccountSecret")
+			// Assert admission returns the reloaded external account and that
+			// required backend calls ran once without storing private material.
+			require.NoError(t, err)
+			require.Same(t, expectedInfo, info)
+			ops.AssertExpectations(t)
+		})
+	}
 }
 
 // TestCreateImportedAccountWithOpsWrapsStageErrors verifies that the shared
@@ -523,22 +540,4 @@ func TestCreateImportedAccountParamsValidateWatchOnly(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
-}
-
-// TestRequireAccountPrivKeyOnSpendable verifies the SQL-only symmetric
-// rejection: a spendable wallet must not create an imported account without
-// encrypted private-key material under ADR 0012.
-func TestRequireAccountPrivKeyOnSpendable(t *testing.T) {
-	t.Parallel()
-
-	err := requireAccountPrivKeyOnSpendable(7, "imported", false, nil)
-	require.ErrorIs(t, err, ErrSpendableWalletNeedsAccountPrivKey)
-
-	err = requireAccountPrivKeyOnSpendable(7, "imported", false, []byte{1})
-	require.NoError(t, err)
-
-	// Watch-only wallets bypass this check; the watch-only-direction
-	// rejection happens in ValidateWatchOnly above.
-	err = requireAccountPrivKeyOnSpendable(7, "imported", true, nil)
-	require.NoError(t, err)
 }
