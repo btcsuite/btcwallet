@@ -2890,15 +2890,16 @@ func TestNewRawAccountWatchingOnly(t *testing.T) {
 // TestNewRawAccountHybrid is similar to TestNewRawAccountWatchingOnly
 // except that the manager is created normally with a seed. This test
 // shows that watch-only accounts can be added to managers with
-// non-watch-only accounts.
+// non-watch-only accounts, including extension across unlocking.
 func TestNewRawAccountHybrid(t *testing.T) {
 	t.Parallel()
 
 	teardown, db := emptyDB(t)
 	defer teardown()
 
-	// We'll start the test by creating a new root manager that will be
-	// used for the duration of the test.
+	// Arrange a locked signing manager, then import an external account and
+	// derive its public children. This loads the watch-only account and its
+	// last-address cache entries that previously broke local unlocking.
 	var mgr *Manager
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
@@ -2955,6 +2956,30 @@ func TestNewRawAccountHybrid(t *testing.T) {
 	}
 
 	testNewRawAccount(t, mgr, db, accountNum, scopedMgr)
+
+	// Act by extending the external branch past its next index while locked,
+	// unlocking the local root, and extending again with the root unlocked.
+	// These are the same public extension/unlock paths used by recovery.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendExternalAddresses(ns, accountNum, 3)
+		if err != nil {
+			return err
+		}
+
+		err = mgr.Unlock(ns, privPassphrase)
+		if err != nil {
+			return err
+		}
+
+		return scopedMgr.ExtendExternalAddresses(ns, accountNum, 5)
+	})
+
+	// Assert external public derivation remains valid in both lock states
+	// and never prevents the containing signing manager from unlocking.
+	require.NoError(t, err)
+	require.False(t, mgr.IsLocked())
 }
 
 func testNewRawAccount(t *testing.T, _ *Manager, db walletdb.DB,
