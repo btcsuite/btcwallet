@@ -1371,6 +1371,10 @@ func listAddressesQuery(walletID uint32, req page.Request[uint32],
 // SQL wallets accept the import only when the wallet is watch-only under ADR
 // 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
 // until migration.
+// SQL success includes live registration on the Wallet lifetime. Registration
+// failure retains the committed address and repeating the import retries its
+// watch without changing stored data. ErrIndeterminateCommit returns no
+// success and does not automatically retry an uncertain SQL commit.
 func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
@@ -1424,7 +1428,8 @@ func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
 		return
 	}
 
-	_, err = w.store.NewImportedAddress(
+	// Reuse committed SQL imports so a failed watch can be retried safely.
+	storeInfo, err := w.importRawAddress(
 		r.ctx, db.NewImportedAddressParams{
 			WalletID:     w.id,
 			AddressType:  storeAddrType.Type,
@@ -1438,7 +1443,53 @@ func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
 		return
 	}
 
+	// The existing delivery path joins committed registration on the Wallet
+	// lifetime; kvdb keeps its legacy notification behavior below.
+	if w.addrStore == nil {
+		_, err = w.deliverStoreAddresses(r.ctx, []db.AddressInfo{*storeInfo})
+		r.respErrChan <- err
+
+		return
+	}
+
 	r.respErrChan <- w.cfg.Chain.NotifyReceived([]address.Address{addr})
+}
+
+// importRawAddress reuses a watch-only SQL address without changing ownership
+// or secrets. Existing address allocation serialization prevents concurrent
+// imports from racing the lookup and insertion; registration runs unlocked.
+func (w *Wallet) importRawAddress(ctx context.Context,
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
+
+	// Kvdb retains legacy duplicate handling. Signing SQL wallets must still
+	// enter the Store policy gate even when the address already belongs to us.
+	if w.addrStore != nil {
+		return w.store.NewImportedAddress(ctx, params)
+	}
+
+	if w.IsWatchOnly() {
+		w.addrMu.Lock()
+		defer w.addrMu.Unlock()
+
+		// The Wallet-scoped lookup returns canonical metadata and never
+		// overwrites a prior import's ciphertext with the repeated input.
+		info, err := w.store.GetAddress(ctx, db.GetAddressQuery{
+			WalletID:     w.id,
+			ScriptPubKey: params.ScriptPubKey,
+		})
+		if !errors.Is(err, db.ErrAddressNotFound) {
+			return info, err
+		}
+	}
+
+	// NewImportedAddress owns the SQL commit. An unknown outcome cannot be
+	// resolved by another lookup or automatically repeating the mutation.
+	info, err := w.store.NewImportedAddress(ctx, params)
+	if errors.Is(err, dbruntime.ErrAmbiguousTxCommit) {
+		return nil, fmt.Errorf("%w: %s", ErrIndeterminateCommit, err.Error())
+	}
+
+	return info, err
 }
 
 // ImportTaprootScript imports a taproot script for tracking. Script presence
@@ -1446,6 +1497,10 @@ func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
 // accept the script-only import only when the wallet is watch-only under ADR
 // 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
 // until migration.
+// SQL success includes live registration on the Wallet lifetime and returns
+// stored metadata for duplicates. Registration failure returns no address but
+// preserves committed data for a repeated import. ErrIndeterminateCommit
+// returns no success and does not automatically retry an uncertain SQL commit.
 func (w *Wallet) ImportTaprootScript(ctx context.Context,
 	tapscript waddrmgr.Tapscript) (AddressInfo, error) {
 
@@ -1510,7 +1565,9 @@ func (w *Wallet) handleImportTaprootScript(r importTaprootScriptReq) {
 		return
 	}
 
-	storeInfo, err := w.store.NewImportedAddress(
+	// Encryption remains outside persistence; duplicate SQL rows keep their
+	// original secrets even when the repeated request encrypts another shape.
+	storeInfo, err := w.importRawAddress(
 		r.ctx, db.NewImportedAddressParams{
 			WalletID:        w.id,
 			AddressType:     db.TaprootPubKey,
@@ -1520,6 +1577,23 @@ func (w *Wallet) handleImportTaprootScript(r importTaprootScriptReq) {
 	)
 	if err != nil {
 		r.respChan <- addressInfoResp{err: err}
+
+		return
+	}
+
+	// SQL delivery uses the stored script flag, including for an existing
+	// key-only address. Only kvdb retains the request-derived flag below.
+	if w.addrStore == nil {
+		batch, err := w.deliverStoreAddresses(
+			r.ctx, []db.AddressInfo{*storeInfo},
+		)
+		if err != nil {
+			r.respChan <- addressInfoResp{err: err}
+
+			return
+		}
+
+		r.respChan <- addressInfoResp{info: batch[0]}
 
 		return
 	}

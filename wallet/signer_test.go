@@ -1878,14 +1878,16 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	tapscript := newTestTapscript(t)
 	leafScript := tapscript.Leaves[0].Script
 
-	// Import notifies the chain of the new watch-only address.
+	// SQL import establishes a live watch on the Wallet lifetime before
+	// exposing the persisted script to the following resolution checks.
 	taprootKey, err := tapscript.TaprootKey()
 	require.NoError(t, err)
 	addr, err := address.NewAddressTaproot(
 		schnorr.SerializePubKey(taprootKey), w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
-	chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
+	chain.On("WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr}).
+		Return(nil).Once()
 
 	// Act: Import, inspect ciphertext, then resolve before and after locking.
 	info, err := w.ImportTaprootScript(t.Context(), tapscript)
