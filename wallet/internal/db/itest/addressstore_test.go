@@ -1183,22 +1183,21 @@ func TestNewImportedAddressDuplicate(t *testing.T) {
 	require.ErrorContains(t, err, "script_pub_key")
 }
 
-// TestNewImportedAddressDuplicateAcrossScopes verifies that imported-address
-// creation rejects the same script pubkey across different imported scopes in
-// one wallet.
+// TestNewImportedAddressDuplicateAcrossScopes verifies that a repeated raw
+// import preserves the canonical record even when its metadata differs.
 func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: commit one watch-only raw import and retain its identity and
+	// metadata so a different repeated representation cannot replace them.
 	store := NewTestStore(t)
-	// ADR 0012: imported addresses without private-key material require
-	// a watch-only wallet to satisfy the symmetric invariant.
 	walletID := newWatchOnlyWallet(
 		t, store, "wallet-duplicate-import-cross-scope",
 	)
 
 	scriptPubKey := RandomBytes(32)
 
-	_, err := store.NewImportedAddress(
+	original, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     walletID,
 			AddressType:  db.PubKeyHash,
@@ -1208,7 +1207,9 @@ func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = store.NewImportedAddress(
+	// Act: repeat the same wallet/script with another address type and key.
+	// Storage must resolve the definite duplicate rather than insert again.
+	repeated, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     walletID,
 			AddressType:  db.WitnessPubKey,
@@ -1216,9 +1217,93 @@ func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
 			ScriptPubKey: scriptPubKey,
 		},
 	)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "constraint")
-	require.ErrorContains(t, err, "script_pub_key")
+
+	// Assert: the repeated call returns the original identity and metadata,
+	// and the public imported-address listing still contains one row.
+	require.NoError(t, err)
+	require.Equal(t, original.ID, repeated.ID)
+	require.Equal(t, original.AddrType, repeated.AddrType)
+	require.Equal(t, original.PubKey, repeated.PubKey)
+	require.Equal(t, original.ScriptPubKey, repeated.ScriptPubKey)
+	require.True(t, original.CreatedAt.Equal(repeated.CreatedAt))
+	require.True(t, repeated.IsImported)
+	require.True(t, repeated.IsWatchOnly)
+
+	addresses := rawImportedAddresses(t, store, walletID, 2)
+	require.Len(t, addresses, 1)
+	require.Equal(t, *repeated, addresses[0])
+}
+
+// TestNewImportedAddressConcurrentDuplicates verifies that storage resolves
+// concurrent first imports to one canonical row without Wallet serialization.
+func TestNewImportedAddressConcurrentDuplicates(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: two callers share a fresh wallet/script and start together,
+	// exercising its existing transaction and uniqueness boundary.
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-concurrent-duplicate-import",
+	)
+	params := db.NewImportedAddressParams{
+		WalletID:     walletID,
+		AddressType:  db.WitnessPubKey,
+		ScriptPubKey: RandomBytes(32),
+		PubKey:       RandomBytes(33),
+	}
+
+	// importResult returns failures to the owner so assertions never run in
+	// the concurrent Store callers.
+	type importResult struct {
+		info *db.AddressInfo
+		err  error
+	}
+
+	const callers = 2
+
+	ctx := t.Context()
+	start := make(chan struct{})
+	results := make(chan importResult, callers)
+
+	// Act: release both writes together and collect every result before
+	// checking the single-row contract through the Store listing.
+	for range callers {
+		go func() {
+			<-start
+
+			info, err := store.NewImportedAddress(ctx, params)
+
+			results <- importResult{
+				info: info,
+				err:  err,
+			}
+		}()
+	}
+
+	close(start)
+
+	completed := make([]importResult, 0, callers)
+	for range callers {
+		completed = append(completed, <-results)
+	}
+
+	// Assert: both calls succeed with the same stored identity and public
+	// metadata, and no extra row is created by the losing insert.
+	addresses := rawImportedAddresses(t, store, walletID, 2)
+	require.Len(t, addresses, 1)
+
+	for _, result := range completed {
+		require.NoError(t, result.err)
+		require.NotNil(t, result.info)
+		require.Equal(t, addresses[0].ID, result.info.ID)
+		require.Equal(t, addresses[0].AddrType, result.info.AddrType)
+		require.Equal(t, addresses[0].PubKey, result.info.PubKey)
+		require.Equal(
+			t, addresses[0].ScriptPubKey, result.info.ScriptPubKey,
+		)
+		require.True(t, result.info.IsImported)
+		require.True(t, result.info.IsWatchOnly)
+	}
 }
 
 // TestNewImportedAddressDuplicateAcrossWallets verifies that wallet-scoped
