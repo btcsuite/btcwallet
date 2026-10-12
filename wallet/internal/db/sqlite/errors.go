@@ -80,6 +80,16 @@ func mapErr(err error) *dberr.SQLError {
 		err = fmt.Errorf("%w: %w", db.ErrAccountNumberConflict, err)
 	}
 
+	// Raw imports reuse only the wallet/script unique rejection. Match the
+	// column tuple while retaining its cause and SQL classification.
+	if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE && strings.Contains(
+		sqliteErr.Error(), "UNIQUE constraint failed: "+
+			"addresses.wallet_id, addresses.script_pub_key",
+	) {
+
+		err = fmt.Errorf("%w: %w", db.ErrAddressAlreadyExists, err)
+	}
+
 	return dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
 }
 
