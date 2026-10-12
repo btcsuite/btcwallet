@@ -17,6 +17,9 @@ const accountNameConstraint = "uidx_accounts_wallet_scope_account_name"
 // accountNumberConstraint identifies the derived-number index within a scope.
 const accountNumberConstraint = "uidx_accounts_scope_account_number"
 
+// addressScriptConstraint identifies one canonical script within a wallet.
+const addressScriptConstraint = "uidx_addresses_wallet_script_pub_key"
+
 // SQLSTATE helper constants support PostgreSQL error classification.
 const (
 	// connectionExceptionClass identifies PostgreSQL SQLSTATE class 08,
@@ -92,20 +95,28 @@ func mapErr(err error) *dberr.SQLError {
 	// transport fallback.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		// Only the account-name index identifies a caller name conflict;
-		// preserve the driver cause for SQL classification and diagnostics.
-		if pgErr.Code == codeUniqueViolation &&
-			pgErr.ConstraintName == accountNameConstraint {
+		// Unique violations share one SQLSTATE; the named constraint
+		// selects a domain identity while retaining the driver cause.
+		if pgErr.Code == codeUniqueViolation {
+			switch pgErr.ConstraintName {
+			case accountNameConstraint:
+				// Keep name collisions distinct from occupied
+				// derived numbers.
+				err = fmt.Errorf("%w: %w",
+					db.ErrAccountNameConflict, err)
 
-			err = fmt.Errorf("%w: %w", db.ErrAccountNameConflict, err)
-		}
+			case accountNumberConstraint:
+				// Exact allocation needs the occupied number
+				// and normal SQL classification.
+				err = fmt.Errorf("%w: %w",
+					db.ErrAccountNumberConflict, err)
 
-		// Exact allocation needs the occupied-number identity while the
-		// original driver cause retains normal SQL classification.
-		if pgErr.Code == codeUniqueViolation &&
-			pgErr.ConstraintName == accountNumberConstraint {
-
-			err = fmt.Errorf("%w: %w", db.ErrAccountNumberConflict, err)
+			case addressScriptConstraint:
+				// Only a wallet/script rejection permits reuse
+				// of its canonical raw-import row.
+				err = fmt.Errorf("%w: %w",
+					db.ErrAddressAlreadyExists, err)
+			}
 		}
 
 		return mapCode(pgErr.Code, err)

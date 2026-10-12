@@ -73,6 +73,14 @@ var (
 	// database.
 	ErrAddressNotFound = errors.New("address not found")
 
+	// ErrAddressAlreadyExists identifies the wallet/script uniqueness
+	// rejection, allowing raw imports to reuse stored data after rollback.
+	ErrAddressAlreadyExists = errors.New("address already exists")
+
+	// ErrIndeterminateCommit reports an unknown durable write outcome.
+	// Store callers must not retry the mutation or resolve it by readback.
+	ErrIndeterminateCommit = dbruntime.ErrAmbiguousTxCommit
+
 	// ErrKeyScopeNotFound is returned when a key scope is not found in the
 	// database.
 	ErrKeyScopeNotFound = errors.New("key scope not found")
@@ -376,6 +384,10 @@ type AddressStore interface {
 	// be spendable. Otherwise, it will be imported as watch-only. It
 	// returns information about the imported address or an error if the
 	// import fails.
+	// Imports without private keys reuse an existing wallet/script record
+	// after admission, preserving ownership, metadata, and secrets.
+	// Private-key imports retain their existing duplicate errors.
+	// ErrIndeterminateCommit returns no record and must not be retried.
 	NewImportedAddress(ctx context.Context,
 		params NewImportedAddressParams) (*AddressInfo, error)
 

@@ -2,12 +2,15 @@ package pg
 
 import (
 	"context"
+	"errors"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // NewImportedAddress imports a new address, script, or private key.
+// Admitted public/script duplicates return canonical metadata after a definite
+// insert rejection; uncertain commits and private-key duplicates are errors.
 func (s *Store) NewImportedAddress(ctx context.Context,
 	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
 
@@ -22,11 +25,25 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 
 		return err
 	})
-	if err != nil {
+	if err == nil {
+		return info, nil
+	}
+
+	// Uncertainty cannot enter duplicate readback, and private-key imports
+	// retain their refusal rather than silently reusing key material.
+	if errors.Is(err, db.ErrIndeterminateCommit) ||
+		params.HasPrivateKey() ||
+		!errors.Is(err, db.ErrAddressAlreadyExists) {
+
 		return nil, err
 	}
 
-	return info, nil
+	// execWrite has rolled back the rejected insert. The unique constraint
+	// selects the existing row, preserving its ownership and secrets.
+	return s.GetAddress(ctx, db.GetAddressQuery{
+		WalletID:     params.WalletID,
+		ScriptPubKey: params.ScriptPubKey,
+	})
 }
 
 // newImportedAddressOps adapts PostgreSQL sqlc queries to the shared
