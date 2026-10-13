@@ -62,8 +62,10 @@ type createImportedAccountOps struct {
 // Verify createImportedAccountOps implements db.CreateImportedAccountOps.
 var _ db.CreateImportedAccountOps = createImportedAccountOps{}
 
-// IsWalletWatchOnly implements db.CreateImportedAccountOps.
-func (o createImportedAccountOps) IsWalletWatchOnly(ctx context.Context,
+// PrepareWalletForAccountCreation implements db.CreateImportedAccountOps;
+// execWrite's immediate transaction already serializes account writers.
+func (o createImportedAccountOps) PrepareWalletForAccountCreation(
+	ctx context.Context,
 	walletID uint32) (bool, error) {
 
 	return getWalletWatchOnly(ctx, o.q, walletID)

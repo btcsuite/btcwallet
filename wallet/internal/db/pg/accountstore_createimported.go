@@ -62,8 +62,10 @@ type createImportedAccountOps struct {
 // Verify createImportedAccountOps implements db.CreateImportedAccountOps.
 var _ db.CreateImportedAccountOps = createImportedAccountOps{}
 
-// IsWalletWatchOnly implements db.CreateImportedAccountOps.
-func (o createImportedAccountOps) IsWalletWatchOnly(ctx context.Context,
+// PrepareWalletForAccountCreation implements db.CreateImportedAccountOps by
+// taking the wallet-row lock within the current PostgreSQL write transaction.
+func (o createImportedAccountOps) PrepareWalletForAccountCreation(
+	ctx context.Context,
 	walletID uint32) (bool, error) {
 
 	return getWalletForAccountCreation(ctx, o.q, walletID)
