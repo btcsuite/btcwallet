@@ -89,9 +89,11 @@ func requireAccountPrivKeyOnSpendable(walletID uint32, name string,
 // sequencing and invariants while each backend keeps sqlc query types, binding
 // shapes, and row-to-AccountInfo conversions local.
 type CreateImportedAccountOps interface {
-	// IsWalletWatchOnly returns whether the target wallet currently runs in
-	// watch-only mode.
-	IsWalletWatchOnly(ctx context.Context, walletID uint32) (bool, error)
+	// PrepareWalletForAccountCreation returns the persisted wallet mode and
+	// establishes backend serialization before any account write. PostgreSQL
+	// locks the wallet row; SQLite serializes writers in its write transaction.
+	PrepareWalletForAccountCreation(ctx context.Context,
+		walletID uint32) (bool, error)
 
 	// EnsureKeyScope returns the existing or newly created key-scope row ID for
 	// the wallet/scope pair, using addrSchema when the caller overrides the
@@ -127,7 +129,11 @@ func validateCreateImportedParams(ctx context.Context,
 		return err
 	}
 
-	walletIsWatchOnly, err := ops.IsWalletWatchOnly(ctx, params.WalletID)
+	// PostgreSQL acquires its cooperative wallet-row lock here, after basic
+	// request validation and before scope creation or account insertion.
+	walletIsWatchOnly, err := ops.PrepareWalletForAccountCreation(
+		ctx, params.WalletID,
+	)
 	if err != nil {
 		return fmt.Errorf("wallet watch only: %w", err)
 	}

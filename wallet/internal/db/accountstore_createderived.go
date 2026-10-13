@@ -115,9 +115,11 @@ type CreateDerivedAccountRow struct {
 // the sequencing and invariants while each backend keeps its sqlc query types,
 // binding shapes, and row conversions local.
 type CreateDerivedAccountOps interface {
-	// WalletWatchOnly returns whether the target wallet currently runs in
-	// watch-only mode.
-	WalletWatchOnly(ctx context.Context, walletID uint32) (bool, error)
+	// PrepareWalletForAccountCreation returns the wallet mode and establishes
+	// backend serialization before scope or account writes. PostgreSQL locks
+	// the wallet row; SQLite and kvdb serialize their write transactions.
+	PrepareWalletForAccountCreation(ctx context.Context,
+		walletID uint32) (bool, error)
 
 	// EnsureScope returns the existing or newly created key-scope row ID
 	// for the wallet/scope pair together with the schema persisted for that
@@ -262,7 +264,11 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, err
 	}
 
-	walletIsWatchOnly, err := ops.WalletWatchOnly(ctx, params.WalletID)
+	// PostgreSQL acquires its cooperative wallet-row lock here, after request
+	// validation and before allocating a scope or account number.
+	walletIsWatchOnly, err := ops.PrepareWalletForAccountCreation(
+		ctx, params.WalletID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("wallet watch only: %w", err)
 	}
