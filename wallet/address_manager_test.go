@@ -1754,14 +1754,14 @@ func TestImportTaprootScript(t *testing.T) {
 }
 
 // TestImportPublicKeySQLWatchFailureRetries checks that an unsuccessful watch
-// preserves the committed import and a repeated public call registers it.
+// preserves the committed import and a repeated public call registers it while
+// retaining the Wallet's signing root.
 func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: the Store supplies the same canonical record for both calls;
-	// each must finish storage before its own watch can authorize success.
+	// Arrange: a signing Wallet receives the canonical Store record twice;
+	// each mutation must finish before its watch can authorize success.
 	w, deps := createStartedSQLWalletWithMocks(t)
-	w.isWatchOnly = true
 
 	key, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -1775,6 +1775,8 @@ func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 	stored := importedPubKeyAddressInfoFromAddr(
 		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
 	)
+	stored.AccountName = ""
+	stored.KeyScope = db.KeyScope{}
 	params := db.NewImportedAddressParams{
 		WalletID:     w.id,
 		AddressType:  db.WitnessPubKey,
@@ -1808,11 +1810,13 @@ func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 	)
 
 	// Assert: the first caller sees failure and the repeat succeeds only
-	// after another watch; Store regressions cover canonical storage reuse.
+	// after another watch while the root remains signing. Store regressions
+	// cover canonical storage reuse.
 	// Fixture cleanup verifies both mutations and their ordered watches.
 	require.ErrorIs(t, firstErr, errDBMock)
 
 	require.NoError(t, retryErr)
+	require.False(t, w.IsWatchOnly())
 }
 
 // TestImportTaprootScriptSQLWatchFailureRetries checks that a script import
@@ -1820,10 +1824,9 @@ func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 func TestImportTaprootScriptSQLWatchFailureRetries(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: seal outside storage and have both Store calls return the
-	// canonical script record before their respective watch attempts.
+	// Arrange: seal a signing Wallet import outside storage. Both Store
+	// calls return its canonical script before their respective watches.
 	w, deps := createStartedSQLWalletWithMocks(t)
-	w.isWatchOnly = true
 
 	tapscript := newTestTapscript(t)
 	outputKey, err := tapscript.TaprootKey()
