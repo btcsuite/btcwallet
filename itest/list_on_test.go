@@ -15,6 +15,12 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
+	// External raw outputs retain custody and public reports after reopen.
+	{
+		Name:     "address manager raw import tracking",
+		TestFunc: testAddressManagerRawImportTracking,
+	},
+
 	// Raw imports must retain committed keys and retry live registration.
 	{
 		Name:     "address manager raw import public key",
