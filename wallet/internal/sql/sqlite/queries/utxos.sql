@@ -91,6 +91,12 @@ SELECT
     ks.purpose, -- script type, used for coin selection
     ks.coin_type, -- BIP-43 key scope purpose
     acc.account_name, -- BIP-43 key scope coin type
+    -- Raw custody depends on address key material; HD custody is resolved in Go.
+    cast(
+        NOT a.is_derived
+        AND coalesce(length(asec.encrypted_priv_key), 0) = 0
+        AS BOOLEAN
+    ) AS raw_is_watch_only,
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -159,6 +165,12 @@ SELECT
     ks.purpose, -- script type, used for coin selection
     ks.coin_type, -- BIP-43 key scope purpose
     acc.account_name, -- BIP-43 key scope coin type
+    -- Raw custody depends on address key material; HD custody is resolved in Go.
+    cast(
+        NOT a.is_derived
+        AND coalesce(length(asec.encrypted_priv_key), 0) = 0
+        AS BOOLEAN
+    ) AS raw_is_watch_only,
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
