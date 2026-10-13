@@ -26,15 +26,6 @@ var (
 	// material and cannot sign transactions.
 	ErrWatchOnlyViolation = errors.New("watch-only invariant violation")
 
-	// ErrSpendableWalletNeedsAddressPrivKey is returned when a non-watch-only
-	// wallet receives an imported address whose payload omits the encrypted
-	// address private key. Symmetric counterpart of ErrWatchOnlyViolation for
-	// the address surface; covers public-only AND script-only imports.
-	ErrSpendableWalletNeedsAddressPrivKey = errors.New(
-		"spendable wallet must not contain an imported address without " +
-			"private-key material",
-	)
-
 	// ErrNilDB is returned when a nil database connection pointer is
 	// provided to the wallet.
 	ErrNilDB = errors.New("wallet requires a non-nil database connection")
