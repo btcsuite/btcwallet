@@ -158,14 +158,21 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     acc.account_name,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
         FROM utxos AS u
         WHERE u.address_id = a.id
-    ) AS is_used
+    ) AS is_used,
+    -- Root mode or absent raw private material determines effective custody.
+    (
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(octet_length(s.encrypted_priv_key), 0) = 0
+        )
+    )::BOOLEAN AS is_watch_only
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN derived_addresses AS da ON a.id = da.address_id
@@ -196,10 +203,10 @@ type GetAddressByScriptPubKeyRow struct {
 	PubKey            []byte
 	CreatedAt         time.Time
 	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
 	AccountName       sql.NullString
 	HasScript         bool
 	IsUsed            bool
+	IsWatchOnly       bool
 }
 
 // Retrieves an address by its script pubkey and wallet.
@@ -222,10 +229,10 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.PubKey,
 		&i.CreatedAt,
 		&i.MasterFingerprint,
-		&i.WalletIsWatchOnly,
 		&i.AccountName,
 		&i.HasScript,
 		&i.IsUsed,
+		&i.IsWatchOnly,
 	)
 	return i, err
 }
@@ -566,14 +573,21 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     acc.account_name,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
         FROM utxos AS u
         WHERE u.address_id = a.id
-    ) AS is_used
+    ) AS is_used,
+    -- Root mode or absent raw private material determines effective custody.
+    (
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(octet_length(s.encrypted_priv_key), 0) = 0
+        )
+    )::BOOLEAN AS is_watch_only
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN derived_addresses AS da ON a.id = da.address_id
@@ -606,10 +620,10 @@ type ListAddressesByScriptPubKeysRow struct {
 	PubKey            []byte
 	CreatedAt         time.Time
 	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
 	AccountName       sql.NullString
 	HasScript         bool
 	IsUsed            bool
+	IsWatchOnly       bool
 }
 
 // Resolves a batch of script pubkeys to the wallet-owned address rows in a
@@ -641,10 +655,10 @@ func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddr
 			&i.PubKey,
 			&i.CreatedAt,
 			&i.MasterFingerprint,
-			&i.WalletIsWatchOnly,
 			&i.AccountName,
 			&i.HasScript,
 			&i.IsUsed,
+			&i.IsWatchOnly,
 		); err != nil {
 			return nil, err
 		}
@@ -676,14 +690,21 @@ SELECT
     a.pub_key,
     a.created_at,
     NULL::BIGINT AS master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     NULL::TEXT AS account_name,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
         FROM utxos AS u
         WHERE u.address_id = a.id
-    ) AS is_used
+    ) AS is_used,
+    -- Root mode or absent raw private material determines effective custody.
+    (
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(octet_length(s.encrypted_priv_key), 0) = 0
+        )
+    )::BOOLEAN AS is_watch_only
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
@@ -720,10 +741,10 @@ type ListRawImportedAddressesRow struct {
 	PubKey            []byte
 	CreatedAt         time.Time
 	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
 	AccountName       sql.NullString
 	HasScript         bool
 	IsUsed            bool
+	IsWatchOnly       bool
 }
 
 // Lists raw imported addresses in a wallet, ordered by address ID.
@@ -752,10 +773,10 @@ func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImpor
 			&i.PubKey,
 			&i.CreatedAt,
 			&i.MasterFingerprint,
-			&i.WalletIsWatchOnly,
 			&i.AccountName,
 			&i.HasScript,
 			&i.IsUsed,
+			&i.IsWatchOnly,
 		); err != nil {
 			return nil, err
 		}
