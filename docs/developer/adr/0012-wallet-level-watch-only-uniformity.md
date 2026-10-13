@@ -5,7 +5,8 @@
 Revision note: [PR #1411][mixed-account-pr] replaces this ADR's original
 wallet-wide custody uniformity rule with immutable wallet/root mode and
 per-account custody, allowing imported XPub accounts alongside local signing
-accounts. The raw-import admission rules remain unchanged.
+accounts. [PR #1412][raw-import-pr] extends this policy to accountless raw
+public-key and tapscript imports in signing wallets.
 
 A wallet can track an external signer's imported account XPub alongside
 accounts whose private keys derive from the wallet root. Importing the XPub
@@ -93,12 +94,31 @@ that bucket does not represent an imported XPub account.
 Raw-import admission applies per address, independently of XPub account
 custody:
 
-- On a spendable wallet, an imported address must carry its own
-  `encrypted_priv_key`. A public-only or script-only address import is
-  rejected with `ErrSpendableWalletNeedsAddressPrivKey`.
-- On a watch-only wallet, the same imported address is public-only and is
-  accepted; a private-key-bearing import is rejected with
+- Signing wallets accept raw public-key and tapscript imports without
+  requiring matching private-key material or changing the wallet root mode.
+- Watch-only wallets continue rejecting private-key-bearing imports with
   `ErrWatchOnlyViolation`.
+- A raw address is watch-only when its wallet is watch-only or its own
+  private-key ciphertext is absent or empty. Script ciphertext alone does not
+  supply signing authority. This check does not decrypt or validate ciphertext
+  and does not prove that a retained script can be satisfied.
+- Address reads reuse their existing address-secret join and Boolean result
+  for effective custody. UTXO queries expose raw private-key absence separately
+  from the existing Go shape helper's imported-HD custody rule. Keyless raw
+  outputs receive the existing false `Spendable` override; private raw and
+  local HD outputs retain their existing defaults and maturity checks.
+
+Raw imports reuse committed registration before public success. Repeated
+imports resolve canonical stored metadata and retry registration in either
+root mode. Matching wallet/output scripts retain their first tapscript; later
+reveals are not merged or substituted, and key-only records are not upgraded.
+Uncertain commits return no success and are not automatically retried. Wallet
+lifetime cancellation and Stop retain ownership of registration.
+
+Startup reconstructs watches from persisted addresses. Reopen preserves public
+address, balance, UTXO and transaction reporting, stored script access, local
+signing refusal for missing keys, and future receipt. This policy adds no
+historical scan, account selector or PSBT behavior.
 
 Derived addresses are unaffected: they inherit their key material from the
 account xpub/xpriv and are reached through `AccountKeyFromParams` (the
@@ -117,11 +137,11 @@ This ADR therefore treats P2A as transaction/output state, not as a standard
 managed or imported address. A spendable wallet that needs to observe an anchor
 tracks the concrete output through the relevant-output / watched-outpoint path,
 not by importing an address row. No imported-address or address-secret row is
-created for the anchor, so no symmetric-invariant exception is needed: the
-invariant never triggers on a path the anchor does not travel. The child
+created for the anchor, so raw admission and custody rules do not apply to
+this path. The child
 transaction that spends and fee-bumps the parent signs with the wallet's own
 key material on its other inputs/outputs; the keyless anchor input contributes
-no signature, so the spend flow stays safe under the uniform wallet-level
+no signature, so the spend flow retains the immutable wallet root-mode
 model.
 
 ## 3. Consequences
@@ -129,12 +149,13 @@ model.
 - Signing wallets can track external account XPubs while local accounts retain
   their existing signing behavior. Reopen preserves the custody distinction.
 - `db.AccountInfo.IsWatchOnly` and `db.AddressInfo.IsWatchOnly` describe
-  effective account/HD-child custody. They need not equal
-  `Wallet.IsWatchOnly()` in a signing wallet with an imported account.
+  effective account/HD-child custody. Raw address custody additionally reflects
+  its own private-key absence. These values need not equal
+  `Wallet.IsWatchOnly()` in a signing wallet tracking external material.
 - `db.UtxoInfo` needs no new watch-only field. Its existing optional
-  `Spendable` override marks imported HD children non-spendable; local
-  children and raw imports retain their existing conversion and wallet-default
-  behavior.
+  `Spendable` override marks imported HD children and keyless raw outputs
+  non-spendable; local children and private raw imports retain their existing
+  conversion and wallet-default behavior.
 - Account/address/UTXO reads do not consult `account_secrets` to infer
   custody. Existing account provenance identifies external accounts without
   mutable capability state or requiring a second wallet.
@@ -143,7 +164,8 @@ model.
   secrets may still be persisted; their presence does not change imported
   provenance into local root custody.
 - Raw-import per-address secret checks remain separate from XPub account
-  admission. The raw-import policy above is unchanged.
+  admission. The inverse raw private-key requirement is removed; watch-only
+  roots still refuse private material, and raw imports stay accountless.
 - Local accounts use wallet-root signing material. HD addresses do not require
   per-address private keys in `address_secrets`; absence of an address secret
   alone does not imply external custody.
@@ -174,6 +196,7 @@ model.
   public account tracking alongside local signing accounts.
 
 [mixed-account-pr]: https://github.com/btcsuite/btcwallet/pull/1411
+[raw-import-pr]: https://github.com/btcsuite/btcwallet/pull/1412
 [btc-core-v23-release]: https://bitcoincore.org/en/releases/23.0/
 [btc-core-createwallet]: https://bitcoincore.org/en/doc/31.0.0/rpc/wallet/createwallet/
 [btc-core-importdescriptors]: https://github.com/bitcoin/bitcoin/blob/v31.0/src/wallet/rpc/backup.cpp
