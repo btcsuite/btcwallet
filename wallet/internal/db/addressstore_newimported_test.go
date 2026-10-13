@@ -9,9 +9,7 @@ import (
 // TestNewImportedAddressParamsValidateWatchOnly verifies the watch-only
 // direction of the imported-address invariant: a watch-only wallet rejects a
 // private-key-bearing import, while a spendable wallet accepts any shape at
-// this stage. The symmetric spendable-side requirement (a spendable wallet
-// must carry spend material) is enforced separately by
-// RequireAddressPrivKeyOnSpendable.
+// this stage. Public material remains watch-only without an account owner.
 func TestNewImportedAddressParamsValidateWatchOnly(t *testing.T) {
 	t.Parallel()
 
@@ -38,7 +36,7 @@ func TestNewImportedAddressParamsValidateWatchOnly(t *testing.T) {
 			walletWatchOnly:  false,
 		},
 		{
-			name:            "spendable wallet accepts public-only (kvdb path)",
+			name:            "spendable wallet accepts public-only",
 			walletWatchOnly: false,
 		},
 	}
@@ -47,65 +45,21 @@ func TestNewImportedAddressParamsValidateWatchOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Arrange: bind the case's encrypted material and parent custody
+			// directly, isolating admission from backend persistence.
 			params := NewImportedAddressParams{
 				WalletID:            7,
 				EncryptedPrivateKey: tc.encryptedPrivKey,
 				EncryptedScript:     tc.encryptedScript,
 			}
+
+			// Act: validate only the parent/private-material custody rule.
 			err := params.ValidateWatchOnly(tc.walletWatchOnly)
 
+			// Assert: private material is refused under a watch-only parent;
+			// the signing and public-only controls remain admitted.
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
-
-				return
-			}
-
-			require.NoError(t, err)
-		})
-	}
-}
-
-// TestRequireAddressPrivKeyOnSpendable verifies the SQL-only symmetric
-// invariant for imported addresses: a spendable wallet requires an address
-// private key and rejects an import without one, while a watch-only wallet
-// accepts a public-only import. ADR 0012 grants script-only imports no waiver
-// on a spendable wallet.
-func TestRequireAddressPrivKeyOnSpendable(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		watchOnly     bool
-		hasPrivKey    bool
-		wantRejection bool
-	}{
-		{
-			name:          "spendable public-only rejected",
-			wantRejection: true,
-		},
-		{
-			name:       "spendable private-key accepted",
-			hasPrivKey: true,
-		},
-		{
-			name:      "watch-only public-only accepted",
-			watchOnly: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := RequireAddressPrivKeyOnSpendable(
-				7, tc.watchOnly, tc.hasPrivKey,
-			)
-
-			if tc.wantRejection {
-				require.ErrorIs(
-					t, err,
-					ErrSpendableWalletNeedsAddressPrivKey,
-				)
 
 				return
 			}

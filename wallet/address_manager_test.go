@@ -1758,10 +1758,9 @@ func TestImportTaprootScript(t *testing.T) {
 func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: the Store supplies the same canonical record for both calls;
-	// each must finish storage before its own watch can authorize success.
+	// Arrange: a signing Wallet receives the canonical Store record twice;
+	// each mutation must finish before its watch can authorize success.
 	w, deps := createStartedSQLWalletWithMocks(t)
-	w.isWatchOnly = true
 
 	key, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -1775,6 +1774,8 @@ func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 	stored := importedPubKeyAddressInfoFromAddr(
 		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
 	)
+	stored.AccountName = ""
+	stored.KeyScope = db.KeyScope{}
 	params := db.NewImportedAddressParams{
 		WalletID:     w.id,
 		AddressType:  db.WitnessPubKey,
@@ -1820,10 +1821,9 @@ func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 func TestImportTaprootScriptSQLWatchFailureRetries(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: seal outside storage and have both Store calls return the
-	// canonical script record before their respective watch attempts.
+	// Arrange: seal a signing Wallet import outside storage. Both Store
+	// calls return its canonical script before their respective watches.
 	w, deps := createStartedSQLWalletWithMocks(t)
-	w.isWatchOnly = true
 
 	tapscript := newTestTapscript(t)
 	outputKey, err := tapscript.TaprootKey()
@@ -2009,6 +2009,47 @@ func TestImportTaprootScriptSQLCommitUncertainty(t *testing.T) {
 	// invocation; fixture cleanup verifies the one mutation expectation.
 	require.ErrorIs(t, err, ErrIndeterminateCommit)
 	require.Zero(t, info)
+}
+
+// TestImportPublicKeySQLSigningWallet verifies that public raw material is
+// admitted and registered without changing the signing Wallet's root custody.
+func TestImportPublicKeySQLSigningWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: retain the fixture's signing root and return the public key's
+	// accountless result from one mutation before lifetime-owned registration.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := key.PubKey()
+	addr, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		pubKey.SerializeCompressed(), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	stored := importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	)
+	stored.AccountName = ""
+	stored.KeyScope = db.KeyScope{}
+	insert := deps.store.On("NewImportedAddress", t.Context(),
+		db.NewImportedAddressParams{
+			WalletID:     w.id,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: stored.ScriptPubKey,
+			PubKey:       pubKey.SerializeCompressed(),
+		}).Return(stored, nil).Once()
+	deps.chain.On("WatchAddrsFromTip", w.lifetimeCtx,
+		[]address.Address{addr}).Return(nil).Once().NotBefore(insert)
+
+	// Act: import through the public API on the unchanged signing fixture.
+	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
+
+	// Assert: success follows registration and leaves root mode signing;
+	// fixture cleanup verifies the ordered Store mutation and chain watch.
+	require.NoError(t, err)
+	require.False(t, w.IsWatchOnly())
 }
 
 // TestImportPublicKeySQLFinishesCommittedWatch checks that caller cancellation
