@@ -88,8 +88,9 @@ type derivedAccountKeyDeriver interface {
 		account uint32) ([]byte, []byte, error)
 }
 
-// WalletWatchOnly implements db.CreateDerivedAccountOps.
-func (o *createDerivedAccountOps) WalletWatchOnly(
+// PrepareWalletForAccountCreation implements db.CreateDerivedAccountOps;
+// walletdb.Update already serializes this account write transaction.
+func (o *createDerivedAccountOps) PrepareWalletForAccountCreation(
 	_ context.Context, _ uint32) (bool, error) {
 
 	return o.mgr.WatchOnly(), nil

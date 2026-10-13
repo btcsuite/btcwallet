@@ -113,7 +113,9 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	}
 
 	ops := &mockCreateDerivedAccountOps{}
-	walletCall := ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	walletCall := ops.On(
+		"PrepareWalletForAccountCreation", mock.Anything, uint32(7),
+	).Return(
 		true, nil,
 	).Once()
 	ensureScopeCall := ops.On(
@@ -172,7 +174,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidParams(t *testing.T) {
 	require.ErrorIs(t, err, ErrMissingAccountName)
 
 	// Explicitly assert zero calls for each backend method.
-	ops.AssertNotCalled(t, "WalletWatchOnly")
+	ops.AssertNotCalled(t, "PrepareWalletForAccountCreation")
 	ops.AssertNotCalled(t, "EnsureScope")
 	ops.AssertNotCalled(t, "AllocateAccountNumber")
 	ops.AssertNotCalled(t, "CreateDerivedAccount")
@@ -188,7 +190,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -232,7 +234,7 @@ func TestCreateDerivedAccountWithOpsMaxAccountNumber(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -276,7 +278,10 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			name: "wallet watch only",
 			setupOps: func() *mockCreateDerivedAccountOps {
 				ops := &mockCreateDerivedAccountOps{}
-				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+				ops.On(
+					"PrepareWalletForAccountCreation", mock.Anything,
+					uint32(7),
+				).Return(
 					false, errTestWallet,
 				).Once()
 
@@ -288,7 +293,10 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			name: "ensure scope",
 			setupOps: func() *mockCreateDerivedAccountOps {
 				ops := &mockCreateDerivedAccountOps{}
-				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+				ops.On(
+					"PrepareWalletForAccountCreation", mock.Anything,
+					uint32(7),
+				).Return(
 					false, nil,
 				).Once()
 				ops.On(
@@ -307,7 +315,10 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			name: "allocate account number",
 			setupOps: func() *mockCreateDerivedAccountOps {
 				ops := &mockCreateDerivedAccountOps{}
-				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+				ops.On(
+					"PrepareWalletForAccountCreation", mock.Anything,
+					uint32(7),
+				).Return(
 					false, nil,
 				).Once()
 				ops.On(
@@ -335,7 +346,10 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			name: "create account",
 			setupOps: func() *mockCreateDerivedAccountOps {
 				ops := &mockCreateDerivedAccountOps{}
-				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+				ops.On(
+					"PrepareWalletForAccountCreation", mock.Anything,
+					uint32(7),
+				).Return(
 					false, nil,
 				).Once()
 				ops.On("EnsureScope", mock.Anything, uint32(7), KeyScope{
@@ -405,7 +419,7 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -456,7 +470,7 @@ func TestCreateDerivedAccountWithOpsRollsBackOnDeriveFnError(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -500,7 +514,7 @@ func TestCreateDerivedAccountWithOpsNilDeriveFn(t *testing.T) {
 
 	require.Nil(t, info)
 	require.ErrorIs(t, err, errNilAccountDerivationFunc)
-	ops.AssertNotCalled(t, "WalletWatchOnly")
+	ops.AssertNotCalled(t, "PrepareWalletForAccountCreation")
 	ops.AssertNotCalled(t, "EnsureScope")
 	ops.AssertNotCalled(t, "AllocateAccountNumber")
 	ops.AssertNotCalled(t, "CreateDerivedAccount")
@@ -518,7 +532,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -561,7 +575,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPublicKey(
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -604,7 +618,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPrivateKey(
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		false, nil,
 	).Once()
 	ops.On(
@@ -647,7 +661,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataWatchOnlyHasPriv(
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, uint32(7)).Return(
 		true, nil,
 	).Once()
 	ops.On(
@@ -694,15 +708,16 @@ type mockCreateDerivedAccountOps struct {
 
 var _ CreateDerivedAccountOps = (*mockCreateDerivedAccountOps)(nil)
 
-// WalletWatchOnly implements CreateDerivedAccountOps.
-func (m *mockCreateDerivedAccountOps) WalletWatchOnly(ctx context.Context,
+// PrepareWalletForAccountCreation implements CreateDerivedAccountOps.
+func (m *mockCreateDerivedAccountOps) PrepareWalletForAccountCreation(
+	ctx context.Context,
 	walletID uint32) (bool, error) {
 
 	args := m.Called(ctx, walletID)
 
 	isWatchOnly, ok := args.Get(0).(bool)
 	if !ok {
-		return false, mockTypeError("WalletWatchOnly result")
+		return false, mockTypeError("PrepareWalletForAccountCreation result")
 	}
 
 	return isWatchOnly, args.Error(1)
@@ -846,7 +861,7 @@ func TestCreateDerivedAccountRejectsScopeConflict(t *testing.T) {
 		InternalAddrType: PubKeyHash,
 	}
 	ops := &mockCreateDerivedAccountOps{}
-	ops.On("WalletWatchOnly", mock.Anything, params.WalletID).
+	ops.On("PrepareWalletForAccountCreation", mock.Anything, params.WalletID).
 		Return(false, nil).Once()
 	ops.On("EnsureScope", mock.Anything, params.WalletID, params.Scope,
 		params.AddrSchema).Return(

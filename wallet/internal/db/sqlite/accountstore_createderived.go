@@ -48,8 +48,10 @@ type createDerivedAccountOps struct {
 	q *sqlc.Queries
 }
 
-// WalletWatchOnly implements db.CreateDerivedAccountOps.
-func (o createDerivedAccountOps) WalletWatchOnly(ctx context.Context,
+// PrepareWalletForAccountCreation implements db.CreateDerivedAccountOps;
+// execWrite's immediate transaction already serializes account writers.
+func (o createDerivedAccountOps) PrepareWalletForAccountCreation(
+	ctx context.Context,
 	walletID uint32) (bool, error) {
 
 	return getWalletWatchOnly(ctx, o.q, walletID)

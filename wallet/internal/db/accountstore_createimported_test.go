@@ -68,7 +68,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 
 	ops := &mockCreateImportedAccountOps{}
 	walletCall := ops.On(
-		"IsWalletWatchOnly", mock.Anything, params.WalletID,
+		"PrepareWalletForAccountCreation", mock.Anything, params.WalletID,
 	).Return(false, nil).Once()
 	ensureScopeCall := ops.On(
 		"EnsureKeyScope", mock.Anything, params.WalletID, params.Scope,
@@ -128,7 +128,7 @@ func TestCreateImportedAccountWithOpsRejectsInvalidParams(t *testing.T) {
 
 	require.Nil(t, info)
 	require.ErrorIs(t, err, ErrMissingAccountName)
-	ops.AssertNotCalled(t, "IsWalletWatchOnly")
+	ops.AssertNotCalled(t, "PrepareWalletForAccountCreation")
 	ops.AssertNotCalled(t, "EnsureKeyScope")
 	ops.AssertNotCalled(t, "CreateImportedAccount")
 	ops.AssertNotCalled(t, "CreateAccountSecret")
@@ -147,7 +147,9 @@ func TestCreateImportedAccountWithOpsRejectsWatchOnlyViolation(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("IsWalletWatchOnly", mock.Anything, params.WalletID).Return(
+	ops.On(
+		"PrepareWalletForAccountCreation", mock.Anything, params.WalletID,
+	).Return(
 		true, nil,
 	).Once()
 
@@ -192,7 +194,7 @@ func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	walletCall := ops.On("IsWalletWatchOnly", mock.Anything,
+	walletCall := ops.On("PrepareWalletForAccountCreation", mock.Anything,
 		params.WalletID,
 	).Return(true, nil).Once()
 	ensureScopeCall := ops.On("EnsureKeyScope", mock.Anything,
@@ -232,7 +234,9 @@ func TestCreateImportedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			opOps.AssertExpectations(t)
 		})
 
-		opOps.On("IsWalletWatchOnly", mock.Anything, uint32(7)).Return(
+		opOps.On(
+			"PrepareWalletForAccountCreation", mock.Anything, uint32(7),
+		).Return(
 			false, errTestImportedWallet,
 		).Once()
 
@@ -257,7 +261,10 @@ func TestCreateImportedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			opOps.AssertExpectations(t)
 		})
 
-		opOps.On("IsWalletWatchOnly", mock.Anything, params.WalletID).Return(
+		opOps.On(
+			"PrepareWalletForAccountCreation", mock.Anything,
+			params.WalletID,
+		).Return(
 			false, nil,
 		).Once()
 		opOps.On("EnsureKeyScope", mock.Anything, params.WalletID,
@@ -283,7 +290,10 @@ func TestCreateImportedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			opOps.AssertExpectations(t)
 		})
 
-		opOps.On("IsWalletWatchOnly", mock.Anything, params.WalletID).Return(
+		opOps.On(
+			"PrepareWalletForAccountCreation", mock.Anything,
+			params.WalletID,
+		).Return(
 			false, nil,
 		).Once()
 		opOps.On("EnsureKeyScope", mock.Anything, params.WalletID,
@@ -316,7 +326,10 @@ func TestCreateImportedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			opOps.AssertExpectations(t)
 		})
 
-		opOps.On("IsWalletWatchOnly", mock.Anything, params.WalletID).Return(
+		opOps.On(
+			"PrepareWalletForAccountCreation", mock.Anything,
+			params.WalletID,
+		).Return(
 			false, nil,
 		).Once()
 		opOps.On("EnsureKeyScope", mock.Anything, params.WalletID,
@@ -351,7 +364,10 @@ func TestCreateImportedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			opOps.AssertExpectations(t)
 		})
 
-		opOps.On("IsWalletWatchOnly", mock.Anything, params.WalletID).Return(
+		opOps.On(
+			"PrepareWalletForAccountCreation", mock.Anything,
+			params.WalletID,
+		).Return(
 			false, nil,
 		).Once()
 		opOps.On("EnsureKeyScope", mock.Anything, params.WalletID,
@@ -404,15 +420,16 @@ type mockCreateImportedAccountOps struct {
 
 var _ CreateImportedAccountOps = (*mockCreateImportedAccountOps)(nil)
 
-// IsWalletWatchOnly implements CreateImportedAccountOps.
-func (m *mockCreateImportedAccountOps) IsWalletWatchOnly(ctx context.Context,
+// PrepareWalletForAccountCreation implements CreateImportedAccountOps.
+func (m *mockCreateImportedAccountOps) PrepareWalletForAccountCreation(
+	ctx context.Context,
 	walletID uint32) (bool, error) {
 
 	args := m.Called(ctx, walletID)
 
 	isWatchOnly, ok := args.Get(0).(bool)
 	if !ok {
-		return false, mockTypeError("IsWalletWatchOnly result")
+		return false, mockTypeError("PrepareWalletForAccountCreation result")
 	}
 
 	return isWatchOnly, args.Error(1)

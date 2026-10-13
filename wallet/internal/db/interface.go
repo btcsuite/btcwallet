@@ -323,10 +323,10 @@ type AddressDerivationFunc func(ctx context.Context,
 // derived account number to obtain the wallet-derived account material. The
 // db layer does not perform crypto.
 //
-// The callback runs with the wallet watch-only mode the workflow loaded via
-// ops.WalletWatchOnly. It MUST NOT call db.Store methods or open a walletdb
-// transaction: the store is already inside a write tx and nested access can
-// deadlock (SQLite) or break tx semantics.
+// The callback receives the wallet mode loaded by
+// ops.PrepareWalletForAccountCreation. It MUST NOT call db.Store methods or
+// open a walletdb transaction: the store is already inside a write tx and
+// nested access can deadlock (SQLite) or break tx semantics.
 type AccountDerivationFunc func(ctx context.Context, scope KeyScope,
 	accountNumber uint32,
 	walletIsWatchOnly bool) (*DerivedAccountData, error)
