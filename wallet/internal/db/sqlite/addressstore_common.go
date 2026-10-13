@@ -68,7 +68,7 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.AddressBranch, base.AddressIndex, base.IsDerived,
 			base.AccountIsDerived, base.ScriptPubKey,
 			base.PubKey, base.CreatedAt,
-			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+			base.IsWatchOnly, base.HasScript, base.IsUsed,
 		)
 
 	case sqlc.ListAddressesByScriptPubKeysRow:
@@ -79,7 +79,7 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.AddressBranch, base.AddressIndex, base.IsDerived,
 			base.AccountIsDerived, base.ScriptPubKey,
 			base.PubKey, base.CreatedAt,
-			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+			base.IsWatchOnly, base.HasScript, base.IsUsed,
 		)
 
 	case sqlc.ListRawImportedAddressesRow:
@@ -90,7 +90,7 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			sql.NullInt64{}, sql.NullInt64{}, base.IsDerived,
 			sql.NullBool{}, base.ScriptPubKey,
 			base.PubKey, base.CreatedAt,
-			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+			base.IsWatchOnly, base.HasScript, base.IsUsed,
 		)
 
 	case sqlc.ListAddressesByAccountRow:
