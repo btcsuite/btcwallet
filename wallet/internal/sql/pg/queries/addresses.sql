@@ -28,14 +28,21 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     acc.account_name,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
         FROM utxos AS u
         WHERE u.address_id = a.id
-    ) AS is_used
+    ) AS is_used,
+    -- Root mode or absent raw private material determines effective custody.
+    (
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(octet_length(s.encrypted_priv_key), 0) = 0
+        )
+    )::BOOLEAN AS is_watch_only
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN derived_addresses AS da ON a.id = da.address_id
@@ -65,14 +72,21 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     acc.account_name,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
         FROM utxos AS u
         WHERE u.address_id = a.id
-    ) AS is_used
+    ) AS is_used,
+    -- Root mode or absent raw private material determines effective custody.
+    (
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(octet_length(s.encrypted_priv_key), 0) = 0
+        )
+    )::BOOLEAN AS is_watch_only
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN derived_addresses AS da ON a.id = da.address_id
@@ -276,14 +290,21 @@ SELECT
     a.pub_key,
     a.created_at,
     NULL::BIGINT AS master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     NULL::TEXT AS account_name,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
         FROM utxos AS u
         WHERE u.address_id = a.id
-    ) AS is_used
+    ) AS is_used,
+    -- Root mode or absent raw private material determines effective custody.
+    (
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(octet_length(s.encrypted_priv_key), 0) = 0
+        )
+    )::BOOLEAN AS is_watch_only
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id

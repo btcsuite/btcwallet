@@ -28,7 +28,6 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     cast(
         EXISTS (
             SELECT 1
@@ -37,6 +36,15 @@ SELECT
         ) AS BOOLEAN
     ) AS is_used,
     acc.account_name,
+    -- Root mode or absent raw private material determines effective custody.
+    cast(
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(length(s.encrypted_priv_key), 0) = 0
+        )
+        AS BOOLEAN
+    ) AS is_watch_only,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -67,7 +75,6 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     cast(
         EXISTS (
             SELECT 1
@@ -76,6 +83,15 @@ SELECT
         ) AS BOOLEAN
     ) AS is_used,
     acc.account_name,
+    -- Root mode or absent raw private material determines effective custody.
+    cast(
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(length(s.encrypted_priv_key), 0) = 0
+        )
+        AS BOOLEAN
+    ) AS is_watch_only,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -282,7 +298,6 @@ SELECT
     a.pub_key,
     a.created_at,
     0 AS master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
     cast(
         EXISTS (
             SELECT 1
@@ -291,6 +306,15 @@ SELECT
         ) AS BOOLEAN
     ) AS is_used,
     '' AS account_name,
+    -- Root mode or absent raw private material determines effective custody.
+    cast(
+        w.is_watch_only
+        OR (
+            NOT a.is_derived
+            AND coalesce(length(s.encrypted_priv_key), 0) = 0
+        )
+        AS BOOLEAN
+    ) AS is_watch_only,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id

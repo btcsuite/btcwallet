@@ -95,6 +95,11 @@ SELECT
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
     (asec.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    -- Raw custody depends on address key material; HD custody is resolved in Go.
+    (
+        NOT a.is_derived
+        AND coalesce(octet_length(asec.encrypted_priv_key), 0) = 0
+    )::BOOLEAN AS raw_is_watch_only,
     -- is_locked: TRUE when an active (non-expired) lease exists for this output.
     -- now_utc is a caller-supplied current UTC timestamp used for the lease
     -- expiry comparison; passed in rather than read from the DB clock so results
@@ -161,6 +166,11 @@ SELECT
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
     (asec.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    -- Raw custody depends on address key material; HD custody is resolved in Go.
+    (
+        NOT a.is_derived
+        AND coalesce(octet_length(asec.encrypted_priv_key), 0) = 0
+    )::BOOLEAN AS raw_is_watch_only,
     -- is_locked: TRUE when an active (non-expired) lease exists for this output.
     -- now_utc is a caller-supplied current UTC timestamp used for the lease
     -- expiry comparison; passed in rather than read from the DB clock so results
