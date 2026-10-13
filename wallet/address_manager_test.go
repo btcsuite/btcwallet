@@ -1396,8 +1396,10 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 	).Return(importedPubKeyAddressInfoFromAddr(
 		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
 	), nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{addr}).
-		Return(nil).Once()
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once()
 
 	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
 	require.NoError(t, err)
@@ -1629,6 +1631,8 @@ func TestListAddressesImportedAlias(t *testing.T) {
 func TestImportPublicKey(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: return the canonical imported record from storage and demand
+	// chain registration before the public call may report success.
 	w, deps := createStartedWalletWithMocks(t)
 
 	privKey, err := btcec.NewPrivateKey()
@@ -1654,10 +1658,16 @@ func TestImportPublicKey(t *testing.T) {
 	).Return(importedPubKeyAddressInfoFromAddr(
 		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
 	), nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{addr}).
-		Return(nil).Once()
 
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once()
+
+	// Act: import the public key through the admitted Wallet request.
 	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
+
+	// Assert: success permits querying the persisted watch-only metadata;
+	// fixture cleanup verifies the required Store and chain calls.
 	require.NoError(t, err)
 
 	expectStoreAddressInfo(t, w, deps, addr, importedPubKeyAddressInfoFromAddr(
@@ -1674,9 +1684,10 @@ func TestImportPublicKey(t *testing.T) {
 func TestImportTaprootScript(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: create a started Wallet and seal the script outside storage,
+	// then return its canonical record and require lifetime registration.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// Create a new tapscript to import.
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
@@ -1726,14 +1737,464 @@ func TestImportTaprootScript(t *testing.T) {
 		HasScript:    true,
 		IsWatchOnly:  true,
 	}, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{addr}).
-		Return(nil).Once()
 
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once()
+
+	// Act: import the script through the public Wallet request boundary.
 	info, err := w.ImportTaprootScript(t.Context(), tapscript)
+
+	// Assert: only registered canonical script metadata reaches the caller;
+	// fixture cleanup verifies encryption, persistence and registration.
 	require.NoError(t, err)
 	require.Equal(t, addr, info.Addr)
 	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
 	require.True(t, info.Imported)
+}
+
+// TestImportPublicKeySQLWatchFailureRetries checks that an unsuccessful watch
+// preserves the committed import and a repeated public call registers it.
+func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the Store supplies the same canonical record for both calls;
+	// each must finish storage before its own watch can authorize success.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := key.PubKey()
+	addr, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		pubKey.SerializeCompressed(), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	stored := importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	)
+	params := db.NewImportedAddressParams{
+		WalletID:     w.id,
+		AddressType:  db.WitnessPubKey,
+		ScriptPubKey: stored.ScriptPubKey,
+		PubKey:       pubKey.SerializeCompressed(),
+	}
+
+	firstImport := deps.store.On(
+		"NewImportedAddress", t.Context(), params,
+	).Return(stored, nil).Once()
+
+	repeatedImport := deps.store.On(
+		"NewImportedAddress", t.Context(), params,
+	).Return(stored, nil).Once().NotBefore(firstImport)
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(errDBMock).Once().NotBefore(firstImport)
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once().NotBefore(repeatedImport)
+
+	// Act: repeat the same import after registration reports failure, using
+	// the public API while the Wallet remains available to accept requests.
+	firstErr := w.ImportPublicKey(
+		t.Context(), pubKey, waddrmgr.WitnessPubKey,
+	)
+	retryErr := w.ImportPublicKey(
+		t.Context(), pubKey, waddrmgr.WitnessPubKey,
+	)
+
+	// Assert: the first caller sees failure and the repeat succeeds only
+	// after another watch; Store regressions cover canonical storage reuse.
+	// Fixture cleanup verifies both mutations and their ordered watches.
+	require.ErrorIs(t, firstErr, errDBMock)
+
+	require.NoError(t, retryErr)
+}
+
+// TestImportTaprootScriptSQLWatchFailureRetries checks that a script import
+// returns no success on watch failure and reuses its stored metadata on retry.
+func TestImportTaprootScriptSQLWatchFailureRetries(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: seal outside storage and have both Store calls return the
+	// canonical script record before their respective watch attempts.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	tapscript := newTestTapscript(t)
+	outputKey, err := tapscript.TaprootKey()
+	require.NoError(t, err)
+
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	encoded, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	encrypted := []byte("original sealed script")
+
+	deps.vault.On("Encrypt", waddrmgr.CKTPublic, encoded).
+		Return(encrypted, nil).Times(2)
+
+	stored := &db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		IsImported:   true,
+		IsWatchOnly:  true,
+		HasScript:    true,
+		ScriptPubKey: pkScript,
+	}
+
+	params := db.NewImportedAddressParams{
+		WalletID:        w.id,
+		AddressType:     db.TaprootPubKey,
+		ScriptPubKey:    pkScript,
+		EncryptedScript: encrypted,
+	}
+
+	firstImport := deps.store.On(
+		"NewImportedAddress", t.Context(), params,
+	).Return(stored, nil).Once()
+
+	repeatedImport := deps.store.On(
+		"NewImportedAddress", t.Context(), params,
+	).Return(stored, nil).Once().NotBefore(firstImport)
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(errDBMock).Once().NotBefore(firstImport)
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once().NotBefore(repeatedImport)
+
+	// Act: import once with a failed registration and then repeat the
+	// public call so its committed record supplies the watch and returned
+	// metadata.
+	failed, firstErr := w.ImportTaprootScript(t.Context(), tapscript)
+	info, retryErr := w.ImportTaprootScript(t.Context(), tapscript)
+
+	// Assert: failure exposes no address and the repeat returns stored
+	// script metadata only after its required registration succeeds.
+	// Cleanup verifies encryption, storage, and both watch attempts.
+	require.ErrorIs(t, firstErr, errDBMock)
+	require.Zero(t, failed)
+
+	require.NoError(t, retryErr)
+	require.Equal(t, addr, info.Addr)
+	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
+}
+
+// TestImportTaprootScriptSQLReturnsStoredMetadata checks that a repeated script
+// request cannot turn an existing key-only address into a script-owned row.
+func TestImportTaprootScriptSQLReturnsStoredMetadata(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the output already belongs to a key-only import. A script
+	// representation with the same output key must leave its metadata
+	// intact.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	tapscript := waddrmgr.Tapscript{
+		Type:          waddrmgr.TaprootFullKeyOnly,
+		FullOutputKey: key.PubKey(),
+	}
+
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(key.PubKey()), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	encoded, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	encrypted := []byte("unused repeat ciphertext")
+
+	deps.vault.On("Encrypt", waddrmgr.CKTPublic, encoded).
+		Return(encrypted, nil).Once()
+
+	stored := &db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		ScriptPubKey: pkScript,
+		PubKey:       key.PubKey().SerializeCompressed(),
+		IsImported:   true,
+		IsWatchOnly:  true,
+	}
+
+	deps.store.On(
+		"NewImportedAddress", t.Context(), db.NewImportedAddressParams{
+			WalletID:        w.id,
+			AddressType:     db.TaprootPubKey,
+			ScriptPubKey:    pkScript,
+			EncryptedScript: encrypted,
+		},
+	).Return(stored, nil).Once()
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Return(nil).Once()
+
+	// Act: repeat the import with a script representation of the owned key.
+	info, err := w.ImportTaprootScript(t.Context(), tapscript)
+
+	// Assert: delivery uses the canonical key-only metadata returned by
+	// storage instead of inferring script ownership from the repeat input.
+	// Fixture cleanup verifies the required Store, vault, and chain calls.
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.TaprootPubKey, info.AddrType)
+	require.Equal(t, key.PubKey(), info.PubKey)
+}
+
+// TestImportTaprootScriptSQLCommitUncertainty checks that an uncertain SQL
+// commit returns no address through the public script import API.
+func TestImportTaprootScriptSQLCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: seal the script outside persistence and make its one Store
+	// insertion ambiguous, without arranging readback or watch side
+	// effects.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	tapscript := newTestTapscript(t)
+	outputKey, err := tapscript.TaprootKey()
+	require.NoError(t, err)
+
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	encoded, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	encrypted := []byte("sealed uncertain script")
+
+	deps.vault.On("Encrypt", waddrmgr.CKTPublic, encoded).
+		Return(encrypted, nil).Once()
+
+	deps.store.On(
+		"NewImportedAddress", t.Context(), db.NewImportedAddressParams{
+			WalletID:        w.id,
+			AddressType:     db.TaprootPubKey,
+			ScriptPubKey:    pkScript,
+			EncryptedScript: encrypted,
+		},
+	).Return(nil, db.ErrIndeterminateCommit).Once()
+
+	// Act: perform the public import once with that uncertain commit
+	// result.
+	info, err := w.ImportTaprootScript(t.Context(), tapscript)
+
+	// Assert: no successful address escapes and no Store retry or watch
+	// call can occur beyond the single mutation authorized by this
+	// invocation; fixture cleanup verifies the one mutation expectation.
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.Zero(t, info)
+}
+
+// TestImportPublicKeySQLFinishesCommittedWatch checks that caller cancellation
+// after commit neither cancels registration nor lets the caller abandon it.
+func TestImportPublicKeySQLFinishesCommittedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: cancel the caller as insertion finishes, then pause the live
+	// watch. The Wallet lifetime remains the sole cancellation authority.
+	w, deps := createStartedSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := key.PubKey()
+	addr, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		pubKey.SerializeCompressed(), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	stored := importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	)
+
+	deps.store.On(
+		"NewImportedAddress", ctx, db.NewImportedAddressParams{
+			WalletID:     w.id,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: stored.ScriptPubKey,
+			PubKey:       pubKey.SerializeCompressed(),
+		},
+	).Run(func(mock.Arguments) {
+		cancel()
+	}).Return(stored, nil).Once()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(nil).Once()
+
+	result := make(chan error, 1)
+
+	// Act: import asynchronously so the owning test can inspect the public
+	// completion boundary while registration is paused after caller cancel.
+	go func() {
+		result <- w.ImportPublicKey(ctx, pubKey, waddrmgr.WitnessPubKey)
+	}()
+
+	<-entered
+
+	// Assert: the caller is canceled, but the live Wallet context and
+	// joined call remain active until registration is released by the
+	// owning test. Fixture cleanup verifies the Store and chain calls.
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.NoError(t, w.lifetimeCtx.Err())
+
+	select {
+	case err := <-result:
+		t.Fatalf("import returned before registration: %v", err)
+
+	default:
+	}
+
+	unblock()
+	require.ErrorIs(t, <-result, context.Canceled)
+}
+
+// TestImportTaprootScriptSQLStopJoinsRegistration checks that shutdown cancels
+// a blocked committed watch and waits until the admitted handler returns.
+func TestImportTaprootScriptSQLStopJoinsRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: reuse an existing script address, then block its
+	// registration until both Wallet cancellation and an explicit handler
+	// release occur.
+	w, deps := createSQLWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	startLoadedWalletForTest(t, w)
+
+	tapscript := newTestTapscript(t)
+	outputKey, err := tapscript.TaprootKey()
+	require.NoError(t, err)
+
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	encoded, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	encrypted := []byte("unused repeated ciphertext")
+
+	deps.vault.On("Encrypt", waddrmgr.CKTPublic, encoded).
+		Return(encrypted, nil).Once()
+
+	deps.vault.On("Lock").Return().Once()
+
+	deps.store.On(
+		"NewImportedAddress", t.Context(), db.NewImportedAddressParams{
+			WalletID:        w.id,
+			AddressType:     db.TaprootPubKey,
+			ScriptPubKey:    pkScript,
+			EncryptedScript: encrypted,
+		},
+	).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		ScriptPubKey: pkScript,
+		HasScript:    true,
+		IsImported:   true,
+		IsWatchOnly:  true,
+	}, nil).Once()
+
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+
+	deps.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	).Run(func(args mock.Arguments) {
+		ctx, _ := args.Get(0).(context.Context)
+
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+	}).Return(context.Canceled).Once()
+
+	result := make(chan addressInfoResp, 1)
+	stopped := make(chan error, 1)
+
+	// Act: reach the blocked registration before starting shutdown, so Stop
+	// must cancel that watch and drain its already-admitted request.
+	go func() {
+		info, err := w.ImportTaprootScript(t.Context(), tapscript)
+		result <- addressInfoResp{info: info, err: err}
+	}()
+
+	<-entered
+
+	go func() {
+		stopped <- w.stop()
+	}()
+
+	<-canceled
+
+	// Assert: neither public result nor Stop can complete while the handler
+	// is paused, and releasing it yields cancellation without an address.
+	// Fixture cleanup verifies the admitted Store, vault, and chain calls.
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned before registration joined: %v", err)
+
+	default:
+	}
+
+	select {
+	case got := <-result:
+		t.Fatalf("import returned before registration joined: %v", got)
+
+	default:
+	}
+
+	unblock()
+
+	got := <-result
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.Zero(t, got.info)
+	require.NoError(t, <-stopped)
 }
 
 // newTestTapscript builds a single-leaf taproot script for import tests.
