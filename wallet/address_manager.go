@@ -242,21 +242,18 @@ type AddressManager interface {
 	ListAddresses(ctx context.Context, accountName string,
 		addrType waddrmgr.AddressType) ([]AddressProperty, error)
 
-	// ImportPublicKey imports a single public key without private signing
-	// material. SQL wallets accept the import only when the wallet is
-	// watch-only under ADR 0012. The legacy kvdb backend retains its
-	// grandfathered mixed-mode behavior until migration.
+	// ImportPublicKey imports a public key for tracking in either root mode.
+	// SQL keeps the raw address accountless, with no HD derivation path or
+	// local signing authority supplied by the imported public material.
 	// Success includes chain-watch registration using the Wallet lifetime.
 	// Registration failure preserves committed data for a repeated import.
 	// Neutrino retains its existing notification rescan behavior.
 	ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 		addrType waddrmgr.AddressType) error
 
-	// ImportTaprootScript imports a taproot script for tracking. Script
-	// presence describes a spending condition, not private signing authority.
-	// SQL wallets accept the script-only import only when the wallet is
-	// watch-only under ADR 0012. The legacy kvdb backend retains its
-	// grandfathered mixed-mode behavior until migration.
+	// ImportTaprootScript imports a taproot script for tracking in either root
+	// mode. SQL keeps the raw address accountless without an HD path. Script
+	// storage describes spending conditions and supplies no signing authority.
 	// Imports matching an existing Wallet/output script retain its first
 	// tapscript. Later reveals are not merged or substituted, and a key-only
 	// import is not upgraded by a later script-bearing request.
@@ -1339,10 +1336,8 @@ func listAddressesQuery(walletID uint32, req page.Request[uint32],
 	return query, addresstype.StoreType{}, nil
 }
 
-// ImportPublicKey imports a single public key without private signing material.
-// SQL wallets accept the import only when the wallet is watch-only under ADR
-// 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
-// until migration.
+// ImportPublicKey imports a public key for tracking in either Wallet root mode.
+// SQL stores it as an accountless raw address without an HD derivation path.
 // Success includes registering the address with the chain backend using the
 // Wallet lifetime context. Registration failure retains the committed address
 // and repeating the import retries its watch without changing stored data.
@@ -1440,11 +1435,9 @@ func (w *Wallet) importRawAddress(ctx context.Context,
 	return info, err
 }
 
-// ImportTaprootScript imports a taproot script for tracking. Script presence
-// describes a spending condition, not private signing authority. SQL wallets
-// accept the script-only import only when the wallet is watch-only under ADR
-// 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
-// until migration.
+// ImportTaprootScript imports a taproot script for tracking in either root
+// mode. Script presence describes spending conditions, not private signing
+// authority. SQL stores an accountless raw address without an HD path.
 // Imports matching an existing Wallet/output script retain its first
 // tapscript. Later reveals are not merged or substituted, and a key-only
 // import is not upgraded by a later script-bearing request.

@@ -521,23 +521,15 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 	}
 }
 
-// TestNewImportedTaprootScriptRejectedOnSpendable verifies the ADR 0012
-// invariant at the store boundary: a spendable (non-watch-only) wallet cannot
-// import a taproot script that carries only encrypted script material and no
-// address private key.
-//
-// This test previously asserted the opposite. Holding a tapscript is not spend
-// capability -- the script states a spending condition, not the signing
-// material
-// that satisfies it -- so it cannot stand in for the address private key. The
-// same import on a watch-only wallet is accepted, which is covered below.
-func TestNewImportedTaprootScriptRejectedOnSpendable(t *testing.T) {
+// TestNewImportedTaprootScriptSigningWallet verifies script-only tracking in
+// a signing wallet without an account or a local signing key.
+func TestNewImportedTaprootScriptSigningWallet(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a signing root receives script ciphertext without a private
+	// key, so the script must not inherit its parent's signing authority.
 	store := NewTestStore(t)
-
 	walletID := newWallet(t, store, "wallet-spendable-taproot-script")
-
 	params := db.NewImportedAddressParams{
 		WalletID:        walletID,
 		AddressType:     db.TaprootPubKey,
@@ -545,8 +537,23 @@ func TestNewImportedTaprootScriptRejectedOnSpendable(t *testing.T) {
 		EncryptedScript: RandomBytes(48),
 	}
 
-	_, err := store.NewImportedAddress(t.Context(), params)
-	require.ErrorIs(t, err, db.ErrSpendableWalletNeedsAddressPrivKey)
+	// Act: insert the script-only raw row and read its persisted metadata.
+	info, err := store.NewImportedAddress(t.Context(), params)
+	require.NoError(t, err)
+	stored, err := store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     walletID,
+		ScriptPubKey: params.ScriptPubKey,
+	})
+
+	// Assert: immediate and persisted custody agree without inventing account
+	// or HD identity; retaining script bytes is independent of signing keys.
+	require.NoError(t, err)
+	require.True(t, info.IsWatchOnly)
+	require.True(t, info.HasScript)
+	require.Nil(t, info.AccountID)
+	require.Empty(t, info.AccountName)
+	require.False(t, info.HasDerivationPath)
+	require.Equal(t, info, stored)
 }
 
 // TestNewImportedTaprootScriptWatchOnly verifies the accepted half of the same
@@ -620,8 +627,10 @@ func TestGetAddressSecretRejectsEmptySelector(t *testing.T) {
 func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: an empty key payload is absent, even when the parent Wallet
+	// can sign. Nonempty script ciphertext must not change that custody.
 	store := NewTestStore(t)
-	walletID := newWatchOnlyWallet(
+	walletID := newWallet(
 		t, store, "wallet-empty-private-import",
 	)
 
@@ -634,9 +643,13 @@ func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
 		EncryptedScript:     RandomBytes(48),
 	}
 
+	// Act: import the raw script and inspect the retained secret payload.
 	info, err := store.NewImportedAddress(t.Context(), params)
 	require.NoError(t, err)
 	require.NotNil(t, info)
+
+	// Assert: the absent key keeps this raw row watch-only; its script stays
+	// available and no empty private payload is persisted as key material.
 	require.True(t, info.IsWatchOnly)
 
 	secret, err := store.GetAddressSecret(
@@ -738,16 +751,16 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 		},
 		{
 			name: "standard wallet imported address without " +
-				"private key is rejected",
-			walletParams: CreateWalletParamsFixture,
-			wantErr:      db.ErrSpendableWalletNeedsAddressPrivKey,
+				"private key remains watch-only",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: true,
 			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
 				walletID uint32) (bool, error) {
 
 				t.Helper()
 
-				// The spendable-wallet invariant rejects a public-only
-				// import before any imported-account alias is needed.
+				// A signing root tracks a public-only raw address without
+				// granting the imported key a local signing path.
 				info, err := store.NewImportedAddress(
 					t.Context(), db.NewImportedAddressParams{
 						WalletID:     walletID,
@@ -824,6 +837,8 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Arrange: create the case's parent wallet and isolated Store.
+			// Root mode supplies the signing and watch-only controls.
 			store := NewTestStore(t)
 
 			walletInfo, err := store.CreateWallet(
@@ -831,7 +846,12 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 			)
 			require.NoError(t, err)
 
+			// Act: exercise the case's existing address creation path using
+			// the parent mode and public or private material under test.
 			isWatchOnly, err := tc.createAddressFn(t, store, walletInfo.ID)
+
+			// Assert: public-only raw imports retain watch-only custody in
+			// signing roots; watch-only roots still reject private material.
 			require.ErrorIs(t, err, tc.wantErr)
 
 			if tc.wantErr != nil {
@@ -1110,13 +1130,14 @@ func TestImportedAddressConcurrentInsert(t *testing.T) {
 func TestRawImportedAddressDoesNotMaterializeAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: raw public inputs have no account xpub or path; their signing
+	// parent must not create an account just to report them.
 	store := NewTestStore(t)
 	scope := db.KeyScopeBIP0084
 
-	// ADR 0012: public-only raw imports need a watch-only wallet to satisfy the
-	// symmetric invariant.
-	walletID := newWatchOnlyWallet(t, store, "wallet-raw-import-idempotent")
+	walletID := newWallet(t, store, "wallet-raw-import-idempotent")
 
+	// Act: import two public scripts through the accountless write path.
 	first, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     walletID,
@@ -1126,8 +1147,6 @@ func TestRawImportedAddressDoesNotMaterializeAccount(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Empty(t, first.AccountName)
-	require.Nil(t, first.AccountID)
 
 	second, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
@@ -1138,6 +1157,12 @@ func TestRawImportedAddressDoesNotMaterializeAccount(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+
+	// Assert: both raw rows are watch-only and have no account identity.
+	require.True(t, first.IsWatchOnly)
+	require.Empty(t, first.AccountName)
+	require.Nil(t, first.AccountID)
+	require.True(t, second.IsWatchOnly)
 	require.Empty(t, second.AccountName)
 	require.Nil(t, second.AccountID)
 
@@ -1150,6 +1175,12 @@ func TestRawImportedAddressDoesNotMaterializeAccount(t *testing.T) {
 
 	addresses := rawImportedAddresses(t, store, walletID, 2)
 	require.Len(t, addresses, 2)
+
+	for _, info := range addresses {
+		// Iterator reads must preserve raw custody without an account join.
+		require.True(t, info.IsWatchOnly)
+		require.Nil(t, info.AccountID)
+	}
 }
 
 // TestNewImportedAddressDuplicate verifies that importing an address with
@@ -1563,6 +1594,8 @@ func TestGetAddressSecret(t *testing.T) {
 func TestGetAddress(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: pair public-only tracking under a signing root with the
+	// existing private-key and invalid-query controls.
 	tests := []struct {
 		name      string
 		setupFunc func(t *testing.T, addrStore db.AddressStore,
@@ -1572,8 +1605,8 @@ func TestGetAddress(t *testing.T) {
 		validate        func(t *testing.T, addr *db.AddressInfo)
 	}{
 		{
-			name:            "get by encrypted script pubkey",
-			watchOnlyWallet: true,
+			name:            "get public raw address in signing wallet",
+			watchOnlyWallet: false,
 			setupFunc: func(t *testing.T, addrStore db.AddressStore,
 				accountStore db.AccountStore,
 				walletID uint32) db.GetAddressQuery {
@@ -1676,8 +1709,12 @@ func TestGetAddress(t *testing.T) {
 			}
 
 			query := tc.setupFunc(t, store, store, walletID)
+
+			// Act: resolve the wallet-local script through the point query.
 			addr, err := store.GetAddress(t.Context(), query)
 
+			// Assert: custody and stable errors match the fixtures; the public
+			// raw import stays watch-only under its signing parent.
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 				require.Nil(t, addr)
@@ -1702,9 +1739,11 @@ func TestGetAddress(t *testing.T) {
 func TestResolveOwnedAddresses(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: public raw scripts live under a signing root, with foreign
+	// scripts retained as the existing wallet-ownership negative control.
 	store := NewTestStore(t)
 
-	walletID := newWatchOnlyWallet(t, store, "resolve-addresses-wallet")
+	walletID := newWallet(t, store, "resolve-addresses-wallet")
 
 	// Import three addresses with known scripts; these are the wallet-owned
 	// scripts the batch lookup must resolve.
@@ -1737,16 +1776,19 @@ func TestResolveOwnedAddresses(t *testing.T) {
 			query.ScriptPubKeys, foreignScripts...,
 		)
 
+		// Act: batch-resolve the mixed script set using its wallet identity.
 		owned, err := store.ResolveOwnedAddresses(t.Context(), query)
 		require.NoError(t, err)
 
-		// Only the owned scripts come back, keyed by string(script).
+		// Assert: only wallet-owned rows return, and public-only raw rows
+		// remain watch-only despite their signing parent.
 		require.Len(t, owned, len(ownedScripts))
 
 		for _, script := range ownedScripts {
 			info, ok := owned[string(script)]
 			require.True(t, ok)
 			require.Equal(t, script, info.ScriptPubKey)
+			require.True(t, info.IsWatchOnly)
 		}
 
 		for _, script := range foreignScripts {

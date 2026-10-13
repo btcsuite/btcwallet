@@ -2504,13 +2504,11 @@ func TestListUTXOsReturnsCurrentWalletOutputs(t *testing.T) {
 func TestUTXOEnrichmentFields(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: the signing parent hosts a raw script with no private key
+	// and the existing local HD output, isolating per-output custody.
 	store := NewTestStore(t)
 
-	// A watch-only wallet can host an imported script-only address: such an
-	// address carries a persisted encrypted script (so HasScript is true)
-	// but no private key, which the ADR 0012 invariant only permits on a
-	// watch-only wallet.
-	walletID := newWatchOnlyWallet(t, store, "wallet-utxo-enrichment")
+	walletID := newWallet(t, store, "wallet-utxo-enrichment")
 
 	const derivedName = "derived"
 
@@ -2569,8 +2567,8 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Index ListUTXOs results by outpoint so assertions don't depend on the
-	// result ordering.
+	// Act: read enriched outputs using the existing wallet-wide UTXO query;
+	// index by outpoint so custody checks do not depend on result ordering.
 	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID: walletID,
 	})
@@ -2582,6 +2580,8 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 		byOutPoint[u.OutPoint] = u
 	}
 
+	// Assert: the accountless raw script has an explicit false override;
+	// the local HD control keeps the parent's signing-mode default.
 	imported, ok := byOutPoint[importedOutPoint]
 	require.True(t, ok, "imported UTXO missing from ListUTXOs")
 	require.Empty(t, imported.AccountName)
@@ -2589,6 +2589,8 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	require.True(t, imported.HasScript)
 	require.True(t, imported.IsLocked)
 	require.Equal(t, db.KeyScope{}, imported.KeyScope)
+	require.NotNil(t, imported.Spendable)
+	require.False(t, *imported.Spendable)
 
 	importedName := db.DefaultImportedAccountName
 	filteredImported, err := store.ListUTXOs(
@@ -2608,8 +2610,10 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	require.False(t, derived.HasScript)
 	require.False(t, derived.IsLocked)
 	require.Equal(t, scope, derived.KeyScope)
+	require.Nil(t, derived.Spendable)
 
-	// GetUtxo surfaces the same enriched view as ListUTXOs.
+	// Act: resolve the same raw output through the point query.
+	// Assert: point enrichment must preserve the identical custody override.
 	got, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
 		WalletID: walletID,
 		OutPoint: importedOutPoint,
@@ -2619,6 +2623,8 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	require.True(t, got.HasScript)
 	require.True(t, got.IsLocked)
 	require.Equal(t, db.KeyScope{}, got.KeyScope)
+	require.NotNil(t, got.Spendable)
+	require.False(t, *got.Spendable)
 }
 
 // TestListUTXOsFiltersByAccount verifies that ListUTXOs applies the optional
