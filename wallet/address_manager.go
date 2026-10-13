@@ -246,6 +246,9 @@ type AddressManager interface {
 	// material. SQL wallets accept the import only when the wallet is
 	// watch-only under ADR 0012. The legacy kvdb backend retains its
 	// grandfathered mixed-mode behavior until migration.
+	// Success includes chain-watch registration using the Wallet lifetime.
+	// Registration failure preserves committed data for a repeated import.
+	// Neutrino retains its existing notification rescan behavior.
 	ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 		addrType waddrmgr.AddressType) error
 
@@ -254,6 +257,13 @@ type AddressManager interface {
 	// SQL wallets accept the script-only import only when the wallet is
 	// watch-only under ADR 0012. The legacy kvdb backend retains its
 	// grandfathered mixed-mode behavior until migration.
+	// Imports matching an existing Wallet/output script retain its first
+	// tapscript. Later reveals are not merged or substituted, and a key-only
+	// import is not upgraded by a later script-bearing request.
+	// Success includes chain-watch registration using the Wallet lifetime
+	// and returns canonical stored metadata. Failed registration returns no
+	// address and preserves committed data for a repeated import. Neutrino
+	// retains its existing notification rescan behavior.
 	ImportTaprootScript(ctx context.Context,
 		tapscript waddrmgr.Tapscript) (AddressInfo, error)
 
@@ -1339,6 +1349,12 @@ func listAddressesQuery(walletID uint32, req page.Request[uint32],
 // SQL wallets accept the import only when the wallet is watch-only under ADR
 // 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
 // until migration.
+// Success includes registering the address with the chain backend using the
+// Wallet lifetime context. Registration failure retains the committed address
+// and repeating the import retries its watch without changing stored data.
+// Full nodes install live watches; Neutrino retains its notification rescan.
+// ErrIndeterminateCommit returns no success and does not automatically retry
+// an uncertain SQL commit.
 func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
@@ -1392,7 +1408,9 @@ func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
 		return
 	}
 
-	_, err = w.store.NewImportedAddress(
+	// Storage supplies canonical metadata for new and repeated imports so
+	// registration can be retried without replacing committed data.
+	storeInfo, err := w.importRawAddress(
 		r.ctx, db.NewImportedAddressParams{
 			WalletID:     w.id,
 			AddressType:  storeAddrType.Type,
@@ -1406,7 +1424,26 @@ func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
 		return
 	}
 
-	r.respErrChan <- w.cfg.Chain.NotifyReceived([]address.Address{addr})
+	// Register the canonical record only after persistence completes. The
+	// Wallet lifetime keeps registration joined even if the caller cancels.
+	_, err = w.deliverStoreAddresses(r.ctx, []db.AddressInfo{*storeInfo})
+	r.respErrChan <- err
+}
+
+// importRawAddress delegates admission and duplicate resolution to storage,
+// exposing only the Wallet's existing public indeterminate-commit identity.
+func (w *Wallet) importRawAddress(ctx context.Context,
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
+
+	// The Store owns the durable outcome. Unknown commits return no success
+	// and cannot be resolved by a Wallet lookup or another mutation.
+	info, err := w.store.NewImportedAddress(ctx, params)
+	if errors.Is(err, db.ErrIndeterminateCommit) {
+		return nil, fmt.Errorf("%w: %s", ErrIndeterminateCommit,
+			err.Error())
+	}
+
+	return info, err
 }
 
 // ImportTaprootScript imports a taproot script for tracking. Script presence
@@ -1414,6 +1451,15 @@ func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
 // accept the script-only import only when the wallet is watch-only under ADR
 // 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
 // until migration.
+// Imports matching an existing Wallet/output script retain its first
+// tapscript. Later reveals are not merged or substituted, and a key-only
+// import is not upgraded by a later script-bearing request.
+// Success includes registering the address with the chain backend using the
+// Wallet lifetime context and returns stored metadata for duplicates.
+// Registration failure returns no address but preserves committed data for a
+// repeated import. Full nodes install live watches; Neutrino retains its
+// notification rescan. ErrIndeterminateCommit returns no success and does not
+// automatically retry an uncertain SQL commit.
 func (w *Wallet) ImportTaprootScript(ctx context.Context,
 	tapscript waddrmgr.Tapscript) (AddressInfo, error) {
 
@@ -1478,7 +1524,9 @@ func (w *Wallet) handleImportTaprootScript(r importTaprootScriptReq) {
 		return
 	}
 
-	storeInfo, err := w.store.NewImportedAddress(
+	// Encryption remains outside persistence; duplicate records keep their
+	// original secrets even when a repeat encrypts another representation.
+	storeInfo, err := w.importRawAddress(
 		r.ctx, db.NewImportedAddressParams{
 			WalletID:        w.id,
 			AddressType:     db.TaprootPubKey,
@@ -1492,23 +1540,18 @@ func (w *Wallet) handleImportTaprootScript(r importTaprootScriptReq) {
 		return
 	}
 
-	storeInfo.HasScript = true
-
-	info, err := addressInfoFromStoreAddress(storeInfo, w.cfg.ChainParams)
+	// Committed delivery returns canonical metadata only after chain
+	// registration and the caller-context check. Errors expose no address.
+	batch, err := w.deliverStoreAddresses(
+		r.ctx, []db.AddressInfo{*storeInfo},
+	)
 	if err != nil {
 		r.respChan <- addressInfoResp{err: err}
 
 		return
 	}
 
-	err = w.cfg.Chain.NotifyReceived([]address.Address{addr})
-	if err != nil {
-		r.respChan <- addressInfoResp{err: err}
-
-		return
-	}
-
-	r.respChan <- addressInfoResp{info: info}
+	r.respChan <- addressInfoResp{info: batch[0]}
 }
 
 // encryptTaprootScript encodes and encrypts taproot script data before the
