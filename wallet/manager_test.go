@@ -1,8 +1,10 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1550,13 +1553,15 @@ func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
 	require.Zero(t, w.masterFingerprint)
 }
 
-// TestManagerKVDBRejectsSecondCreate verifies the legacy backend enforces its
-// one-Wallet limit even when the second request has another runtime name.
+// TestManagerKVDBRejectsSecondCreate verifies every occupied legacy alias is
+// rejected without replacing the live Wallet or its durable credentials.
 func TestManagerKVDBRejectsSecondCreate(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create the one Wallet the kvdb backend can keep open.
-	m := testKVDBManager(t)
+	// Arrange: Keep one database path across Manager lifetimes and create its
+	// sole Wallet with credentials that rejected requests must not replace.
+	dbPath := testKVDBPath(t)
+	m := testKVDBManagerAt(t, dbPath)
 	params := CreateWalletParams{
 		Name:              "first",
 		Mode:              ModeGenSeed,
@@ -1569,15 +1574,211 @@ func TestManagerKVDBRejectsSecondCreate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, first)
 
-	// Act: Attempt to create a sibling identity through the same Manager.
-	params.Name = "second"
-	second, err := m.Create(params)
+	// Act: Repeatedly request both the cached name and another alias with a
+	// replacement passphrase; kvdb's one durable Wallet owns every alias.
+	for _, name := range []string{params.Name, "second"} {
+		replacement := params
+		replacement.Name = name
+		replacement.PrivatePassphrase = []byte("replacement-private")
+		duplicate, err := m.Create(replacement)
 
-	// Assert: The backend reports its single-Wallet constraint and does not
-	// return a second runtime instance.
-	require.ErrorIs(t, err, ErrInvalidParam)
-	require.ErrorContains(t, err, "one wallet per database")
-	require.Nil(t, second)
+		// Assert: Rejection preserves the same running pointer and its original
+		// credentials instead of publishing or persisting another Wallet.
+		require.ErrorIs(t, err, ErrWalletExists)
+		require.Nil(t, duplicate)
+		require.Same(t, first, m.wallets[params.Name])
+	}
+
+	// Assert: Unlock the live Wallet using its original passphrase after both
+	// rejected aliases, detecting any replacement of runtime credentials.
+	require.NoError(t, first.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	}))
+
+	// Arrange: Reopen the same durable database after stopping its owner. kvdb
+	// stores no wallet name, so startup caches its sole Wallet under "".
+	require.NoError(t, m.Stop())
+	m = testKVDBManagerAt(t, dbPath)
+
+	// Act: Send a missing-name create to the Manager with the unnamed cache.
+	duplicate, err := m.Create(CreateWalletParams{})
+
+	// Assert: Missing identity remains a validation error even though startup
+	// has installed an active Wallet at the empty map key.
+	require.ErrorIs(t, err, ErrMissingParam)
+	require.Nil(t, duplicate)
+
+	// Act: Request both valid aliases with the replacement passphrase; neither
+	// can create another Wallet in the occupied database after restart.
+	for _, name := range []string{params.Name, "another-alias"} {
+		replacement := params
+		replacement.Name = name
+		replacement.PrivatePassphrase = []byte("replacement-private")
+		duplicate, err := m.Create(replacement)
+
+		// Assert: Valid aliases share the stable duplicate identity and never
+		// return a replacement runtime for the persisted Wallet.
+		require.ErrorIs(t, err, ErrWalletExists)
+		require.Nil(t, duplicate)
+	}
+
+	// Assert: Unlock the unnamed startup Wallet using the original passphrase,
+	// proving rejected creates preserve credentials across the durable reopen.
+	require.NoError(t, m.wallets[""].Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	}))
+}
+
+// TestManagerCreateRejectsActiveDuplicate verifies an occupied active name
+// prevents a second Store create and keeps the original Wallet usable.
+func TestManagerCreateRejectsActiveDuplicate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Permit exactly one durable create and its ordinary startup;
+	// fixture cleanup verifies that a duplicate never consumes another call.
+	params := managerLifecycleCreateParams("active-wallet")
+	store := &walletmock.Store{}
+	store.On("CreateWallet", mock.Anything,
+		mock.AnythingOfType("db.CreateWalletParams")).Return(&db.WalletInfo{
+		ID:          1,
+		Name:        params.Name,
+		IsWatchOnly: true,
+	}, nil).Once()
+	store.On("GetWallet", mock.Anything, params.Name).
+		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 1,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).Return(nil).Once()
+	m := testSQLManager(t, store)
+	first, err := m.Create(params)
+	require.NoError(t, err)
+
+	// Act: Ask for the same active name with replacement credentials.
+	params.PrivatePassphrase = []byte("replacement-private")
+	duplicate, err := m.Create(params)
+
+	// Assert: The public duplicate identity returns no candidate, leaves the
+	// original pointer published, and permits a public call on that Wallet.
+	require.ErrorIs(t, err, ErrWalletExists)
+	require.Nil(t, duplicate)
+	require.Same(t, first, m.wallets[params.Name])
+	require.NoError(t, first.Lock(t.Context()))
+}
+
+// TestManagerCreateClassifiesStoreErrors verifies only a Store duplicate
+// gains the public identity while every original error remains discoverable.
+func TestManagerCreateClassifiesStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Distinguish a wrapped duplicate from an unrelated uniqueness
+	// failure and a write failure, using one strict Store expectation per case.
+	duplicateErr := fmt.Errorf("store duplicate: %w", db.ErrWalletExists)
+	uniqueErr := dberr.NewSQLError(dberr.BackendSQLite,
+		dberr.ReasonConstraint, "19", errors.New("account uniqueness"))
+	writeErr := errors.New("store write failure")
+	tests := []struct {
+		name     string
+		storeErr error
+		wantErr  error
+	}{
+		{
+			name:     "duplicate",
+			storeErr: duplicateErr,
+			wantErr:  ErrWalletExists,
+		},
+		{
+			name:     "other uniqueness",
+			storeErr: uniqueErr,
+			wantErr:  uniqueErr,
+		},
+		{
+			name:     "write failure",
+			storeErr: writeErr,
+			wantErr:  writeErr,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Supply a valid rootless request so the Store error,
+			// rather than derivation or validation, is the failing boundary.
+			store := &walletmock.Store{}
+			store.On("CreateWallet", mock.Anything,
+				mock.AnythingOfType("db.CreateWalletParams")).
+				Return(nil, test.storeErr).Once()
+			m := testSQLManager(t, store)
+
+			// Act: Let public Create receive the configured backend failure.
+			w, err := m.Create(managerLifecycleCreateParams(test.name))
+
+			// Assert: Preserve the original cause and add the public duplicate
+			// identity exactly when the Store's cause identifies occupancy.
+			require.Nil(t, w)
+			require.ErrorIs(t, err, test.wantErr)
+			require.ErrorIs(t, err, test.storeErr)
+			require.Equal(t, errors.Is(test.storeErr, db.ErrWalletExists),
+				errors.Is(err, ErrWalletExists))
+		})
+	}
+}
+
+// TestKVDBManagerBackendRejectsDurableDuplicate verifies the legacy create
+// operation classifies occupancy without a cached Store or namespace mutation.
+func TestKVDBManagerBackendRejectsDurableDuplicate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Close a completed Wallet, reopen only its database, and retain a
+	// complete snapshot before attempting an uncached legacy duplicate.
+	m := testKVDBManager(t)
+	params := CreateWalletParams{
+		Name:              "durable-wallet",
+		Mode:              ModeGenSeed,
+		PubPassphrase:     []byte(InsecurePubPassphrase),
+		PrivatePassphrase: []byte("original-private"),
+		Birthday:          time.Now(),
+	}
+	_, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, m.Stop())
+	cfg := m.config
+	cfg.KVDBPubPassphrase = params.PubPassphrase
+	backend, err := newKVDBManagerBackend(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = backend.close()
+	})
+
+	var before bytes.Buffer
+
+	require.NoError(t, backend.db.Copy(&before))
+
+	params.Name = "different-alias"
+	params.PrivatePassphrase = []byte("replacement-private")
+
+	// Act: With no cached Store, rely on the legacy operation's wrapped
+	// address-manager occupancy result rather than any runtime alias.
+	data, err := backend.create(t.Context(), params, nil)
+
+	// Assert: Every namespace remains identical, no Store is opened for the
+	// loser, and the persisted original credential can still unlock the winner.
+	require.ErrorIs(t, err, db.ErrWalletExists)
+	require.Nil(t, data)
+	require.Nil(t, backend.store)
+
+	var after bytes.Buffer
+
+	require.NoError(t, backend.db.Copy(&after))
+	require.Equal(t, before.Bytes(), after.Bytes())
+	loaded, err := backend.listWallets(t.Context())
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.NoError(t, loaded[0].vault.Unlock(t.Context(),
+		[]byte("original-private")))
 }
 
 // TestManagerCreateFailureLeavesManagerReusable verifies that a failed Create

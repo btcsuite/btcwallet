@@ -23,6 +23,10 @@ var (
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
 
+	// ErrWalletExists reports duplicate creation without changing the existing
+	// Wallet. SQL names are unique; kvdb admits only one Wallet per database.
+	ErrWalletExists = errors.New("wallet already exists")
+
 	// ErrInvalidDatabaseIdentity reports invalid Manager network identity
 	// input before a SQL database is opened.
 	ErrInvalidDatabaseIdentity = errors.New("invalid database identity")
@@ -404,6 +408,8 @@ func validateManagedWalletName(name string) error {
 }
 
 // Create persists, starts, and publishes one Wallet while Manager is running.
+// Duplicate creation returns no Wallet and ErrWalletExists while preserving
+// the existing Wallet and its credentials, including all aliases on kvdb.
 //
 // TODO(yy): Add a context parameter once wallet creation uses a single atomic
 // database transaction.
@@ -420,15 +426,28 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
+	// The existing active set rejects duplicates before backend work. Skip
+	// absent names so kvdb's unnamed startup entry cannot mask name validation.
+	if params.Name != "" && m.wallets[params.Name] != nil {
+		return nil, fmt.Errorf("wallet %q: %w", params.Name, ErrWalletExists)
+	}
+
 	// Durable preparation and private startup stay under the admission lock;
 	// Stop cannot close storage until the accepted creation has settled.
 	w, err := m.createWallet(params)
 	if err != nil {
+		// Backend occupancy gains one public identity; retain its cause and
+		// leave unrelated validation, constraint and write errors unchanged.
+		if errors.Is(err, db.ErrWalletExists) {
+			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
+		}
+
 		return nil, err
 	}
 
-	// If we are in shell mode and have initial accounts, we import them now.
-	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
+	// Parameter validation permits initial accounts only in shell mode, so
+	// import any requested accounts before the Wallet starts.
+	if len(params.InitialAccounts) > 0 {
 		err = w.importInitialAccounts(
 			context.Background(), params.InitialAccounts,
 		)

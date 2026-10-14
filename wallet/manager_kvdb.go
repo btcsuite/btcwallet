@@ -77,7 +77,7 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 
 	if b.store != nil {
 		return nil, fmt.Errorf("%w: kvdb serves one wallet per "+
-			"database; %q is already loaded", ErrInvalidParam,
+			"database; %q is already loaded", db.ErrWalletExists,
 			b.walletName)
 	}
 
@@ -93,6 +93,15 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 		Birthday:          params.Birthday,
 	})
 	if err != nil {
+		// Legacy creation is insert-only even without a cached Store. Match
+		// its wrapped manager error rather than persisting an alias identity.
+		var managerErr waddrmgr.ManagerError
+		if errors.As(err, &managerErr) &&
+			managerErr.ErrorCode == waddrmgr.ErrAlreadyExists {
+
+			err = fmt.Errorf("%w: %w", db.ErrWalletExists, err)
+		}
+
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
