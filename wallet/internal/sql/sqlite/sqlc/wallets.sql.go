@@ -20,6 +20,7 @@ INSERT INTO wallets (
 ) VALUES (
     ?, ?, ?, ?, ?
 )
+ON CONFLICT (wallet_name) DO NOTHING
 RETURNING id
 `
 
@@ -31,6 +32,7 @@ type CreateWalletParams struct {
 	MasterHdPubKey []byte
 }
 
+// Only wallet-name occupancy produces an empty result; other constraints fail.
 func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error) {
 	row := q.queryRow(ctx, q.createWalletStmt, CreateWallet,
 		arg.WalletName,
