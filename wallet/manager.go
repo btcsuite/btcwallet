@@ -84,11 +84,13 @@ type CreateWalletParams struct {
 	// Mode determines which fields below are required.
 	Mode CreateMode
 
-	// Seed is required for ModeImportSeed. Ignored for others.
+	// Seed is required for ModeImportSeed. Ignored for others. Creation
+	// borrows these bytes synchronously without retaining or clearing them.
 	Seed []byte
 
 	// RootKey is the required ModeImportExtKey XPrv. XPub-root creation is
 	// unsupported; use a ModeShell wallet and import account XPubs.
+	// Creation borrows this key synchronously without retaining or zeroing it.
 	RootKey *hdkeychain.ExtendedKey
 
 	// InitialAccounts is optional and names watch-only accounts to import
@@ -483,6 +485,13 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
+	// Validation makes shell roots nil and imported XPrvs the same pointer as
+	// params.RootKey. Only derived roots differ, so destroy those on every
+	// preparation exit while preserving the caller's borrowed key.
+	if rootKey != params.RootKey {
+		defer rootKey.Zero()
+	}
+
 	// The Manager mutex keeps runtime assembly, Store mutation, and cache
 	// publication atomic so no partial Wallet becomes observable.
 	walletCfg, err := m.config.walletConfig(params.Name)
@@ -627,12 +636,13 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 }
 
 // deriveRootKey resolves the master extended key after creation parameters have
-// passed validation.
+// passed validation. The caller owns derived roots; imported XPrvs remain
+// borrowed.
 func (m *Manager) deriveRootKey(
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
 
 	if params.Mode == ModeGenSeed {
-		return m.genRootKey()
+		return m.genRootKey(hdkeychain.GenerateSeed)
 	}
 
 	if params.Mode == ModeImportSeed {
@@ -648,13 +658,20 @@ func (m *Manager) deriveRootKey(
 	return nil, nil //nolint:nilnil
 }
 
-// genRootKey generates a fresh random seed and derives its master extended
-// private key.
-func (m *Manager) genRootKey() (*hdkeychain.ExtendedKey, error) {
-	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+// genRootKey derives a master from an owned generated seed. generateSeed is
+// hdkeychain.GenerateSeed in production and exposes the original seed buffer
+// to cleanup tests. The caller owns the returned master.
+func (m *Manager) genRootKey(
+	generateSeed func(uint8) ([]byte, error)) (*hdkeychain.ExtendedKey, error) {
+
+	seed, err := generateSeed(hdkeychain.RecommendedSeedLen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate seed: %w", err)
 	}
+
+	// NewMaster does not retain the seed, so its lifetime ends when derivation
+	// finishes, including error or panic unwinding.
+	defer clear(seed)
 
 	return m.deriveFromSeed(seed)
 }
