@@ -8,6 +8,8 @@ INSERT INTO wallets (
 ) VALUES (
     ?, ?, ?, ?, ?
 )
+-- Only wallet-name occupancy produces an empty result; other constraints fail.
+ON CONFLICT (wallet_name) DO NOTHING
 RETURNING id;
 
 -- name: InsertWalletSyncState :exec
