@@ -1479,21 +1479,276 @@ func TestManagerDeriveFromSeed(t *testing.T) {
 	})
 }
 
-// TestManagerGenRootKey verifies the internal helper method genRootKey,
-// ensuring it generates a random seed and derives a valid master key.
+// TestManagerGenRootKey observes destruction of the generated seed without
+// destroying the independently derived master returned to its owner.
 func TestManagerGenRootKey(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Keep the generator's original allocation observable and derive
+	// the expected master before cleanup can erase its input bytes.
 	m := testKVDBManager(t)
+	seed := fixedTestSeed()
+	wantMaster, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
 
-	// With no configured kvdb path there is no legacy wallet to recover, so
-	// genRootKey takes the fresh-generation branch.
-	key, err := m.genRootKey()
+	// Act: Supply the owned buffer through the production generator signature
+	// so the observation concerns the seed Manager receives, not a copy.
+	key, err := m.genRootKey(func(length uint8) ([]byte, error) {
+		require.Equal(t, uint8(hdkeychain.RecommendedSeedLen), length)
 
-	// Verify we got a valid private extended key.
+		return seed, nil
+	})
+
+	// Assert: The original seed is cleared while the returned master still
+	// reproduces the expected private root and supports private derivation.
 	require.NoError(t, err)
 	require.NotNil(t, key)
+
+	require.Equal(t, make([]byte, len(seed)), seed)
+	require.Equal(t, wantMaster.String(), key.String())
 	require.True(t, key.IsPrivate())
+	_, err = key.Derive(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
+}
+
+// TestManagerCreateBoundsGenesisSecrets verifies successful creation destroys
+// Manager-derived roots while preserving usable caller seeds and XPrvs.
+func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range genesisCreateCases(t) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Capture the live root at the existing backend boundary
+			// and return mock-backed data with the required startup reads.
+			params := tc.params
+			params.Name = testWalletName
+			params.PrivatePassphrase = []byte("private")
+			_, deps := createTestWalletWithMocks(t)
+			deps.store.On("GetWallet", mock.Anything, params.Name).
+				Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).
+				Once()
+			deps.store.On("ListAccounts", mock.Anything,
+				db.ListAccountsQuery{WalletID: 1}).
+				Return([]db.AccountInfo{}, nil).Once()
+			deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
+				Return(nil).Once()
+			deps.vault.On("Lock").Return().Once()
+
+			var observedRoot *hdkeychain.ExtendedKey
+
+			backend := &managerBackendMock{}
+			backend.On("create", mock.Anything, params, mock.Anything).
+				Return(&walletData{
+					id:    1,
+					name:  params.Name,
+					store: deps.store,
+					vault: deps.vault,
+				}, nil).Run(func(args mock.Arguments) {
+				var ok bool
+				observedRoot, ok = args.Get(2).(*hdkeychain.ExtendedKey)
+				require.True(t, ok)
+				require.True(t, observedRoot.IsPrivate())
+			}).Once()
+			backend.On("close").Return(nil).Once()
+			manager := newManagerLifecycleTest(t, backend)
+			manager.started.Store(true)
+			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
+			require.True(t, ok)
+			chain.On("IsCurrent").Return(false).Maybe()
+
+			// Act: Complete public creation, including private runtime startup,
+			// before examining the captured preparation root and caller input.
+			wallet, err := manager.Create(params)
+
+			// Assert: Derived roots no longer expose key material; borrowed
+			// roots and seeds retain their bytes and remain useful to callers.
+			require.NoError(t, err)
+			require.NotNil(t, wallet)
+			require.Equal(t, tc.wantRoot, observedRoot.String())
+			require.Equal(t, tc.wantRootPrivate, observedRoot.IsPrivate())
+			require.Equal(t, tc.wantSeed, params.Seed)
+
+			// Preserved roots must retain caller identity and support private
+			// derivation, beyond matching the case's serialized expectation.
+			if tc.wantRootPrivate {
+				require.Same(t, params.RootKey, observedRoot)
+				_, err := params.RootKey.Derive(
+					hdkeychain.HardenedKeyStart,
+				)
+				require.NoError(t, err)
+			}
+
+			// Preserved seed bytes must still reproduce the declared master
+			// after public creation has returned.
+			if tc.wantSeedMaster != "" {
+				master, err := hdkeychain.NewMaster(
+					params.Seed, &chainParams,
+				)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantSeedMaster, master.String())
+			}
+		})
+	}
+}
+
+// TestManagerCreateBoundsGenesisSecretsOnFailure verifies backend failure
+// destroys derived roots while caller material remains unchanged and usable.
+func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range genesisCreateCases(t) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Observe a valid root before returning a later creation
+			// error; fixture cleanup owns backend expectation verification.
+			params := tc.params
+			params.Name = testWalletName
+			params.PrivatePassphrase = []byte("private")
+
+			var observedRoot *hdkeychain.ExtendedKey
+
+			backend := &managerBackendMock{}
+			backend.On("create", mock.Anything, params, mock.Anything).
+				Return(nil, errDBMock).Run(func(args mock.Arguments) {
+				var ok bool
+				observedRoot, ok = args.Get(2).(*hdkeychain.ExtendedKey)
+				require.True(t, ok)
+				require.True(t, observedRoot.IsPrivate())
+			}).Once()
+			backend.On("close").Return(nil).Once()
+			manager := newManagerLifecycleTest(t, backend)
+			manager.started.Store(true)
+
+			// Act: Let the public request return its backend failure before
+			// inspecting the original root object and borrowed input bytes.
+			wallet, err := manager.Create(params)
+
+			// Assert: Failure preserves the original error and borrowed
+			// material, but leaves no usable Manager-derived root or Wallet.
+			require.ErrorIs(t, err, errDBMock)
+			require.Nil(t, wallet)
+			require.Equal(t, tc.wantRoot, observedRoot.String())
+			require.Equal(t, tc.wantRootPrivate, observedRoot.IsPrivate())
+			require.Equal(t, tc.wantSeed, params.Seed)
+
+			// Preserved roots must retain caller identity and support private
+			// derivation after the backend error has unwound preparation.
+			if tc.wantRootPrivate {
+				require.Same(t, params.RootKey, observedRoot)
+				_, err := params.RootKey.Derive(
+					hdkeychain.HardenedKeyStart,
+				)
+				require.NoError(t, err)
+			}
+
+			// Preserved seed bytes must still reproduce the declared master
+			// even when no Wallet was returned.
+			if tc.wantSeedMaster != "" {
+				master, err := hdkeychain.NewMaster(
+					params.Seed, &chainParams,
+				)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantSeedMaster, master.String())
+			}
+		})
+	}
+}
+
+// genesisCreateCase declares the post-return secret outcomes independently
+// of the inputs so each public-creation test can assert ownership directly.
+type genesisCreateCase struct {
+	params          CreateWalletParams
+	wantRoot        string
+	wantRootPrivate bool
+	wantSeed        []byte
+	wantSeedMaster  string
+}
+
+// genesisCreateCases shares deterministic inputs and expected ownership
+// outcomes while leaving mock expectations and assertions in each test.
+func genesisCreateCases(t *testing.T) map[string]genesisCreateCase {
+	t.Helper()
+
+	// Each test receives its own imported root; subtests share no mutable
+	// signing material across separate public creation outcomes.
+	root, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+
+	return map[string]genesisCreateCase{
+		"generated seed": {
+			params: CreateWalletParams{
+				Mode: ModeGenSeed,
+			},
+			wantRoot:        "zeroed extended key",
+			wantRootPrivate: false,
+			wantSeed:        nil,
+			wantSeedMaster:  "",
+		},
+		"imported seed": {
+			params: CreateWalletParams{
+				Mode: ModeImportSeed,
+				Seed: fixedTestSeed(),
+			},
+			wantRoot:        "zeroed extended key",
+			wantRootPrivate: false,
+			wantSeed:        fixedTestSeed(),
+			wantSeedMaster:  root.String(),
+		},
+		"imported XPrv": {
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: root,
+			},
+			wantRoot:        root.String(),
+			wantRootPrivate: true,
+			wantSeed:        nil,
+			wantSeedMaster:  "",
+		},
+	}
+}
+
+// TestManagerCreateBoundsGenesisSecretsOnPanic verifies that preparation
+// unwinding destroys the owned root even when backend creation panics.
+func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Capture the valid generated root immediately before a backend
+	// panic, without creating runtime resources that would obscure cleanup.
+	params := CreateWalletParams{
+		Name:              testWalletName,
+		Mode:              ModeGenSeed,
+		PrivatePassphrase: []byte("private"),
+	}
+
+	var observedRoot *hdkeychain.ExtendedKey
+
+	backend := &managerBackendMock{}
+	backend.On("create", mock.Anything, params, mock.Anything).
+		Return(nil, nil).Run(func(args mock.Arguments) {
+		var ok bool
+		observedRoot, ok = args.Get(2).(*hdkeychain.ExtendedKey)
+		require.True(t, ok)
+		require.True(t, observedRoot.IsPrivate())
+		panic(errDBMock)
+	}).Once()
+	backend.On("close").Return(nil).Once()
+	manager := newManagerLifecycleTest(t, backend)
+	manager.started.Store(true)
+
+	// Act: Recover around the public call so assertions observe the original
+	// key only after Manager's deferred cleanup has finished unwinding.
+	require.PanicsWithValue(t, errDBMock, func() {
+		_, _ = manager.Create(params)
+	})
+
+	// Assert: The captured master no longer exposes private material even
+	// though preparation did not return through an ordinary error path.
+	require.NotNil(t, observedRoot)
+	require.False(t, observedRoot.IsPrivate())
+	require.Equal(t, "zeroed extended key", observedRoot.String())
 }
 
 // TestManagerDeriveRootKey verifies the high-level key derivation logic,
