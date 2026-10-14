@@ -14,6 +14,10 @@ var (
 	// database.
 	ErrWalletNotFound = errors.New("wallet not found")
 
+	// ErrWalletExists reports an occupied wallet name without changing its
+	// existing rows or credentials.
+	ErrWalletExists = errors.New("wallet already exists")
+
 	// ErrAddressTypeNotFound is returned when an address type is not found.
 	ErrAddressTypeNotFound = errors.New("address type not found")
 
@@ -199,8 +203,9 @@ type Store interface {
 // WalletStore defines the methods for wallet-level operations.
 type WalletStore interface {
 	// CreateWallet creates a new wallet in the database with the provided
-	// parameters. It returns the ID of the newly created wallet or an error
-	// if the creation fails.
+	// parameters. SQL backends return ErrWalletExists for an occupied name
+	// without changing the existing wallet, or preserve the original error
+	// for other failures. The legacy kvdb Store does not implement creation.
 	CreateWallet(ctx context.Context, params CreateWalletParams) (
 		*WalletInfo, error)
 

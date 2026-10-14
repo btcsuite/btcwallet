@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -14,7 +15,8 @@ var _ db.WalletStore = (*Store)(nil)
 
 // CreateWallet creates a new wallet in the database with the provided
 // parameters. It returns the created wallet info or an error if the
-// creation fails.
+// creation fails. An occupied name returns db.ErrWalletExists without changing
+// the existing wallet; other failures retain their original classification.
 func (s *Store) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (*db.WalletInfo, error) {
 
@@ -50,17 +52,25 @@ type createWalletOps struct {
 // Ensure createWalletOps implements db.CreateWalletOps at compile time.
 var _ db.CreateWalletOps = (*createWalletOps)(nil)
 
-// CreateWallet implements db.CreateWalletOps.
+// CreateWallet inserts only a new name and classifies the targeted conflict
+// result without mistaking other SQLite uniqueness failures for duplicates.
 func (o createWalletOps) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (int64, error) {
 
-	return o.q.CreateWallet(ctx, sqlc.CreateWalletParams{
+	id, err := o.q.CreateWallet(ctx, sqlc.CreateWalletParams{
 		WalletName:     params.Name,
 		IsImported:     params.IsImported,
 		ManagerVersion: int64(params.ManagerVersion),
 		IsWatchOnly:    params.IsWatchOnly,
 		MasterHdPubKey: params.MasterPubKey,
 	})
+	// The query suppresses only wallet-name conflicts, so an empty RETURNING
+	// result identifies occupancy without inspecting generic constraint codes.
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, db.ErrWalletExists
+	}
+
+	return id, err
 }
 
 // InsertWalletSecrets implements db.CreateWalletOps.
