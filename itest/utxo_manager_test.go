@@ -584,3 +584,264 @@ func testListLeasedOutputs(h *bwtest.HarnessTest) {
 	}, pollTimeout)
 	require.NoError(h, err, "expired lease still listed")
 }
+
+// spendLeaseDepth is the spend depth the confirmation-controlled lease cases
+// request. Three leaves a block below the release depth that must keep the
+// lease.
+const spendLeaseDepth = 3
+
+// signLeaseSpend signs, without broadcasting, a transaction that spends op
+// back to the wallet. Cases sign before leasing op, because input decoration
+// refuses an output that is already leased.
+func signLeaseSpend(h *bwtest.HarnessTest, w *wallet.Wallet,
+	op wire.OutPoint) *wire.MsgTx {
+
+	h.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(h.NewWalletAddress(w))
+	require.NoError(h, err, "failed to create spend pkscript")
+
+	return h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{op},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+}
+
+// testLeaseOutputIgnoresExpiry verifies that a lease with WithReleaseAfterSpend
+// stays held by its owner after its wall-clock expiration passes.
+func testLeaseOutputIgnoresExpiry(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	// A one-nanosecond duration has expired by the time it is stored, so a
+	// timed lease would be free for another owner to take.
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, time.Nanosecond,
+		wallet.WithReleaseAfterSpend(spendLeaseDepth),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	_, err = w.LeaseOutput(
+		h.Context(), wtxmgr.LockID{2}, op, leaseDuration,
+	)
+
+	require.ErrorIs(
+		h, err, wallet.ErrOutputAlreadyLocked,
+		"expired confirmation lease was taken over",
+	)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases")
+	require.Len(h, leases, 1, "expired confirmation lease not listed")
+	require.Equal(h, owner, leases[0].LockID, "unexpected lease owner")
+}
+
+// testLeaseOutputSpendDepth verifies that a lease with WithReleaseAfterSpend
+// outlives the spend of its output, reports the spend height, and ends exactly
+// when the spend reaches the requested depth.
+func testLeaseOutputSpendDepth(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	spendTx := signLeaseSpend(h, w, op)
+
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, leaseDuration,
+		wallet.WithReleaseAfterSpend(spendLeaseDepth),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	err = w.Broadcast(h.Context(), spendTx, "")
+	require.NoError(h, err, "failed to broadcast spend")
+
+	h.MineBlockWithTx(spendTx)
+	_, spendHeight := h.GetBestBlock()
+
+	// One block short of the requested depth.
+	h.MineBlocks(spendLeaseDepth - 2)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases below depth")
+	require.Len(h, leases, 1, "lease released below depth")
+	require.Equal(h, op, leases[0].OutPoint, "unexpected leased output")
+	require.Equal(
+		h, uint32(spendLeaseDepth), leases[0].ReleaseAfterSpendConfs,
+		"unexpected release depth",
+	)
+	require.Equal(
+		h, spendHeight, leases[0].ConfirmedSpendHeight,
+		"unexpected spend height",
+	)
+
+	h.MineBlocks(1)
+
+	leases, err = w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases at depth")
+	require.Empty(h, leases, "lease not released at depth")
+}
+
+// testLeaseOutputSpendDepthOne verifies that a depth-one lease ends in the
+// block that confirms its spend. Neutrino and bitcoind record that spend in
+// the same store write that advances the sync tip.
+func testLeaseOutputSpendDepthOne(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	op := funding.WalletOutpoints[0]
+
+	spendTx := signLeaseSpend(h, w, op)
+
+	_, err := w.LeaseOutput(
+		h.Context(), wtxmgr.LockID{1}, op, leaseDuration,
+		wallet.WithReleaseAfterSpend(1),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	err = w.Broadcast(h.Context(), spendTx, "")
+	require.NoError(h, err, "failed to broadcast spend")
+
+	h.MineBlockWithTx(spendTx)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases")
+	require.Empty(h, leases, "lease not released in spend block")
+}
+
+// testLeaseOutputSpendReload verifies that a confirmation-controlled lease
+// keeps its release depth and spend height across a wallet reload.
+func testLeaseOutputSpendReload(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	spendTx := signLeaseSpend(h, w, op)
+
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, leaseDuration,
+		wallet.WithReleaseAfterSpend(spendLeaseDepth),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	err = w.Broadcast(h.Context(), spendTx, "")
+	require.NoError(h, err, "failed to broadcast spend")
+
+	h.MineBlockWithTx(spendTx)
+	_, spendHeight := h.GetBestBlock()
+
+	// The listing below reads only state persisted before the reload.
+	w = h.ReloadWallet(w)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases after reload")
+	require.Len(h, leases, 1, "reload dropped the lease")
+	require.Equal(h, owner, leases[0].LockID, "unexpected lease owner")
+	require.Equal(
+		h, uint32(spendLeaseDepth), leases[0].ReleaseAfterSpendConfs,
+		"reload changed the release depth",
+	)
+	require.Equal(
+		h, spendHeight, leases[0].ConfirmedSpendHeight,
+		"reload changed the spend height",
+	)
+}
+
+// testReleaseOutputSpentLease verifies that only the owner can release a
+// confirmation-controlled lease whose output is already spent, and that the
+// spent output is unknown once released.
+func testReleaseOutputSpentLease(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	spendTx := signLeaseSpend(h, w, op)
+
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, leaseDuration,
+		wallet.WithReleaseAfterSpend(spendLeaseDepth),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	err = w.Broadcast(h.Context(), spendTx, "")
+	require.NoError(h, err, "failed to broadcast spend")
+
+	h.MineBlockWithTx(spendTx)
+
+	errOther := w.ReleaseOutput(h.Context(), wtxmgr.LockID{2}, op)
+	errOwner := w.ReleaseOutput(h.Context(), owner, op)
+
+	require.ErrorIs(
+		h, errOther, wallet.ErrOutputUnlockNotAllowed,
+		"release under wrong lock ID not rejected",
+	)
+	require.NoError(h, errOwner, "failed to release spent lease")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases after release")
+	require.Empty(h, leases, "released spent lease still listed")
+
+	// Only the lease kept the spent output releasable.
+	err = w.ReleaseOutput(h.Context(), owner, op)
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"release of spent unleased output not rejected",
+	)
+}
+
+// testLeaseOutputSpendRenewal verifies that an owner renewal without
+// WithReleaseAfterSpend keeps the stored depth, while a renewal with it
+// replaces the depth.
+func testLeaseOutputSpendRenewal(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, leaseDuration,
+		wallet.WithReleaseAfterSpend(spendLeaseDepth),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	_, err = w.LeaseOutput(h.Context(), owner, op, 2*leaseDuration)
+	require.NoError(h, err, "failed to renew lease without depth")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases after renewal")
+	require.Len(h, leases, 1, "renewal created a second lease")
+	require.Equal(
+		h, uint32(spendLeaseDepth), leases[0].ReleaseAfterSpendConfs,
+		"renewal without depth changed the depth",
+	)
+
+	_, err = w.LeaseOutput(
+		h.Context(), owner, op, leaseDuration,
+		wallet.WithReleaseAfterSpend(spendLeaseDepth+2),
+	)
+	require.NoError(h, err, "failed to renew lease with depth")
+
+	leases, err = w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases after depth renewal")
+	require.Len(h, leases, 1, "depth renewal created a second lease")
+	require.Equal(
+		h, uint32(spendLeaseDepth+2), leases[0].ReleaseAfterSpendConfs,
+		"renewal with depth did not replace the depth",
+	)
+}
