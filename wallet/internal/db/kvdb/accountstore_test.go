@@ -2417,3 +2417,60 @@ func TestCreateImportedAccountDefaultIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestRenameAccountNumberedImported checks the numeric rename selector accepts
+// an imported account whose declared BIP44 number is retained by the store.
+func TestRenameAccountNumberedImported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: import a valid fixture key at a declared number, keeping the
+	// existing numberless/raw refusal tests as independent negative controls.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := db.KeyScopeBIP0084
+	number := uint32(7)
+	derive := kvdbDeriveFnFixture(t, mgr)
+	data, err := derive(t.Context(), scope, number, false)
+	require.NoError(t, err)
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:         scope,
+			Name:          "numbered rename",
+			AccountNumber: &number,
+			PublicKey:     data.PublicKey,
+		},
+	)
+	require.NoError(t, err)
+
+	name := "renamed import"
+
+	// Act: rename through the public number rather than the mutable name.
+	err = store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope:         scope,
+		AccountNumber: &number,
+		NewName:       name,
+	})
+
+	// Assert: both public selectors read the new name and unchanged declared
+	// number, proving numeric rename does not discard the import's known path.
+	require.NoError(t, err)
+
+	for _, query := range []db.GetAccountQuery{
+		{
+			Scope:         scope,
+			AccountNumber: &number,
+			SkipBalance:   true,
+		},
+		{
+			Scope:       scope,
+			Name:        &name,
+			SkipBalance: true,
+		},
+	} {
+		info, err := store.GetAccount(t.Context(), query)
+		require.NoError(t, err)
+		require.Equal(t, name, info.AccountName)
+		require.Equal(t, &number, info.AccountNumber)
+	}
+}
