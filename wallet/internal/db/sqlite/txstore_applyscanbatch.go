@@ -148,11 +148,10 @@ func (o scanHorizonOps) GetHorizonAccount(ctx context.Context,
 	return o.horizonAccountByID(ctx, *horizon.AccountID, horizon.Scope)
 }
 
-// buildHorizonAccount assembles the HorizonAccount the shared extension
-// workflow needs from a resolved account row. An imported xpub account has a
-// NULL account_number, surfaced as a nil AccountNumber so the derivation
-// callback receives no wallet-derived number; xpub-based derivation keys off
-// the account public key alone. A derived account's number is passed through.
+// buildHorizonAccount preserves the row's known BIP44 account number,
+// including an imported number. NULL denotes a numberless import and becomes
+// nil. Number presence does not mean the wallet derived the key; the callback
+// derives imported children from the account public key.
 func buildHorizonAccount(row horizonAccountRow) (*db.HorizonAccount, error) {
 	schema, err := db.DerivedAddressAccountSchema(
 		row.internalTypeID, row.externalTypeID,
@@ -161,9 +160,8 @@ func buildHorizonAccount(row horizonAccountRow) (*db.HorizonAccount, error) {
 		return nil, fmt.Errorf("account addr schema: %w", err)
 	}
 
-	// A derived account carries a real BIP44 number; an imported xpub
-	// account has a NULL account_number and is surfaced as nil so the shared
-	// extension presents no wallet-derived number for it.
+	// Preserve known numbers for either account-key source. Only a NULL
+	// number remains nil, preventing a numberless import from claiming a path.
 	var accountNumber *uint32
 	if row.accountNumber.Valid {
 		num, err := db.Int64ToUint32(row.accountNumber.Int64)
