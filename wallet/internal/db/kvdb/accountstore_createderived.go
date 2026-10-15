@@ -200,7 +200,7 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 
 	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
 	err = putAccountCreatedAt(
-		o.ns, scope, uint32(accountNumber), now,
+		o.ns, scope, uint32(accountNumber), now, nil,
 	)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, fmt.Errorf(

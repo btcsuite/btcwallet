@@ -2112,6 +2112,12 @@ func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket,
 	}
 	account++
 
+	// A prior exact import can exhaust the sequence immediately. Refuse the
+	// reserved imported-address slot before any legacy account write occurs.
+	if account > MaxAccountNum {
+		return 0, managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
+	}
+
 	// With the name validated, we'll create a new account for the new
 	// contiguous account.
 	err = s.newAccountWatchingOnly(
