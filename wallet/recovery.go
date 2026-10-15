@@ -32,10 +32,9 @@ type storeRecoveryDeriver struct {
 	accountPubKey []byte
 	addrSchema    waddrmgr.ScopeAddrSchema
 
-	// derivedAccountNumber is the account's real BIP44 number, kept apart
-	// from the key recovery state indexes the account by. It is nil for an
-	// imported account, which has no wallet-derived number and whose
-	// lookahead derives from accountPubKey alone.
+	// derivedAccountNumber is the known BIP44 component, separate from the
+	// recovery key. Nil denotes a numberless import; a known imported number
+	// does not mean the wallet derived the key. Lookahead uses accountPubKey.
 	derivedAccountNumber *uint32
 }
 
@@ -132,14 +131,10 @@ type RecoveryState struct {
 	// recovery leaves this empty and derives through addrMgr instead.
 	accountDerivers map[waddrmgr.AccountScope]recoveryAddressDeriver
 
-	// accountNames maps every account loaded into the recovery state to its
-	// durable name, keyed by the same account key as branchStates. A
-	// backend resolving
-	// an emitted horizon must prefer the name: both store backends mask an
-	// imported account's number to 0, so resolving an imported-xpub horizon
-	// by number alone would mis-resolve to the default derived account or
-	// fail. This lookup lets the syncer stamp ScanHorizon.AccountName at
-	// emission.
+	// accountNames maps the recovery key to the account's observed name so
+	// emitted horizons retain display metadata. Names can change, so SQL
+	// resolves those horizons by their stamped AccountID rather than a name
+	// or a number that can be unknown for an imported account.
 	accountNames map[waddrmgr.AccountScope]string
 
 	// accountIDs maps the recovery account key to the account's stable store
@@ -618,8 +613,9 @@ func (rs *RecoveryState) initAccountState(
 // lookahead window.
 //
 // accountID is the durable store row identity stamped onto emitted horizons.
-// accountNumber is the account's real BIP44 number and is nil for an imported
-// account. props.AccountNumber carries the recovery account key the loader
+// accountNumber is the known BIP44 component, nil only for a numberless
+// import. Its presence does not mean the wallet derived the account key.
+// props.AccountNumber carries the recovery account key the loader
 // chose: the caller's account number for a targeted scan, and the row ID for an
 // untargeted full scan, where an imported account would otherwise collide with
 // a derived account sharing its BIP44 number.
