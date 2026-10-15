@@ -53,8 +53,8 @@ WHERE
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
     AND (
-        (acc.is_derived AND acc.account_number IS NOT NULL)
-        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+        -- Only root-derived accounts require a known path.
+        acc.is_derived = FALSE OR acc.account_number IS NOT NULL
     )
 `
 
@@ -118,8 +118,8 @@ WHERE
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
     AND (
-        (acc.is_derived AND acc.account_number IS NOT NULL)
-        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+        -- Only root-derived accounts require a known path.
+        acc.is_derived = FALSE OR acc.account_number IS NOT NULL
     )
 GROUP BY da.account_id
 `
@@ -291,6 +291,7 @@ INSERT INTO accounts (
     account_name,
     is_derived,
     no_chain_sync,
+    account_number,
     public_key,
     master_fingerprint,
     internal_type_id,
@@ -302,19 +303,23 @@ SELECT
     $1 AS account_name,
     FALSE AS is_derived,
     $2 AS no_chain_sync,
-    $3 AS public_key,
-    $4 AS master_fingerprint,
+    -- A declared scope completes the XPub's encoded account path; NULL
+    -- preserves imports whose full path is unknown.
+    $3 AS account_number,
+    $4 AS public_key,
+    $5 AS master_fingerprint,
     -- Optional branch types override the scope schema only for this account.
-    $5 AS internal_type_id,
-    $6 AS external_type_id
+    $6 AS internal_type_id,
+    $7 AS external_type_id
 FROM key_scopes AS ks
-WHERE ks.id = $7
+WHERE ks.id = $8
 RETURNING id, created_at
 `
 
 type CreateImportedAccountParams struct {
 	AccountName       string
 	NoChainSync       bool
+	AccountNumber     sql.NullInt64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	InternalTypeID    sql.NullInt16
@@ -328,13 +333,14 @@ type CreateImportedAccountRow struct {
 }
 
 // Creates a new imported xpub account under the given scope. Imported xpub
-// accounts are HD account-like rows but do not have BIP44 account numbers.
+// accounts retain a known account number when their scope is declared.
 // The synchronization policy is bound verbatim as immutable account metadata;
 // recording it here deliberately performs no chain operation.
 func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error) {
 	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
 		arg.AccountName,
 		arg.NoChainSync,
+		arg.AccountNumber,
 		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.InternalTypeID,
@@ -442,7 +448,7 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE a.scope_id = $1 AND a.account_number = $2 AND a.is_derived
+WHERE a.scope_id = $1 AND a.account_number = $2
 `
 
 type GetAccountByScopeAndNumberParams struct {
@@ -604,7 +610,6 @@ WHERE
     AND ks.purpose = $2
     AND ks.coin_type = $3
     AND a.account_number = $4
-    AND a.is_derived
 `
 
 type GetAccountByWalletScopeAndNumberParams struct {
@@ -1331,7 +1336,6 @@ WHERE
             AND key_scopes.coin_type = $4
     )
     AND account_number = $5
-    AND is_derived
 `
 
 type UpdateAccountNameByWalletScopeAndNumberParams struct {

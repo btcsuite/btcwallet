@@ -100,7 +100,7 @@ type Querier interface {
 	// Stores account ownership and BIP44 path data for an HD-derived address.
 	CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error
 	// Creates a new imported xpub account under the given scope. Imported xpub
-	// accounts are HD account-like rows but do not have BIP44 account numbers.
+	// accounts retain a known account number when their scope is declared.
 	// The synchronization policy is bound verbatim as immutable account metadata;
 	// recording it here deliberately performs no chain operation.
 	CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error)
