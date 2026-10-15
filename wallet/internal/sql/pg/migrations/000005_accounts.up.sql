@@ -2,9 +2,8 @@
 -- This ensures migration tracking stays accurate and fails loudly if run twice.
 
 -- Accounts table stores wallet-level HD account identity under each key scope.
--- Wallet-derived accounts carry a BIP44 account number; imported xpub accounts
--- leave account_number NULL because they do not have wallet-derived BIP44
--- identity.
+-- Wallet-derived accounts have a BIP44 account number. Imported xpub accounts
+-- keep a known account number or leave account_number NULL.
 CREATE TABLE accounts (
     -- DB ID of the account, primary key.
     id BIGSERIAL PRIMARY KEY,
@@ -25,8 +24,8 @@ CREATE TABLE accounts (
     -- Whether automatic chain synchronization excludes this account.
     no_chain_sync BOOLEAN NOT NULL DEFAULT FALSE,
 
-    -- BIP44 account number allocated by the wallet for derived accounts.
-    -- Imported xpub accounts leave this NULL and are identified by id/name.
+    -- BIP44 account number, allocated or explicitly supplied. Numberless
+    -- imports remain identified by id/name.
     account_number BIGINT,
 
     -- Master fingerprint is the fingerprint of the master pub key that created
@@ -61,11 +60,8 @@ CREATE TABLE accounts (
     -- Account numbers must be non-negative when present.
     CHECK (account_number IS NULL OR account_number >= 0),
 
-    -- Derived account shape must match account-number presence.
-    CHECK (
-        (is_derived AND account_number IS NOT NULL)
-        OR (NOT is_derived AND account_number IS NULL)
-    ),
+    -- Wallet-derived accounts require a number; imported xpubs may have one.
+    CHECK (NOT is_derived OR account_number IS NOT NULL),
 
     -- Composite foreign key to key scopes. This ensures scope_id belongs to
     -- the same wallet_id as the account row. Wallet ownership is transitively
