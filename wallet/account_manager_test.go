@@ -2638,3 +2638,183 @@ func TestNewAccountExistingScopeSchema(t *testing.T) {
 		})
 	}
 }
+
+// TestImportAccountDeclaredScope verifies the public API forwards the declared
+// path, branch schema and fingerprint rather than inferring them from version.
+func TestImportAccountDeclaredScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		scope       waddrmgr.KeyScope
+		schema      *waddrmgr.ScopeAddrSchema
+		want        db.ScopeAddrSchema
+		fp          uint32
+		noChainSync bool
+	}{
+		{
+			name:  "canonical default",
+			scope: waddrmgr.KeyScopeBIP0049Plus,
+			want:  db.ScopeAddrMap[db.KeyScopeBIP0049Plus],
+		},
+		{
+			name: "custom schema",
+			scope: waddrmgr.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			},
+			schema: &waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+			want:        db.ScopeAddrMap[db.KeyScopeBIP0084],
+			fp:          0x11223344,
+			noChainSync: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: use an account-zero XPub with generic version bytes
+			// and require the declared schema and SQL chain policy in one call.
+			w, deps := createStartedWalletWithMocks(t)
+			key, _ := importAccountTestKey(t, 44)
+			number := uint32(0)
+
+			expectAccountNameAvailable(deps, tc.scope, testAccountName)
+			deps.store.On("CreateImportedAccount", mock.Anything,
+				db.CreateImportedAccountParams{
+					Name:              testAccountName,
+					Scope:             db.KeyScope(tc.scope),
+					AccountNumber:     &number,
+					AddrSchema:        &tc.want,
+					PublicKey:         []byte(key.String()),
+					MasterFingerprint: tc.fp,
+					NoChainSync:       tc.noChainSync,
+				}).Return(&db.AccountInfo{
+				AccountName:          testAccountName,
+				AccountNumber:        &number,
+				KeyScope:             db.KeyScope(tc.scope),
+				AddrSchema:           tc.want,
+				IsImported:           true,
+				NoChainSync:          tc.noChainSync,
+				MasterKeyFingerprint: &tc.fp,
+			}, nil).Once()
+
+			// Act: import through admission with the common account record;
+			// AddrType is omitted because declared scope selects the schema.
+			info, err := w.ImportAccount(t.Context(), ImportAccountParams{
+				Name:                 testAccountName,
+				XPub:                 key,
+				Scope:                &tc.scope,
+				AddrSchema:           tc.schema,
+				MasterKeyFingerprint: tc.fp,
+				NoChainSync:          tc.noChainSync,
+			}, false)
+
+			// Assert: the public result retains imported identity and both
+			// fingerprints and requested chain policy. Cleanup verifies calls.
+			require.NoError(t, err)
+			require.True(t, info.IsImported)
+			require.Equal(t, tc.noChainSync, info.NoChainSync)
+			require.Equal(t, AccountNumber(0), *info.AccountNumber)
+			require.Equal(t, tc.scope, info.KeyScope)
+			require.Equal(
+				t, MasterFingerprint(tc.fp), *info.MasterKeyFingerprint,
+			)
+		})
+	}
+}
+
+// TestImportAccountDeclaredScopeValidation verifies the new scope/schema input
+// restrictions fail before any Store access, including script-type conversion.
+func TestImportAccountDeclaredScopeValidation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: valid public account material isolates scope/schema failures;
+	// no Store expectations permit a rejected input to reach persistence.
+	key, _ := importAccountTestKey(t, 44)
+	custom := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	canonical := waddrmgr.KeyScopeBIP0084
+	witness := waddrmgr.ScopeAddrMap[canonical]
+
+	tests := []struct {
+		name   string
+		scope  *waddrmgr.KeyScope
+		schema *waddrmgr.ScopeAddrSchema
+	}{
+		{
+			name:  "custom requires schema",
+			scope: &custom,
+		},
+		{
+			name:   "schema requires scope",
+			schema: &witness,
+		},
+		{
+			name:  "script branch rejected before conversion",
+			scope: &canonical,
+			schema: &waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.TaprootScript,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: start request admission with the existing mock fixture;
+			// its cleanup owns the single expectation check for each mock.
+			w, _ := createStartedWalletWithMocks(t)
+
+			// Act: submit the selected invalid new-form input with a valid key.
+			info, err := w.ImportAccount(t.Context(), ImportAccountParams{
+				Name:       testAccountName,
+				XPub:       key,
+				Scope:      tc.scope,
+				AddrSchema: tc.schema,
+			}, false)
+
+			// Assert: public parameter refusal returns no account before any
+			// persistence call can consume a name, number or scope.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestImportAccountNumberedKVDB verifies declared imports retain their known
+// number and schema through the real kvdb Store and public account reads.
+func TestImportAccountNumberedKVDB(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use a started watch-only kvdb Wallet and an account-zero XPub.
+	// Declaring its scope must select the exact slot, including a zero number.
+	m := testKVDBManager(t)
+	w, err := m.Create(managerLifecycleCreateParams("numbered-kvdb"))
+	require.NoError(t, err)
+	key, _ := importAccountTestKey(t, 84)
+	scope := waddrmgr.KeyScopeBIP0084
+	number := AccountNumber(0)
+
+	// Act: import through the same declared-scope API used by SQL Wallets.
+	info, err := w.ImportAccount(t.Context(), ImportAccountParams{
+		Name:  testAccountName,
+		XPub:  key,
+		Scope: &scope,
+	}, false)
+
+	// Assert: the imported key has a known number, default witness schema and
+	// present-zero fingerprint; the persisted public read agrees with creation.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Equal(t, &number, info.AccountNumber)
+	require.Equal(t, scope, info.KeyScope)
+	require.Equal(t, waddrmgr.ScopeAddrMap[scope], info.AddrSchema)
+	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
+	stored, err := w.GetAccount(t.Context(), scope, testAccountName)
+	require.NoError(t, err)
+	require.Equal(t, info, stored)
+}
