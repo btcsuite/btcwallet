@@ -65,8 +65,8 @@ Wallet-root-derived accounts set `is_derived` and have a non-null account
 number. Unnumbered caller-supplied XPub accounts clear `is_derived` and leave
 `account_number` NULL. Numbered caller-supplied XPub accounts also clear
 `is_derived`, because the wallet did not derive their account key, but retain
-the real non-null hardened account component declared by the caller and
-validated against the supplied depth-three XPub.
+the real non-null hardened account component encoded by the supplied
+depth-three XPub.
 
 There is no `derived_accounts` table. The account ID remains an internal Store
 identity for all account shapes. It is not a portable public identifier.
@@ -90,57 +90,63 @@ cross the Store boundary as semantic identity.
 
 #### Account Creation Identity
 
-Wallet-root provenance and account-number presence are orthogonal. The
-accepted account shapes are:
+Whether the account key was imported and whether its account number is known
+are separate facts. The supported account shapes are:
 
-| Source | Account custody | Provenance | Number | Fingerprint |
+| Source | Account custody | Account key | Number | Fingerprint |
 | --- | --- | --- | --- | --- |
-| Generated seed | spendable | wallet-root | required | computed |
-| Imported private root | spendable | wallet-root | required | computed |
-| Caller-supplied XPub, unnumbered | watch-only | caller-supplied | absent | required |
-| Caller-supplied XPub, numbered | watch-only | caller-supplied | required | optional |
+| Generated seed | spendable | wallet-derived | required | computed |
+| Imported private root | spendable | wallet-derived | required | computed |
+| Imported XPub, unnumbered | watch-only | imported | absent | required |
+| Imported XPub, numbered | watch-only | imported | required | required |
 
-The persisted `is_derived` fact and the public `IsImported` projection encode
-wallet-root versus caller-supplied provenance. The optional account number
-distinguishes unnumbered from numbered caller-supplied identity, so no second
-provenance enum is needed. Accounts derived from an imported private wallet
-root remain wallet-root-derived; a supplied account XPub remains
-caller-supplied even when it has a known account number.
+The persisted `is_derived` fact and public `IsImported` result distinguish a
+wallet-derived account key from an imported account key. An optional account
+number distinguishes numberless imports from imports with a known number.
+Accounts derived from an imported private wallet root remain wallet-derived.
 
-For a numbered caller-supplied XPub, the full key origin is the caller-declared
-tuple `(master fingerprint?, purpose', coin_type', account')`. The wallet
-validates the public key's network, depth, and hardened account child against
-the requested account number. It cannot authenticate the hardened purpose or
-coin ancestors or optional fingerprint, which remain caller-declared
-provenance. Fingerprint presence, including present-zero, is preserved.
-Root-derived accounts use the wallet-computed fingerprint.
+For a numbered import, the caller supplies the master fingerprint, purpose
+and coin type; the account number comes from the XPub's hardened child index.
+The wallet validates the key's network, depth and hardened account child. It
+cannot authenticate the hardened purpose or coin ancestors or the supplied
+fingerprint. `MasterKeyFingerprint` remains a scalar `uint32`, including zero.
+Wallet-derived accounts use the wallet-computed fingerprint.
 
 #### Account Creation Requests
 
-`NewAccountParams` is the one extensible wallet-owned account-creation request.
-It starts with the existing name and scope inputs plus `NoChainSync`. Optional
-exact account selection, custom scope schema selection, a supplied account
-XPub, and its optional fingerprint enter the request only with their owning
-behavior; the initial request does not publish dormant fields. No separate
-exact-account, lnd-specific, or key-family operation is introduced.
+`NewAccountParams` retains the name, scope, optional account number, address
+schema and `NoChainSync` inputs for deriving an account from the wallet seed.
+Existing account XPubs are imported through `ImportAccount`.
 
-`AccountInfo` exposes the immutable `NoChainSync` fact alongside the account's
-identity facts. This result does not make chain synchronization a custody or
-signing signal.
+`ImportAccount` accepts `ImportAccountParams` and the existing `dryRun`
+argument. The renamed existing account record also supplies
+`CreateWalletParams.InitialAccounts`, so initial and live imports share the
+same key, name, fingerprint, scope and schema validation.
 
-The retained ordinary unnumbered-import signature is
-`ImportAccount(context.Context, string, *hdkeychain.ExtendedKey, uint32,
-waddrmgr.AddressType, bool) (*AccountInfo, error)`.
-Its fingerprint is required, including zero. The XPub version and address type
-retain their existing scope and schema selection. The operation has no exact
-account number, schema override, or `NoChainSync` input, always creates and
-reports `NoChainSync=false`, and does not gain an `ImportAccountParams`
-wrapper.
+A nil `Scope` retains XPub-version/address-type inference and a numberless
+import. A declared `Scope` retains the number encoded by the XPub's hardened
+account child. `AddrSchema` requires a declared scope; canonical scopes use
+their existing default schema when omitted, while custom scopes require one.
+The declared purpose and coin type select the scope independently of the
+extended-key version, which is still checked for the configured network.
 
-Caller-declared scope is authoritative only for a numbered caller-supplied
-XPub request through `NewAccountParams`. Its extended-key version is checked for
-the configured Bitcoin network but does not infer scope or schema. Ordinary
-`ImportAccount` retains the distinct version-and-address-type selection above.
+Both SQL backends reuse the imported-account transaction to insert the optional
+number and advance the existing `next_account_number` cursor. Numbered imports
+remain `is_derived=false` and must return the requested effective schema before
+commit. Failures and dry runs roll back account, secret, scope and cursor
+writes. kvdb reuses its watch-only account writer at the known number and
+advances its existing account cursor without consuming lower holes. Its existing
+account metadata record retains the optional number alongside the timestamp;
+old and inferred imports keep an unknown number. Account and address reads,
+numeric selection and reopening preserve declared imports on either backend.
+
+Imports always create and report `NoChainSync=false`; the import input has no
+chain-policy field. `AccountInfo` exposes the immutable `NoChainSync` fact
+without making it a custody or signing signal.
+
+lnd's online remote-signer wallet imports external account XPubs before wallet
+startup, including purpose-1017 key-family accounts and mixed BIP49 schemas.
+These inputs fit the existing import and initial-account paths.
 
 #### Chain Synchronization
 
@@ -244,6 +250,12 @@ The accepted tradeoff is a nullable `account_number` interpreted together with
 immutable account provenance. This keeps the invariant local to the account
 row, admits a truthful numbered caller-supplied path, and still removes fake
 identity.
+
+A new path table is unnecessary because `accounts` already holds the scope,
+optional number, XPub and fingerprint. A second public import method, duplicate
+input record or compatibility wrapper would repeat existing import behavior.
+Rename the shared record to `ImportAccountParams` rather than adding another
+type, and keep importing existing keys separate from wallet-seed derivation.
 
 #### Account Consequences
 
@@ -375,3 +387,4 @@ Cons:
   effective account custody. This ADR supersedes its SQL imported-address
   bucket shape: raw imports now use the reserved name only as an alias, not as
   a stored account row.
+- [lnd watch-only account imports](https://github.com/lightningnetwork/lnd/blob/d932f48678228e337a7cc75ee4e864245e6e2b99/config_builder.go#L1608).
