@@ -37,7 +37,9 @@ INSERT INTO accounts (
     is_derived,
     no_chain_sync,
     public_key,
-    master_fingerprint
+    master_fingerprint,
+    internal_type_id,
+    external_type_id
 )
 SELECT
     ks.wallet_id,
@@ -46,7 +48,10 @@ SELECT
     FALSE AS is_derived,
     sqlc.arg('no_chain_sync') AS no_chain_sync,
     sqlc.arg('public_key') AS public_key,
-    sqlc.arg('master_fingerprint') AS master_fingerprint
+    sqlc.arg('master_fingerprint') AS master_fingerprint,
+    -- Optional branch types override the scope schema only for this account.
+    sqlc.narg('internal_type_id') AS internal_type_id,
+    sqlc.narg('external_type_id') AS external_type_id
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, created_at;
@@ -85,13 +90,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -108,13 +116,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -131,13 +142,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -158,13 +172,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -187,11 +204,14 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -209,11 +229,14 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -230,13 +253,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -255,13 +281,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -287,13 +316,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -317,13 +349,16 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only
+    w.is_watch_only AS wallet_is_watch_only,
+    -- Imported overrides take precedence; accounts without them inherit scope.
+    cast(coalesce(a.internal_type_id, ks.internal_type_id) AS INTEGER)
+        AS internal_type_id,
+    cast(coalesce(a.external_type_id, ks.external_type_id) AS INTEGER)
+        AS external_type_id
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
