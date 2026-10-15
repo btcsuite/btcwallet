@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -404,10 +405,15 @@ func (h *HarnessTest) ConnectToMiner(tempMiner *HarnessTest) {
 		h.Fatalf("nil temp miner harness")
 	}
 
-	err := h.miner.Client.AddNode(tempMiner.miner.P2PAddress(), "add")
+	// Temporary peers keep isolated forks from automatically reconnecting.
+	err := h.miner.Client.Node(
+		btcjson.NConnect, tempMiner.miner.P2PAddress(), nil,
+	)
 	require.NoError(h, err, "failed to connect to temp miner")
 
-	err = tempMiner.miner.Client.AddNode(h.miner.P2PAddress(), "add")
+	err = tempMiner.miner.Client.Node(
+		btcjson.NConnect, h.miner.P2PAddress(), nil,
+	)
 	require.NoError(h, err, "failed to connect temp miner")
 }
 
@@ -423,10 +429,15 @@ func (h *HarnessTest) DisconnectFromMiner(tempMiner *HarnessTest) {
 		h.Fatalf("nil temp miner harness")
 	}
 
-	err := h.miner.Client.AddNode(tempMiner.miner.P2PAddress(), "remove")
+	// Disconnect temporary peers until the test explicitly reconnects them.
+	err := h.miner.Client.Node(
+		btcjson.NDisconnect, tempMiner.miner.P2PAddress(), nil,
+	)
 	require.NoError(h, err, "failed to disconnect from temp miner")
 
-	err = tempMiner.miner.Client.AddNode(h.miner.P2PAddress(), "remove")
+	err = tempMiner.miner.Client.Node(
+		btcjson.NDisconnect, h.miner.P2PAddress(), nil,
+	)
 	require.NoError(h, err, "failed to disconnect temp miner")
 }
 
