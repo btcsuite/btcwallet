@@ -22,10 +22,10 @@ type HorizonAccount struct {
 	// AccountID is the database row ID of the account.
 	AccountID int64
 
-	// AccountNumber is the wallet-derived BIP44 account number used by the
-	// derivation callback. It is nil for imported xpub accounts, which have
-	// no wallet-derived number and derive children from AccountPubKey alone,
-	// mirroring AddressDerivationParams.DerivedAccountNumber.
+	// AccountNumber is the known BIP44 component used by the callback, or
+	// nil for a numberless import. Known numbers can belong to imported keys;
+	// they do not mean the wallet derived the key. Imported children use
+	// AccountPubKey, mirroring AddressDerivationParams.DerivedAccountNumber.
 	AccountNumber *uint32
 
 	// AccountPubKey is the plaintext account-level extended public key the
@@ -58,8 +58,8 @@ func (a *HorizonAccount) branchState(branch uint32) (AddressType, uint32) {
 type ScanHorizonOps interface {
 	// GetHorizonAccount loads the account a horizon targets. Implementations
 	// must resolve by horizon.AccountID, which is the stable account row
-	// identity. AccountName is mutable and Account does not identify imported
-	// xpub accounts, so neither field may be used as the durable target.
+	// identity. AccountName is mutable and Account is a recovery key, not
+	// always a path number, so neither field is the durable SQL target.
 	// Implementations return ErrAccountNotFound when no such account exists.
 	GetHorizonAccount(ctx context.Context,
 		horizon ScanHorizon) (*HorizonAccount, error)
