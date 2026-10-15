@@ -89,7 +89,7 @@ type WalletFixture struct {
 	// InitialAccounts seeds a watch-only shell wallet with the provided
 	// accounts. A nil or empty slice creates no accounts, and a non-empty
 	// slice implies WatchOnly.
-	InitialAccounts []wallet.WatchOnlyAccount
+	InitialAccounts []wallet.ImportAccountParams
 
 	// Unlocked unlocks the wallet once it has started.
 	Unlocked bool

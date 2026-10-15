@@ -168,7 +168,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			name: "ModeShell",
 			params: CreateWalletParams{
 				Mode: ModeShell,
-				InitialAccounts: []WatchOnlyAccount{{
+				InitialAccounts: []ImportAccountParams{{
 					Scope:                waddrmgr.KeyScopeBIP0049Plus,
 					XPub:                 acctXPub,
 					MasterKeyFingerprint: 0,
@@ -252,14 +252,14 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	accountXPub, err := accountKey.Neuter()
 	require.NoError(t, err)
 
-	initialXPub := []WatchOnlyAccount{
+	initialXPub := []ImportAccountParams{
 		{
 			XPub:     accountXPub,
 			AddrType: waddrmgr.WitnessPubKey,
 		},
 	}
-	initialXPrv := []WatchOnlyAccount{{XPub: rootKey}}
-	initialNil := []WatchOnlyAccount{{}}
+	initialXPrv := []ImportAccountParams{{XPub: rootKey}}
+	initialNil := []ImportAccountParams{{}}
 
 	tests := []struct {
 		name       string
@@ -1011,7 +1011,7 @@ func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
 			require.NoError(t, err)
 
 			params := managerLifecycleCreateParams("candidate")
-			params.InitialAccounts = []WatchOnlyAccount{
+			params.InitialAccounts = []ImportAccountParams{
 				{
 					Name:     "initial-account",
 					XPub:     tc.key,

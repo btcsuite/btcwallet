@@ -1346,7 +1346,7 @@ func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
+			InitialAccounts: []wallet.ImportAccountParams{{
 				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -1539,7 +1539,7 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
+			InitialAccounts: []wallet.ImportAccountParams{{
 				Scope:                keys.scope,
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -1688,7 +1688,7 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 
 			var fixture bwtest.WalletFixture
 
-			fixture.InitialAccounts = []wallet.WatchOnlyAccount{
+			fixture.InitialAccounts = []wallet.ImportAccountParams{
 				{
 					Scope:                waddrmgr.KeyScopeBIP0049Plus,
 					XPub:                 initialKey,
@@ -1774,7 +1774,7 @@ func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
+			InitialAccounts: []wallet.ImportAccountParams{{
 				Scope:                keys.scope,
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -1852,7 +1852,7 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
+			InitialAccounts: []wallet.ImportAccountParams{{
 				Scope:                keys.scope,
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -1897,7 +1897,7 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
+			InitialAccounts: []wallet.ImportAccountParams{{
 				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -1976,7 +1976,7 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
+			InitialAccounts: []wallet.ImportAccountParams{{
 				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
