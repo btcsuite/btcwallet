@@ -42,8 +42,8 @@ func (s *Store) RenameAccount(_ context.Context,
 			return err
 		}
 
-		// AccountNumber is the public BIP44 identifier, so reject
-		// waddrmgr-internal numbers assigned to imported accounts.
+		// Numeric selection needs a known BIP44 number; a numberless
+		// import's native slot must not become a public identifier.
 		if params.AccountNumber != nil {
 			err = assertRenameableAccount(ns, scopedMgr, acctNum)
 			if err != nil {
@@ -98,7 +98,18 @@ func assertRenameableAccount(ns walletdb.ReadBucket,
 	}
 
 	if isImported {
-		return db.ErrAccountNotFound
+		// Only a declared import exposes its native slot as a known
+		// account number. Older and inferred imports have no declaration.
+		_, number, err := readAccountCreatedAt(
+			ns, scopedMgr.Scope(), acctNum,
+		)
+		if err != nil {
+			return err
+		}
+
+		if number == nil {
+			return db.ErrAccountNotFound
+		}
 	}
 
 	return nil
