@@ -308,7 +308,7 @@ func testSignerDerivePubKeyWatchOnly(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{
-		InitialAccounts: []wallet.WatchOnlyAccount{{
+		InitialAccounts: []wallet.ImportAccountParams{{
 			Scope:                keys.scope,
 			XPub:                 keys.accountKey,
 			MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -541,7 +541,7 @@ func testSignerECDHWatchOnly(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{
-		InitialAccounts: []wallet.WatchOnlyAccount{{
+		InitialAccounts: []wallet.ImportAccountParams{{
 			Scope:                keys.scope,
 			XPub:                 keys.accountKey,
 			MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -675,7 +675,7 @@ func testSignerDeriveImportedXPub(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{
-		InitialAccounts: []wallet.WatchOnlyAccount{{
+		InitialAccounts: []wallet.ImportAccountParams{{
 			Scope:                keys.scope,
 			XPub:                 keys.accountKey,
 			MasterKeyFingerprint: keys.masterKeyFingerprint,
@@ -1747,7 +1747,7 @@ func testSignerRejectWatchOnly(h *bwtest.HarnessTest) {
 	keys := deterministicImportedAccountKeys(h)
 
 	w, _ := h.NewWallet(bwtest.WalletFixture{
-		InitialAccounts: []wallet.WatchOnlyAccount{
+		InitialAccounts: []wallet.ImportAccountParams{
 			{
 				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
