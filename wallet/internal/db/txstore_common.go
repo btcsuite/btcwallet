@@ -749,6 +749,10 @@ type CreateTxRequest struct {
 
 	// IsCoinbase caches the consensus coinbase check for backend insert params.
 	IsCoinbase bool
+
+	// IsBatch identifies chain ingestion, where an absent confirmed label
+	// preserves user metadata. Direct creation keeps strict label comparison.
+	IsBatch bool
 }
 
 // NewCreateTxRequest performs the backend-independent CreateTx preparation
@@ -1254,6 +1258,14 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 // already has a wallet-scoped row.
 func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
 	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	// Resolve an absent confirmed chain label from this transaction's row so
+	// replay can still validate and record edges. Existing-row writes never
+	// write this label back, preserving concurrent user updates; direct
+	// creation and explicit labels retain their strict comparison.
+	if req.IsBatch && req.Params.Block != nil && req.Params.Label == "" {
+		req.Params.Label = existing.Label
+	}
 
 	if canIgnoreUnminedConfirmedDuplicate(req, existing) {
 		return nil

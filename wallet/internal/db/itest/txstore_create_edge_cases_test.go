@@ -67,10 +67,13 @@ func TestCreateTxRejectsInvalidParams(t *testing.T) {
 }
 
 // TestCreateTxSkipsDuplicateConfirmedTransaction verifies that an exact
-// duplicate confirmed insert is idempotent instead of creating a second row.
+// duplicate confirmed insert is idempotent while conflicting direct labels
+// are rejected, including an empty label that chain replay treats as absent.
 func TestCreateTxSkipsDuplicateConfirmedTransaction(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Store a labeled confirmed transaction so direct duplicates must
+	// distinguish an exact replay from an attempted label replacement.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-duplicate-confirmed-tx")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -91,14 +94,54 @@ func TestCreateTxSkipsDuplicateConfirmedTransaction(t *testing.T) {
 		Received: time.Unix(1710000850, 0),
 		Block:    &confirmedBlock,
 		Status:   db.TxStatusPublished,
+		Label:    "external",
 		Credits:  map[uint32]address.Address{0: nil},
 	}
 
 	err := store.CreateTx(t.Context(), params)
 	require.NoError(t, err)
 
-	err = store.CreateTx(t.Context(), params)
-	require.NoError(t, err)
+	tests := []struct {
+		name    string
+		label   string
+		wantErr error
+	}{
+		{
+			name:  "same label",
+			label: "external",
+		},
+		{
+			name:    "absent label",
+			wantErr: db.ErrTxAlreadyExists,
+		},
+		{
+			name:    "different label",
+			label:   "replacement",
+			wantErr: db.ErrTxAlreadyExists,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange: Copy the seeded request so each row changes only its
+			// proposed label and observes the same stored transaction.
+			replay := params
+			replay.Label = tc.label
+
+			// Act: Use direct creation, which must retain strict label
+			// comparison even after the chain-batch replay fix.
+			err := store.CreateTx(t.Context(), replay)
+
+			// Assert: Only the exact duplicate succeeds; neither rejected
+			// request may erase or replace the original user label.
+			require.ErrorIs(t, err, tc.wantErr)
+			info, err := store.GetTx(t.Context(), db.GetTxQuery{
+				WalletID: walletID,
+				Txid:     tx.TxHash(),
+			})
+			require.NoError(t, err)
+			require.Equal(t, "external", info.Label)
+		})
+	}
 }
 
 // TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow verifies that
