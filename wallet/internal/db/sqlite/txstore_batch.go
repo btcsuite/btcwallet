@@ -82,7 +82,7 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 	// A confirmed tx may reference a block the batch never advanced the
 	// sync tip to: SyncedTo is nil for standalone relevant-tx
 	// notifications. Ensure that confirming block row exists before
-	// CreateTxWithOps validates it during PrepareBlock, otherwise the
+	// ApplyBatchTxWithOps validates it during PrepareBlock, otherwise the
 	// confirmed insert fails with ErrBlockNotFound. This only inserts the
 	// block row; advancing the wallet sync tip stays the sole
 	// responsibility of applyBatchSyncTip.
@@ -93,7 +93,7 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 		}
 	}
 
-	err = db.CreateTxWithOps(ctx, req, ops)
+	err = db.ApplyBatchTxWithOps(ctx, req, ops)
 
 	return promoteBatchDuplicate(ctx, qtx, req, ops, err)
 }
