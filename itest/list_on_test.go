@@ -57,6 +57,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAddressManagerListAddresses,
 	},
 	{
+		Name:     "address manager list addresses account miss",
+		TestFunc: testAddressManagerListAddressesAccountMiss,
+	},
+	{
 		Name:     "address manager get address info",
 		TestFunc: testAddressManagerGetAddressInfo,
 	},
