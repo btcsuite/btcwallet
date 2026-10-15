@@ -33,6 +33,11 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 		Coin:    params.Scope.Coin,
 	}
 
+	// bbolt releases its writer before OnCommit registers new scopes.
+	// Serialize admission through those callbacks with other Store writes.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	var info *db.AccountInfo
 
 	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
