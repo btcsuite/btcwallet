@@ -43,19 +43,73 @@ func TestCreateImportedAccountParamsValidate(t *testing.T) {
 	require.ErrorIs(t, err, ErrReservedAccountName)
 }
 
+// TestCreateImportedAccountNumberedParamsValidate verifies known imported paths
+// use the existing hardened bounds and account-derived branch restrictions.
+func TestCreateImportedAccountNumberedParamsValidate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: vary invalid path/schema data in complete imports so failures
+	// identify numbered inputs rather than missing account names or keys.
+	tests := []struct {
+		name   string
+		scope  KeyScope
+		number uint32
+		schema *ScopeAddrSchema
+	}{
+		{
+			name:   "reserved account number",
+			scope:  KeyScopeBIP0084,
+			number: MaxAccountNumber + 1,
+		},
+		{
+			name: "hardened purpose",
+			scope: KeyScope{
+				Purpose: 1 << 31,
+			},
+		},
+		{
+			name:  "script branch",
+			scope: KeyScopeBIP0084,
+			schema: &ScopeAddrSchema{
+				ExternalAddrType: WitnessScript,
+				InternalAddrType: WitnessPubKey,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: apply the declared path to a valid imported fixture.
+			params := testCreateImportedAccountParams()
+			params.Scope = test.scope
+			params.AccountNumber = &test.number
+			params.AddrSchema = test.schema
+
+			// Act: validate before the workflow can consume a scope or cursor.
+			err := params.Validate()
+
+			// Assert: each invalid path returns the parameter sentinel.
+			require.ErrorIs(t, err, ErrInvalidParam)
+		})
+	}
+}
+
 // TestCreateImportedAccountWithOps verifies that the shared helper owns the
 // imported-account workflow sequencing and returns the final AccountInfo.
 func TestCreateImportedAccountWithOps(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: configure one complete imported-account workflow with the
-	// non-default synchronization policy. Exact once-only expectations prove
-	// the policy reaches the insert without disturbing operation ordering.
+	// known number and non-default policy. Exact once-only expectations prove
+	// both reach the existing insert without additional backend calls.
 	params := testCreateImportedAccountParams()
 	params.NoChainSync = true
+	params.AccountNumber = ptrUint32(7)
 	createdAt := time.Unix(123, 0)
 	expectedInfo := &AccountInfo{
 		AccountName:          params.Name,
+		AccountNumber:        params.AccountNumber,
 		IsImported:           true,
 		IsWatchOnly:          false,
 		CreatedAt:            createdAt,
@@ -78,6 +132,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 		"CreateImportedAccount", mock.Anything,
 		CreateImportedAccountInsertRequest{
 			ScopeID:           11,
+			AccountNumber:     params.AccountNumber,
 			Name:              params.Name,
 			PublicKey:         params.PublicKey,
 			MasterFingerprint: params.MasterFingerprint,
@@ -103,6 +158,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 	// requested policy, while every backend stage satisfies its expectation.
 	require.NoError(t, err)
 	require.Same(t, expectedInfo, info)
+	require.Equal(t, params.AccountNumber, info.AccountNumber)
 	require.Equal(t, createdAt, info.CreatedAt)
 	require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
 	require.Equal(t, params.PublicKey, info.PublicKey)
