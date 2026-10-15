@@ -162,7 +162,8 @@ type AddrStore interface {
 		account uint32) (bool, error)
 
 	// NewScopedKeyManager creates a new scoped key manager from the root
-	// manager.
+	// manager. Use the returned manager inside the transaction; root lookups
+	// and address-type indexes include it only after commit.
 	NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		scope KeyScope,
 		addrSchema ScopeAddrSchema) (AccountStore, error)

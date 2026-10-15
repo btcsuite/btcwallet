@@ -6278,7 +6278,7 @@ func (w *Wallet) ImportAccountDeprecated(
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
-		accountProps, err = w.importAccount(
+		accountProps, _, err = w.importAccount(
 			ns, name, accountPubKey, masterKeyFingerprint, addrType,
 		)
 		return err
@@ -6301,7 +6301,7 @@ func (w *Wallet) ImportAccountWithScope(name string,
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
-		accountProps, err = w.importAccountScope(
+		accountProps, _, err = w.importAccountScope(
 			ns, name, accountPubKey, masterKeyFingerprint, keyScope,
 			&addrSchema,
 		)
@@ -6310,22 +6310,23 @@ func (w *Wallet) ImportAccountWithScope(name string,
 	return accountProps, err
 }
 
-// importAccount is the internal implementation of ImportAccount -- one should
-// reference its documentation for this method.
+// importAccount validates a legacy import and returns its scoped manager so
+// callers can use a new scope before the transaction publishes it.
 func (w *Wallet) importAccount(ns walletdb.ReadWriteBucket, name string,
 	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
-	addrType *waddrmgr.AddressType) (*waddrmgr.AccountProperties, error) {
+	addrType *waddrmgr.AddressType) (*waddrmgr.AccountProperties,
+	waddrmgr.AccountStore, error) {
 
 	// Ensure we have a valid account public key.
 	if err := validateExtendedPubKey(accountPubKey, true, w.chainParams); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Determine what key scope the account public key should belong to and
 	// whether it should use a custom address schema.
 	keyScope, addrSchema, err := keyScopeFromPubKey(accountPubKey, addrType)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	return w.importAccountScope(
@@ -6334,11 +6335,12 @@ func (w *Wallet) importAccount(ns walletdb.ReadWriteBucket, name string,
 	)
 }
 
-// importAccountScope imports a watch-only account for a given scope.
+// importAccountScope imports a watch-only account and returns the manager used
+// in this transaction, which need not be globally registered until commit.
 func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
 	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
 	keyScope waddrmgr.KeyScope, addrSchema *waddrmgr.ScopeAddrSchema) (
-	*waddrmgr.AccountProperties, error) {
+	*waddrmgr.AccountProperties, waddrmgr.AccountStore, error) {
 
 	scopedMgr, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
@@ -6346,7 +6348,7 @@ func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
 			ns, keyScope, *addrSchema,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -6354,9 +6356,11 @@ func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
 		ns, name, accountPubKey, masterKeyFingerprint, addrSchema,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return scopedMgr.AccountProperties(ns, account)
+	props, err := scopedMgr.AccountProperties(ns, account)
+
+	return props, scopedMgr, err
 }
 
 // ImportAccountDryRun serves as a dry run implementation of ImportAccount. This
@@ -6391,7 +6395,9 @@ func (w *Wallet) ImportAccountDryRun(name string,
 
 		// Import the account as usual.
 		var err error
-		accountProps, err = w.importAccount(
+		var manager waddrmgr.AccountStore
+
+		accountProps, manager, err = w.importAccount(
 			ns, name, accountPubKey, masterKeyFingerprint, addrType,
 		)
 		if err != nil {
@@ -6402,13 +6408,8 @@ func (w *Wallet) ImportAccountDryRun(name string,
 		// could do this based on the provided accountPubKey alone, but
 		// we go through the ScopedKeyManager instead to ensure
 		// addresses will be derived as expected from the wallet's
-		// point-of-view.
-		manager, err := w.addrStore.FetchScopedKeyManager(
-			accountProps.KeyScope,
-		)
-		if err != nil {
-			return err
-		}
+		// point-of-view. Keep the returned manager: a newly created scope
+		// is transaction-local and this dry run will never publish it.
 
 		// The importAccount method above will cache the imported
 		// account within the scoped manager. Since this is a dry-run
