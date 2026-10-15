@@ -194,6 +194,12 @@ func importAccountErr(err error) error {
 	case errors.Is(err, db.ErrInvalidParam):
 		publicErr = ErrInvalidParam
 
+	// Valid imports can exhaust the same account sequence as NewAccount.
+	case errors.Is(err, db.ErrMaxAccountNumberReached),
+		isAddrMgrErr(err, waddrmgr.ErrAccountNumTooHigh):
+
+		publicErr = ErrAccountDerivationExhausted
+
 	case isAccountMissing(err):
 		publicErr = ErrAccountNotFound
 
@@ -370,13 +376,14 @@ type AccountManager interface {
 
 	// ImportAccount imports an account from an extended public key.
 	// Invalid or private keys return ErrInvalidAccountKey. The key scope is
-	// derived from the version bytes of the extended key. The account name
-	// must be unique within the derived scope. If dryRun is true, the import
-	// is validated but not persisted. Imported accounts remain watch-only
-	// alongside local signing accounts; no signing material is imported.
-	ImportAccount(ctx context.Context, name string,
-		accountKey *hdkeychain.ExtendedKey,
-		masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
+	// inferred from its version and AddrType when account.Scope is nil.
+	// A declared scope retains the number from the XPub's hardened child;
+	// callers must compare any separately expected number before importing.
+	// NoChainSync excludes automatic chain synchronization on SQL; kvdb ignores
+	// it and reports false. The account name must be unique within its scope.
+	// If dryRun is true, validation does not persist the import. Imported
+	// accounts stay watch-only; no signing material is imported.
+	ImportAccount(ctx context.Context, account ImportAccountParams,
 		dryRun bool) (*AccountInfo, error)
 }
 
@@ -1125,16 +1132,20 @@ type importAccountReq struct {
 	resp    chan accountResp
 }
 
-// ImportAccount imports an account from an extended public key. Private
-// extended keys are rejected. The key scope is derived from the version
-// bytes of the extended key. The account name must be unique within the
-// derived scope. Invalid account keys return ErrInvalidAccountKey.
+// ImportAccount imports an extended public account key. A nil Scope selects
+// the scope from its version and AddrType. A declared Scope retains the
+// number from the XPub's hardened child. Callers must compare any separately
+// expected number before importing. Names must be unique in their scope.
+// Invalid or private keys return ErrInvalidAccountKey. Declared imports retain
+// their known number on SQL and kvdb backends.
 // An occupied name returns ErrAccountAlreadyExists before identity checks;
 // otherwise shared XPub payloads with overlapping corresponding branch schemas
 // return ErrAccountIdentityCollision, including on dry runs.
 //
 // Imported accounts remain watch-only alongside local signing accounts.
 // Their addresses and outputs are tracked without a local signing path.
+// NoChainSync excludes automatic chain synchronization on SQL; its default is
+// false. Kvdb ignores the flag and reports false.
 //
 // dryRun=true validates the import through the store and rolls the transaction
 // back; no account row is persisted.
@@ -1142,9 +1153,7 @@ type importAccountReq struct {
 // The time complexity of this method is dominated by the database lookup
 // to ensure the account name is unique within the scope.
 func (w *Wallet) ImportAccount(ctx context.Context,
-	name string, accountKey *hdkeychain.ExtendedKey,
-	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-	dryRun bool) (*AccountInfo, error) {
+	account ImportAccountParams, dryRun bool) (*AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -1152,7 +1161,7 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 	}
 
 	accountKeySnapshot, err := snapshotExtendedPubKey(
-		accountKey, true, w.cfg.ChainParams,
+		account.XPub, true, w.cfg.ChainParams,
 	)
 	if err != nil {
 		return nil, err
@@ -1163,16 +1172,24 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 		return nil, err
 	}
 
+	// Own all pointer inputs before admission so a canceled caller cannot
+	// change the key path or branch schema seen by the handler.
+	account.XPub = accountKeySnapshot
+	if account.Scope != nil {
+		scope := *account.Scope
+		account.Scope = &scope
+	}
+
+	if account.AddrSchema != nil {
+		schema := *account.AddrSchema
+		account.AddrSchema = &schema
+	}
+
 	req := importAccountReq{
-		reqCtx: reqCtx{ctx: ctx},
-		account: ImportAccountParams{
-			Name:                 name,
-			XPub:                 accountKeySnapshot,
-			MasterKeyFingerprint: masterKeyFingerprint,
-			AddrType:             addrType,
-		},
-		dryRun: dryRun,
-		resp:   make(chan accountResp, 1),
+		reqCtx:  reqCtx{ctx: ctx},
+		account: account,
+		dryRun:  dryRun,
+		resp:    make(chan accountResp, 1),
 	}
 
 	err = w.sendReq(ctx, req)
