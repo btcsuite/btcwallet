@@ -3432,3 +3432,104 @@ func TestManagedAddressValidation(t *testing.T) {
 	}
 
 }
+
+// TestNewScopedKeyManagerCommit verifies a new scope stays transaction-local
+// until commit, so rollback cannot publish its manager or address-type indexes.
+func TestNewScopedKeyManagerCommit(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		txErr error
+	}{
+		{
+			name: "commit",
+		},
+		{
+			name:  "rollback",
+			txErr: walletdb.ErrDryRunRollBack,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: unlock a real manager whose canonical scopes are
+			// already loaded, then retain its address-type indexes before
+			// creating the absent purpose-1017 scope in either outcome.
+			cleanup, db, mgr := setupManager(t)
+			t.Cleanup(cleanup)
+
+			err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+				return mgr.Unlock(
+					tx.ReadBucket(waddrmgrNamespaceKey), privPassphrase,
+				)
+			})
+			require.NoError(t, err)
+
+			scope := KeyScope{Purpose: 1017, Coin: 0}
+			schema := ScopeAddrMap[KeyScopeBIP0084]
+			external := append([]KeyScope(nil),
+				mgr.ScopesForExternalAddrType(schema.ExternalAddrType)...)
+			internal := append([]KeyScope(nil),
+				mgr.ScopesForInternalAddrTypes(schema.InternalAddrType)...)
+
+			// Act: create the scope and capture its global visibility
+			// before the transaction chooses commit or rollback. Retain
+			// the returned manager independently of global registration.
+			var scoped AccountStore
+
+			var duringLookup error
+
+			var duringExternal, duringInternal []KeyScope
+
+			err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+				var err error
+
+				scoped, err = mgr.NewScopedKeyManager(
+					tx.ReadWriteBucket(waddrmgrNamespaceKey), scope, schema,
+				)
+				if err != nil {
+					return err
+				}
+
+				_, duringLookup = mgr.FetchScopedKeyManager(scope)
+				duringExternal = append([]KeyScope(nil),
+					mgr.ScopesForExternalAddrType(schema.ExternalAddrType)...)
+				duringInternal = append([]KeyScope(nil),
+					mgr.ScopesForInternalAddrTypes(schema.InternalAddrType)...)
+
+				return tc.txErr
+			})
+
+			// Assert: neither outcome publishes before commit. Rollback
+			// retains the original indexes; success publishes the exact
+			// returned manager and both of its address-type entries.
+			require.NotNil(t, scoped)
+			require.True(t, IsError(duringLookup, ErrScopeNotFound))
+			require.Equal(t, external, duringExternal)
+			require.Equal(t, internal, duringInternal)
+
+			registered, lookupErr := mgr.FetchScopedKeyManager(scope)
+			if tc.txErr != nil {
+				require.ErrorIs(t, err, tc.txErr)
+				require.True(t, IsError(lookupErr, ErrScopeNotFound))
+				require.Nil(t, registered)
+				require.Equal(t, external,
+					mgr.ScopesForExternalAddrType(schema.ExternalAddrType))
+				require.Equal(t, internal,
+					mgr.ScopesForInternalAddrTypes(schema.InternalAddrType))
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NoError(t, lookupErr)
+			require.Same(t, scoped, registered)
+			require.Contains(t,
+				mgr.ScopesForExternalAddrType(schema.ExternalAddrType), scope)
+			require.Contains(t,
+				mgr.ScopesForInternalAddrTypes(schema.InternalAddrType), scope)
+		})
+	}
+}
