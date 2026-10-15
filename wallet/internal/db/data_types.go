@@ -550,6 +550,10 @@ type CreateImportedAccountParams struct {
 	// scope is determined by the default mapping unless AddrSchema is set.
 	Scope KeyScope
 
+	// AccountNumber retains the known BIP44 index for a numbered import.
+	// Nil preserves a numberless import on every backend.
+	AccountNumber *uint32
+
 	// MasterFingerprint is the fingerprint of the master key.
 	MasterFingerprint uint32
 
