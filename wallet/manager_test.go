@@ -169,7 +169,6 @@ func TestManagerCreateSuccess(t *testing.T) {
 			params: CreateWalletParams{
 				Mode: ModeShell,
 				InitialAccounts: []ImportAccountParams{{
-					Scope:                waddrmgr.KeyScopeBIP0049Plus,
 					XPub:                 acctXPub,
 					MasterKeyFingerprint: 0,
 					Name:                 "test-shell-account",
@@ -215,7 +214,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 					t.Context(), db.GetAccountQuery{
 						WalletID: w.id,
 						Scope: db.KeyScope(
-							tc.params.InitialAccounts[0].Scope,
+							waddrmgr.KeyScopeBIP0049Plus,
 						),
 						Name: &tc.params.InitialAccounts[0].Name,
 					},

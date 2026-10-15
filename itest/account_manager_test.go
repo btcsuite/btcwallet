@@ -1347,7 +1347,6 @@ func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
-				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 sourceName,
@@ -1540,7 +1539,6 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
-				Scope:                keys.scope,
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1690,7 +1688,6 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 
 			fixture.InitialAccounts = []wallet.ImportAccountParams{
 				{
-					Scope:                waddrmgr.KeyScopeBIP0049Plus,
 					XPub:                 initialKey,
 					MasterKeyFingerprint: keys.masterKeyFingerprint,
 					Name:                 "schema seed",
@@ -1775,7 +1772,6 @@ func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
-				Scope:                keys.scope,
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1853,7 +1849,6 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
-				Scope:                keys.scope,
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1898,7 +1893,6 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
-				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1977,7 +1971,6 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
-				Scope:                keys.scope,
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
