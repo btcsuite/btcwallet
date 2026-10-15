@@ -938,25 +938,6 @@ func testUnsafeSignerRejectWatchOnly(h *bwtest.HarnessTest) {
 	require.True(h, addrKeyIsNil, "expected no address key")
 }
 
-// createSignerPath builds a signing selector from public address metadata,
-// retaining the account number and child rather than assuming address index 0.
-func createSignerPath(derivation *wallet.AddressDerivation) wallet.BIP32Path {
-	// Follow wallet.BIP32Path: use the public account number for lookup
-	// and harden only the BIP32 account child.
-	account := hdkeychain.HardenedKeyStart + derivation.Account
-
-	return wallet.BIP32Path{
-		KeyScope: derivation.KeyScope,
-		DerivationPath: waddrmgr.DerivationPath{
-			InternalAccount:      derivation.Account,
-			Account:              account,
-			Branch:               derivation.Branch,
-			Index:                derivation.Index,
-			MasterKeyFingerprint: derivation.MasterKeyFingerprint,
-		},
-	}
-}
-
 // testSignerSignDigestECDSA verifies a persistent Wallet signs for its public
 // child key, and that the signature authenticates the requested digest only.
 func testSignerSignDigestECDSA(h *bwtest.HarnessTest) {
