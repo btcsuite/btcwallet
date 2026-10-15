@@ -195,5 +195,17 @@ func checkAccountIdentity(ns walletdb.ReadBucket, mgr waddrmgr.AddrStore,
 		}
 	}
 
+	// The exact kvdb slot must be free even if its older row is numberless;
+	// otherwise the native writer would replace that account's key.
+	if candidate.AccountNumber != nil {
+		for i, account := range accounts {
+			if account.KeyScope == candidate.KeyScope &&
+				numbers[i] == *candidate.AccountNumber {
+
+				return db.ErrAccountNumberConflict
+			}
+		}
+	}
+
 	return db.CheckAccountIdentity(candidate, accounts)
 }
