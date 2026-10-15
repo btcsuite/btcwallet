@@ -697,8 +697,12 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 					count)
 
 				_, err := w.ImportAccount(
-					b.Context(), accountName, accountKey,
-					masterFingerprint, addrT, dryRun,
+					b.Context(), ImportAccountParams{
+						Name:                 accountName,
+						XPub:                 accountKey,
+						AddrType:             addrT,
+						MasterKeyFingerprint: masterFingerprint,
+					}, dryRun,
 				)
 				require.NoError(b, err)
 

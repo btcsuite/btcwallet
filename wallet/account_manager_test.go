@@ -1517,8 +1517,12 @@ func TestImportAccount(t *testing.T) {
 			// Act: Import with the versioned XPub and requested address
 			// type so the public path resolves the per-account schema.
 			info, err := w.ImportAccount(
-				t.Context(), testAccountName, key, fingerprint,
-				test.addrType, test.dryRun,
+				t.Context(), ImportAccountParams{
+					Name:                 testAccountName,
+					XPub:                 key,
+					AddrType:             test.addrType,
+					MasterKeyFingerprint: fingerprint,
+				}, test.dryRun,
 			)
 
 			// Assert: Check the returned identity; shared fixture cleanup
@@ -1549,8 +1553,12 @@ func TestImportAccountOccupiedName(t *testing.T) {
 
 	// Act: Import the public key using the occupied account name.
 	_, err := w.ImportAccount(
-		t.Context(), name, accountKey, masterFP,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), ImportAccountParams{
+			Name:                 name,
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: masterFP,
+		}, false,
 	)
 
 	// Assert: The conflict identity proves preflight refused mutation.
@@ -1587,6 +1595,11 @@ func TestImportAccountStoreErrors(t *testing.T) {
 			name:     "unsupported numbered import",
 			storeErr: db.ErrAccountOperationUnsupported,
 			want:     ErrAccountOperationUnsupported,
+		},
+		{
+			name:     "account sequence exhausted",
+			storeErr: db.ErrMaxAccountNumberReached,
+			want:     ErrAccountDerivationExhausted,
 		},
 		{
 			name:     "invalid declared branch types",
@@ -1629,8 +1642,12 @@ func TestImportAccountStoreErrors(t *testing.T) {
 
 			// Act: Import through public translation after name preflight.
 			_, err := w.ImportAccount(
-				t.Context(), testAccountName, accountKey, masterFP,
-				waddrmgr.WitnessPubKey, false,
+				t.Context(), ImportAccountParams{
+					Name:                 testAccountName,
+					XPub:                 accountKey,
+					AddrType:             waddrmgr.WitnessPubKey,
+					MasterKeyFingerprint: masterFP,
+				}, false,
 			)
 
 			// Assert: Preserve each public identity without the backend cause.
@@ -1655,8 +1672,12 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 
 	// Act: Try an empty account name with valid public key material.
 	_, err := w.ImportAccount(
-		t.Context(), "", accountKey, masterFP,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), ImportAccountParams{
+			Name:                 "",
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: masterFP,
+		}, false,
 	)
 
 	// Assert: Name validation returns the wallet-owned parameter identity.
@@ -1664,8 +1685,12 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 
 	// Act: A valid name allows the unsupported address type to be checked.
 	_, err = w.ImportAccount(
-		t.Context(), testAccountName, accountKey, masterFP,
-		waddrmgr.PubKeyHash, false,
+		t.Context(), ImportAccountParams{
+			Name:                 testAccountName,
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.PubKeyHash,
+			MasterKeyFingerprint: masterFP,
+		}, false,
 	)
 
 	// Assert: Address validation also hides internal error identities.
@@ -1676,8 +1701,14 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 	cancel()
 
 	// Act: Retry with an already-canceled caller and valid key material.
-	_, err = w.ImportAccount(ctx, "", accountKey, masterFP,
-		waddrmgr.WitnessPubKey, false)
+	_, err = w.ImportAccount(
+		ctx, ImportAccountParams{
+			Name:                 "",
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: masterFP,
+		}, false,
+	)
 
 	// Assert: Caller cancellation precedes name validation and Store work.
 	require.ErrorIs(t, err, context.Canceled)
@@ -1702,8 +1733,12 @@ func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		_, err := w.ImportAccount(
-			ctx, testAccountName, accountKey, masterFP,
-			waddrmgr.WitnessPubKey, false,
+			ctx, ImportAccountParams{
+				Name:                 testAccountName,
+				XPub:                 accountKey,
+				AddrType:             waddrmgr.WitnessPubKey,
+				MasterKeyFingerprint: masterFP,
+			}, false,
 		)
 		result <- err
 	}()
@@ -1771,8 +1806,11 @@ func TestImportAccountRejectsInvalidKeyBeforeAdmission(t *testing.T) {
 
 			// Act: Attempt to import the invalid key through the public API.
 			_, err := w.ImportAccount(
-				ctx, testAccountName, test.key, 0,
-				waddrmgr.WitnessPubKey, false,
+				ctx, ImportAccountParams{
+					Name:     testAccountName,
+					XPub:     test.key,
+					AddrType: waddrmgr.WitnessPubKey,
+				}, false,
 			)
 
 			// Assert: The account-key sentinel, rather than caller
@@ -1889,8 +1927,11 @@ func TestImportAccountRejectsStopped(t *testing.T) {
 
 	// Act: Attempt to import the invalid key through the terminal Wallet.
 	_, err := w.ImportAccount(
-		t.Context(), testAccountName, nil, 0,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), ImportAccountParams{
+			Name:     testAccountName,
+			XPub:     nil,
+			AddrType: waddrmgr.WitnessPubKey,
+		}, false,
 	)
 
 	// Assert: The terminal sentinel proves shutdown wins before key validation
