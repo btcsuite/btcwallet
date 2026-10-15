@@ -171,8 +171,9 @@ func (s *ScopedKeyManager) AllocateImportedAccountNumber(
 // row using the caller-supplied account-level extended public key. The
 // pubkey is encrypted with cryptoKeyPub before storage.
 //
-// Must run inside the same walletdb.Update transaction as
-// AllocateImportedAccountNumber.
+// It advances the existing account cursor without consuming lower holes.
+// Run inside walletdb.Update; sequential callers may allocate first with
+// AllocateImportedAccountNumber in the same transaction.
 func (s *ScopedKeyManager) PutWatchOnlyAccountWithKeys(
 	ns walletdb.ReadWriteBucket, account uint32, name string,
 	pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
@@ -210,6 +211,20 @@ func (s *ScopedKeyManager) PutWatchOnlyAccountWithKeys(
 	)
 	if err != nil {
 		return err
+	}
+
+	// Exact imports share the sequential namespace. Preserve its maximum
+	// before caching the row; an all-ones cursor denotes an empty scope.
+	lastAccount, err := fetchLastAccount(ns, &s.scope)
+	if err != nil {
+		return err
+	}
+
+	if lastAccount == ^uint32(0) || account > lastAccount {
+		err = putLastAccount(ns, &s.scope, account)
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = s.loadAccountInfo(ns, account)

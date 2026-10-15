@@ -164,7 +164,7 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 	// Persist the creation timestamp into the kvdb-owned side
 	// bucket. The subsequent loadAccountInfo call reads it back.
 	err = putAccountCreatedAt(
-		ns, scope, accountNumber, time.Now().UTC(),
+		ns, scope, accountNumber, time.Now().UTC(), nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("persist created-at: %w", err)

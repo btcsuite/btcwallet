@@ -56,7 +56,7 @@ type accountGetOps struct {
 
 	// internalAccountNumber caches the resolved waddrmgr account number from
 	// loadAccountByNumber so AttachAccountBalance can use it for balance
-	// lookups. Imported accounts expose no public AccountNumber, but kvdb
+	// lookups. Numberless imports expose no public AccountNumber, but kvdb
 	// balance rows still key by the original waddrmgr number.
 	internalAccountNumber uint32
 }
@@ -262,7 +262,9 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 	// timestamp, so kvdb keeps one in a side bucket. A missing
 	// entry (for rows written before the side bucket existed)
 	// returns time.Time{} as "unknown".
-	createdAt, err := readAccountCreatedAt(ns, scope, accountNumber)
+	createdAt, knownNumber, err := readAccountCreatedAt(
+		ns, scope, accountNumber,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("read created-at: %w", err)
 	}
@@ -274,7 +276,8 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		return nil, err
 	}
 
-	var accountNumberForContract *uint32
+	// Imported keys expose a number only when declaration metadata retained it.
+	accountNumberForContract := knownNumber
 	if !accountIsImported {
 		accountNumberForContract = &props.AccountNumber
 	}

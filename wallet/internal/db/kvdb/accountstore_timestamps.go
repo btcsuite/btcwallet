@@ -18,13 +18,18 @@ import (
 // namespace that holds per-account creation timestamps. waddrmgr's
 // account row layout does not include a creation timestamp; the kvdb
 // adapter stores it here so the db.AccountInfo.CreatedAt contract is
-// satisfied without changing waddrmgr's bucket layout.
+// satisfied without changing waddrmgr's bucket layout. Declared imports append
+// their known number; old and inferred imports keep timestamp-only data.
 var accountCreatedAtBucketKey = []byte("account-created-at")
 
 // createdAtValueLen is the on-disk byte width of a per-account creation
 // timestamp encoded as a big-endian int64 nanosecond offset from the
 // Unix epoch.
 const createdAtValueLen = 8
+
+// numberedCreatedAtValueLen includes the declared uint32 account number after
+// the existing timestamp, allowing old and numberless values to stay unchanged.
+const numberedCreatedAtValueLen = createdAtValueLen + 4
 
 // errCreatedAtUnexpectedSize is returned when the side bucket's value
 // for an existing (scope, account) key has an unexpected byte width.
@@ -55,9 +60,11 @@ func newAccountCreatedAtKey(scope waddrmgr.KeyScope,
 // putAccountCreatedAt writes the creation timestamp for an account to
 // the side bucket. The caller must hold a walletdb.ReadWriteTx and
 // pass the waddrmgr namespace bucket; the helper creates the
-// sub-bucket on first use.
+// sub-bucket on first use. A known number is stored with the timestamp so its
+// presence survives reopen without inferring a path from legacy account IDs.
 func putAccountCreatedAt(ns walletdb.ReadWriteBucket,
-	scope waddrmgr.KeyScope, account uint32, t time.Time) error {
+	scope waddrmgr.KeyScope, account uint32, t time.Time,
+	knownNumber *uint32) error {
 
 	bucket, err := ns.CreateBucketIfNotExists(accountCreatedAtBucketKey)
 	if err != nil {
@@ -66,11 +73,21 @@ func putAccountCreatedAt(ns walletdb.ReadWriteBucket,
 
 	key := newAccountCreatedAtKey(scope, account)
 
-	var value [createdAtValueLen]byte
-	//nolint:gosec // UnixNano() always fits in uint64 for times after 1970.
-	binary.BigEndian.PutUint64(value[:], uint64(t.UTC().UnixNano()))
+	// Preserve the old encoding unless the caller explicitly supplied a path.
+	length := createdAtValueLen
+	if knownNumber != nil {
+		length = numberedCreatedAtValueLen
+	}
 
-	err = bucket.Put(key[:], value[:])
+	value := make([]byte, length)
+	//nolint:gosec // UnixNano() always fits in uint64 for times after 1970.
+	binary.BigEndian.PutUint64(value, uint64(t.UTC().UnixNano()))
+
+	if knownNumber != nil {
+		binary.BigEndian.PutUint32(value[createdAtValueLen:], *knownNumber)
+	}
+
+	err = bucket.Put(key[:], value)
 	if err != nil {
 		return fmt.Errorf("put created-at: %w", err)
 	}
@@ -78,30 +95,29 @@ func putAccountCreatedAt(ns walletdb.ReadWriteBucket,
 	return nil
 }
 
-// readAccountCreatedAt returns the creation timestamp for an account.
-// If no entry exists for (scope, account) the helper returns
-// time.Time{} (Go's zero value) and a nil error, meaning "unknown".
-// Decoding zero nanos is reserved for legitimate epoch timestamps.
+// readAccountCreatedAt returns the timestamp and optional declared number.
+// Missing metadata means an unknown timestamp and number; old timestamp-only
+// records retain an unknown number even when their internal ID matches a key.
 func readAccountCreatedAt(ns walletdb.ReadBucket,
-	scope waddrmgr.KeyScope, account uint32) (time.Time, error) {
+	scope waddrmgr.KeyScope, account uint32) (time.Time, *uint32, error) {
 
 	bucket := ns.NestedReadBucket(accountCreatedAtBucketKey)
 	if bucket == nil {
-		return time.Time{}, nil
+		return time.Time{}, nil, nil
 	}
 
 	key := newAccountCreatedAtKey(scope, account)
 	raw := bucket.Get(key[:])
 
 	if raw == nil {
-		return time.Time{}, nil
+		return time.Time{}, nil, nil
 	}
 
-	if len(raw) != createdAtValueLen {
-		return time.Time{}, fmt.Errorf(
-			"%w: scope=%v account=%d: expected %d bytes, got %d",
+	if len(raw) != createdAtValueLen && len(raw) != numberedCreatedAtValueLen {
+		return time.Time{}, nil, fmt.Errorf(
+			"%w: scope=%v account=%d: expected %d or %d bytes, got %d",
 			errCreatedAtUnexpectedSize, scope, account,
-			createdAtValueLen, len(raw),
+			createdAtValueLen, numberedCreatedAtValueLen, len(raw),
 		)
 	}
 
@@ -109,5 +125,12 @@ func readAccountCreatedAt(ns walletdb.ReadBucket,
 	// time.Now() in putAccountCreatedAt; round-tripping fits int64.
 	nanos := int64(binary.BigEndian.Uint64(raw))
 
-	return time.Unix(0, nanos).UTC(), nil
+	// Only the explicit tail establishes a known number for an imported key.
+	var knownNumber *uint32
+	if len(raw) > createdAtValueLen {
+		number := binary.BigEndian.Uint32(raw[createdAtValueLen:])
+		knownNumber = &number
+	}
+
+	return time.Unix(0, nanos).UTC(), knownNumber, nil
 }
