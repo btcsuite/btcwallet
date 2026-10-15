@@ -983,6 +983,76 @@ func testAddressManagerListAddresses(h *bwtest.HarnessTest) {
 	}
 }
 
+// testAddressManagerListAddressesAccountMiss proves listing resolves the
+// account in the address type's scope: an account absent there fails with
+// ErrAccountNotFound on every backend, while an existing account with no
+// addresses lists as empty rather than as a miss.
+func testAddressManagerListAddressesAccountMiss(h *bwtest.HarnessTest) {
+	// A taproot-only account exists in the wallet but not in the BIP84
+	// scope that WitnessPubKey selects, so a name match alone is not enough.
+	const (
+		emptyAccount   = "empty account"
+		taprootAccount = "taproot account"
+	)
+
+	tests := []struct {
+		name        string
+		accountName string
+		addrType    waddrmgr.AddressType
+		wantErr     error
+	}{
+		{
+			name:        "unknown account",
+			accountName: "missing account",
+			addrType:    waddrmgr.WitnessPubKey,
+			wantErr:     wallet.ErrAccountNotFound,
+		},
+		{
+			name:        "account in another scope",
+			accountName: taprootAccount,
+			addrType:    waddrmgr.WitnessPubKey,
+			wantErr:     wallet.ErrAccountNotFound,
+		},
+		{
+			name:        "existing empty account",
+			accountName: emptyAccount,
+			addrType:    waddrmgr.WitnessPubKey,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: both named accounts exist and neither has
+			// allocated an address.
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			h.CreateTestAccount(w, waddrmgr.KeyScopeBIP0084, emptyAccount)
+			h.CreateTestAccount(
+				w, waddrmgr.KeyScopeBIP0086, taprootAccount,
+			)
+
+			// Act: list the account for the address type.
+			listed, err := w.ListAddresses(
+				ctx, tc.accountName, tc.addrType,
+			)
+
+			// Assert: a miss carries the public identity, and only an
+			// existing account may report an empty listing.
+			if tc.wantErr != nil {
+				require.ErrorIs(h, err, tc.wantErr)
+				require.Nil(h, listed)
+
+				return
+			}
+
+			require.NoError(h, err)
+			require.Empty(h, listed)
+		})
+	}
+}
+
 // testAddressManagerGetAddressInfo proves point lookups return complete
 // metadata for allocated addresses on both branches, before and after
 // reopening the wallet.
