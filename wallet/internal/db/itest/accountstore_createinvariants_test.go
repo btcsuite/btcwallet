@@ -530,3 +530,39 @@ func TestReservedImportedAliasNameRejected(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, info.AccountName)
 }
+
+// TestPathBoundAccountShape admits imported numbered accounts while retaining
+// the schema's requirement that wallet-derived accounts have a real number.
+func TestPathBoundAccountShape(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: one watch-only scope supports both the invalid row and
+	// the valid numbered import used as its control.
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(t, store, "account-shape")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084,
+		"numberless", true)
+
+	// Act: insert a derived row without a number directly. Store creation
+	// always allocates one, so only raw SQL can reach this schema CHECK.
+	_, rootErr := store.DB().ExecContext(t.Context(), `
+		INSERT INTO accounts (wallet_id, scope_id, account_name, is_derived)
+		SELECT wallet_id, id, 'missing-number', TRUE FROM key_scopes
+	`)
+	// The Store supports the valid numbered shape, so use its import method
+	// rather than bypassing account creation for this acceptance control.
+	number := uint32(7)
+	_, suppliedErr := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:      walletID,
+			Scope:         db.KeyScopeBIP0084,
+			Name:          "supplied-number",
+			AccountNumber: &number,
+			PublicKey:     RandomBytes(33),
+		},
+	)
+
+	// Assert: imported account numbers preserve the wallet-derived constraint.
+	requireDriverConstraintError(t, rootErr)
+	require.NoError(t, suppliedErr)
+}
