@@ -702,6 +702,26 @@ func putWatchingOnly(ns walletdb.ReadWriteBucket, watchingOnly bool) error {
 	return nil
 }
 
+// readSizedField reads a 4-byte little-endian length at offset followed by
+// that many bytes, and returns a copy of those bytes and the offset just past
+// them. It returns false if data is too short, so a corrupted record is
+// reported as an error instead of causing a slice bounds panic.
+func readSizedField(data []byte, offset int) ([]byte, int, bool) {
+	if offset < 0 || len(data)-offset < 4 {
+		return nil, 0, false
+	}
+	n := binary.LittleEndian.Uint32(data[offset : offset+4])
+	offset += 4
+	if uint64(len(data)-offset) < uint64(n) {
+		return nil, 0, false
+	}
+
+	field := make([]byte, n)
+	copy(field, data[offset:offset+int(n)])
+
+	return field, offset + int(n), true
+}
+
 // deserializeAccountRow deserializes the passed serialized account information.
 // This is used as a common base for the various account types to deserialize
 // the common parts.
@@ -721,9 +741,13 @@ func deserializeAccountRow(accountID []byte, serializedAccount []byte) (*dbAccou
 
 	row := dbAccountRow{}
 	row.acctType = accountType(serializedAccount[0])
-	rdlen := binary.LittleEndian.Uint32(serializedAccount[1:5])
-	row.rawData = make([]byte, rdlen)
-	copy(row.rawData, serializedAccount[5:5+rdlen])
+	rawData, _, ok := readSizedField(serializedAccount, 1)
+	if !ok {
+		str := fmt.Sprintf("malformed serialized account for key %x",
+			accountID)
+		return nil, managerError(ErrDatabase, str, nil)
+	}
+	row.rawData = rawData
 
 	return &row, nil
 }
@@ -765,22 +789,33 @@ func deserializeDefaultAccountRow(accountID []byte, row *dbAccountRow) (*dbDefau
 		dbAccountRow: *row,
 	}
 
-	pubLen := binary.LittleEndian.Uint32(row.rawData[0:4])
-	retRow.pubKeyEncrypted = make([]byte, pubLen)
-	copy(retRow.pubKeyEncrypted, row.rawData[4:4+pubLen])
-	offset := 4 + pubLen
-	privLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
-	retRow.privKeyEncrypted = make([]byte, privLen)
-	copy(retRow.privKeyEncrypted, row.rawData[offset:offset+privLen])
-	offset += privLen
+	malformed := func() error {
+		str := fmt.Sprintf("malformed serialized bip0044 account for "+
+			"key %x", accountID)
+		return managerError(ErrDatabase, str, nil)
+	}
+
+	var ok bool
+	offset := 0
+	retRow.pubKeyEncrypted, offset, ok = readSizedField(row.rawData, offset)
+	if !ok {
+		return nil, malformed()
+	}
+	retRow.privKeyEncrypted, offset, ok = readSizedField(
+		row.rawData, offset,
+	)
+	if !ok || len(row.rawData)-offset < 8 {
+		return nil, malformed()
+	}
 	retRow.nextExternalIndex = binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
 	offset += 4
 	retRow.nextInternalIndex = binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
 	offset += 4
-	nameLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
-	retRow.name = string(row.rawData[offset : offset+nameLen])
+	name, _, ok := readSizedField(row.rawData, offset)
+	if !ok {
+		return nil, malformed()
+	}
+	retRow.name = string(name)
 
 	return &retRow, nil
 }
@@ -1358,9 +1393,12 @@ func deserializeAddressRow(serializedAddress []byte) (*dbAddressRow, error) {
 	row.account = binary.LittleEndian.Uint32(serializedAddress[1:5])
 	row.addTime = binary.LittleEndian.Uint64(serializedAddress[5:13])
 	row.syncStatus = syncStatus(serializedAddress[13])
-	rdlen := binary.LittleEndian.Uint32(serializedAddress[14:18])
-	row.rawData = make([]byte, rdlen)
-	copy(row.rawData, serializedAddress[18:18+rdlen])
+	rawData, _, ok := readSizedField(serializedAddress, 14)
+	if !ok {
+		str := "malformed serialized address"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
+	row.rawData = rawData
 
 	return &row, nil
 }
@@ -1439,14 +1477,20 @@ func deserializeImportedAddress(row *dbAddressRow) (*dbImportedAddressRow, error
 		dbAddressRow: *row,
 	}
 
-	pubLen := binary.LittleEndian.Uint32(row.rawData[0:4])
-	retRow.encryptedPubKey = make([]byte, pubLen)
-	copy(retRow.encryptedPubKey, row.rawData[4:4+pubLen])
-	offset := 4 + pubLen
-	privLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
-	retRow.encryptedPrivKey = make([]byte, privLen)
-	copy(retRow.encryptedPrivKey, row.rawData[offset:offset+privLen])
+	var (
+		offset int
+		ok     bool
+	)
+	retRow.encryptedPubKey, offset, ok = readSizedField(row.rawData, 0)
+	if ok {
+		retRow.encryptedPrivKey, _, ok = readSizedField(
+			row.rawData, offset,
+		)
+	}
+	if !ok {
+		str := "malformed serialized imported address"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
 
 	return &retRow, nil
 }
@@ -1491,14 +1535,20 @@ func deserializeScriptAddress(row *dbAddressRow) (*dbScriptAddressRow, error) {
 		dbAddressRow: *row,
 	}
 
-	hashLen := binary.LittleEndian.Uint32(row.rawData[0:4])
-	retRow.encryptedHash = make([]byte, hashLen)
-	copy(retRow.encryptedHash, row.rawData[4:4+hashLen])
-	offset := 4 + hashLen
-	scriptLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
-	retRow.encryptedScript = make([]byte, scriptLen)
-	copy(retRow.encryptedScript, row.rawData[offset:offset+scriptLen])
+	var (
+		offset int
+		ok     bool
+	)
+	retRow.encryptedHash, offset, ok = readSizedField(row.rawData, 0)
+	if ok {
+		retRow.encryptedScript, _, ok = readSizedField(
+			row.rawData, offset,
+		)
+	}
+	if !ok {
+		str := "malformed serialized script address"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
 
 	return &retRow, nil
 }
@@ -1551,14 +1601,20 @@ func deserializeWitnessScriptAddress(
 		isSecretScript: row.rawData[1] == 1,
 	}
 
-	hashLen := binary.LittleEndian.Uint32(row.rawData[2:6])
-	retRow.encryptedHash = make([]byte, hashLen)
-	copy(retRow.encryptedHash, row.rawData[6:6+hashLen])
-	offset := 6 + hashLen
-	scriptLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
-	retRow.encryptedScript = make([]byte, scriptLen)
-	copy(retRow.encryptedScript, row.rawData[offset:offset+scriptLen])
+	var (
+		offset int
+		ok     bool
+	)
+	retRow.encryptedHash, offset, ok = readSizedField(row.rawData, 2)
+	if ok {
+		retRow.encryptedScript, _, ok = readSizedField(
+			row.rawData, offset,
+		)
+	}
+	if !ok {
+		str := "malformed serialized witness script address"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
 
 	return &retRow, nil
 }
