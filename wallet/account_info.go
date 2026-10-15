@@ -15,8 +15,8 @@ import (
 // pointer and byte-slice fields are owned by the result and may be mutated by
 // the caller without affecting Store state or another result.
 type AccountInfo struct {
-	// AccountNumber is the BIP44 account index used for a derived account. A
-	// nil pointer means the account has no BIP44 number, while a non-nil zero
+	// AccountNumber is the known BIP44 index for wallet-derived or imported
+	// accounts. Nil means the account has no BIP44 number; a non-nil zero
 	// identifies account zero.
 	AccountNumber *AccountNumber
 
