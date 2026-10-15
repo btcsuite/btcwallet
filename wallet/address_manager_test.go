@@ -2750,6 +2750,7 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 		branch      uint32
 		fingerprint uint32
 		imported    bool
+		numbered    bool
 	}{
 		{
 			name:        "external by name",
@@ -2792,6 +2793,16 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 			branch:    1,
 			imported:  true,
 		},
+		{
+			name: "supplied account path",
+			selector: NewAccountSelectorByNumber(
+				scope, AccountNumber(account),
+			),
+			queryNumber: &account,
+			fingerprint: 0x12345678,
+			imported:    true,
+			numbered:    true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2816,11 +2827,11 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 				ScriptPubKey:         script,
 				PubKey:               pubKey,
 			}
-			// Imported xpub children have a relative path but no wallet-root
-			// account number, so the allocation must expose a nil origin.
-			if tc.imported {
+			// Only numberless imports omit origin; supplied numbered keys
+			// retain their declared path without entering chain registration.
+			stored.IsImported = tc.imported
+			if tc.imported && !tc.numbered {
 				stored.AccountNumber = nil
-				stored.IsImported = true
 			}
 
 			deps.store.On("NewDerivedAddress", t.Context(),
@@ -2840,14 +2851,14 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 			)
 
 			// Assert: Every locator field matches the committed row, including
-			// zero fingerprints. Shared cleanup rejects extra allocation or
-			// watch calls, including a separate account read.
+			// zero fingerprints. Missing expectations reject watch calls and
+			// extra reads; one Store call proves one child was allocated.
 			require.NoError(t, err)
 			require.Equal(t, pubKey, key.PubKey.SerializeCompressed())
 			require.Equal(t, tc.branch, key.Branch)
 			require.Equal(t, stored.Index, key.Index)
 
-			if tc.imported {
+			if tc.imported && !tc.numbered {
 				require.Nil(t, key.Origin)
 			} else {
 				require.Equal(t, &KeyOrigin{

@@ -163,9 +163,9 @@ type scanReq struct {
 
 // scanTarget is the internal, identity-aware form of a targeted-rescan
 // account. The public Rescan API accepts waddrmgr.AccountScope, which only
-// carries (scope, number). That is ambiguous for imported accounts: both Store
-// backends mask an imported account's number to 0, and GetAccount rejects a
-// number lookup that resolves to an imported row, so an imported-xpub target
+// carries (scope, number). That is ambiguous for numberless imports: Store
+// backends mask an unknown account number to 0, and GetAccount rejects a
+// number lookup that resolves to a numberless row, so such an imported target
 // cannot be loaded by number at all. scanTarget resolves the durable,
 // non-masked identity up front -- before any horizon load -- so the targeted
 // path can carry AccountName as the source of truth and never mis-resolve an
@@ -205,9 +205,9 @@ type storeScanAccount struct {
 	// a later account rename cannot break horizon extension.
 	accountID *uint32
 
-	// derivedAccountNumber is the account's real BIP44 number. It is nil for
-	// an imported account, whose lookahead derives from its own xpub and has
-	// no wallet-derived account number.
+	// derivedAccountNumber is the known BIP44 component, nil only for a
+	// numberless import. A known imported number does not mean the wallet
+	// derived the account key; lookahead still uses the account's own xpub.
 	derivedAccountNumber *uint32
 }
 
@@ -2170,9 +2170,9 @@ func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
 
 // storeScanHorizonAccount resolves one targeted scanTarget into its Store
 // account row. The lookup prefers the durable AccountName when set, mirroring
-// the ScanHorizon contract: both backends mask an imported account's number to
-// 0 and GetAccount rejects a number lookup that resolves to an imported row, so
-// resolving an imported target by number would fail or load the default derived
+// the ScanHorizon contract: backends mask an unknown imported number to 0
+// and GetAccount rejects a number lookup that resolves to a numberless row, so
+// resolving a numberless target by number could fail or select the default
 // account. A number lookup is therefore issued only for a derived target whose
 // name resolution is unavailable.
 func (s *syncer) storeScanHorizonAccount(ctx context.Context,
@@ -2184,7 +2184,7 @@ func (s *syncer) storeScanHorizonAccount(ctx context.Context,
 		SkipBalance: true,
 	}
 
-	// Prefer the durable, scope-unique name so a masked imported number can
+	// Prefer the scope-unique name so a masked unknown imported number can
 	// never resolve to the default derived account; fall back to the number
 	// only when no name was resolved.
 	if target.AccountName != "" {
@@ -2595,16 +2595,16 @@ func (s *syncer) resolveScanTargets(ctx context.Context,
 // scanTargetNames indexes one account snapshot by the (scope, number) identity
 // a rescan caller names, mapping each to the account's durable name.
 //
-// A derived account is indexed by its public AccountNumber on every backend.
-// An imported account exposes no public number, so it is indexed by its store
+// An account with a known path is indexed by its public AccountNumber,
+// including imported accounts. A numberless import uses its store
 // AccountID -- but only for kvdb, recognized by the legacy address manager
 // being present. There AccountID is waddrmgr's own internal, non-masked account
 // number, which is exactly the selector the caller supplies, so this is a
 // format-boundary adaptation rather than a store-identity selector. SQL sets
 // AccountID from a relational row ID unrelated to any BIP44 number, so matching
 // it would let a request for a nonexistent account select an unrelated imported
-// row; there an unmatched numeric target is simply not found, and targeting an
-// imported account by number stays unsupported. A derived row always wins if a
+// row; there an unmatched numeric target is simply not found, and targeting a
+// numberless import by number stays unsupported. A numbered row wins if a
 // malformed snapshot ever presents both.
 func (s *syncer) scanTargetNames(
 	ctx context.Context) (map[waddrmgr.AccountScope]string, error) {
@@ -2628,7 +2628,7 @@ func (s *syncer) scanTargetNames(
 
 		scope := waddrmgr.KeyScope(info.KeyScope)
 
-		if !info.IsImported && info.AccountNumber != nil {
+		if info.AccountNumber != nil {
 			names[waddrmgr.AccountScope{
 				Scope:   scope,
 				Account: *info.AccountNumber,

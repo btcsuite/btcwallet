@@ -1028,11 +1028,9 @@ func (w *Wallet) privKeyForAddressInfo(ctx context.Context,
 	addressInfo AddressInfo) (
 	*btcec.PrivateKey, error) {
 
-	// An address with no derivation is either a raw single import or an
-	// imported-xpub child. Neither has wallet-derived account-level private
-	// material to resolve, so refuse before any secret lookup rather than
-	// reading a missing account number as account 0, which is the wallet's
-	// own default derived account.
+	// Raw imports and numberless imported-XPub children have no derivation.
+	// Refuse before lookup so a missing number cannot select account zero.
+	// Numbered imported children reach the account's empty-secret check below.
 	derivation := addressInfo.Derivation
 	if derivation == nil {
 		return nil, ErrNoAssocPrivateKey
@@ -1197,10 +1195,10 @@ func revealedTapscriptLeaf(tapscript *waddrmgr.Tapscript) ([]byte, error) {
 // account-level encrypted secret stored behind the wallet store, addressed by
 // the derivation path's BIP44 account number.
 //
-// One selector suffices because derived accounts are the only kind holding
-// account-level signing material: an imported account is created from an
-// extended public key, so callers reaching an imported-xpub child must refuse
-// before arriving here rather than falling back to account 0.
+// Numbered imported-XPub children also reach this lookup, but their accounts
+// have no encrypted private key and return ErrWatchOnlyAccount. Numberless
+// imported children are refused before lookup, so an unknown number cannot
+// fall back to the wallet's default account zero.
 //
 // A watch-only account (no encrypted private material) yields
 // ErrWatchOnlyAccount, and an account that is not in the store yields
