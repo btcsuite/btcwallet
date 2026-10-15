@@ -1855,3 +1855,206 @@ func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), *next.AccountNumber)
 }
+
+// TestCreateImportedAccountNumberedDefaultConflict verifies collisions with a
+// new spendable scope's seeded default are refused before scope registration.
+func TestCreateImportedAccountNumberedDefaultConflict(t *testing.T) {
+	t.Parallel()
+
+	// Number, name and key collisions share the same fixture and refusal
+	// assertions; keyChild varies the key independently of the supplied slot.
+	cases := []struct {
+		name        string
+		number      uint32
+		keyChild    uint32
+		accountName string
+		wantErr     error
+	}{
+		{
+			name:        "default number",
+			number:      waddrmgr.DefaultAccountNum,
+			keyChild:    waddrmgr.DefaultAccountNum,
+			accountName: "default contender",
+			wantErr:     db.ErrAccountNumberConflict,
+		},
+		{
+			name:        "default name at nonzero number",
+			number:      7,
+			keyChild:    7,
+			accountName: waddrmgr.DefaultAccountName,
+			wantErr:     db.ErrAccountNameConflict,
+		},
+		{
+			name:        "default key at nonzero number",
+			number:      7,
+			keyChild:    waddrmgr.DefaultAccountNum,
+			accountName: "default key contender",
+			wantErr:     db.ErrAccountIdentityCollision,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: derive a valid XPub for an absent spendable scope
+			// without creating a row, and retain the public account list.
+			// Registration would seed default at zero before the import.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := db.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			}
+			schema := db.ScopeAddrSchema{
+				ExternalAddrType: db.WitnessPubKey,
+				InternalAddrType: db.WitnessPubKey,
+			}
+			derive := kvdbDeriveFnFixture(t, mgr)
+			data, err := derive(t.Context(), scope, tc.keyChild, false)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{
+				SkipBalance: true,
+			}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			// Act: import an account whose supplied number, name or key
+			// collides with the default that registration would create.
+			info, err := store.CreateImportedAccount(t.Context(),
+				db.CreateImportedAccountParams{
+					Scope:         scope,
+					Name:          tc.accountName,
+					AccountNumber: &tc.number,
+					PublicKey:     data.PublicKey,
+					AddrSchema:    &schema,
+				},
+			)
+
+			// Assert: admission returns the conflict without an account
+			// or registered scope. Listing remains usable and unchanged,
+			// proving rollback cannot leave a manager for missing data.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, info)
+			after, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+			require.ElementsMatch(t, before, after)
+
+			_, err = mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+			require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+		})
+	}
+}
+
+// TestCreateImportedAccountDefaultIdentity checks that scope creation admits
+// its additional default account before assigning a second owner of its keys.
+func TestCreateImportedAccountDefaultIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Both rows create a stored owner; only its key differs from the native
+	// default. The request-only collision is in the default-conflict table.
+	cases := []struct {
+		name       string
+		ownerChild uint32
+		wantErr    error
+	}{
+		{
+			name:       "existing owner matches default",
+			ownerChild: 0,
+			wantErr:    db.ErrAccountIdentityCollision,
+		},
+		{
+			name:       "different existing owner",
+			ownerChild: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: derive keys for an absent spendable scope, whose
+			// registration also creates account zero. Always import its
+			// zero or one key under BIP84 so the same subject distinguishes
+			// a duplicate default from an unrelated existing owner.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := db.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			}
+			schema := db.ScopeAddrSchema{
+				ExternalAddrType: db.WitnessPubKey,
+				InternalAddrType: db.WitnessPubKey,
+			}
+			derive := kvdbDeriveFnFixture(t, mgr)
+			data, err := derive(t.Context(), scope, 7, false)
+			require.NoError(t, err)
+
+			key, err := derive(t.Context(), scope, tc.ownerChild, false)
+			require.NoError(t, err)
+			owner, err := store.CreateImportedAccount(t.Context(),
+				db.CreateImportedAccountParams{
+					Scope:      db.KeyScopeBIP0084,
+					Name:       "existing imported owner",
+					PublicKey:  key.PublicKey,
+					AddrSchema: &schema,
+				},
+			)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{
+				SkipBalance: true,
+			}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			number := uint32(7)
+
+			// Act: request the nonzero slot through Store, which accepts
+			// key and number fields independently. Both the requested key
+			// and the additional default must pass ownership admission.
+			info, err := store.CreateImportedAccount(t.Context(),
+				db.CreateImportedAccountParams{
+					Scope:         scope,
+					Name:          "declared import",
+					AccountNumber: &number,
+					PublicKey:     data.PublicKey,
+					AddrSchema:    &schema,
+				},
+			)
+
+			// Assert: either duplicate refuses the entire operation with
+			// usable, unchanged listing and no registered scope. An
+			// unrelated owner permits the import and remains unchanged.
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				require.Nil(t, info)
+				after, err := store.ListAccounts(t.Context(), query)
+				require.NoError(t, err)
+				require.ElementsMatch(t, before, after)
+
+				_, err = mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+				require.True(t, waddrmgr.IsError(
+					err, waddrmgr.ErrScopeNotFound,
+				))
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, info)
+
+			stored, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+				Scope:       db.KeyScopeBIP0084,
+				Name:        &owner.AccountName,
+				SkipBalance: true,
+			})
+			require.NoError(t, err)
+			require.Equal(t, owner, stored)
+		})
+	}
+}
