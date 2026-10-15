@@ -673,12 +673,10 @@ func TestBalanceExcludesImportedFromNumericAccountFilter(t *testing.T) {
 	require.Equal(t, btcutil.Amount(100), res.Total)
 }
 
-// TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter verifies that an
-// imported xpub (watch-only) account is excluded from the numeric Account
-// balance filter even though it carries an ordinary kvdb account number. SQL
-// backends store NULL account_number for imported accounts, so they can never
-// be summed numerically; kvdb must match that, while the account stays
-// reachable through (Scope, Name).
+// TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter verifies that a
+// numberless imported xpub account is excluded from the numeric Account balance
+// filter despite its internal kvdb number, while a declared imported number
+// selects only its own balance; named access remains available in both cases.
 func TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter(t *testing.T) {
 	t.Parallel()
 
@@ -688,11 +686,14 @@ func TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter(t *testing.T) {
 	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScopeBIP0084
 
-	// Arrange: a derived account-0 UTXO and an imported xpub-account UTXO
-	// whose account carries an ordinary (non-pseudo) account number.
+	// Arrange: Credit a derived account, a numberless import and a declared
+	// import with different amounts so numeric leakage cannot pass unnoticed.
 	importedName := "imported-xpub-balance"
 	importedAcct := createImportedXpubAccount(
 		t, store, scope, importedName, 0xBE,
+	)
+	declaredAcct := createImportedXpubAccount(
+		t, store, scope, "declared-xpub-balance", 0xBF, 7,
 	)
 
 	creditAccountAddressAtHeight(
@@ -703,37 +704,49 @@ func TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter(t *testing.T) {
 		t, store.db, mgr, txStore, scope, importedAcct,
 		btcutil.Amount(300), balanceTestTipHeight, false,
 	)
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, declaredAcct,
+		btcutil.Amount(500), balanceTestTipHeight, false,
+	)
 
-	// A numeric Account filter on the imported account's ordinary number
-	// must sum nothing: imported accounts are not numerically addressable.
-	res, err := store.Balance(
+	// Act: Query each numeric selector and the numberless import's name
+	// through Balance, exercising the public selection contract.
+	importedBalance, err := store.Balance(
 		t.Context(), db.BalanceParams{
 			Scope:   &dbScope,
 			Account: &importedAcct,
 		},
 	)
 	require.NoError(t, err)
-	require.Zero(t, res.Total)
 
-	// The derived account is still summed by its number, with no leakage
-	// from the imported account.
 	derivedAcct := uint32(0)
-	res, err = store.Balance(
+	derivedBalance, err := store.Balance(
 		t.Context(), db.BalanceParams{
 			Scope:   &dbScope,
 			Account: &derivedAcct,
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, btcutil.Amount(100), res.Total)
 
-	// The imported account remains summable through its (Scope, Name).
-	res, err = store.Balance(
+	namedBalance, err := store.Balance(
 		t.Context(), db.BalanceParams{
 			Scope: &dbScope,
 			Name:  &importedName,
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, btcutil.Amount(300), res.Total)
+	declaredBalance, err := store.Balance(
+		t.Context(), db.BalanceParams{
+			Scope:   &dbScope,
+			Account: &declaredAcct,
+		},
+	)
+	require.NoError(t, err)
+
+	// Assert: Known numbers select their own funds, while an internal number
+	// cannot make a numberless import numerically addressable.
+	require.Zero(t, importedBalance.Total)
+	require.Equal(t, btcutil.Amount(100), derivedBalance.Total)
+	require.Equal(t, btcutil.Amount(300), namedBalance.Total)
+	require.Equal(t, btcutil.Amount(500), declaredBalance.Total)
 }

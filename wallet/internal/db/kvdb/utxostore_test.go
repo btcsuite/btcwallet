@@ -931,11 +931,9 @@ func TestListUTXOsExcludesImportedFromNumericAccountFilter(t *testing.T) {
 }
 
 // TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter verifies that
-// kvdb excludes an imported xpub (watch-only) account from the numeric
-// db.ListUtxosQuery.Account filter even though the account carries an ordinary
-// kvdb account number. SQL backends store NULL account_number for imported
-// accounts, so they are never selectable by number; kvdb must match that. The
-// imported UTXO stays reachable through (Scope, AccountName).
+// kvdb excludes a numberless imported xpub from the numeric Account filter
+// despite its internal account number, while a declared imported number selects
+// only its own UTXO; the numberless import remains reachable by name.
 func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
 	t *testing.T) {
 
@@ -947,11 +945,14 @@ func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
 	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScopeBIP0084
 
-	// Arrange: a derived account-0 UTXO and an imported xpub-account UTXO
-	// whose account carries an ordinary (non-pseudo) account number.
+	// Arrange: Credit derived, numberless imported and declared imported
+	// accounts with distinct outputs to expose incorrect numeric selection.
 	importedName := "imported-xpub-list"
 	importedAcct := createImportedXpubAccount(
 		t, store, scope, importedName, 0xBE,
+	)
+	declaredAcct := createImportedXpubAccount(
+		t, store, scope, "declared-xpub-list", 0xBF, 7,
 	)
 
 	derivedPoint := creditAccountAddressAtHeight(
@@ -962,56 +963,84 @@ func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
 		t, store.db, mgr, txStore, scope, importedAcct,
 		btcutil.Amount(2000), balanceTestTipHeight, false,
 	)
+	declaredPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, declaredAcct,
+		btcutil.Amount(3000), balanceTestTipHeight, false,
+	)
 
-	// A numeric Account filter on the imported account's ordinary number
-	// must select nothing: imported rows are not numerically addressable.
-	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+	// Act: List each account by number and the numberless import by name,
+	// using the same public query that callers use to find owned outputs.
+	importedUTXOs, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID: 0,
 		Scope:    &dbScope,
 		Account:  &importedAcct,
 	})
 	require.NoError(t, err)
-	require.Empty(t, utxos)
 
-	// The derived account is still selectable by number, with no leakage
-	// from the imported account.
 	derivedAcct := uint32(0)
-	utxos, err = store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+	derivedUTXOs, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID: 0,
 		Scope:    &dbScope,
 		Account:  &derivedAcct,
 	})
 	require.NoError(t, err)
-	require.Len(t, utxos, 1)
-	require.Equal(t, derivedPoint, utxos[0].OutPoint)
 
-	// The imported account remains selectable through (Scope, AccountName).
-	utxos, err = store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+	namedUTXOs, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID:    0,
 		Scope:       &dbScope,
 		AccountName: &importedName,
 	})
 	require.NoError(t, err)
-	require.Len(t, utxos, 1)
-	require.Equal(t, importedPoint, utxos[0].OutPoint)
-	require.NotNil(t, utxos[0].Spendable)
-	require.False(t, *utxos[0].Spendable)
+	declaredUTXOs, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: 0,
+		Scope:    &dbScope,
+		Account:  &declaredAcct,
+	})
+	require.NoError(t, err)
+
+	// Assert: Numeric selection isolates both known accounts and excludes
+	// the numberless import, which retains its named watch-only result.
+	require.Empty(t, importedUTXOs)
+	require.Len(t, derivedUTXOs, 1)
+	require.Equal(t, derivedPoint, derivedUTXOs[0].OutPoint)
+	require.Len(t, namedUTXOs, 1)
+	require.Equal(t, importedPoint, namedUTXOs[0].OutPoint)
+	require.NotNil(t, namedUTXOs[0].Spendable)
+	require.False(t, *namedUTXOs[0].Spendable)
+	require.Len(t, declaredUTXOs, 1)
+	require.Equal(t, declaredPoint, declaredUTXOs[0].OutPoint)
 }
 
 // createImportedXpubAccount creates an imported (watch-only) xpub account via
 // CreateImportedAccount, which allocates an ordinary kvdb account number
-// (NewAccountWatchingOnly) rather than the legacy ImportedAddrAccount
-// pseudo-account. It returns that account number so callers can confirm a
-// numeric Account filter still excludes the account despite the ordinary
-// number. The xpub-derived seed byte keeps successive accounts distinct.
+// rather than the legacy ImportedAddrAccount pseudo-account. An optional number
+// creates a depth-three key and declares its account path; without it, the
+// public account remains numberless. The returned internal number lets fixtures
+// credit either kind, and the seed byte keeps successive accounts distinct.
 func createImportedXpubAccount(t *testing.T, store *Store,
-	scope waddrmgr.KeyScope, name string, seedByte byte) uint32 {
+	scope waddrmgr.KeyScope, name string, seedByte byte,
+	number ...uint32) uint32 {
 
 	t.Helper()
 
 	seed := bytes.Repeat([]byte{seedByte}, hdkeychain.RecommendedSeedLen)
 	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
 	require.NoError(t, err)
+
+	// Declared imports require an account key at the requested hardened path;
+	// existing numberless fixtures keep their original key and allocation.
+	var accountNumber *uint32
+	if len(number) > 0 {
+		accountNumber = &number[0]
+		for _, child := range []uint32{
+			scope.Purpose, scope.Coin, *accountNumber,
+		} {
+			master, err = master.Derive(
+				hdkeychain.HardenedKeyStart + child,
+			)
+			require.NoError(t, err)
+		}
+	}
 
 	masterPub, err := master.Neuter()
 	require.NoError(t, err)
@@ -1020,6 +1049,7 @@ func createImportedXpubAccount(t *testing.T, store *Store,
 
 	_, err = store.CreateImportedAccount(t.Context(),
 		db.CreateImportedAccountParams{
+			AccountNumber:     accountNumber,
 			Scope:             dbScope,
 			Name:              name,
 			MasterFingerprint: 0xDEADBEEF,
@@ -1044,9 +1074,8 @@ func createImportedXpubAccount(t *testing.T, store *Store,
 	})
 	require.NoError(t, err)
 
-	// The imported account must receive an ordinary account number, not the
-	// legacy pseudo-account: that is the exact case the numeric filter has to
-	// guard against.
+	// These are HD account fixtures, so their native slot must differ from
+	// the raw-import pseudo-account whose exclusion has separate coverage.
 	require.NotEqual(t, uint32(waddrmgr.ImportedAddrAccount), account)
 
 	return account

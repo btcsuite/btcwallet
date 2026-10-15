@@ -118,22 +118,14 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 		return nil, translateAccountErr(err, db.ErrAccountNotFound)
 	}
 
-	// Numeric selectors identify wallet-derived accounts, not the internal
-	// numbers kvdb also assigns to imported xpubs. Reject those before
-	// consuming a child; named imported accounts can still allocate.
-	accountImported, err := accountIsImported(ns, manager, account)
+	// Use the existing account reader's known-number contract before consuming
+	// a child, so an imported internal ID cannot imply an unknown path.
+	accountInfo, err := loadAccountInfo(ns, manager, account, walletIsWatchOnly)
 	if err != nil {
-		// Origin lookup wraps legacy failures. Unwrap before translating so
-		// numeric misses expose the same Store identity as named misses.
-		var managerErr waddrmgr.ManagerError
-		if errors.As(err, &managerErr) {
-			return nil, translateAccountErr(managerErr, db.ErrAccountNotFound)
-		}
-
 		return nil, err
 	}
 
-	if params.AccountNumber != nil && accountImported {
+	if params.AccountNumber != nil && accountInfo.AccountNumber == nil {
 		return nil, db.ErrAccountNotFound
 	}
 
@@ -143,7 +135,7 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 	}
 
 	info, err := managedAddressInfo(
-		ns, manager, walletIsWatchOnly, accountImported, managedAddr,
+		ns, manager, walletIsWatchOnly, accountInfo.IsImported, managedAddr,
 	)
 	if err != nil {
 		return nil, err
@@ -1220,8 +1212,11 @@ func managedAddressInfo(
 	// Only HD accounts contribute account custody. Raw imports retain their
 	// own private-key classification even when the bucket is imported.
 	accountWatchOnly := accountImported
+	isImported := accountImported
 
 	if rawImported {
+		// Raw imports report imported status independently of account custody.
+		isImported = true
 		accountWatchOnly = false
 		accountNumber = 0
 		accountName = db.DefaultImportedAccountName
@@ -1242,8 +1237,19 @@ func managedAddressInfo(
 	}
 
 	var accountNumberPtr *uint32
-	if derivation.hasPath && !accountImported {
-		accountNumberPtr = &derivation.accountNumber
+	if derivation.hasPath {
+		// Retain declared imported paths without treating an ordinary imported
+		// internal ID as an account component. Raw imports have no HD path.
+		if accountImported {
+			_, accountNumberPtr, err = readAccountCreatedAt(
+				ns, waddrmgr.KeyScope(keyScope), accountNumber,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("read account number: %w", err)
+			}
+		} else {
+			accountNumberPtr = &derivation.accountNumber
+		}
 	}
 
 	return &db.AddressInfo{
@@ -1252,7 +1258,7 @@ func managedAddressInfo(
 		KeyScope:             derivation.keyScope,
 		MasterKeyFingerprint: derivation.fingerprint,
 		AddrType:             addrType.Type,
-		IsImported:           accountImported || rawImported,
+		IsImported:           isImported,
 		HasDerivationPath:    derivation.hasPath,
 		Branch:               derivation.branch,
 		Index:                derivation.index,

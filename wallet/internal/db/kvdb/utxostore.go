@@ -619,7 +619,7 @@ func (s *Store) classifyBalanceUTXO(addrmgrNs walletdb.ReadBucket,
 // survive the Scope and account filters from BalanceParams. nameAcct is the
 // account number resolved from a Name filter, if any; it selects that account
 // by exact number regardless of origin. A numeric params.Account filter, by
-// contrast, never matches an imported account (see numericAccountMatches).
+// contrast, requires a known path number (see numericAccountMatches).
 // Account and Name are mutually exclusive, so at most one of the two account
 // filters applies.
 func balanceFilterAllows(addrmgrNs walletdb.ReadBucket,
@@ -640,14 +640,9 @@ func balanceFilterAllows(addrmgrNs walletdb.ReadBucket,
 		return true, nil
 	}
 
-	imported, err := accountIsImported(addrmgrNs, owner, account)
-	if err != nil {
-		return false, err
-	}
-
 	return numericAccountMatches(
-		account, *params.Account, imported,
-	), nil
+		addrmgrNs, owner, account, *params.Account,
+	)
 }
 
 // confsAllowed reports whether an unspent output's confirmation depth
@@ -998,23 +993,13 @@ func accountMatchesQuery(addrmgrNs walletdb.ReadBucket,
 		return true, nil
 	}
 
-	imported, err := accountIsImported(
-		addrmgrNs, binding.acctStore, binding.acctNum,
-	)
-	if err != nil {
-		return false, err
-	}
-
 	return numericAccountMatches(
-		binding.acctNum, *query.Account, imported,
-	), nil
+		addrmgrNs, binding.acctStore, binding.acctNum, *query.Account,
+	)
 }
 
-// accountIsImported reports whether the owning account is imported. This keeps
-// the numeric Account filter aligned with the SQL backends, where imported
-// accounts have a NULL account_number and so are never numerically selectable,
-// including imported xpub/watch-only accounts that carry ordinary kvdb account
-// numbers.
+// accountIsImported reports the owning account's key source. Number presence
+// is separate: declared imported accounts can have known path components.
 //
 // A nil acctStore only occurs for narrow test doubles that pre-date the
 // enrichment contract; production AddrStore always resolves a non-nil
@@ -1035,22 +1020,26 @@ func accountIsImported(addrmgrNs walletdb.ReadBucket,
 	return imported, nil
 }
 
-// numericAccountMatches reports whether a row owned by ownerAcct
-// satisfies a numeric Account filter set to wantAcct, given whether the
-// owning account is imported.
-//
-// Imported accounts have no numeric counterpart on the SQL backends
-// (their account_number column is NULL), so an imported row never
-// matches a numeric filter on either backend regardless of its kvdb
-// account number; such rows are selectable only via (Scope,
-// AccountName). This covers both the legacy ImportedAddrAccount
-// pseudo-account and imported xpub/watch-only accounts created through
-// NewAccountWatchingOnly, which carry ordinary kvdb account numbers. A
-// derived row matches iff its account number equals the filter.
-func numericAccountMatches(ownerAcct, wantAcct uint32, imported bool) bool {
-	if imported {
-		return false
+// numericAccountMatches applies the known-number contract to either key source.
+// Numberless and raw imports remain selectable only by name; a stored declared
+// number prevents legacy internal IDs from accidentally becoming path numbers.
+func numericAccountMatches(ns walletdb.ReadBucket,
+	owner waddrmgr.AccountStore, ownerAcct, wantAcct uint32) (bool, error) {
+
+	imported, err := accountIsImported(ns, owner, ownerAcct)
+	if err != nil {
+		return false, err
 	}
 
-	return ownerAcct == wantAcct
+	// The raw pseudo-account has no account key or declared path metadata.
+	if imported && ownerAcct != waddrmgr.ImportedAddrAccount {
+		_, number, err := readAccountCreatedAt(ns, owner.Scope(), ownerAcct)
+		if err != nil {
+			return false, fmt.Errorf("read account number: %w", err)
+		}
+
+		return number != nil && *number == wantAcct, nil
+	}
+
+	return !imported && ownerAcct == wantAcct, nil
 }
