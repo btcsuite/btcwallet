@@ -171,20 +171,28 @@ func renameAccountErr(err error) error {
 	return publicAccountErr(err, publicErr)
 }
 
-// importAccountErr includes legacy scope creation, which can fail for a
-// missing scope, a locked wallet, or a removed private root before importing.
+// importAccountErr preserves public conflict and capability identities for
+// imports while retaining the existing legacy scope-creation failures.
 func importAccountErr(err error) error {
 	var publicErr error
 
 	switch {
-	case isAccountNameConflict(err):
+	// A known imported number shares the existing occupied-account result.
+	case isAccountNameConflict(err),
+		errors.Is(err, db.ErrAccountNumberConflict):
 		publicErr = ErrAccountAlreadyExists
 
 	case errors.Is(err, db.ErrAccountIdentityCollision):
 		publicErr = ErrAccountIdentityCollision
 
-	case isAddrMgrErr(err, waddrmgr.ErrWatchingOnly):
+	case errors.Is(err, db.ErrAccountOperationUnsupported),
+		isAddrMgrErr(err, waddrmgr.ErrWatchingOnly):
+
 		publicErr = ErrAccountOperationUnsupported
+
+	// Store validation can reject unsupported declared-path branch types.
+	case errors.Is(err, db.ErrInvalidParam):
+		publicErr = ErrInvalidParam
 
 	case isAccountMissing(err):
 		publicErr = ErrAccountNotFound
@@ -1112,12 +1120,9 @@ func (w *Wallet) handleRenameAccount(req renameAccountReq) {
 type importAccountReq struct {
 	reqCtx
 
-	name                 string
-	accountKey           *hdkeychain.ExtendedKey
-	masterKeyFingerprint uint32
-	addrType             waddrmgr.AddressType
-	dryRun               bool
-	resp                 chan accountResp
+	account ImportAccountParams
+	dryRun  bool
+	resp    chan accountResp
 }
 
 // ImportAccount imports an account from an extended public key. Private
@@ -1159,13 +1164,15 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 	}
 
 	req := importAccountReq{
-		reqCtx:               reqCtx{ctx: ctx},
-		name:                 name,
-		accountKey:           accountKeySnapshot,
-		masterKeyFingerprint: masterKeyFingerprint,
-		addrType:             addrType,
-		dryRun:               dryRun,
-		resp:                 make(chan accountResp, 1),
+		reqCtx: reqCtx{ctx: ctx},
+		account: ImportAccountParams{
+			Name:                 name,
+			XPub:                 accountKeySnapshot,
+			MasterKeyFingerprint: masterKeyFingerprint,
+			AddrType:             addrType,
+		},
+		dryRun: dryRun,
+		resp:   make(chan accountResp, 1),
 	}
 
 	err = w.sendReq(ctx, req)
@@ -1184,18 +1191,17 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 // handleImportAccount validates and persists an admitted import while keeping
 // public error translation separate from pre-start Manager imports.
 func (w *Wallet) handleImportAccount(req importAccountReq) {
-	err := validateAccountName(req.name)
+	err := validateAccountName(req.account.Name)
 	if err != nil {
 		req.resp <- accountResp{err: err}
 
 		return
 	}
 
-	// The key's version bytes select the scope the name has to be unique in,
+	// Resolve the declared or inferred scope before checking its account name,
 	// so the request is built before that name can be looked up.
-	params, err := w.importAccountParams(
-		req.name, req.accountKey, req.masterKeyFingerprint,
-		req.addrType, req.dryRun,
+	params, err := importAccountParams(
+		req.account, w.id, w.cfg.ChainParams, req.dryRun,
 	)
 	if err != nil {
 		if errors.Is(err, ErrInvalidAccountKey) {
@@ -1211,7 +1217,7 @@ func (w *Wallet) handleImportAccount(req importAccountReq) {
 	}
 
 	err = w.requireAccountNameAvailable(
-		req.ctx, waddrmgr.KeyScope(params.Scope), req.name,
+		req.ctx, waddrmgr.KeyScope(params.Scope), req.account.Name,
 	)
 	if err != nil {
 		req.resp <- accountResp{err: importAccountErr(err)}
@@ -1230,13 +1236,9 @@ func (w *Wallet) handleImportAccount(req importAccountReq) {
 // allowing Manager.Create to bypass admission and retain internal error
 // identities; only the public entry point applies the wallet error contract.
 func (w *Wallet) importAccountInternal(ctx context.Context,
-	name string, accountKey *hdkeychain.ExtendedKey,
-	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-	dryRun bool) (*AccountInfo, error) {
+	account ImportAccountParams, dryRun bool) (*AccountInfo, error) {
 
-	params, err := w.importAccountParams(
-		name, accountKey, masterKeyFingerprint, addrType, dryRun,
-	)
+	params, err := importAccountParams(account, w.id, w.cfg.ChainParams, dryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -1244,22 +1246,37 @@ func (w *Wallet) importAccountInternal(ctx context.Context,
 	return w.persistImportedAccount(ctx, params)
 }
 
-// importAccountParams validates the supplied key material and builds the Store
-// request for an XPub import, resolving the key scope and the per-account
-// address schema that the key version and requested address type select.
-func (w *Wallet) importAccountParams(name string,
-	accountKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
-	addrType waddrmgr.AddressType, dryRun bool) (
+// importAccountParams validates the same account input for public imports and
+// Manager preflight, retaining a known number only when Scope is declared.
+func importAccountParams(account ImportAccountParams, walletID uint32,
+	chainParams *chaincfg.Params, dryRun bool) (
 	db.CreateImportedAccountParams, error) {
 
 	var params db.CreateImportedAccountParams
 
-	err := validateExtendedPubKey(accountKey, true, w.cfg.ChainParams)
+	err := validateExtendedPubKey(account.XPub, true, chainParams)
 	if err != nil {
 		return params, err
 	}
 
-	keyScope, addrSchema, err := keyScopeFromPubKey(accountKey, &addrType)
+	// Inferred imports retain the existing version/address-type selection.
+	// Declared imports use the key's child index and existing path validator.
+	var scope waddrmgr.KeyScope
+
+	schema := account.AddrSchema
+	if account.Scope == nil && schema != nil {
+		return params, fmt.Errorf("schema requires scope: %w", ErrInvalidParam)
+	}
+
+	if account.Scope == nil {
+		scope, schema, err = keyScopeFromPubKey(account.XPub, &account.AddrType)
+	} else {
+		scope = *account.Scope
+
+		number := account.XPub.ChildIndex() - hdkeychain.HardenedKeyStart
+		params.AccountNumber = &number
+	}
+
 	if err != nil {
 		return params, err
 	}
@@ -1268,25 +1285,42 @@ func (w *Wallet) importAccountParams(name string,
 	// this import's canonical default before persistence so it cannot inherit
 	// that override. Keep the key-selected scope; script types do not define
 	// the XPub's derivation identity.
-	if addrSchema == nil {
-		schema := waddrmgr.ScopeAddrMap[keyScope]
-		addrSchema = &schema
+	if schema == nil {
+		canonical, ok := waddrmgr.ScopeAddrMap[scope]
+		if !ok {
+			return params, fmt.Errorf("custom scope needs schema: %w",
+				ErrInvalidParam)
+		}
+
+		schema = &canonical
 	}
 
-	dbAddrSchema, err := dbScopeAddrSchema(addrSchema)
-	if err != nil {
-		return params, err
+	// Reuse hardened-path and schema validation only for declared imports.
+	if params.AccountNumber != nil {
+		path := db.CreateDerivedAccountParams{
+			Name:          account.Name,
+			Scope:         db.KeyScope(scope),
+			AccountNumber: params.AccountNumber,
+		}
+
+		err = validateNewAccountSchema(&path, schema)
+		if err != nil {
+			return params, err
+		}
 	}
+
+	params.AddrSchema, err = dbScopeAddrSchema(schema)
 
 	return db.CreateImportedAccountParams{
-		WalletID:          w.id,
-		Name:              name,
-		Scope:             db.KeyScope(keyScope),
-		MasterFingerprint: masterKeyFingerprint,
-		PublicKey:         []byte(accountKey.String()),
+		WalletID:          walletID,
+		Name:              account.Name,
+		Scope:             db.KeyScope(scope),
+		AccountNumber:     params.AccountNumber,
+		MasterFingerprint: account.MasterKeyFingerprint,
+		PublicKey:         []byte(account.XPub.String()),
 		DryRun:            dryRun,
-		AddrSchema:        dbAddrSchema,
-	}, nil
+		AddrSchema:        params.AddrSchema,
+	}, err
 }
 
 // persistImportedAccount shares persistence and result conversion with
