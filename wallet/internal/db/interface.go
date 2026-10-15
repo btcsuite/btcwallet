@@ -277,7 +277,9 @@ type AccountStore interface {
 	// CreateImportedAccount stores an imported account identified by
 	// an extended public key. Returns the persisted account as an
 	// AccountInfo populated with the durable fields the wallet
-	// expects (PublicKey, MasterKeyFingerprint, etc.).
+	// expects (PublicKey, MasterKeyFingerprint, etc.). A known AccountNumber
+	// occupies the account-number namespace and advances its sequential cursor.
+	// kvdb retains that number in its existing watch-only row and metadata.
 	//
 	// If the key scope does not exist, it will be automatically created
 	// using the address schema from ScopeAddrMap with no coin public/private
