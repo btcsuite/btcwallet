@@ -31,8 +31,11 @@ func newManagedWallet(cfg Config, data *walletData) *Wallet {
 		isWatchOnly:       data.isWatchOnly,
 	}
 
+	// The syncer writes through txEventStore so the Wallet reports the
+	// transaction changes its batches commit.
 	w.sync = newSyncer(
-		cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		cfg, w.addrStore, w.txStore, w,
+		&txEventStore{Store: w.store, w: w}, w.id,
 	)
 	w.state = newWalletState(w.sync)
 

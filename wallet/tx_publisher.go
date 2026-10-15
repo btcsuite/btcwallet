@@ -210,6 +210,15 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		return
 	}
 
+	// Capture whether the wallet already records the tx, so a successful
+	// publish reports it only when this request recorded it.
+	rec, err := w.beginTxRecord(r.ctx, []txWrite{{hash: r.tx.TxHash()}})
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
 	// First, we'll attempt to add the tx to our wallet's DB. This will
 	// allow us to track the tx's confirmation status, and also
 	// re-broadcast it upon startup. If any of the subsequent steps fail,
@@ -219,6 +228,12 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// removal below so a wallet-unrelated tx (never recorded) is not
 	// removed, which would clobber the publish error with ErrTxNotFound.
 	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
+
+	// Keep the record in flight until the publish settles, so a
+	// confirmation committed meanwhile supersedes its event.
+	rec.hold()
+	defer rec.discard()
+
 	if err != nil {
 		r.respErrChan <- err
 
@@ -229,7 +244,21 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// return immediately. On any failures, we remove it from the tx store
 	// to prevent subsequent attempts with stale transaction data.
 	err = w.publishTx(r.tx, ourAddrs)
+
+	// The network already knew the tx. The wallet keeps tracking it, but
+	// this request published nothing new, so it reports nothing.
+	if errors.Is(err, errAlreadyBroadcasted) {
+		r.respErrChan <- nil
+
+		return
+	}
+
 	if err == nil {
+		// The caller waits for an admitted request even if it cancels,
+		// so a canceled context must not drop the event for a publish
+		// that succeeded.
+		rec.deliver(context.WithoutCancel(r.ctx))
+
 		r.respErrChan <- nil
 
 		return
@@ -773,7 +802,8 @@ func (w *Wallet) walletOwnedOutputs(ctx context.Context,
 
 // publishTx is a helper function that handles the process of broadcasting a
 // transaction to the network. This includes getting a chain client,
-// registering for notifications, and sending the raw transaction.
+// registering for notifications, and sending the raw transaction. It returns
+// errAlreadyBroadcasted when the network already knew the transaction.
 func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// We'll also ask to be notified of the tx once it confirms on-chain.
 	// This is done outside of the database tx to prevent backend
@@ -811,13 +841,13 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 		errors.Is(rpcErr, chain.ErrTxAlreadyKnown),
 		errors.Is(rpcErr, chain.ErrTxAlreadyConfirmed):
 
-		// The tx is already known, confirmed, or in the mempool, so it
-		// was accepted by the network. Treat this as a successful
-		// publish so the recorded tx keeps being tracked rather than
-		// removed by the caller.
+		// The tx is already known, confirmed, or in the mempool, so the
+		// network accepted it before this publish. Report that apart
+		// from a new publication, so the caller keeps tracking the
+		// recorded tx without reporting it as published.
 		log.Infof("%v: tx already known/confirmed/in mempool", txid)
 
-		return nil
+		return errAlreadyBroadcasted
 
 	// If the tx was rejected for any other reason, then we'll return the
 	// error and let the caller handle the cleanup.
