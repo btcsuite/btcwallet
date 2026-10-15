@@ -1065,12 +1065,11 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			w, deps := createStartedSQLWalletWithMocks(t)
 			deps.syncer.On("syncState").Return(syncStateSynced).Once()
 
-			var stamp waddrmgr.BlockStamp
-
-			stamp.Height = 100
-			deps.chain.On("BlockStamp").Return(
-				&stamp, nil,
-			).Once()
+			// SQL authoring reads the persisted processed tip.
+			deps.store.On("GetWallet", mock.Anything, w.cfg.Name).
+				Return(&db.WalletInfo{
+					SyncedTo: &db.Block{Height: 100},
+				}, nil).Once()
 
 			inputAddr, inputScript, inputKey := expectedStoreAddress(
 				t, storeDerivationAccountPubKey(t), db.WitnessPubKey,
@@ -1333,9 +1332,7 @@ func TestFundPsbtTranslatesAmountError(t *testing.T) {
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
 	}).Return(accountInfo, nil).Once()
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
-	).Once()
+	// The started kvdb fixture already supplies its processed tip.
 	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
 		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
 	}).Return([]db.UtxoInfo{}, nil).Once()
@@ -5492,9 +5489,14 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 
 	utxo := &wire.TxOut{Value: 1_000_000, PkScript: inputScript}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
-	).Once()
+	// SQL needs its persisted tip; started kvdb fixtures already supply
+	// their address-manager tip for this non-coinbase input.
+	if w.addrStore == nil {
+		mocks.store.On("GetWallet", mock.Anything, w.cfg.Name).
+			Return(&db.WalletInfo{
+				SyncedTo: &db.Block{Height: 100},
+			}, nil).Once()
+	}
 
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id, OutPoint: outPoint,
