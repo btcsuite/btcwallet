@@ -900,9 +900,14 @@ func TestAdvanceChainSync(t *testing.T) {
 		"GetCFilters", hashes, wire.GCSFilterRegular,
 	).Return(filters, nil).Once()
 
+	// Keep the mocked batch connected so this case exercises successful
+	// advancement rather than the rollback path for inconsistent ancestry.
 	headers := make([]*wire.BlockHeader, 5)
+
+	parent := chainhash.Hash{}
 	for i := range 5 {
-		headers[i] = &wire.BlockHeader{}
+		headers[i] = &wire.BlockHeader{PrevBlock: parent}
+		parent = hashes[i]
 	}
 
 	mockChain.On("GetBlockHeaders", hashes).Return(headers, nil).Once()
@@ -7517,4 +7522,163 @@ func TestLiveWatchTargetedScanFailure(t *testing.T) {
 	require.False(t, info.Synced)
 	_, err = w.CreateTransaction(t.Context(), &TxIntent{})
 	require.ErrorIs(t, err, ErrStateForbidden)
+}
+
+// TestScanBatchAncestry preserves rollback evidence and rejects broken interior
+// ancestry before allowing a connected retry to confirm the same transaction.
+func TestScanBatchAncestry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Confirm a real transaction on the old branch, then expose a
+	// higher backend tip whose next block extends a replacement height one.
+	// The existing worker stays behind its mocked backend-readiness gate.
+	_, client, w := newLiveWatchManager(t)
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+
+	recv, err := w.NewAddress(t.Context(), NewAccountSelectorByName(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
+	), false)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(recv.Addr)
+	require.NoError(t, err)
+
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	s.cfg.SyncMethod = SyncMethodFullBlocks
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+		Hash:  chainhash.Hash{1},
+		Index: 460,
+	}, nil, nil))
+	tx.AddTxOut(&wire.TxOut{
+		Value:    1000,
+		PkScript: script,
+	})
+	record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	matches := TxEntries{
+		{
+			Rec: record,
+		},
+	}
+	oldBlock := &db.Block{
+		Hash:      chainhash.Hash{47},
+		Height:    1,
+		Timestamp: time.Now().Truncate(time.Second),
+	}
+	require.NoError(t, s.applyStoreTxBatch(
+		t.Context(), matches, oldBlock, oldBlock,
+	))
+
+	newHash := chainhash.Hash{48}
+	next := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: newHash,
+		Timestamp: oldBlock.Timestamp,
+	})
+	nextHash := next.BlockHash()
+
+	client.On("GetBestBlock").Unset()
+	client.On("GetBestBlock").Return(&nextHash, int32(2), nil).Times(4)
+	client.On("GetBlockHashes", int64(2), int64(2)).
+		Return([]chainhash.Hash{nextHash}, nil).Once()
+	client.On("GetBlocks", []chainhash.Hash{nextHash}).
+		Return([]*wire.MsgBlock{next}, nil).Once()
+	client.On("GetBlockHashes", int64(0), int64(1)).Return(
+		[]chainhash.Hash{*chainParams.GenesisHash, newHash}, nil,
+	).Once()
+	client.On("GetBlockHeader", chainParams.GenesisHash).Unset()
+	client.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&chainParams.GenesisBlock.Header, nil).Once()
+
+	// Arrange: After rollback, the first block extends genesis, but the
+	// second still names a different parent. A later fetch returns a connected
+	// replacement. Both batches contain the same previously detached payment.
+	first := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: *chainParams.GenesisHash,
+		Timestamp: oldBlock.Timestamp,
+	})
+	require.NoError(t, first.AddTransaction(tx))
+	firstHash := first.BlockHash()
+
+	connected := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: firstHash,
+		Timestamp: oldBlock.Timestamp,
+	})
+	connectedHash := connected.BlockHash()
+	mixedHashes := []chainhash.Hash{firstHash, nextHash}
+	connectedHashes := []chainhash.Hash{firstHash, connectedHash}
+
+	client.On("GetBlockHashes", int64(1), int64(2)).
+		Return(mixedHashes, nil).Once()
+	client.On("GetBlocks", mixedHashes).
+		Return([]*wire.MsgBlock{first, next}, nil).Once()
+	client.On("GetBestBlock").
+		Return(&connectedHash, int32(2), nil).Twice()
+	client.On("GetBlockHashes", int64(1), int64(2)).
+		Return(connectedHashes, nil).Once()
+	client.On("GetBlocks", connectedHashes).
+		Return([]*wire.MsgBlock{first, connected}, nil).Once()
+
+	// Only the connected retry commits a credit and refreshes its live watch;
+	// the fixture owns verification of these required calls during cleanup.
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	client.On("NotifySpent", []*wire.OutPoint{
+		{
+			Hash: tx.TxHash(),
+		},
+	}).Return(nil).Once()
+
+	// Act: Advance before delivering any disconnect notification. The first
+	// fetched parent must trigger the existing rollback instead of committing
+	// a replacement tip that hides the old transaction's detached block.
+	finished, err := s.advanceChainSync(t.Context())
+
+	// Assert: Public Wallet state still exposes the fork point and a detached
+	// transaction before any new branch can overwrite the fork evidence.
+	require.NoError(t, err)
+	require.False(t, finished)
+	info, err := w.Info(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 0, info.SyncedTo.Height)
+	detail, err := w.GetTx(t.Context(), tx.TxHash())
+	require.NoError(t, err)
+	require.Nil(t, detail.Block)
+
+	// Act: Refetch from genesis while the backend returns a mixed batch. Its
+	// valid first parent must not hide the disconnected second block.
+	finished, err = s.advanceChainSync(t.Context())
+
+	// Assert: Neither the tip nor the payment's confirmation changes. This
+	// catches committing an old-branch payment behind a new-branch tip.
+	require.NoError(t, err)
+	require.False(t, finished)
+	info, err = w.Info(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 0, info.SyncedTo.Height)
+	require.Equal(t, *chainParams.GenesisHash, info.SyncedTo.Hash)
+	detail, err = w.GetTx(t.Context(), tx.TxHash())
+	require.NoError(t, err)
+	require.Nil(t, detail.Block)
+
+	// Act: Retry the same heights with a batch whose links now connect. The
+	// existing scan loop needs no additional recovery state to make progress.
+	finished, err = s.advanceChainSync(t.Context())
+
+	// Assert: The connected batch advances the public tip and confirms the
+	// payment in its actual containing block, rather than discarding all work.
+	require.NoError(t, err)
+	require.False(t, finished)
+	info, err = w.Info(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 2, info.SyncedTo.Height)
+	require.Equal(t, connectedHash, info.SyncedTo.Hash)
+	detail, err = w.GetTx(t.Context(), tx.TxHash())
+	require.NoError(t, err)
+	require.NotNil(t, detail.Block)
+	require.Equal(t, firstHash, detail.Block.Hash)
 }
