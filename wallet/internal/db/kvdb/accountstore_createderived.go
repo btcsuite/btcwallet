@@ -33,6 +33,11 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 
 	mgr := s.addrStore
 
+	// Ownership checks need every committed scope registered. Reuse the
+	// Store write lock until Update has run its commit callbacks.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	var info *db.AccountInfo
 
 	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
@@ -89,7 +94,7 @@ type derivedAccountKeyDeriver interface {
 }
 
 // PrepareWalletForAccountCreation implements db.CreateDerivedAccountOps;
-// walletdb.Update already serializes this account write transaction.
+// the Store lock serializes account writes through their commit callbacks.
 func (o *createDerivedAccountOps) PrepareWalletForAccountCreation(
 	_ context.Context, _ uint32) (bool, error) {
 

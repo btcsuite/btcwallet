@@ -2505,3 +2505,41 @@ func TestOpenWithRetryRoutedSigning(t *testing.T) {
 
 	chainClient.AssertExpectations(t)
 }
+
+// TestImportAccountDryRunMissingScope verifies the legacy dry run uses its
+// transaction-local manager when a watch-only wallet has no BIP49 scope yet.
+func TestImportAccountDryRunMissingScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a watch-only wallet without the canonical scopes that
+	// testWalletWatchingOnly preloads. Loader owns its complete shutdown;
+	// the existing key fixture and nested type select strict BIP49 imports.
+	loader := NewLoader(&chainParams, t.TempDir(), true, defaultDBTimeout, 0)
+	w, err := loader.CreateNewWatchingOnlyWallet([]byte("public"), time.Now())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, loader.UnloadWallet())
+	})
+	key, fingerprint := importAccountTestKey(t, 49)
+	addrType := waddrmgr.NestedWitnessPubKey
+	scope := waddrmgr.KeyScopeBIP0049Plus
+	_, err = w.addrStore.FetchScopedKeyManager(scope)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+
+	// Act: preview through the exported legacy API before its new scoped
+	// manager is globally visible, deriving one address from each branch.
+	props, external, internal, err := w.ImportAccountDryRun(
+		"missing scope preview", key, fingerprint, &addrType, 1,
+	)
+
+	// Assert: both branch previews survive the private helper calls and the
+	// rollback leaves no registered scope, so later imports see a clean state.
+	require.NoError(t, err)
+	require.Equal(t, scope, props.KeyScope)
+	require.Len(t, external, 1)
+	require.Len(t, internal, 1)
+	require.Equal(t, addrType, external[0].AddrType())
+	require.Equal(t, addrType, internal[0].AddrType())
+	_, err = w.addrStore.FetchScopedKeyManager(scope)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+}

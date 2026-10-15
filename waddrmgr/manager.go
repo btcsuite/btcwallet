@@ -516,9 +516,11 @@ func (m *Manager) Close() {
 // scoped key manager is a sub-manager that only has the coin type key of a
 // particular coin type and BIP0043 purpose. This is useful as it enables
 // callers to create an arbitrary BIP0043 like schema with a stand alone
-// manager. Note that a new scoped manager cannot be created if: the wallet is
-// watch only, the manager hasn't been unlocked, or the root key has been.
-// neutered from the database.
+// manager. Spendable wallets must be unlocked and retain the master HD private
+// key; watch-only wallets create the scope without a derived default account.
+// The returned manager is usable inside ns's transaction. Root lookups and
+// address-type indexes include the new scope only after the transaction
+// commits.
 //
 // TODO(roasbeef): addrtype of raw key means it'll look in scripts to possibly
 // mark as gucci?
@@ -620,9 +622,9 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		}
 	}
 
-	// Finally, we'll register this new scoped manager with the root
-	// manager.
-	m.scopedManagers[scope] = &ScopedKeyManager{
+	// Keep the manager usable in this transaction without publishing rows
+	// that a preview or failed import may still roll back.
+	scoped := &ScopedKeyManager{
 		scope:       scope,
 		addrSchema:  addrSchema,
 		rootManager: m,
@@ -632,14 +634,22 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 			defaultPrivKeyCacheSize,
 		),
 	}
-	m.externalAddrSchemas[addrSchema.ExternalAddrType] = append(
-		m.externalAddrSchemas[addrSchema.ExternalAddrType], scope,
-	)
-	m.internalAddrSchemas[addrSchema.InternalAddrType] = append(
-		m.internalAddrSchemas[addrSchema.InternalAddrType], scope,
-	)
+	// Commit runs after this method releases the root lock, so reacquire it
+	// before publishing the manager and its address-type indexes together.
+	ns.Tx().OnCommit(func() {
+		m.mtx.Lock()
+		defer m.mtx.Unlock()
 
-	return m.scopedManagers[scope], nil
+		m.scopedManagers[scope] = scoped
+		m.externalAddrSchemas[addrSchema.ExternalAddrType] = append(
+			m.externalAddrSchemas[addrSchema.ExternalAddrType], scope,
+		)
+		m.internalAddrSchemas[addrSchema.InternalAddrType] = append(
+			m.internalAddrSchemas[addrSchema.InternalAddrType], scope,
+		)
+	})
+
+	return scoped, nil
 }
 
 // FetchScopedKeyManager attempts to fetch an active scoped manager according to

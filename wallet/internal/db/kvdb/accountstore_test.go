@@ -1647,34 +1647,62 @@ func TestCreateImportedAccountIdentityNamePrecedence(t *testing.T) {
 	require.ElementsMatch(t, before, after)
 }
 
-// TestCreateImportedAccountIdentityConcurrent checks that walletdb serializes
-// same-scope and cross-scope conflicting requests without consuming loser IDs.
+// TestCreateImportedAccountIdentityConcurrent checks account admission waits
+// for scope registration without admitting duplicate owners or consuming IDs.
 func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 	t.Parallel()
 
+	missing := db.KeyScope{Purpose: 1017, Coin: 0}
+	otherMissing := db.KeyScope{Purpose: 1018, Coin: 0}
+	schema := db.ScopeAddrMap[db.KeyScopeBIP0084]
+
 	tests := []struct {
-		name  string
-		scope db.KeyScope
-		other string
-		want  error
+		name       string
+		firstScope db.KeyScope
+		scope      db.KeyScope
+		other      string
+		want       error
+		wantSlot   uint32
 	}{
 		{
-			name:  "same scope",
-			scope: db.KeyScopeBIP0084,
-			other: "second",
-			want:  db.ErrAccountIdentityCollision,
+			name:       "same scope",
+			firstScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   1,
 		},
 		{
-			name:  "cross scope",
-			scope: db.KeyScopeBIP0049Plus,
-			other: "second",
-			want:  db.ErrAccountIdentityCollision,
+			name:       "cross scope",
+			firstScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0049Plus,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   1,
 		},
 		{
-			name:  "occupied name",
-			scope: db.KeyScopeBIP0084,
-			other: "first",
-			want:  db.ErrAccountNameConflict,
+			name:       "occupied name",
+			firstScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			other:      "first",
+			want:       db.ErrAccountNameConflict,
+			wantSlot:   1,
+		},
+		{
+			name:       "missing same scope",
+			firstScope: missing,
+			scope:      missing,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   0,
+		},
+		{
+			name:       "missing cross scope",
+			firstScope: missing,
+			scope:      otherMissing,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   0,
 		},
 	}
 	for _, tc := range tests {
@@ -1683,6 +1711,8 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 
 			// Arrange: both workers wait at a shared start barrier; buffered
 			// outcomes let every worker finish even if an assertion fails.
+			// Missing scopes exercise the commit/registration interval;
+			// their legacy numberless allocator starts at slot zero.
 			store, _, cleanup := newAccountStoreFixture(t)
 			t.Cleanup(cleanup)
 
@@ -1701,14 +1731,16 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 
 			for _, params := range []db.CreateImportedAccountParams{
 				{
-					Scope:     db.KeyScopeBIP0084,
-					Name:      "first",
-					PublicKey: []byte(pub.String()),
+					Scope:      tc.firstScope,
+					Name:       "first",
+					PublicKey:  []byte(pub.String()),
+					AddrSchema: &schema,
 				},
 				{
-					Scope:     tc.scope,
-					Name:      tc.other,
-					PublicKey: []byte(pub.String()),
+					Scope:      tc.scope,
+					Name:       tc.other,
+					PublicKey:  []byte(pub.String()),
+					AddrSchema: &schema,
 				},
 			} {
 				go func() {
@@ -1742,7 +1774,7 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 				if account.IsImported {
 					imported++
 
-					require.Equal(t, uint32(1), *account.AccountID)
+					require.Equal(t, tc.wantSlot, *account.AccountID)
 				}
 			}
 
@@ -1767,7 +1799,7 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 				return nil
 			})
 			require.NoError(t, err)
-			require.Equal(t, uint32(1), allocated)
+			require.Equal(t, tc.wantSlot, allocated)
 		})
 	}
 }
