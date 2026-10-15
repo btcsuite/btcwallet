@@ -56,9 +56,9 @@ const (
 	ModeShell
 )
 
-// WatchOnlyAccount contains the information needed to import a watch-only
+// ImportAccountParams contains the information needed to import a watch-only
 // account.
-type WatchOnlyAccount struct {
+type ImportAccountParams struct {
 	// Scope is the key scope of the account.
 	Scope waddrmgr.KeyScope
 
@@ -94,7 +94,7 @@ type CreateWalletParams struct {
 	// InitialAccounts is optional and names watch-only accounts to import
 	// after the wallet is created. It requires WatchOnly and is only
 	// honored for ModeShell.
-	InitialAccounts []WatchOnlyAccount
+	InitialAccounts []ImportAccountParams
 
 	// WatchOnly requests a watch-only wallet and is valid only for ModeShell.
 	WatchOnly bool
@@ -501,7 +501,7 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 // importInitialAccounts imports a list of watch-only accounts into the wallet.
 // This is typically used during wallet initialization in shell mode.
 func (w *Wallet) importInitialAccounts(ctx context.Context,
-	accounts []WatchOnlyAccount) error {
+	accounts []ImportAccountParams) error {
 
 	for _, account := range accounts {
 		_, err := w.importAccountInternal(
@@ -612,7 +612,7 @@ func (p *CreateWalletParams) validate() error {
 }
 
 // validateInitialAccountKeys requires public keys for shell account imports.
-func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
+func validateInitialAccountKeys(accounts []ImportAccountParams) error {
 	for i, account := range accounts {
 		switch {
 		case account.XPub == nil:
