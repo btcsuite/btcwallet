@@ -1475,6 +1475,11 @@ func TestListAddresses(t *testing.T) {
 	accountName := waddrmgr.DefaultAccountName
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    scope,
+		Name:     &accountName,
+	}).Return(&db.AccountInfo{}, nil).Once()
 	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
@@ -1502,6 +1507,58 @@ func TestListAddresses(t *testing.T) {
 	require.Len(t, addrs, 1)
 	require.Equal(t, addr.String(), addrs[0].Address.String())
 	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
+}
+
+// TestListAddressesUnknownAccount verifies an account missing from the
+// addrType's scope fails with ErrAccountNotFound before any listing work, for
+// both the SQL miss and the legacy kvdb miss, instead of listing it as empty.
+func TestListAddressesUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		storeErr error
+	}{
+		{
+			name:     "sql account miss",
+			storeErr: db.ErrAccountNotFound,
+		},
+		{
+			name:     "sql scope miss",
+			storeErr: db.ErrKeyScopeNotFound,
+		},
+		{
+			name: "kvdb account miss",
+			storeErr: fmt.Errorf("get account: %w", waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrAccountNotFound,
+			}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: only the account lookup is expected, so any
+			// balance or address read fails the mock assertions.
+			w, deps := createStartedWalletWithMocks(t)
+			accountName := "missing account"
+			deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(waddrmgr.KeyScopeBIP0084),
+				Name:     &accountName,
+			}).Return(nil, tc.storeErr).Once()
+
+			// Act: list the unknown account.
+			addrs, err := w.ListAddresses(
+				t.Context(), accountName, waddrmgr.WitnessPubKey,
+			)
+
+			// Assert: the public miss identity and no listing.
+			require.ErrorIs(t, err, ErrAccountNotFound)
+			require.Nil(t, addrs)
+		})
+	}
 }
 
 // TestListAddressesImportedAlias tests that raw imported addresses are listed
