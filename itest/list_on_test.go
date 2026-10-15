@@ -179,6 +179,16 @@ var allTestCases = []*testCase{
 		Name:     "account manager create custom scope account",
 		TestFunc: testAccountManagerCreateCustomScopeAccount,
 	},
+	// Imported receiving accounts retain both declared branch paths.
+	{
+		Name:     "account manager derive path bound address",
+		TestFunc: testAccountManagerDerivePathBoundAddress,
+	},
+	// Custom imported key allocation resumes its declared path after reopen.
+	{
+		Name:     "account manager allocate path bound key",
+		TestFunc: testAccountManagerAllocatePathBoundKey,
+	},
 	{
 		Name:     "account manager create exact account",
 		TestFunc: testAccountManagerCreateExactAccount,
