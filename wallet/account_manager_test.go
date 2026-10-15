@@ -1579,6 +1579,21 @@ func TestImportAccountStoreErrors(t *testing.T) {
 			want:     ErrAccountAlreadyExists,
 		},
 		{
+			name:     "number conflict",
+			storeErr: db.ErrAccountNumberConflict,
+			want:     ErrAccountAlreadyExists,
+		},
+		{
+			name:     "unsupported numbered import",
+			storeErr: db.ErrAccountOperationUnsupported,
+			want:     ErrAccountOperationUnsupported,
+		},
+		{
+			name:     "invalid declared branch types",
+			storeErr: db.ErrInvalidParam,
+			want:     ErrInvalidParam,
+		},
+		{
 			name:     "absent legacy scope",
 			storeErr: db.ErrKeyScopeNotFound,
 			want:     ErrAccountNotFound,
@@ -1709,7 +1724,7 @@ func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
 
 	req, ok := rawReq.(importAccountReq)
 	require.True(t, ok)
-	require.Equal(t, wantKey, req.accountKey.String())
+	require.Equal(t, wantKey, req.account.XPub.String())
 }
 
 // TestImportAccountRejectsInvalidKeyBeforeAdmission verifies invalid key
