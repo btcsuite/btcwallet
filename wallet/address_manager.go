@@ -235,7 +235,10 @@ type AddressManager interface {
 	GetAddressInfo(ctx context.Context, a address.Address) (AddressInfo, error)
 
 	// ListAddresses lists all addresses for a given account, including
-	// their balances.
+	// their balances. The account is resolved in the key scope of addrType;
+	// if no such account exists there, the returned error wraps
+	// ErrAccountNotFound. An existing account with no addresses yields an
+	// empty list.
 	ListAddresses(ctx context.Context, accountName string,
 		addrType waddrmgr.AddressType) ([]AddressProperty, error)
 
@@ -1155,7 +1158,9 @@ func (w *Wallet) getAddressInfo(ctx context.Context, a address.Address) (
 }
 
 // ListAddresses lists all addresses for a given account, including their
-// balances.
+// balances. The account is resolved in the key scope of addrType; if no such
+// account exists there, the returned error wraps ErrAccountNotFound. An
+// existing account with no addresses yields an empty list.
 func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 	addrType waddrmgr.AddressType) ([]AddressProperty, error) {
 
@@ -1202,6 +1207,13 @@ func (w *Wallet) handleListAddresses(r listAddressesReq) {
 		return
 	}
 
+	err = w.checkListAccount(r.ctx, query)
+	if err != nil {
+		r.respChan <- listAddressesResp{err: err}
+
+		return
+	}
+
 	balances, err := w.addrBalances(r.ctx)
 	if err != nil {
 		r.respChan <- listAddressesResp{err: err}
@@ -1214,7 +1226,9 @@ func (w *Wallet) handleListAddresses(r listAddressesReq) {
 	addresses := w.store.IterAddresses(r.ctx, query)
 	for storeAddr, err := range addresses {
 		if err != nil {
-			r.respChan <- listAddressesResp{err: err}
+			r.respChan <- listAddressesResp{
+				err: listAddressesErr(err),
+			}
 
 			return
 		}
@@ -1239,6 +1253,40 @@ func (w *Wallet) handleListAddresses(r listAddressesReq) {
 	}
 
 	r.respChan <- listAddressesResp{addresses: properties}
+}
+
+// checkListAccount rejects a by-account listing whose account is absent from
+// the query's scope. SQL lists an unknown account as empty while kvdb fails
+// with its legacy error, so resolving the account first gives both one public
+// identity. The reserved imported alias has no account row and is skipped.
+func (w *Wallet) checkListAccount(ctx context.Context,
+	query db.ListAddressesQuery) error {
+
+	if query.AccountName == nil {
+		return nil
+	}
+
+	_, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    *query.Scope,
+		Name:     query.AccountName,
+	})
+	if err != nil {
+		return listAddressesErr(err)
+	}
+
+	return nil
+}
+
+// listAddressesErr maps a missing account or scope to ErrAccountNotFound and
+// passes every other error through unchanged, so existing wallet-owned errors
+// keep their identity.
+func listAddressesErr(err error) error {
+	if isAccountMissing(err) {
+		return publicAccountErr(err, ErrAccountNotFound)
+	}
+
+	return err
 }
 
 // walletAddressTypeMatches reports whether a store address row matches a
