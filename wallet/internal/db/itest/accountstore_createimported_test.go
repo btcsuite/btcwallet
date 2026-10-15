@@ -544,6 +544,111 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 	}
 }
 
+// TestCreateImportedAccountNumberedRollback proves import failures leave
+// no account, secret, scope or account-cursor mutation in the SQL transaction.
+func TestCreateImportedAccountNumberedRollback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use equal and distinct XPub payloads to reach occupied-number
+	// and cross-scope identity failures independently.
+	master, err := hdkeychain.NewMaster(
+		bytes.Repeat([]byte{0xCC}, 32), &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	key, err := master.Neuter()
+	require.NoError(t, err)
+	other, err := key.Derive(1)
+	require.NoError(t, err)
+
+	witness := db.ScopeAddrMap[db.KeyScopeBIP0084]
+	custom := db.KeyScope{Purpose: 1017, Coin: 0}
+
+	tests := []struct {
+		name       string
+		ownerScope db.KeyScope
+		scope      db.KeyScope
+		schema     *db.ScopeAddrSchema
+		number     uint32
+		key        string
+		want       error
+	}{
+		{
+			name:       "occupied number",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			number:     7,
+			key:        other.String(),
+			want:       db.ErrAccountNumberConflict,
+		},
+		{
+			name:       "identity across scopes",
+			ownerScope: db.KeyScopeBIP0084,
+			scope:      custom,
+			schema:     &witness,
+			number:     7,
+			key:        key.String(),
+			want:       db.ErrAccountIdentityCollision,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: retain an existing numbered owner and snapshot every
+			// persistent fact the candidate's import transaction can mutate.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "numbered-import-rollback")
+			number := uint32(7)
+			owner := db.CreateImportedAccountParams{
+				WalletID:            walletID,
+				Name:                "owner",
+				Scope:               tc.ownerScope,
+				AccountNumber:       &number,
+				PublicKey:           []byte(key.String()),
+				EncryptedPrivateKey: RandomBytes(32),
+			}
+			_, err := store.CreateImportedAccount(t.Context(), owner)
+			require.NoError(t, err)
+
+			// Store reads cannot expose orphan secrets, empty scopes or
+			// allocation cursors. Count them directly to detect writes
+			// leaked by the failed import transaction.
+			const counts = `SELECT (SELECT count(*) FROM accounts),
+				(SELECT count(*) FROM account_secrets),
+				(SELECT count(*) FROM key_scopes),
+				(SELECT sum(next_account_number) FROM key_scopes)`
+
+			var before, after [4]int64
+
+			err = store.DB().QueryRowContext(t.Context(), counts).Scan(
+				&before[0], &before[1], &before[2], &before[3],
+			)
+			require.NoError(t, err)
+
+			candidate := owner
+			candidate.Name, candidate.Scope = "numbered-candidate", tc.scope
+			candidate.AccountNumber = &tc.number
+			candidate.AddrSchema = tc.schema
+			candidate.PublicKey = []byte(tc.key)
+
+			// Act: reach the concrete backend's numbered import transaction.
+			info, err := store.CreateImportedAccount(t.Context(), candidate)
+
+			// Assert: every refusal returns no row and leaves all durable
+			// facts unchanged, using the same assertions for each failure.
+			require.ErrorIs(t, err, tc.want)
+
+			require.Nil(t, info)
+
+			err = store.DB().QueryRowContext(t.Context(), counts).Scan(
+				&after[0], &after[1], &after[2], &after[3],
+			)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+		})
+	}
+}
+
 // TestCreateImportedAccountNumberedPreview verifies a successful dry run
 // returns numbered imported identity while leaving its new scope unpersisted.
 func TestCreateImportedAccountNumberedPreview(t *testing.T) {
