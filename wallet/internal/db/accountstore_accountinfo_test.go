@@ -15,13 +15,13 @@ import (
 func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: build one normalized SQL row with a non-default synchronization
-	// policy so conversion must preserve both account metadata additions.
+	// Arrange: build an imported account row with a non-default sync policy
+	// and known account number so conversion must preserve both.
 	row := AccountInfoRow[int16]{
 		RowID:            42,
 		AccountNumber:    sql.NullInt64{Int64: 7, Valid: true},
 		AccountName:      "strict",
-		IsDerived:        true,
+		IsDerived:        false,
 		NoChainSync:      true,
 		ExternalKeyCount: 1,
 		InternalKeyCount: 2,
@@ -45,6 +45,8 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	}, info.AddrSchema)
 	require.Equal(t, int64(42), info.rowID)
 	require.True(t, info.NoChainSync)
+	require.True(t, info.IsImported)
+	require.Equal(t, uint32(7), *info.AccountNumber)
 }
 
 // TestOptionalMasterFingerprintPreservesPresence verifies SQL NULL and valid
