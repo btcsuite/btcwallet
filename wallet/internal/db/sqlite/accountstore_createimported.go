@@ -13,8 +13,8 @@ import (
 // CreateImportedAccount stores an imported account identified by an extended
 // public key. If the key scope does not exist, it is created using the address
 // schema provided by the caller with no coin public/private key material.
-// Imported accounts have NULL account_number since they don't follow BIP44
-// derivation.
+// Imported keys remain is_derived=false while optionally retaining a known
+// BIP44 account number.
 func (s *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
@@ -104,6 +104,7 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 	row, err := o.q.CreateImportedAccount(
 		ctx, sqlc.CreateImportedAccountParams{
 			ScopeID:        req.ScopeID,
+			AccountNumber:  db.NullableUint32ToSQLInt64(req.AccountNumber),
 			AccountName:    req.Name,
 			NoChainSync:    req.NoChainSync,
 			PublicKey:      req.PublicKey,
@@ -117,6 +118,17 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 	)
 	if err != nil {
 		return 0, err
+	}
+
+	// Reuse the existing allocator only for supplied numbers, so imports and
+	// wallet-derived accounts advance the same cursor in this transaction.
+	if req.AccountNumber != nil {
+		_, err = (createDerivedAccountOps(o)).AllocateAccountNumber(
+			ctx, req.ScopeID, req.AccountNumber,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("advance account number: %w", err)
+		}
 	}
 
 	return row.ID, nil
