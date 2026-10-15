@@ -56,8 +56,8 @@ type GetAccountOps interface {
 // The helper owns the ordered sequencing, so postgres, sqlite, and kvdb all
 // validate before any backend step, load exactly one selector path into a
 // normalized AccountInfo through backend-local conversions, extract the account
-// row ID from the loaded AccountInfo, reject number-based imported-account
-// lookups consistently, and attach balances after the account has been loaded.
+// row ID from the loaded AccountInfo, reject numeric lookups of numberless
+// imports, and attach balances after the account has been loaded.
 func GetAccountWithOps(ctx context.Context, query GetAccountQuery,
 	ops GetAccountOps) (*AccountInfo, error) {
 
@@ -82,11 +82,9 @@ func GetAccountWithOps(ctx context.Context, query GetAccountQuery,
 		return nil, fmt.Errorf("load account: %w", err)
 	}
 
-	// Imported accounts may only be looked up by Name; they do not expose a
-	// public account number. Reject inbound number-based lookups that resolve
-	// to imported so kvdb-internal account numbers cannot leak through this
-	// API.
-	if query.AccountNumber != nil && info.IsImported {
+	// A backend-local ID is not a semantic account number. Keep numberless
+	// imports masked while allowing supplied keys with a declared path.
+	if query.AccountNumber != nil && info.AccountNumber == nil {
 		return nil, formatGetAccountNotFound(query)
 	}
 
