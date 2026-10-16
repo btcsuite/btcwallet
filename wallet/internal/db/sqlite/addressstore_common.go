@@ -59,6 +59,8 @@ type addressInfoRow interface {
 
 // addressRowToInfo converts a SQLite address row to an AddressInfo struct.
 func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
+	// Raw-capable queries expose private-key custody without account identity;
+	// the shared converter still supplies the existing HD account custody.
 	switch base := any(row).(type) {
 	case sqlc.GetAddressByScriptPubKeyRow:
 		return addressFieldsToInfo(
@@ -163,7 +165,7 @@ func addressFieldsToInfo(id int64, derivedAddressID sql.NullInt64,
 	scriptTypeID int64, addressBranch sql.NullInt64,
 	addressIndex sql.NullInt64, isDerived bool,
 	accountIsDerived sql.NullBool, scriptPubKey []byte, pubKey []byte,
-	createdAt time.Time, walletIsWatchOnly bool,
+	createdAt time.Time, isWatchOnly bool,
 	hasScript bool, isUsed bool) (*db.AddressInfo, error) {
 
 	return db.AddressRowToInfo(db.AddressInfoRow[int64]{
@@ -178,7 +180,7 @@ func addressFieldsToInfo(id int64, derivedAddressID sql.NullInt64,
 		TypeID:            scriptTypeID,
 		IsDerived:         isDerived,
 		AccountIsDerived:  accountIsDerived,
-		WalletIsWatchOnly: walletIsWatchOnly,
+		IsWatchOnly:       isWatchOnly,
 		HasScript:         hasScript,
 		CreatedAt:         createdAt,
 		AddressBranch:     addressBranch,
