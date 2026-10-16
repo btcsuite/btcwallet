@@ -1123,9 +1123,15 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			changeScript := expectFreshChangeAddress(
 				t, w, deps, accountName, scope, test.addrType,
 			)
-			_, _, changeKey := expectedStoreAddress(
+			changeAddr, _, changeKey := expectedStoreAddress(
 				t, storeDerivationAccountPubKey(t), test.addrType, 1, 0,
 			)
+			// The funded packet keeps this change, so FundPsbt
+			// registers it before returning.
+			deps.chain.On(
+				"WatchAddrsFromTip", w.lifetimeCtx,
+				[]address.Address{changeAddr},
+			).Return(nil).Once()
 			// HD coordinates and a public key establish script facts;
 			// the zero account-number pointer keeps the root origin absent.
 			changeInfo := new(db.AddressInfo)
@@ -5551,9 +5557,10 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 		HasDerivationPath: true,
 		Branch:            1,
 	}}, nil).Once()
+	// Only a run that returns a funded packet registers its change.
 	mocks.chain.On(
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
-	).Return(nil).Once()
+	).Return(nil).Maybe()
 
 	// Input decoration and change output decoration both resolve their
 	// address through the store.
@@ -5746,11 +5753,15 @@ func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
-	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
 	require.NoError(t, err)
+
+	// The funded packet's change was registered before return.
+	require.GreaterOrEqual(t, changeIndex, int32(0))
+	mocks.chain.AssertNumberOfCalls(t, "WatchAddrsFromTip", 1)
 
 	// Act: scribble over every script the funded packet came back with.
 	for _, txOut := range funded.UnsignedTx.TxOut {
@@ -5760,6 +5771,47 @@ func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 	}
 
 	// Assert: the caller's packet is untouched by any of it.
+	require.Equal(t, before, packetSnapshot(t, packet))
+}
+
+// TestFundPsbtChangeWatchFailure verifies that a failed change registration
+// returns no packet and leaves the caller's packet untouched.
+func TestFundPsbtChangeWatchFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fund a packet that leaves change, replacing the fixture's
+	// optional registration with a failure.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
+	expectManualFundingSources(t, w, mocks, outPoint)
+	mocks.chain.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+		Unset()
+	mocks.chain.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+		Return(errChainMock).Once()
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	tx.AddTxOut(&wire.TxOut{
+		Value:    400_000,
+		PkScript: append([]byte{0x00, 0x14}, make([]byte, 20)...),
+	})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	before := packetSnapshot(t, packet)
+
+	// Act: Fund the packet through the public wrapper.
+	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: No packet is returned and the caller's packet is unchanged.
+	require.ErrorIs(t, err, errChainMock)
+	require.Nil(t, funded)
 	require.Equal(t, before, packetSnapshot(t, packet))
 }
 

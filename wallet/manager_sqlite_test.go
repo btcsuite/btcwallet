@@ -41,7 +41,7 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 		AccountNumber: &number, NoChainSync: true,
 	})
 	require.NoError(t, err)
-	source, err := w.createChangeSource(t.Context(), &ScopedAccount{
+	source, _, err := w.createChangeSource(t.Context(), &ScopedAccount{
 		KeyScope: scope, AccountName: account.AccountName,
 	})
 	require.NoError(t, err)
@@ -61,6 +61,69 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, &chainParams)
 	require.NoError(t, err)
 	chainMock.AssertNotCalled(t, "WatchAddrsFromTip", mock.Anything, addrs)
+}
+
+// TestChangeWatchFailureSQLiteKeepsChange verifies that a failed change
+// registration leaves the exact committed change child in a real SQLite Store.
+func TestChangeWatchFailureSQLiteKeepsChange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the backend non-current so only the change watch
+	// registers, then allocate change on a chain-synchronized account.
+	chainMock := createTestChain(t)
+	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  filepath.Join(t.TempDir(), "change.sqlite"),
+		ChainParams: chainParams,
+		ChainSource: chainMock,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Stop() })
+
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
+
+	params := sqliteCreateParams(t)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase, Timeout: -1,
+	}))
+
+	scope := waddrmgr.KeyScopeBIP0084
+	_, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope, Name: "synced-change",
+	})
+	require.NoError(t, err)
+
+	source, change, err := w.createChangeSource(
+		t.Context(), &ScopedAccount{
+			KeyScope: scope, AccountName: "synced-change",
+		},
+	)
+	require.NoError(t, err)
+
+	script, err := source.NewScript()
+	require.NoError(t, err)
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, &chainParams)
+	require.NoError(t, err)
+	chainMock.On("WatchAddrsFromTip", w.lifetimeCtx, addrs).
+		Return(errChainMock).Once()
+
+	// Act: Register the kept change and fail the backend registration.
+	err = w.watchAuthoredChange(t.Context(), 0, change)
+
+	// Assert: The failure is returned and the committed child remains.
+	require.ErrorIs(t, err, errChainMock)
+	stored, err := w.store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID: w.id, ScriptPubKey: script,
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), stored.Branch)
+	require.Zero(t, stored.Index)
 }
 
 // TestManagerCreateUsesCommittedWalletRow verifies that Create assembles the
