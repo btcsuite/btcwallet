@@ -217,7 +217,7 @@ func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 
 // expectDefaultAuthoringSources configures automatic selection from the default
 // BIP0086 account. It registers the account-by-name and account-by-number
-// lookups, a chain tip at height 100, one 100,000-sat P2WPKH UTXO mined at
+// lookups, a processed tip at height 100, one 100,000-sat P2WPKH UTXO mined at
 // height 1, and one P2TR-sized derived change script. The requested payment is
 // 99,700 sat, so the remainder after fees is below the change threshold: the
 // authoring result must contain one input, the payment output, and no change.
@@ -251,9 +251,11 @@ func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
 	}).Return(accountInfo, nil).Once()
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
-	).Once()
+	// SQL listing and authoring share the persisted Wallet tip.
+	mocks.store.On("GetWallet", mock.Anything, w.cfg.Name).
+		Return(&db.WalletInfo{
+			SyncedTo: &db.Block{Height: 100},
+		}, nil).Once()
 	utxo := db.UtxoInfo{
 		OutPoint: validUTXO, Amount: inputAmount, PkScript: inputScript,
 		Height: 1,
@@ -1122,6 +1124,359 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 	require.IsType(t, &InputsPolicy{}, intent.Inputs)
 }
 
+// authoringHeightCases covers the processed-tip boundary and the two public
+// policy exclusions. Each cached height would reverse the expected result,
+// exposing a return to chain-cache eligibility without requiring a cache read.
+var authoringHeightCases = []struct {
+	name         string
+	height       uint32
+	cachedHeight int32
+	minConfs     uint32
+	coinbase     bool
+	eligible     bool
+}{
+	{
+		name:         "accept processed tip coin",
+		height:       739,
+		cachedHeight: 738,
+		minConfs:     1,
+		eligible:     true,
+	},
+	{
+		name:         "reject under confirmed coin",
+		height:       739,
+		cachedHeight: 740,
+		minConfs:     2,
+	},
+	{
+		name:         "reject immature coinbase",
+		height:       741 - uint32(chainParams.CoinbaseMaturity),
+		cachedHeight: 740,
+		minConfs:     1,
+		coinbase:     true,
+	},
+}
+
+// TestCreateTransactionAutomaticConfirmationHeight verifies public automatic
+// selection uses processed height, including confirmation and maturity gates.
+func TestCreateTransactionAutomaticConfirmationHeight(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range authoringHeightCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Keep the processed tip at 739 while the chain
+			// cache disagrees. One owned coin can fund the payment only
+			// if the requested confirmation and maturity gates allow it.
+			w, mocks := createStartedSQLWalletWithMocks(t)
+			mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+			mocks.store.On("GetWallet", mock.Anything, w.cfg.Name).
+				Return(&db.WalletInfo{
+					SyncedTo: &db.Block{Height: 739},
+				}, nil).Once()
+			mocks.chain.On("BlockStamp").Return(
+				&waddrmgr.BlockStamp{Height: tc.cachedHeight}, nil,
+			).Maybe()
+
+			accountNum := uint32(waddrmgr.DefaultAccountNum)
+			scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+			account := &db.AccountInfo{
+				AccountNumber: &accountNum,
+				AccountName:   defaultAccountName,
+				AddrSchema:    db.ScopeAddrMap[scope],
+				NoChainSync:   true,
+			}
+			mocks.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID: w.id, Scope: scope,
+					Name: &defaultAccountName,
+				},
+			).Return(account, nil).Once()
+			mocks.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID: w.id, Scope: scope,
+					AccountNumber: &accountNum,
+				},
+			).Return(account, nil).Once()
+
+			script := singleAddrPkScript(t)
+			coin := db.UtxoInfo{
+				OutPoint: validUTXO, Amount: 100_000,
+				PkScript: script, Height: tc.height,
+				FromCoinBase: tc.coinbase,
+			}
+			mocks.store.On("ListUTXOs", mock.Anything,
+				db.ListUtxosQuery{
+					WalletID: w.id, Scope: &scope,
+					AccountName: &defaultAccountName,
+				},
+			).Return([]db.UtxoInfo{coin}, nil).Once()
+
+			// Success requires one allocation. Negative cases permit
+			// change only to expose the original cache's public result;
+			// NoChainSync keeps watch delivery outside this regression.
+			changeCall := mocks.store.On("NewDerivedAddresses", mock.Anything,
+				db.NewDerivedAddressParams{
+					WalletID: w.id, AccountName: defaultAccountName,
+					Scope: scope, Change: true,
+				}, uint32(1),
+			).Return([]db.AddressInfo{
+				{
+					ScriptPubKey: script,
+				},
+			}, nil)
+			if tc.eligible {
+				changeCall.Once()
+			} else {
+				changeCall.Maybe()
+			}
+
+			// Act: Author through the public default-account policy;
+			// no test-side filter preselects the coin's eligibility.
+			authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+				Outputs: []wire.TxOut{
+					{
+						Value: 99_700, PkScript: script,
+					},
+				},
+				Inputs:  &InputsPolicy{MinConfs: tc.minConfs},
+				FeeRate: defaultFeeRate,
+			})
+
+			// Assert: Insufficient confirmations or maturity leave no
+			// inputs; an eligible coin funds the exact named outpoint.
+			if !tc.eligible {
+				var sourceErr txauthor.InputSourceError
+				require.ErrorAs(t, err, &sourceErr)
+				require.Nil(t, authored)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, authored.Tx.TxIn, 1)
+			require.Equal(t, coin.OutPoint,
+				authored.Tx.TxIn[0].PreviousOutPoint)
+		})
+	}
+}
+
+// TestCreateTransactionSelectedConfirmationHeight verifies an explicit policy
+// candidate retains MinConfs and maturity checks against the processed tip.
+func TestCreateTransactionSelectedConfirmationHeight(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range authoringHeightCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Return the same divergent height and owned coin
+			// as automatic selection, but require lookup by outpoint.
+			// This exercises explicit policy eligibility independently.
+			w, mocks := createStartedSQLWalletWithMocks(t)
+			mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+			mocks.store.On("GetWallet", mock.Anything, w.cfg.Name).
+				Return(&db.WalletInfo{
+					SyncedTo: &db.Block{Height: 739},
+				}, nil).Once()
+			mocks.chain.On("BlockStamp").Return(
+				&waddrmgr.BlockStamp{Height: tc.cachedHeight}, nil,
+			).Maybe()
+
+			scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+			mocks.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID: w.id, Scope: scope,
+					Name: &defaultAccountName,
+				},
+			).Return(&db.AccountInfo{
+				AccountName: defaultAccountName,
+				AddrSchema:  db.ScopeAddrMap[scope],
+				NoChainSync: true,
+			}, nil).Once()
+
+			script := singleAddrPkScript(t)
+			coin := &db.UtxoInfo{
+				OutPoint: validUTXO, Amount: 100_000,
+				PkScript: script, Height: tc.height,
+				FromCoinBase: tc.coinbase,
+			}
+			mocks.store.On("GetUtxo", mock.Anything,
+				db.GetUtxoQuery{
+					WalletID: w.id, OutPoint: coin.OutPoint,
+				},
+			).Return(coin, nil).Once()
+
+			// Require one allocation on success; keep it optional for
+			// negatives so a cached-height regression fails publicly.
+			changeCall := mocks.store.On("NewDerivedAddresses", mock.Anything,
+				db.NewDerivedAddressParams{
+					WalletID: w.id, AccountName: defaultAccountName,
+					Scope: scope, Change: true,
+				}, uint32(1),
+			).Return([]db.AddressInfo{
+				{
+					ScriptPubKey: script,
+				},
+			}, nil)
+			if tc.eligible {
+				changeCall.Once()
+			} else {
+				changeCall.Maybe()
+			}
+
+			// Act: Restrict public policy selection to the candidate,
+			// retaining the caller's explicit confirmation requirement.
+			authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+				Outputs: []wire.TxOut{
+					{
+						Value: 99_700, PkScript: script,
+					},
+				},
+				Inputs: &InputsPolicy{
+					MinConfs: tc.minConfs,
+					Source: &CoinSourceUTXOs{
+						UTXOs: []wire.OutPoint{coin.OutPoint},
+					},
+				},
+				FeeRate: defaultFeeRate,
+			})
+
+			// Assert: Naming a candidate cannot bypass either gate;
+			// a valid processed-tip candidate remains spendable.
+			if !tc.eligible {
+				var sourceErr txauthor.InputSourceError
+				require.ErrorAs(t, err, &sourceErr)
+				require.Nil(t, authored)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, authored.Tx.TxIn, 1)
+			require.Equal(t, coin.OutPoint,
+				authored.Tx.TxIn[0].PreviousOutPoint)
+		})
+	}
+}
+
+// TestCreateTransactionManualConfirmationHeight verifies public exact-input
+// authoring measures coinbase maturity against Wallet-processed height.
+func TestCreateTransactionManualConfirmationHeight(t *testing.T) {
+	t.Parallel()
+
+	// At tip 739 these heights straddle maturity by one block. The cache
+	// disagrees in the direction that would reverse each expected result.
+	tests := []struct {
+		name         string
+		height       uint32
+		cachedHeight int32
+		eligible     bool
+	}{
+		{
+			name:         "accept mature coinbase",
+			height:       740 - uint32(chainParams.CoinbaseMaturity),
+			cachedHeight: 738,
+			eligible:     true,
+		},
+		{
+			name:         "reject immature coinbase",
+			height:       741 - uint32(chainParams.CoinbaseMaturity),
+			cachedHeight: 740,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Exact inputs have no MinConfs policy, but a
+			// coinbase still needs maturity. Return one boundary coin
+			// and a processed tip independent of the cached chain tip.
+			w, mocks := createStartedSQLWalletWithMocks(t)
+			mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+			mocks.store.On("GetWallet", mock.Anything, w.cfg.Name).
+				Return(&db.WalletInfo{
+					SyncedTo: &db.Block{Height: 739},
+				}, nil).Once()
+			mocks.chain.On("BlockStamp").Return(
+				&waddrmgr.BlockStamp{Height: tc.cachedHeight}, nil,
+			).Maybe()
+
+			scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+			mocks.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID: w.id, Scope: scope,
+					Name: &defaultAccountName,
+				},
+			).Return(&db.AccountInfo{
+				AccountName: defaultAccountName,
+				AddrSchema:  db.ScopeAddrMap[scope],
+				NoChainSync: true,
+			}, nil).Once()
+
+			script := singleAddrPkScript(t)
+			coin := &db.UtxoInfo{
+				OutPoint: validUTXO, Amount: 100_000,
+				PkScript: script, Height: tc.height,
+				FromCoinBase: true,
+			}
+			mocks.store.On("GetUtxo", mock.Anything,
+				db.GetUtxoQuery{
+					WalletID: w.id, OutPoint: coin.OutPoint,
+				},
+			).Return(coin, nil).Once()
+
+			// Require one allocation on success; permit it on rejection
+			// only to expose the original height source's public result.
+			changeCall := mocks.store.On("NewDerivedAddresses", mock.Anything,
+				db.NewDerivedAddressParams{
+					WalletID: w.id, AccountName: defaultAccountName,
+					Scope: scope, Change: true,
+				}, uint32(1),
+			).Return([]db.AddressInfo{
+				{
+					ScriptPubKey: script,
+				},
+			}, nil)
+			if tc.eligible {
+				changeCall.Once()
+			} else {
+				changeCall.Maybe()
+			}
+
+			// Act: Require the exact coin through the public wrapper;
+			// no automatic source can substitute another eligible coin.
+			authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+				Outputs: []wire.TxOut{
+					{
+						Value: 99_700, PkScript: script,
+					},
+				},
+				Inputs: &InputsManual{
+					UTXOs: []wire.OutPoint{coin.OutPoint},
+				},
+				FeeRate: defaultFeeRate,
+			})
+
+			// Assert: Mature coins fund the exact input; immature ones
+			// produce the existing manual eligibility error and no tx.
+			if !tc.eligible {
+				require.ErrorIs(t, err, ErrUtxoNotEligible)
+				require.Nil(t, authored)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, authored.Tx.TxIn, 1)
+			require.Equal(t, coin.OutPoint,
+				authored.Tx.TxIn[0].PreviousOutPoint)
+		})
+	}
+}
+
 // TestCreateTransactionInvalidIntent tests that an error is returned when an
 // invalid transaction intent is provided.
 func TestCreateTransactionInvalidIntent(t *testing.T) {
@@ -1628,7 +1983,8 @@ func TestFilterEligibleOutputsExcludesBareMultisig(t *testing.T) {
 func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 	t.Parallel()
 
-	// Arrange.
+	// Arrange: Mock a processed tip and a renamed account 0 so selection must
+	// resolve the current account name before listing its UTXOs.
 	w, mocks := createTestWalletWithMocks(t)
 
 	// The default account (number 0) has been renamed away from "default".
@@ -1636,8 +1992,9 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	// The kvdb fixture exposes its processed tip through the address manager.
+	mocks.addrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
 	).Once()
 
 	// The default account must be resolved by number 0, never by the
@@ -1683,6 +2040,8 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return one processed-tip coin from the named scope so value-form
+	// dispatch must retain its account and confirmation constraints.
 	w, mocks := createTestWalletWithMocks(t)
 
 	accountName := "value-account"
@@ -1695,8 +2054,9 @@ func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 		Height:   100,
 	}}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	// The kvdb fixture exposes its processed tip through the address manager.
+	mocks.addrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
 	).Once()
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id,
@@ -1709,12 +2069,15 @@ func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 		AccountName: &accountName,
 	}).Return(unspent, nil).Once()
 
+	// Act: Select with a value-form scoped account at one confirmation.
 	eligible, err := w.getEligibleUTXOs(
 		t.Context(), ScopedAccount{
 			AccountName: accountName,
 			KeyScope:    waddrmgr.KeyScopeBIP0084,
 		}, 1,
 	)
+
+	// Assert: The named account contributes its sole eligible outpoint.
 	require.NoError(t, err)
 	require.Len(t, eligible, 1)
 	require.Equal(t, outPoint, eligible[0].OutPoint)
@@ -1729,6 +2092,8 @@ func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Provide both accountless SQL and legacy imported rows at the
+	// processed tip; neither shape needs a real imported account row.
 	w, mocks := createTestWalletWithMocks(t)
 
 	accountName := db.DefaultImportedAccountName
@@ -1765,8 +2130,9 @@ func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 		AccountName: db.DefaultImportedAccountName,
 	}}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	// The kvdb fixture exposes its processed tip through the address manager.
+	mocks.addrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
 	).Once()
 
 	// The imported alias has no account row, so a real GetAccount returns
@@ -1785,12 +2151,15 @@ func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 		WalletID: w.id,
 	}).Return(unspent, nil).Once()
 
+	// Act: Select from the imported alias without resolving an account row.
 	eligible, err := w.getEligibleUTXOs(
 		t.Context(), ScopedAccount{
 			AccountName: accountName,
 			KeyScope:    waddrmgr.KeyScopeBIP0084,
 		}, 1,
 	)
+
+	// Assert: Only raw imported rows survive the scope and alias checks.
 	require.NoError(t, err)
 	require.Len(t, eligible, 2)
 	require.Equal(t, rawOutPoint, eligible[0].OutPoint)
@@ -1807,6 +2176,8 @@ func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 func TestGetEligibleUTXOsSourceUTXOsValue(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return one owned coin at the processed tip so a value-form
+	// outpoint source must fetch it and honor one confirmation.
 	w, mocks := createTestWalletWithMocks(t)
 
 	outPoint := wire.OutPoint{Hash: [32]byte{6}, Index: 0}
@@ -1817,19 +2188,23 @@ func TestGetEligibleUTXOsSourceUTXOsValue(t *testing.T) {
 		Height:   100,
 	}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	// The kvdb fixture exposes its processed tip through the address manager.
+	mocks.addrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
 	).Once()
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
 		OutPoint: outPoint,
 	}).Return(credit, nil).Once()
 
+	// Act: Select from the explicit value-form candidate list.
 	eligible, err := w.getEligibleUTXOs(
 		t.Context(), CoinSourceUTXOs{
 			UTXOs: []wire.OutPoint{outPoint},
 		}, 1,
 	)
+
+	// Assert: The eligible candidate is returned without substitution.
 	require.NoError(t, err)
 	require.Len(t, eligible, 1)
 	require.Equal(t, outPoint, eligible[0].OutPoint)
@@ -1841,11 +2216,13 @@ func TestGetEligibleUTXOsSourceUTXOsValue(t *testing.T) {
 func TestGetEligibleUTXOsNilSourceAccountNotFound(t *testing.T) {
 	t.Parallel()
 
-	// Arrange.
+	// Arrange: Return the processed tip, then report that default account 0
+	// does not exist so its wallet-facing error remains distinguishable.
 	w, mocks := createTestWalletWithMocks(t)
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	// The kvdb fixture exposes its processed tip through the address manager.
+	mocks.addrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
 	).Once()
 
 	// The default-account resolution by number 0 reports not found.
@@ -1856,7 +2233,7 @@ func TestGetEligibleUTXOsNilSourceAccountNotFound(t *testing.T) {
 		}),
 	).Return(nil, db.ErrAccountNotFound).Once()
 
-	// Act.
+	// Act: Resolve the implicit default source before selecting any coins.
 	eligible, err := w.getEligibleUTXOs(t.Context(), nil, 1)
 
 	// Assert: the store-level not-found is wrapped as the wallet error.
@@ -1872,7 +2249,7 @@ func TestCreateManualInputSource(t *testing.T) {
 	t.Parallel()
 
 	// The wallet treats an output as a mature coinbase only once it has
-	// reached CoinbaseMaturity confirmations against the chain tip. With
+	// reached CoinbaseMaturity confirmations against the processed tip. With
 	// the tip at height 100 and regtest maturity of 100, a coinbase mined
 	// at height 1 has exactly 100 confirmations (mature) while one mined at
 	// height 100 has a single confirmation (immature).
@@ -1907,11 +2284,13 @@ func TestCreateManualInputSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange.
+			// Arrange: Mock the processed tip and a coinbase straddling
+			// maturity so exact-input validation must use that height.
 			w, mocks := createTestWalletWithMocks(t)
 
-			mocks.chain.On("BlockStamp").Return(
-				&waddrmgr.BlockStamp{Height: tipHeight}, nil,
+			// Maturity uses this Wallet's processed tip for all inputs.
+			mocks.addrStore.On("SyncedTo").Return(
+				waddrmgr.BlockStamp{Height: tipHeight},
 			).Once()
 
 			credit := &db.UtxoInfo{
@@ -1926,7 +2305,7 @@ func TestCreateManualInputSource(t *testing.T) {
 				OutPoint: tc.outPoint,
 			}).Return(credit, nil).Once()
 
-			// Act.
+			// Act: Build the manual source without automatic coin substitution.
 			source, err := w.createManualInputSource(
 				t.Context(), &InputsManual{
 					UTXOs: []wire.OutPoint{tc.outPoint},
@@ -2127,7 +2506,7 @@ func corruptAmountPkScript() []byte {
 }
 
 // expectCorruptAmountSources stands the store up to return one default-account
-// UTXO per given amount and registers the account and chain lookups an input
+// UTXO per given amount and registers the account and tip lookups an input
 // source performs on the way. It serves both selection paths: automatic
 // selection lists the account's UTXOs, while manual selection fetches each of
 // the returned outpoints by name.
@@ -2150,7 +2529,7 @@ func expectCorruptAmountSources(t *testing.T, w *Wallet,
 		AddrSchema:    db.ScopeAddrMap[scope],
 	}
 
-	// The account and chain reads differ in number between the two paths
+	// The account reads differ in number between the two paths
 	// and are only scaffolding for the amounts under test, so they are not
 	// pinned to a count.
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
@@ -2159,9 +2538,15 @@ func expectCorruptAmountSources(t *testing.T, w *Wallet,
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
 	}).Return(accountInfo, nil).Maybe()
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
-	).Maybe()
+
+	// Started kvdb fixtures already supply their address-manager tip.
+	// SQL fixtures need the persisted tip read instead.
+	if w.addrStore == nil {
+		mocks.store.On("GetWallet", mock.Anything, w.cfg.Name).
+			Return(&db.WalletInfo{
+				SyncedTo: &db.Block{Height: 100},
+			}, nil).Once()
+	}
 
 	script := corruptAmountPkScript()
 	utxos := make([]db.UtxoInfo, len(amounts))
