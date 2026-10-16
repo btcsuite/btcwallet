@@ -11,10 +11,15 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
@@ -24,6 +29,199 @@ import (
 // Each case resolves its key scope from this value, so the funded scope has a
 // single authority: the address type owns that mapping.
 const addressManagerFundingType = waddrmgr.WitnessPubKey
+
+// testAddressManagerRawImportPublicKey verifies imports and repeats retain
+// canonical metadata and observe future payments through the real chain
+// client owned by the harness.
+func testAddressManagerRawImportPublicKey(h *bwtest.HarnessTest) {
+	// SPV supplies confirmed notifications; this case requires observing
+	// a future payment while it is still in the full node's mempool.
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("unmined raw import payments require a full node")
+	}
+
+	// Arrange: use real persistence and chain registration. SQL requires a
+	// watch-only shell; kvdb's seeded Wallet supplies the existing scopes
+	// for its mixed-mode imports. Public-key imports need no unlocked key.
+	ctx := h.Context()
+
+	sqlWallet := *dbBackend == string(wallet.DBBackendSQLite) ||
+		*dbBackend == string(wallet.DBBackendPostgres)
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		WatchOnly: sqlWallet,
+	})
+
+	// Unfunded creation supplies no sync boundary. Finish startup watch
+	// reconstruction so it cannot register the later import for this test.
+	h.AssertWalletSynced(w)
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(h, err)
+
+	addr, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		key.PubKey().SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	// Act: import through the public API using real persistence and live
+	// registration; public success must establish monitoring.
+	err = w.ImportPublicKey(ctx, key.PubKey(), waddrmgr.WitnessPubKey)
+
+	// Assert: the completed import is visible through the public address
+	// query before a repeat can reuse its canonical record.
+	require.NoError(h, err)
+
+	stored, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+
+	// Act: repeat the public import to exercise canonical reuse and live
+	// registration without replacing the real harness client.
+	err = w.ImportPublicKey(ctx, key.PubKey(), waddrmgr.WitnessPubKey)
+
+	// Assert: the repeat succeeds and public lookup preserves the same
+	// canonical metadata supplied by the committed import.
+	require.NoError(h, err)
+
+	got, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+	require.Equal(h, stored, got)
+
+	// Act: pay after the repeated import succeeds, so receipt must come
+	// from its live watch rather than startup reconstruction or a scan.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: pkScript,
+	}, bwtest.MinerFeeRate)
+
+	// Assert: asynchronous notification reaches the public transaction view
+	// before mining. Retain the successful polling result for the unmined
+	// assertion, then empty the shared mempool.
+	var received *wallet.TxDetail
+
+	err = wait.NoError(func() error {
+		var err error
+
+		received, err = w.GetTx(ctx, *payment)
+
+		return err
+	}, pollTimeout)
+	require.NoError(h, err)
+
+	require.Nil(h, received.Block)
+
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+}
+
+// testAddressManagerRawImportTaprootScript proves repeated imports retain the
+// original encrypted script across an output-key-only repeat, then receive a
+// future unmined payment through the real full-node watch.
+func testAddressManagerRawImportTaprootScript(h *bwtest.HarnessTest) {
+	// SPV supplies confirmed notifications; this case requires observing
+	// a future payment while it is still in the full node's mempool.
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("unmined raw import payments require a full node")
+	}
+
+	// Arrange: keep one revealed spending leaf for a later key-only repeat.
+	// SQL needs an unlocked watch-only shell; kvdb's seeded Wallet supplies
+	// existing scopes and a public script key that is usable while locked.
+	ctx := h.Context()
+
+	sqlWallet := *dbBackend == string(wallet.DBBackendSQLite) ||
+		*dbBackend == string(wallet.DBBackendPostgres)
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		WatchOnly: sqlWallet,
+		Unlocked:  sqlWallet,
+	})
+
+	// Unfunded creation supplies no sync boundary. Finish startup watch
+	// reconstruction so it cannot register the later import for this test.
+	h.AssertWalletSynced(w)
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(h, err)
+
+	leafScript := []byte{txscript.OP_TRUE}
+	tapscript := waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypePartialReveal,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: key.PubKey(),
+			LeafVersion: txscript.BaseLeafVersion,
+		},
+		RevealedScript: leafScript,
+	}
+
+	outputKey, err := tapscript.TaprootKey()
+	require.NoError(h, err)
+
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	repeat := waddrmgr.Tapscript{
+		Type:          waddrmgr.TaprootFullKeyOnly,
+		FullOutputKey: outputKey,
+	}
+
+	// Act: import the script through real persistence and the harness's
+	// full-node client; success must include live monitoring.
+	_, err = w.ImportTaprootScript(ctx, tapscript)
+
+	// Assert: public lookup observes the committed script metadata that
+	// the following output-key-only repeat must preserve.
+	require.NoError(h, err)
+
+	stored, err := w.GetAddressInfo(ctx, addr)
+	require.NoError(h, err)
+
+	// Act: repeat with an output-key-only representation, which must not
+	// replace the original encrypted spending conditions.
+	info, err := w.ImportTaprootScript(ctx, repeat)
+
+	// Assert: the repeat returns the canonical stored metadata.
+	// Resolving its output below proves the original secret still exists.
+	require.NoError(h, err)
+	require.Equal(h, stored, info)
+
+	script, err := w.ScriptForOutput(ctx, wire.TxOut{
+		PkScript: pkScript,
+	})
+	require.NoError(h, err)
+	require.Equal(h, leafScript, script.Script)
+
+	// Act: broadcast after successful registration so no import-time scan
+	// can supply the future payment to the Wallet.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: pkScript,
+	}, bwtest.MinerFeeRate)
+
+	// Assert: keep the successful polling result to check the payment is
+	// still unmined, then mine to clean the shared harness mempool.
+	var received *wallet.TxDetail
+
+	err = wait.NoError(func() error {
+		var err error
+
+		received, err = w.GetTx(ctx, *payment)
+
+		return err
+	}, pollTimeout)
+	require.NoError(h, err)
+
+	require.Nil(h, received.Block)
+
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+}
 
 // createTestAddressInfo independently derives address metadata from the
 // fixture account and requested branch; only the chosen child index comes from

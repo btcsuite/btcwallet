@@ -158,7 +158,7 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 }
 
 // NewImportedAddress imports one address through the legacy address-manager
-// path.
+// path, reusing canonical metadata after a definite duplicate rejection.
 func (s *Store) NewImportedAddress(ctx context.Context,
 	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
 
@@ -198,16 +198,26 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 			return errMissingAddrmgrNamespace
 		}
 
-		result, err := s.importAddressTx(ns, manager, addrMgr, params)
-		if err != nil {
-			return err
-		}
+		// Capture the result for publication only after Update confirms
+		// commit, propagating the import error without another branch.
+		info, err = s.importAddressTx(ns, manager, addrMgr, params)
 
-		info = result
-
-		return nil
+		return err
 	})
 	if err != nil {
+		// The scoped manager rejects duplicates before writing. Reuse
+		// the stored address so a repeated import can retry its watch
+		// without replacing the original metadata or script material.
+		var managerErr waddrmgr.ManagerError
+		if errors.As(err, &managerErr) &&
+			managerErr.ErrorCode == waddrmgr.ErrDuplicateAddress {
+
+			return s.GetAddress(ctx, db.GetAddressQuery{
+				WalletID:     params.WalletID,
+				ScriptPubKey: params.ScriptPubKey,
+			})
+		}
+
 		return nil, fmt.Errorf("NewImportedAddress: %w", err)
 	}
 
