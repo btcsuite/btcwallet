@@ -139,7 +139,8 @@ type Controller interface {
 	Lock(ctx context.Context) error
 
 	// ChangePassphrase changes the wallet's passphrases according to the
-	// request.
+	// request. Cancellation before acceptance leaves the wallet unchanged;
+	// after acceptance, the call waits for the authoritative operation result.
 	ChangePassphrase(ctx context.Context, req ChangePassphraseRequest) error
 
 	// Info returns a comprehensive snapshot of the wallet's static
@@ -452,6 +453,9 @@ func (w *Wallet) Lock(ctx context.Context) error {
 }
 
 // ChangePassphrase changes the wallet's passphrases according to the request.
+// Cancellation before acceptance leaves the wallet unchanged. After acceptance,
+// it waits for the handler's result even if the caller cancels or shutdown
+// begins.
 //
 // This is part of the Controller interface.
 func (w *Wallet) ChangePassphrase(ctx context.Context,
@@ -470,14 +474,8 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 		return err
 	}
 
-	// Wait for the accepted request's result even if wallet shutdown begins.
-	// The caller context remains the only way to stop waiting early.
-	reqErr, err := waitForReq(ctx, r.resp)
-	if err != nil {
-		return err
-	}
-
-	return reqErr
+	// After acceptance, cancellation cannot replace the operation result.
+	return <-r.resp
 }
 
 // infoReq keeps metadata work inside the accepted handler's Wallet lifetime.

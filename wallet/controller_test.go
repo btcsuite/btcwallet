@@ -132,41 +132,52 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 	})
 }
 
-// TestControllerChangePassphrase_Interrupted_WaitCancelled verifies
-// ChangePassphrase when response wait is interrupted by context cancellation.
-func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
+// TestControllerChangePassphraseWaitsForAcceptedResult verifies cancellation
+// cannot replace the handler's failure after request acceptance.
+func TestControllerChangePassphraseWaitsForAcceptedResult(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block during response wait and cancel context.
-	w, _ := createTestWalletWithMocks(t)
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+		// Arrange: Receive the unbuffered handoff ourselves so the handler
+		// result stays unpublished until after cancellation.
+		w, _ := createTestWalletWithMocks(t)
+		require.NoError(t, w.state.toStarting())
+		require.NoError(t, w.state.toStarted())
 
-	ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
+		var req ChangePassphraseRequest
 
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
-	}
+		errChan := make(chan error, 1)
+		go func() { errChan <- w.ChangePassphrase(ctx, req) }()
 
-	// Act: Cancel context.
-	cancel()
+		accepted, ok := (<-w.requestChan).(changePassphraseReq)
+		require.True(t, ok)
 
-	// Assert: Verify error.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
+		// A failed assertion must still release the accepted caller;
+		// OnceFunc also lets the normal path publish the same failure.
+		respond := sync.OnceFunc(func() { accepted.resp <- errDBMock })
+		t.Cleanup(respond)
+
+		// Act: Withhold the response while cancellation runs to completion,
+		// making any premature return observable.
+		cancel()
+		synctest.Wait()
+
+		// Assert: Cancellation cannot finish the accepted call. Publishing
+		// the handler's failure must release it with that exact error.
+		select {
+		case err := <-errChan:
+			t.Fatalf("returned before handler completion: %v", err)
+		default:
+		}
+
+		respond()
+		require.ErrorIs(t, <-errChan, errDBMock)
+	})
 }
 
 // TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown verifies
@@ -214,43 +225,6 @@ func TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown(
 	case err := <-errChan:
 		require.ErrorIs(t, err, errDBMock)
 
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
-}
-
-// TestControllerChangePassphrase_Interrupted_WaitTimeout verifies
-// ChangePassphrase when response wait times out.
-func TestControllerChangePassphrase_Interrupted_WaitTimeout(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and allow timeout.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	ctx, cancel := context.WithTimeout(t.Context(),
-		10*time.Millisecond)
-	defer cancel()
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
-
-	// Assert: Verify timeout.
-	select {
-	case err := <-errChan:
-		require.ErrorContains(t, err,
-			"context deadline exceeded")
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
