@@ -401,6 +401,14 @@ type Wallet struct {
 	// lifecycle and authentication requests.
 	requestChan chan any
 
+	// txSubscribersMu coordinates registration, delivery and closure because
+	// producer and subscription lifetime handlers run concurrently.
+	txSubscribersMu sync.Mutex
+
+	// txSubscribers contains this Wallet's active streams. Access requires
+	// txSubscribersMu so sending cannot race with channel closure.
+	txSubscribers map[*txSubscription]struct{}
+
 	// lockTimer is the timer used to automatically lock the wallet after a
 	// timeout.
 	lockTimer *time.Timer

@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -18,6 +19,103 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestTxSubscriptionCancel verifies concurrent and repeated cancellation joins
+// cleanup through the public function without requiring a channel consumer.
+func TestTxSubscriptionCancel(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The started fixture owns Wallet teardown and mock checks. Two
+	// callers share the cleanup function to exercise overlapping requests.
+	w, _ := createStartedWalletWithMocks(t)
+	events, cancel, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+
+	completed := make(chan struct{}, 2)
+
+	// Act: Concurrent cancellation must converge on one closure, and a later
+	// call must remain safe after the original requests have completed.
+	for range 2 {
+		go func() {
+			cancel()
+
+			completed <- struct{}{}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-completed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent cancellation did not complete")
+		}
+	}
+
+	cancel()
+
+	// Assert: Cleanup is synchronous, so the channel is already closed when
+	// either caller returns; no consumer was needed to let cleanup finish.
+	_, open := <-events
+	require.False(t, open)
+}
+
+// TestTxSubscriptionContextCancellation verifies caller cancellation closes the
+// stream through its admitted handler, without an explicit cleanup request.
+func TestTxSubscriptionContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use a separate context to end the stream while leaving the
+	// fixture's Wallet alive; its existing cleanup verifies mock expectations.
+	w, _ := createStartedWalletWithMocks(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	events, stop, err := w.SubscribeTxns(ctx)
+	require.NoError(t, err)
+
+	// Act: End the caller context rather than invoking explicit cleanup.
+	cancel()
+
+	// Assert: Bound the asynchronous handler's closure, then verify explicit
+	// cleanup is safe after that independent termination path has completed.
+	select {
+	case _, open := <-events:
+		require.False(t, open)
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscription did not close after context cancellation")
+	}
+
+	stop()
+}
+
+// TestTxSubscriptionWalletStop verifies shutdown joins stream closure and
+// rejects
+// new subscriptions, while existing cleanup functions remain safe after Stop.
+func TestTxSubscriptionWalletStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Register before shutdown; the fixture already owns dependency
+	// teardown so this test needs only the public subscription results.
+	w, _ := createStartedWalletWithMocks(t)
+	events, cancel, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+
+	// Act: Finish shutdown, invoke cleanup with the loop stopped, and try to
+	// register again. No request may be left waiting for that stopped loop.
+	require.NoError(t, w.stop())
+	cancel()
+
+	next, stop, err := w.SubscribeTxns(t.Context())
+
+	// Assert: Stop joined closure and new registration returns only the
+	// lifecycle error, without an event channel or unusable cleanup function.
+	require.ErrorIs(t, err, ErrWalletStopped)
+	require.Nil(t, next)
+	require.Nil(t, stop)
+
+	_, open := <-events
+	require.False(t, open)
+}
 
 // TestTxStatusString tests the caller-facing string form for every public
 // transaction status and for an unsupported numeric value.
