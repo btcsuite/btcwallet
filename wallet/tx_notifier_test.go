@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -149,4 +150,100 @@ func TestTxSubscriptionSlowConsumer(t *testing.T) {
 
 	_, open := <-slow
 	require.False(t, open)
+}
+
+// TestTxSubscriptionWalletIsolation verifies another Wallet cannot receive a
+// transaction merely because it has registered its own subscription.
+func TestTxSubscriptionWalletIsolation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Only the publishing Wallet owns the transaction. Register the
+	// unrelated Wallet too, so an accidentally shared registry would leak it.
+	w, client, script := subscriptionWallet(t)
+	other, _ := createStartedWalletWithMocks(t)
+	own, _, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+
+	unrelated, _, err := other.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("SendRawTransaction", mock.Anything, false).
+		Return(nil, nil).Once()
+
+	tx := subscriptionTx(script, 2)
+
+	// Act: Complete publication and its synchronous notification attempt.
+	require.NoError(t, w.Broadcast(t.Context(), tx, ""))
+
+	// Assert: Delivery reaches the owner, while the unrelated live stream has
+	// no event. No sleep is needed after the producer operation has completed.
+	require.Equal(t, tx.TxHash(), receiveTxSubscription(t, own).Detail.Hash)
+
+	select {
+	case event := <-unrelated:
+		t.Fatalf("another Wallet received a notification: %v", event)
+	default:
+	}
+}
+
+// TestTxSubscriptionCancelDuringPublication verifies cancellation can finish
+// while an admitted publication is still waiting on its chain operation.
+func TestTxSubscriptionCancelDuringPublication(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Pause the single network send with a bounded-lifetime barrier.
+	// Context cleanup releases it even if the owning test fails an assertion.
+	w, client, script := subscriptionWallet(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	events, stop, err := w.SubscribeTxns(ctx)
+	require.NoError(t, err)
+
+	publishing := make(chan struct{})
+	release := make(chan struct{})
+
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("SendRawTransaction", mock.Anything, false).
+		Run(func(mock.Arguments) {
+			close(publishing)
+
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}).Return(nil, nil).Once()
+
+	result := make(chan error, 1)
+
+	// Act: End the subscription while publication is held, then allow the
+	// successful send to finish. Only the owning goroutine makes assertions.
+	go func() {
+		result <- w.Broadcast(ctx, subscriptionTx(script, 3), "")
+	}()
+
+	select {
+	case <-publishing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication did not reach the chain send")
+	}
+
+	stop()
+	close(release)
+
+	// Assert: Cancellation has closed the stream without delaying the send
+	// or changing its successful result; the producer cannot send after close.
+	_, open := <-events
+	require.False(t, open)
+
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication did not finish after cancellation")
+	}
 }

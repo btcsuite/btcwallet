@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -741,4 +742,98 @@ func testTxReaderDurableReopen(h *bwtest.HarnessTest) {
 
 	// The harness requires an empty mempool once a case succeeds.
 	h.MineBlockWithTx(hist.unminedTx)
+}
+
+// testTransactionSubscriptionPublication verifies local publication provides
+// an unconfirmed observation even without an incoming mempool feed.
+func testTransactionSubscriptionPublication(h *bwtest.HarnessTest) {
+	// Arrange: Subscribe before publishing a signed self-payment. The existing
+	// harness owns funding, signing, and teardown across all storage backends.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	addr := h.NewWalletAddressOfType(w, txReaderFundingType)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+
+	events, cancel, err := w.SubscribeTxns(h.Context())
+	require.NoError(h, err)
+
+	defer cancel()
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{funding.WalletOutpoints[0]},
+		Outputs: []wire.TxOut{
+			{
+				Value:    oneBTC - spendFee,
+				PkScript: script,
+			},
+		},
+	})
+
+	// Act: Observe publication before mining can confirm it; then receive the
+	// confirmation without assuming there were no duplicate observations.
+	require.NoError(h, w.Broadcast(h.Context(), tx, ""))
+	unconfirmed := h.ReceiveTxEvent(events, tx.TxHash(), false)
+	block := h.MineBlockWithTx(tx)
+	confirmed := h.ReceiveTxEvent(events, tx.TxHash(), true)
+
+	// Assert: Both delivery sources use Wallet details and separate observation
+	// timestamps. Confirmation identifies the actual block, not a queued state.
+	require.Nil(h, unconfirmed.Detail.Block)
+	require.Equal(h, block.BlockHash(), confirmed.Detail.Block.Hash)
+	require.Equal(h, tx.TxHash(), confirmed.Detail.Hash)
+	require.False(h, unconfirmed.Timestamp.IsZero())
+	require.False(h, confirmed.Timestamp.IsZero())
+}
+
+// testTransactionSubscriptionObservation verifies external chain observations
+// reach the Wallet stream independently of local Broadcast notifications.
+func testTransactionSubscriptionObservation(h *bwtest.HarnessTest) {
+	// Arrange: Register the receiving address and wait for live watches before
+	// an external payment; initial Wallet creation alone promises no readiness.
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Unlocked: true,
+	})
+	addr := h.NewWalletAddressOfType(w, txReaderFundingType)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err)
+	h.AssertWalletSynced(w)
+
+	events, cancel, err := w.SubscribeTxns(h.Context())
+	require.NoError(h, err)
+
+	defer cancel()
+
+	// Act: Send through the miner so only the syncer can provide observations.
+	// RPC backends expose incoming mempool events; Neutrino has no such feed.
+	hash := h.SendOutputs([]*wire.TxOut{
+		{
+			Value:    oneBTC,
+			PkScript: script,
+		},
+	}, bwtest.MinerFeeRate)
+	_, isNeutrino := h.ChainClient.(*chain.NeutrinoClient)
+
+	var unconfirmed *wallet.TxEvent
+	if !isNeutrino {
+		unconfirmed = h.ReceiveTxEvent(events, *hash, false)
+	}
+
+	h.MineBlocksAndAssertNumTxns(1, 1)
+	confirmed := h.ReceiveTxEvent(events, *hash, true)
+
+	// Assert: The incoming payment has the same full Wallet payload regardless
+	// of storage backend. No count/order or complete reorg history is promised.
+	if !isNeutrino {
+		require.Equal(h, *hash, unconfirmed.Detail.Hash)
+		require.Nil(h, unconfirmed.Detail.Block)
+	}
+
+	require.Equal(h, *hash, confirmed.Detail.Hash)
+	require.NotNil(h, confirmed.Detail.Block)
+	require.Equal(h, btcutil.Amount(oneBTC), confirmed.Detail.Value)
 }
