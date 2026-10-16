@@ -699,3 +699,20 @@ func txDetailInfoFromLegacy(details *wtxmgr.TxDetails) *db.TxDetailInfo {
 		OwnedOutputs: ownedOutputs,
 	}
 }
+
+// receiveTxSubscription bounds a public stream receive so a missing
+// notification fails the test without hiding payload assertions in a helper.
+func receiveTxSubscription(t *testing.T, events <-chan *TxEvent) *TxEvent {
+	t.Helper()
+
+	select {
+	case notification, open := <-events:
+		require.True(t, open, "subscription ended")
+
+		return notification
+	case <-time.After(5 * time.Second):
+		t.Fatal("transaction subscription did not deliver")
+
+		return nil
+	}
+}
