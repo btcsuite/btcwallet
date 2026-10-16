@@ -1123,9 +1123,15 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			changeScript := expectFreshChangeAddress(
 				t, w, deps, accountName, scope, test.addrType,
 			)
-			_, _, changeKey := expectedStoreAddress(
+			changeAddr, _, changeKey := expectedStoreAddress(
 				t, storeDerivationAccountPubKey(t), test.addrType, 1, 0,
 			)
+			// The funded packet keeps this change, so FundPsbt
+			// registers it before returning.
+			deps.chain.On(
+				"WatchAddrsFromTip", w.lifetimeCtx,
+				[]address.Address{changeAddr},
+			).Return(nil).Once()
 			// HD coordinates and a public key establish script facts;
 			// the zero account-number pointer keeps the root origin absent.
 			changeInfo := new(db.AddressInfo)
@@ -5551,9 +5557,10 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 		HasDerivationPath: true,
 		Branch:            1,
 	}}, nil).Once()
+	// Only a run that returns a funded packet registers its change.
 	mocks.chain.On(
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
-	).Return(nil).Once()
+	).Return(nil).Maybe()
 
 	// Input decoration and change output decoration both resolve their
 	// address through the store.

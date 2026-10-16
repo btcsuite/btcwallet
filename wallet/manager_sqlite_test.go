@@ -41,14 +41,18 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 		AccountNumber: &number, NoChainSync: true,
 	})
 	require.NoError(t, err)
-	source, err := w.createChangeSource(t.Context(), &ScopedAccount{
-		KeyScope: scope, AccountName: account.AccountName,
-	})
+	source, change, err := w.createChangeSource(
+		t.Context(), &ScopedAccount{
+			KeyScope: scope, AccountName: account.AccountName,
+		},
+	)
 	require.NoError(t, err)
 
-	// Act: allocate fresh change on the excluded account.
+	// Act: allocate fresh change on the excluded account and register it as
+	// kept change.
 	script, err := source.NewScript()
 	require.NoError(t, err)
+	require.NoError(t, w.watchAuthoredChange(t.Context(), 0, change))
 
 	// Assert: the fresh child persists without live script registration.
 	stored, err := w.store.GetAddress(t.Context(), db.GetAddressQuery{
