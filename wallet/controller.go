@@ -26,6 +26,10 @@ const (
 	// without error to be considered "stable", at which point the retry
 	// backoff is reset to initialBackoff.
 	stableRunTime = 10 * time.Minute
+
+	// changePassphraseTimeout bounds accepted rotation independently of caller
+	// cancellation and Wallet shutdown, while the existing mainLoop drains it.
+	changePassphraseTimeout = 30 * time.Second
 )
 
 var (
@@ -1102,7 +1106,15 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 		params.PrivateNew = req.req.PrivateNew
 	}
 
-	err = w.keyVault.ChangePassphrase(w.lifetimeCtx, params)
+	// Acceptance transfers ownership to this serialized handler. Give the
+	// Vault bounded work independent of runtime cancellation; stop joins
+	// mainLoop before locking the Vault or letting Manager close storage.
+	ctx, cancel := context.WithTimeout(
+		context.Background(), changePassphraseTimeout,
+	)
+	defer cancel()
+
+	err = w.keyVault.ChangePassphrase(ctx, params)
 	if err != nil {
 		req.resp <- err
 		return

@@ -180,54 +180,91 @@ func TestControllerChangePassphraseWaitsForAcceptedResult(t *testing.T) {
 	})
 }
 
-// TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown verifies
-// that shutdown does not hide the result of an accepted passphrase change.
-func TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown(
-	t *testing.T) {
-
+// TestControllerChangePassphraseDrainsOnManagerStop verifies accepted rotation
+// retains its result and resources until the serialized Vault call completes.
+func TestControllerChangePassphraseDrainsOnManagerStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Start a wallet and call ChangePassphrase asynchronously so the
-	// test can capture the request after the wallet has accepted ownership.
-	w, _ := createTestWalletWithMocks(t)
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+		// Arrange: Put a running Wallet under the existing Manager fixture
+		// and hold its Vault call so shutdown must drain the real mainLoop.
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(t.Context(),
-			ChangePassphraseRequest{})
-	}()
+		var backend managerBackendMock
 
-	var accepted changePassphraseReq
-	select {
-	case rawReq := <-w.requestChan:
-		var ok bool
+		manager := newManagerLifecycleTest(t, &backend)
+		manager.wallets[w.cfg.Name] = w
 
-		accepted, ok = rawReq.(changePassphraseReq)
-		require.True(t, ok, "expected a change passphrase request")
+		entered := make(chan context.Context, 1)
+		release := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(unblock)
 
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
-	}
+		deps.vault.On("ChangePassphrase", mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) {
+				ctx, _ := args.Get(0).(context.Context)
+				entered <- ctx
 
-	// Act: Begin shutdown after admission, then deliver the handler result.
-	// This ordering reproduces the race where shutdown previously preempted
-	// the response even though the accepted operation could still complete.
-	w.cancel()
+				<-release
+			}).Return(errDBMock).Once()
 
-	accepted.resp <- errDBMock
+		// Observe both teardown boundaries and require the backend to close
+		// after Vault lock, without adding fixture-owned mock assertions.
+		locked := make(chan struct{})
+		closed := make(chan struct{})
+		lockCall := deps.vault.On("Lock").Run(func(mock.Arguments) {
+			close(locked)
+		}).Return().Once()
+		backend.On("close").Run(func(mock.Arguments) {
+			close(closed)
+		}).Return(nil).Once().NotBefore(lockCall)
 
-	// Assert: The caller receives the accepted request's exact result instead
-	// of a lifecycle error produced solely because shutdown began.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, errDBMock)
+		var req ChangePassphraseRequest
 
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
+		req.ChangePrivate = true
+		req.PrivateOld = []byte("old")
+		req.PrivateNew = []byte("new")
+
+		result := make(chan error, 1)
+		go func() { result <- w.ChangePassphrase(t.Context(), req) }()
+
+		acceptedCtx := <-entered
+
+		// Act: Start aggregate shutdown after the Vault has accepted work;
+		// the barrier lets runtime cancellation and every waiter settle.
+		stopped := make(chan error, 1)
+		go func() { stopped <- manager.Stop() }()
+
+		<-w.lifetimeCtx.Done()
+		synctest.Wait()
+
+		// Assert: Accepted work stays bounded and live through runtime
+		// cancellation; neither response nor teardown can pass the rotation.
+		_, bounded := acceptedCtx.Deadline()
+		require.True(t, bounded)
+		require.NoError(t, acceptedCtx.Err())
+
+		select {
+		case <-result:
+			t.Fatal("caller returned before rotation finished")
+		case <-stopped:
+			t.Fatal("Manager stopped before rotation finished")
+		case <-locked:
+			t.Fatal("Vault locked before rotation finished")
+		case <-closed:
+			t.Fatal("Store closed before rotation finished")
+		default:
+		}
+
+		// Releasing the Vault fixes the operation result before shutdown
+		// finishes; fixture cleanup verifies each teardown call exactly once.
+		unblock()
+		require.ErrorIs(t, <-result, errDBMock)
+		require.NoError(t, <-stopped)
+	})
 }
 
 // TestHandleLockReq verifies that the handleLockReq method correctly processes
