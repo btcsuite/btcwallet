@@ -9,7 +9,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
-// ListLeasedOutputs lists all active leases for current wallet-owned UTXOs.
+// ListLeasedOutputs lists all active leases for wallet-owned UTXOs. Timed
+// leases require an unspent output, while confirmation-controlled leases stay
+// listed after their spend until maturity or release.
 func (s *Store) ListLeasedOutputs(ctx context.Context,
 	walletID uint32) ([]db.LeasedOutput, error) {
 
@@ -37,6 +39,8 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 
 			lease, err := db.BuildLeasedOutput(
 				row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
+				row.ReleaseAfterSpendConfs,
+				row.ConfirmedSpendHeight,
 			)
 			if err != nil {
 				return err

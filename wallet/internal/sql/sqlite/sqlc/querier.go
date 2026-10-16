@@ -7,7 +7,6 @@ package sqlc
 import (
 	"context"
 	"database/sql"
-	"time"
 )
 
 type Querier interface {
@@ -19,7 +18,7 @@ type Querier interface {
 	// account_id.
 	AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error)
 	// Acquires or renews a lease for an outpoint and returns the resulting
-	// expiration time.
+	// expiration time and spend policy.
 	//
 	// How:
 	// - Resolves the outpoint to a current UTXO row and writes the lease in the
@@ -30,17 +29,20 @@ type Querier interface {
 	//   and expired-lease takeover all happen atomically.
 	// Lease semantics:
 	// - If the UTXO has no lease row, insert a new lease.
-	// - If the UTXO has an expired lease, steal it.
+	// - If the UTXO has an expired timed lease, steal it.
 	// - If the UTXO has an active lease with the same lock_id, renew it.
 	// - If the UTXO has an active lease with a different lock_id, return no
 	//   rows (caller should treat this as "already leased").
+	// - A confirmation-controlled lease (release_after_spend_confs > 0) never
+	//   expires by wall clock, so only its owner can renew it.
+	// - A renewal with zero release_after_spend_confs keeps the stored depth.
 	//
 	// NOTE: expires_at is computed by the caller as time.Now().UTC()+duration, and
 	// callers must also pass a UTC-normalized now_utc for lease-expiry checks.
 	// Performance:
 	// - SQLite executes the resolution and lease write atomically inside one
 	//   statement, which avoids stale-ID races between separate helper calls.
-	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (AcquireUtxoLeaseRow, error)
 	// Reserves the cursor past an exact account without consuming lower holes.
 	// The existing immediate transaction keeps this update and the account/key
 	// inserts atomic, including when the cursor already exceeds the minimum.
@@ -121,8 +123,8 @@ type Querier interface {
 	// Deletes all expired lease rows for a wallet.
 	//
 	// How:
-	// - Removes only rows whose expiration has passed, leaving active leases
-	//   untouched.
+	// - Removes only timed rows whose expiration has passed, leaving active and
+	//   confirmation-controlled leases untouched.
 	// Performance:
 	// - Uses the expiration predicate together with wallet scoping to bound the
 	//   cleanup pass.
@@ -131,6 +133,16 @@ type Querier interface {
 	DeleteKeyScope(ctx context.Context, id int64) (int64, error)
 	// Deletes the secrets for a key scope.
 	DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int64, error)
+	// Deletes confirmation-controlled leases whose spend reached its release
+	// depth at the wallet's new sync tip.
+	//
+	// How:
+	// - A spend confirmed at height h has tip_height - h + 1 confirmations.
+	// - Rows without a confirmed spend (progress 0 or -1) and timed leases are
+	//   untouched.
+	// Performance:
+	// - Uses the partial spend-maturity index scoped by wallet.
+	DeleteMaturedUtxoLeases(ctx context.Context, arg DeleteMaturedUtxoLeasesParams) (int64, error)
 	// Deletes an unconfirmed transaction row.
 	//
 	// How:
@@ -183,8 +195,9 @@ type Querier interface {
 	// Returns the lock ID for the current active lease on a UTXO ID.
 	//
 	// How:
-	// - Reads only non-expired lease rows so callers can distinguish an active
-	//   lock-ID mismatch from an already-unlocked output.
+	// - Reads only active lease rows so callers can distinguish an active lock-ID
+	//   mismatch from an already-unlocked output. A confirmation-controlled lease
+	//   stays active until spend maturity or release.
 	// Performance:
 	// - Targets at most one row through the unique lease key.
 	GetActiveUtxoLeaseLockID(ctx context.Context, arg GetActiveUtxoLeaseLockIDParams) ([]byte, error)
@@ -227,6 +240,17 @@ type Querier interface {
 	// the first unused child. Reuse-aware allocation runs it in the transaction
 	// that resolved the account, so it sees the row the index counter belongs to.
 	GetOldestUnusedAddress(ctx context.Context, arg GetOldestUnusedAddressParams) (GetOldestUnusedAddressRow, error)
+	// Retrieves the database ID of a UTXO whose lease can be released.
+	//
+	// How:
+	// - Resolves the outpoint like GetUtxoIDByOutpoint.
+	// - Accepts an unspent output whose parent transaction is still in `pending`
+	//   or `published` status, or any output held by a confirmation-controlled
+	//   lease so its owner can release it after a spend or invalidation.
+	// Performance:
+	// - Uses the wallet-scoped transaction hash lookup first, then narrows to the
+	//   unique `(tx_id, output_index)` outpoint and its unique lease key.
+	GetReleasableUtxoIDByOutpoint(ctx context.Context, arg GetReleasableUtxoIDByOutpointParams) (int64, error)
 	// Retrieves the full transaction row along with optional block metadata.
 	//
 	// How:
@@ -390,9 +414,11 @@ type Querier interface {
 	// How:
 	// - Starts from utxo_leases, then joins utxos and transactions so the result
 	//   can be returned as network outpoints.
-	// - Filters out expired rows using the caller-supplied UTC timestamp.
-	// - Restricts the result to outputs that are still unspent and whose parent
-	//   transaction is still in `pending` or `published` status.
+	// - Timed rows require an unexpired lease (against the caller-supplied UTC
+	//   timestamp), an unspent output, and a parent transaction still in
+	//   `pending` or `published` status.
+	// - Confirmation-controlled rows stay listed until spend maturity or release,
+	//   even after their output is spent or its parent is invalidated.
 	// Performance:
 	// - Restricts first by wallet and expiration, then joins only the surviving
 	//   lease rows back to utxos/transactions.

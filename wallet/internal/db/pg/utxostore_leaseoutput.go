@@ -52,32 +52,37 @@ var _ db.LeaseOutputOps = (*leaseOutputOps)(nil)
 // outpoint.
 func (o *leaseOutputOps) Acquire(ctx context.Context,
 	params db.LeaseOutputParams, nowUTC time.Time,
-	expiresAt time.Time) (time.Time, error) {
+	expiresAt time.Time) (*db.LeasedOutput, error) {
 
 	outputIndex, err := db.Uint32ToInt32(params.OutPoint.Index)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("convert output index: %w", err)
+		return nil, fmt.Errorf("convert output index: %w", err)
 	}
 
-	expiration, err := o.qtx.AcquireUtxoLease(
+	row, err := o.qtx.AcquireUtxoLease(
 		ctx, sqlc.AcquireUtxoLeaseParams{
-			WalletID:    int64(params.WalletID),
-			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
-			TxHash:      params.OutPoint.Hash[:],
-			OutputIndex: outputIndex,
-			NowUtc:      nowUTC,
+			WalletID:               int64(params.WalletID),
+			LockID:                 params.ID[:],
+			ExpiresAt:              expiresAt,
+			ReleaseAfterSpendConfs: int64(params.ReleaseAfterSpendConfs),
+			TxHash:                 params.OutPoint.Hash[:],
+			OutputIndex:            outputIndex,
+			NowUtc:                 nowUTC,
 		},
 	)
 	if err == nil {
-		return expiration, nil
+		return db.BuildLeasedOutput(
+			params.OutPoint.Hash[:], params.OutPoint.Index,
+			params.ID[:], row.ExpiresAt, row.ReleaseAfterSpendConfs,
+			row.ConfirmedSpendHeight,
+		)
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, db.ErrLeaseOutputNoRow
+		return nil, db.ErrLeaseOutputNoRow
 	}
 
-	return time.Time{}, fmt.Errorf("acquire lease row: %w", err)
+	return nil, fmt.Errorf("acquire lease row: %w", err)
 }
 
 // HasUtxo reports whether the requested outpoint still exists as a current

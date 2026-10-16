@@ -74,7 +74,16 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 			}
 		}
 
-		return nil
+		// Leases that mature at any synced block have also matured at
+		// the final one.
+		if len(params.SyncedBlocks) == 0 {
+			return nil
+		}
+
+		return releaseMaturedLeases(
+			ctx, qtx, params.WalletID,
+			&params.SyncedBlocks[len(params.SyncedBlocks)-1],
+		)
 	})
 }
 

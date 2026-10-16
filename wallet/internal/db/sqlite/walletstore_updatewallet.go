@@ -55,6 +55,30 @@ func (o updateWalletOps) UpdateWalletSyncState(ctx context.Context,
 			params.WalletID, db.ErrWalletNotFound)
 	}
 
+	return releaseMaturedLeases(ctx, o.q, params.WalletID, params.SyncedTo)
+}
+
+// releaseMaturedLeases deletes the wallet's confirmation-controlled leases
+// whose spend reached its release depth at tip. Writers call it after
+// recording their transactions, so a spend confirmed in the same write counts.
+// A nil tip is a no-op.
+func releaseMaturedLeases(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, tip *db.Block) error {
+
+	if tip == nil {
+		return nil
+	}
+
+	_, err := qtx.DeleteMaturedUtxoLeases(
+		ctx, sqlc.DeleteMaturedUtxoLeasesParams{
+			WalletID:  int64(walletID),
+			TipHeight: int64(tip.Height),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("delete matured utxo leases: %w", err)
+	}
+
 	return nil
 }
 

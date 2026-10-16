@@ -121,10 +121,12 @@ type Utxo struct {
 }
 
 type UtxoLease struct {
-	WalletID  int64
-	UtxoID    int64
-	LockID    []byte
-	ExpiresAt time.Time
+	WalletID               int64
+	UtxoID                 int64
+	LockID                 []byte
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
+	ConfirmedSpendHeight   int64
 }
 
 type Wallet struct {

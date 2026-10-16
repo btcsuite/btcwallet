@@ -90,6 +90,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteKeyScopeSecretsStmt, err = db.PrepareContext(ctx, DeleteKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteKeyScopeSecrets: %w", err)
 	}
+	if q.deleteMaturedUtxoLeasesStmt, err = db.PrepareContext(ctx, DeleteMaturedUtxoLeases); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteMaturedUtxoLeases: %w", err)
+	}
 	if q.deleteUnminedTransactionByHashStmt, err = db.PrepareContext(ctx, DeleteUnminedTransactionByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteUnminedTransactionByHash: %w", err)
 	}
@@ -164,6 +167,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getOldestUnusedAddressStmt, err = db.PrepareContext(ctx, GetOldestUnusedAddress); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOldestUnusedAddress: %w", err)
+	}
+	if q.getReleasableUtxoIDByOutpointStmt, err = db.PrepareContext(ctx, GetReleasableUtxoIDByOutpoint); err != nil {
+		return nil, fmt.Errorf("error preparing query GetReleasableUtxoIDByOutpoint: %w", err)
 	}
 	if q.getTransactionByHashStmt, err = db.PrepareContext(ctx, GetTransactionByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query GetTransactionByHash: %w", err)
@@ -442,6 +448,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteKeyScopeSecretsStmt: %w", cerr)
 		}
 	}
+	if q.deleteMaturedUtxoLeasesStmt != nil {
+		if cerr := q.deleteMaturedUtxoLeasesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteMaturedUtxoLeasesStmt: %w", cerr)
+		}
+	}
 	if q.deleteUnminedTransactionByHashStmt != nil {
 		if cerr := q.deleteUnminedTransactionByHashStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteUnminedTransactionByHashStmt: %w", cerr)
@@ -565,6 +576,11 @@ func (q *Queries) Close() error {
 	if q.getOldestUnusedAddressStmt != nil {
 		if cerr := q.getOldestUnusedAddressStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getOldestUnusedAddressStmt: %w", cerr)
+		}
+	}
+	if q.getReleasableUtxoIDByOutpointStmt != nil {
+		if cerr := q.getReleasableUtxoIDByOutpointStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getReleasableUtxoIDByOutpointStmt: %w", cerr)
 		}
 	}
 	if q.getTransactionByHashStmt != nil {
@@ -898,6 +914,7 @@ type Queries struct {
 	deleteExpiredUtxoLeasesStmt                   *sql.Stmt
 	deleteKeyScopeStmt                            *sql.Stmt
 	deleteKeyScopeSecretsStmt                     *sql.Stmt
+	deleteMaturedUtxoLeasesStmt                   *sql.Stmt
 	deleteUnminedTransactionByHashStmt            *sql.Stmt
 	deleteUnminedTransactionByHashWithInvalidStmt *sql.Stmt
 	deleteUtxosByTxIDStmt                         *sql.Stmt
@@ -923,6 +940,7 @@ type Queries struct {
 	getKeyScopeByWalletAndScopeStmt               *sql.Stmt
 	getKeyScopeSecretsStmt                        *sql.Stmt
 	getOldestUnusedAddressStmt                    *sql.Stmt
+	getReleasableUtxoIDByOutpointStmt             *sql.Stmt
 	getTransactionByHashStmt                      *sql.Stmt
 	getTransactionMetaByHashStmt                  *sql.Stmt
 	getUtxoByOutpointStmt                         *sql.Stmt
@@ -1005,6 +1023,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteExpiredUtxoLeasesStmt:                   q.deleteExpiredUtxoLeasesStmt,
 		deleteKeyScopeStmt:                            q.deleteKeyScopeStmt,
 		deleteKeyScopeSecretsStmt:                     q.deleteKeyScopeSecretsStmt,
+		deleteMaturedUtxoLeasesStmt:                   q.deleteMaturedUtxoLeasesStmt,
 		deleteUnminedTransactionByHashStmt:            q.deleteUnminedTransactionByHashStmt,
 		deleteUnminedTransactionByHashWithInvalidStmt: q.deleteUnminedTransactionByHashWithInvalidStmt,
 		deleteUtxosByTxIDStmt:                         q.deleteUtxosByTxIDStmt,
@@ -1030,6 +1049,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getKeyScopeByWalletAndScopeStmt:               q.getKeyScopeByWalletAndScopeStmt,
 		getKeyScopeSecretsStmt:                        q.getKeyScopeSecretsStmt,
 		getOldestUnusedAddressStmt:                    q.getOldestUnusedAddressStmt,
+		getReleasableUtxoIDByOutpointStmt:             q.getReleasableUtxoIDByOutpointStmt,
 		getTransactionByHashStmt:                      q.getTransactionByHashStmt,
 		getTransactionMetaByHashStmt:                  q.getTransactionMetaByHashStmt,
 		getUtxoByOutpointStmt:                         q.getUtxoByOutpointStmt,

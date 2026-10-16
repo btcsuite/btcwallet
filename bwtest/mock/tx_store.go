@@ -44,6 +44,14 @@ func (m *TxStore) DeleteExpiredLockedOutputs(
 	return args.Error(0)
 }
 
+// DeleteMaturedLockedOutputs implements the wtxmgr.TxStore interface.
+func (m *TxStore) DeleteMaturedLockedOutputs(ns walletdb.ReadWriteBucket,
+	chainHeight int32) error {
+
+	args := m.Called(ns, chainHeight)
+	return args.Error(0)
+}
+
 // InsertTx implements the wtxmgr.TxStore interface.
 func (m *TxStore) InsertTx(ns walletdb.ReadWriteBucket,
 	rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) error {
@@ -96,9 +104,10 @@ func (m *TxStore) ListLockedOutputs(
 
 // LockOutput implements the wtxmgr.TxStore interface.
 func (m *TxStore) LockOutput(ns walletdb.ReadWriteBucket, id wtxmgr.LockID,
-	op wire.OutPoint, duration time.Duration) (time.Time, error) {
+	op wire.OutPoint, duration time.Duration,
+	optFuncs ...wtxmgr.LockOutputOption) (time.Time, error) {
 
-	args := m.Called(ns, id, op, duration)
+	args := m.Called(ns, id, op, duration, optFuncs)
 	if args.Get(0) == nil {
 		return time.Time{}, args.Error(1)
 	}
