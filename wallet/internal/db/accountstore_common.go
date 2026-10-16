@@ -43,7 +43,7 @@ func MapGetAccountSecretErr(err error, query GetAccountSecretQuery) error {
 // excluding the candidate's own scoped Store ID. Equal XPub payloads conflict
 // when corresponding branch schemas overlap, regardless of chain-sync policy.
 func CheckAccountIdentity(candidate AccountInfo, accounts []AccountInfo) error {
-	payload := accountXPubPayload(candidate.PublicKey)
+	payload := AccountXPubPayload(candidate.PublicKey)
 	if payload == nil {
 		return nil
 	}
@@ -57,11 +57,8 @@ func CheckAccountIdentity(candidate AccountInfo, accounts []AccountInfo) error {
 			continue
 		}
 
-		if bytes.Equal(payload, accountXPubPayload(account.PublicKey)) &&
-			(candidate.AddrSchema.ExternalAddrType ==
-				account.AddrSchema.ExternalAddrType ||
-				candidate.AddrSchema.InternalAddrType ==
-					account.AddrSchema.InternalAddrType) {
+		if bytes.Equal(payload, AccountXPubPayload(account.PublicKey)) &&
+			AccountSchemasOverlap(candidate.AddrSchema, account.AddrSchema) {
 
 			return ErrAccountIdentityCollision
 		}
@@ -70,10 +67,19 @@ func CheckAccountIdentity(candidate AccountInfo, accounts []AccountInfo) error {
 	return nil
 }
 
-// accountXPubPayload recognizes serialized public keys without tightening the
-// SQL Store's existing opaque-byte input contract. Removing serialization
-// metadata leaves exactly the chain code and compressed public key.
-func accountXPubPayload(serialized []byte) []byte {
+// AccountSchemasOverlap reports whether corresponding branches can derive the
+// same scripts from equal XPub payloads. Cross-branch equality is disjoint
+// because external and internal branches derive through /0 and /1.
+func AccountSchemasOverlap(a, b ScopeAddrSchema) bool {
+	return a.ExternalAddrType == b.ExternalAddrType ||
+		a.InternalAddrType == b.InternalAddrType
+}
+
+// AccountXPubPayload returns the chain code and compressed public key without
+// serialization metadata that cannot distinguish script ownership. It returns
+// nil for unrecognized or private keys to preserve the Store's opaque-byte
+// input contract; callers requiring a valid XPub must validate it separately.
+func AccountXPubPayload(serialized []byte) []byte {
 	key, err := hdkeychain.NewKeyFromString(string(serialized))
 	if err != nil || key.IsPrivate() {
 		return nil
