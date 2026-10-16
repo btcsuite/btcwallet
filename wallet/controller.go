@@ -709,6 +709,11 @@ func (w *Wallet) mainLoop() {
 			case changePassphraseReq:
 				w.handleChangePassphraseReq(r)
 
+			// Cleanup is a control request; acknowledge it inline without
+			// launching another handler to close the same channels.
+			case cancelTxSubscriptionReq:
+				w.cancelTxSubscription(r.sub)
+
 			default:
 				// Non-control requests run concurrently. Register the handler
 				// before launch so Stop drains every accepted request.
@@ -750,6 +755,10 @@ func (w *Wallet) handleReq(req any) {
 	defer w.wg.Done()
 
 	switch r := req.(type) {
+	// Subscription handlers remain joined until their stream closes.
+	case subscribeTxnsReq:
+		w.handleSubscribeTxns(r)
+
 	case infoReq:
 		w.handleInfo(r)
 
