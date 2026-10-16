@@ -1586,6 +1586,15 @@ func TestImportAccountStoreErrors(t *testing.T) {
 			storeErr: db.ErrAccountNameConflict,
 			want:     ErrAccountAlreadyExists,
 		},
+		// The shared commit marker must outrank its cancellation cause while
+		// the caller remains active, regardless of which SQL backend wrote.
+		{
+			name: "indeterminate cancellation",
+			storeErr: &dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			},
+			want: ErrIndeterminateCommit,
+		},
 		{
 			name:     "number conflict",
 			storeErr: db.ErrAccountNumberConflict,
@@ -1631,17 +1640,19 @@ func TestImportAccountStoreErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Let a valid import reach the backend refusal.
+			// Arrange: Let a valid import reach a Store error with a candidate
+			// account. Keep the caller active even when the error's cause
+			// wraps cancellation, so this tests the delivered result mapping.
 			w, deps := createStartedWalletWithMocks(t)
 			accountKey, masterFP := importAccountTestKey(t, 84)
 			scope := waddrmgr.KeyScopeBIP0084
 			expectAccountNameAvailable(deps, scope, testAccountName)
 			deps.store.On(
 				"CreateImportedAccount", mock.Anything, mock.Anything,
-			).Return((*db.AccountInfo)(nil), test.storeErr).Once()
+			).Return(&db.AccountInfo{}, test.storeErr).Once()
 
 			// Act: Import through public translation after name preflight.
-			_, err := w.ImportAccount(
+			info, err := w.ImportAccount(
 				t.Context(), ImportAccountParams{
 					Name:                 testAccountName,
 					XPub:                 accountKey,
@@ -1650,9 +1661,13 @@ func TestImportAccountStoreErrors(t *testing.T) {
 				}, false,
 			)
 
-			// Assert: Preserve each public identity without the backend cause.
+			// Assert: Discard the candidate and expose the wallet identity;
+			// a cancellation cause must not mask a delivered uncertain commit.
+			require.Nil(t, info)
 			require.ErrorIs(t, err, test.want)
 			require.NotErrorIs(t, err, test.storeErr)
+			require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+			require.NotErrorIs(t, err, context.Canceled)
 
 			var managerErr waddrmgr.ManagerError
 			require.NotErrorAs(t, err, &managerErr)
