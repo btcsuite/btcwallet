@@ -669,11 +669,15 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 //     and change sources, and invoking the shared transaction authoring method.
 //  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
 //     change output to the PSBT structure and sort it according to BIP 69.
+//  4. Registration: On SQL wallets, registering change kept by the funded
+//     packet from the live tip. A registration failure returns no packet while
+//     the committed change address stays in the wallet. Kvdb change and change
+//     for NoChainSync accounts are not registered.
 //
 // FundPsbt deliberately invokes the neutral authoring boundary instead of the
 // public CreateTransaction wrapper. Their construction flow is identical
-// today, but keeping the wrappers independent prevents direct-transaction watch
-// delivery from leaking into PSBT-specific lease, cleanup, and publication.
+// today, but keeping the wrappers independent keeps each wrapper's change
+// registration next to its own lease, cleanup, and publication obligations.
 // Accepted funding finishes before return, including packet updates and any
 // supplied coin selector, even if the caller cancels after admission.
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
@@ -729,7 +733,9 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 		return
 	}
 
-	inputSource, changeSource, err := w.prepareTxAuthSources(r.ctx, txIntent)
+	inputSource, changeSource, change, err := w.prepareTxAuthSources(
+		r.ctx, txIntent,
+	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
 
@@ -750,6 +756,15 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 	packet, changeIndex, err := w.populatePsbtPacket(
 		r.ctx, packet, authoredTx,
 	)
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	// Register kept change before the caller can observe the packet. A
+	// negative sorted index means authoring dropped the change output.
+	err = w.watchAuthoredChange(r.ctx, int(changeIndex), change)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
 
