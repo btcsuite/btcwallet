@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -4530,6 +4531,232 @@ func TestApplyScanBatchConfirmsTxInNewBlock(t *testing.T) {
 	require.NotNil(t, walletInfo.SyncedTo)
 	require.Equal(t, lateBlock.Height, walletInfo.SyncedTo.Height)
 	require.Equal(t, lateBlock.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyScanBatchReplaysLabeledTx verifies that absent chain labels preserve
+// user metadata while replayed credits and the sync tip commit or fail
+// together.
+func TestApplyScanBatchReplaysLabeledTx(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Vary only the replay label and credited output; the same stored
+	// labeled transaction exercises successful replay and atomic rejection.
+	tests := []struct {
+		name          string
+		label         string
+		creditIndex   uint32
+		wantErr       error
+		wantCreditErr error
+		tipIndex      int
+	}{
+		{
+			name:     "absent label records credit",
+			tipIndex: 1,
+		},
+		{
+			name:          "invalid credit rolls back tip",
+			creditIndex:   1,
+			wantErr:       db.ErrAddressNotFound,
+			wantCreditErr: db.ErrUtxoNotFound,
+		},
+		{
+			name:          "explicit label conflict rolls back tip",
+			label:         "replacement",
+			wantErr:       db.ErrTxAlreadyExists,
+			wantCreditErr: db.ErrUtxoNotFound,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Confirm a labeled child spending a wallet parent but
+			// omit its credit, which the subsequent scan must still discover.
+			store := NewTestStore(t)
+			walletName := "wallet-replay-label"
+			walletID := newWallet(t, store, walletName)
+			createDerivedAccount(
+				t, store, walletID, db.KeyScopeBIP0084, "default",
+			)
+			addr := newDerivedAddress(
+				t, store, walletID, db.KeyScopeBIP0084, "default", false,
+			)
+			blocks := []db.Block{NewBlockFixture(300), NewBlockFixture(301)}
+			parent := newRegularTx(
+				[]wire.OutPoint{randomOutPoint()},
+				[]*wire.TxOut{
+					{
+						Value:    9000,
+						PkScript: addr.ScriptPubKey,
+					},
+				},
+			)
+			parentOutput := wire.OutPoint{
+				Hash:  parent.TxHash(),
+				Index: 0,
+			}
+			child := newRegularTx(
+				[]wire.OutPoint{parentOutput},
+				[]*wire.TxOut{
+					{
+						Value:    6000,
+						PkScript: addr.ScriptPubKey,
+					},
+					{
+						Value:    1000,
+						PkScript: []byte{txscript.OP_TRUE},
+					},
+				},
+			)
+			seed := db.ScanBatchParams{
+				WalletID: walletID,
+				Transactions: []db.CreateTxParams{
+					{
+						WalletID: walletID,
+						Tx:       parent,
+						Received: time.Unix(1710000800, 0),
+						Block:    &blocks[0],
+						Status:   db.TxStatusPublished,
+						Credits:  map[uint32]address.Address{0: nil},
+					},
+					{
+						WalletID: walletID,
+						Tx:       child,
+						Received: time.Unix(1710000801, 0),
+						Block:    &blocks[0],
+						Status:   db.TxStatusPublished,
+						Label:    "external",
+					},
+				},
+				SyncedBlocks: blocks[:1],
+			}
+			require.NoError(t, store.ApplyScanBatch(t.Context(), seed))
+			replay := seed.Transactions[1]
+			replay.Label = tc.label
+			replay.Credits = map[uint32]address.Address{tc.creditIndex: nil}
+
+			// Act: Replay the same confirmation while advancing the tip, so
+			// a late credit failure must roll back that attempted advancement.
+			err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+				WalletID:     walletID,
+				Transactions: []db.CreateTxParams{replay},
+				SyncedBlocks: blocks[1:],
+			})
+
+			// Assert: Replay preserves the stored label and existing spend;
+			// the newly discovered credit and later tip appear only together.
+			require.ErrorIs(t, err, tc.wantErr)
+			info, err := store.GetTx(t.Context(), db.GetTxQuery{
+				WalletID: walletID,
+				Txid:     child.TxHash(),
+			})
+			require.NoError(t, err)
+			require.Equal(t, "external", info.Label)
+			require.Equal(t, db.TxStatusPublished, info.Status)
+			require.NotNil(t, info.Block)
+			require.Equal(t, blocks[0].Hash, info.Block.Hash)
+			require.Equal(t, blocks[0].Height, info.Block.Height)
+			require.True(t, walletUtxoSpent(t, store, walletID, parentOutput))
+			_, err = store.GetUtxo(t.Context(), db.GetUtxoQuery{
+				WalletID: walletID,
+				OutPoint: wire.OutPoint{
+					Hash:  child.TxHash(),
+					Index: 0,
+				},
+			})
+			require.ErrorIs(t, err, tc.wantCreditErr)
+			wallet, err := store.GetWallet(t.Context(), walletName)
+			require.NoError(t, err)
+			require.NotNil(t, wallet.SyncedTo)
+			require.Equal(t, blocks[tc.tipIndex].Hash, wallet.SyncedTo.Hash)
+			require.Equal(t, blocks[tc.tipIndex].Height, wallet.SyncedTo.Height)
+		})
+	}
+}
+
+// TestApplyScanBatchPreservesConcurrentLabel verifies that chain replay and a
+// user label update both commit without losing the label or sync progress.
+func TestApplyScanBatchPreservesConcurrentLabel(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start with labeled confirmed history so replay cannot succeed
+	// by relying on an empty stored label, regardless of the write order.
+	store := NewTestStore(t)
+	walletName := "wallet-concurrent-replay-label"
+	walletID := newWallet(t, store, walletName)
+	blocks := []db.Block{NewBlockFixture(310), NewBlockFixture(311)}
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{
+			{
+				Value:    6000,
+				PkScript: []byte{txscript.OP_TRUE},
+			},
+		},
+	)
+	replay := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000900, 0),
+		Block:    &blocks[0],
+		Status:   db.TxStatusPublished,
+		Label:    "external",
+	}
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID:     walletID,
+		Transactions: []db.CreateTxParams{replay},
+		SyncedBlocks: blocks[:1],
+	})
+	require.NoError(t, err)
+
+	replay.Label = ""
+	label := "edited"
+	start := make(chan struct{})
+	results := make(chan error, 2)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	// Act: Release both bounded writes together without imposing commit order.
+	// Buffered results let both workers finish before the owner checks errors.
+	go func() {
+		<-start
+
+		results <- store.ApplyScanBatch(ctx, db.ScanBatchParams{
+			WalletID:     walletID,
+			Transactions: []db.CreateTxParams{replay},
+			SyncedBlocks: blocks[1:],
+		})
+	}()
+	go func() {
+		<-start
+
+		results <- store.UpdateTx(ctx, db.UpdateTxParams{
+			WalletID: walletID,
+			Txid:     tx.TxHash(),
+			Label:    &label,
+		})
+	}()
+
+	close(start)
+
+	firstErr, secondErr := <-results, <-results
+
+	// Assert: Both writes succeed and their independent results survive: only
+	// the user update owns the label, while replay advances the wallet tip.
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, label, info.Label)
+	wallet, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, wallet.SyncedTo)
+	require.Equal(t, blocks[1].Hash, wallet.SyncedTo.Hash)
+	require.Equal(t, blocks[1].Height, wallet.SyncedTo.Height)
 }
 
 // TestApplyScanBatchRejectsMismatchedWalletID verifies that a scan batch is

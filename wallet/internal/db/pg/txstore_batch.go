@@ -73,6 +73,10 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 		return fmt.Errorf("validate tx: %w", err)
 	}
 
+	// Identify chain ingestion so the shared replay flow can preserve an
+	// absent confirmed label without changing direct CreateTx semantics.
+	req.IsBatch = true
+
 	ops := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: qtx,
