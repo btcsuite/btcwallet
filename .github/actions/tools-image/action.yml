@@ -1,0 +1,21 @@
+name: "Build tools image"
+description: "Builds the btcwallet-tools image with a GitHub Actions layer cache."
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    # Load the image into the local daemon so the Makefile's docker run
+    # targets can use it. Run them with `make -o docker-tools` so they do
+    # not rebuild it without the cache.
+    - name: Build btcwallet-tools
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: tools/Dockerfile
+        tags: btcwallet-tools
+        load: true
+        cache-from: type=gha,scope=btcwallet-tools
+        cache-to: type=gha,mode=max,scope=btcwallet-tools
