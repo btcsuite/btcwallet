@@ -177,6 +177,11 @@ func importAccountErr(err error) error {
 	var publicErr error
 
 	switch {
+	// Persistence may have succeeded even when the lost commit reply wraps
+	// cancellation; preserve uncertainty before ordinary caller errors.
+	case errors.Is(err, dbruntime.ErrAmbiguousTxCommit):
+		return fmt.Errorf("%w: %s", ErrIndeterminateCommit, err.Error())
+
 	// A known imported number shares the existing occupied-account result.
 	case isAccountNameConflict(err),
 		errors.Is(err, db.ErrAccountNumberConflict):
@@ -383,6 +388,8 @@ type AccountManager interface {
 	// it and reports false. The account name must be unique within its scope.
 	// If dryRun is true, validation does not persist the import. Imported
 	// accounts stay watch-only; no signing material is imported.
+	// Failures return no account; ErrIndeterminateCommit means persistence
+	// may have succeeded.
 	ImportAccount(ctx context.Context, account ImportAccountParams,
 		dryRun bool) (*AccountInfo, error)
 }
@@ -1149,6 +1156,9 @@ type importAccountReq struct {
 //
 // dryRun=true validates the import through the store and rolls the transaction
 // back; no account row is persisted.
+//
+// Failures return no account; ErrIndeterminateCommit means persistence may
+// have succeeded.
 //
 // The time complexity of this method is dominated by the database lookup
 // to ensure the account name is unique within the scope.
