@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
@@ -82,11 +83,84 @@ func restoreInputMetadata(packet *psbt.Packet,
 	return nil
 }
 
+// spendKind names the shape of the output an input spends, as far as the
+// metadata that output can carry is concerned.
+type spendKind uint8
+
+const (
+	// spendUnknown is an output the wallet cannot classify. It carries no
+	// entitlement either way, so caller metadata is neither admitted nor
+	// refused on the strength of it.
+	spendUnknown spendKind = iota
+
+	// spendWitnessKey is a single-key segwit v0 spend: P2WPKH.
+	spendWitnessKey
+
+	// spendWitnessScript is a script-hash segwit v0 spend: P2WSH.
+	spendWitnessScript
+
+	// spendNested is a segwit v0 spend wrapped in P2SH.
+	spendNested
+
+	// spendTaproot is a segwit v1 spend.
+	spendTaproot
+)
+
+// singleKey reports whether the spend is satisfied by one key, which is to say
+// it admits no cosigner.
+func (k spendKind) singleKey() bool {
+	return k == spendWitnessKey || k == spendTaproot
+}
+
+// classifySpend reports what kind of output an input spends, reading the script
+// from the wallet's own record of the coin rather than from anything the caller
+// supplied.
+//
+// The wallet writes a witness UTXO for every input it decorates, so this is
+// the authoritative answer for an input funding selected. An input it could not
+// decorate classifies as unknown.
+func classifySpend(decorated *psbt.PInput) spendKind {
+	if decorated.WitnessUtxo == nil {
+		return spendUnknown
+	}
+
+	script := decorated.WitnessUtxo.PkScript
+
+	switch {
+	case txscript.IsPayToTaproot(script):
+		return spendTaproot
+
+	case txscript.IsPayToWitnessPubKeyHash(script):
+		return spendWitnessKey
+
+	case txscript.IsPayToWitnessScriptHash(script):
+		return spendWitnessScript
+
+	case txscript.IsPayToScriptHash(script):
+		return spendNested
+
+	default:
+		return spendUnknown
+	}
+}
+
 // mergeCallerInput merges one caller input record into the wallet's decorated
 // record, in place, following the authority rule described on
 // restoreInputMetadata.
 func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
-	err := checkCallerInputAgrees(decorated, caller, idx)
+	spend := classifySpend(decorated)
+
+	err := checkFieldsFitSpend(caller, spend, idx)
+	if err != nil {
+		return err
+	}
+
+	err = checkDerivationCount(caller, spend, idx)
+	if err != nil {
+		return err
+	}
+
+	err = checkCallerInputAgrees(decorated, caller, idx)
 	if err != nil {
 		return err
 	}
@@ -138,6 +212,135 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 	}
 
 	return nil
+}
+
+// checkDerivationCount refuses more than one derivation record on a spend that
+// only one key can satisfy.
+//
+// A P2WPKH or key-path taproot output is spent by a single key, so it has no
+// cosigners to describe. A caller naming several keys there is not supplying
+// multisig metadata; it is describing an input that does not exist, and the
+// extra records would follow the packet out of funding.
+//
+// Whether each named key actually participates in a script that does admit
+// several is a question about the witness script, and is left to the task that
+// takes that on.
+func checkDerivationCount(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	if !spend.singleKey() {
+		return nil
+	}
+
+	records := len(caller.Bip32Derivation) +
+		len(caller.TaprootBip32Derivation)
+	if records > 1 {
+		return fmt.Errorf("%w: input %d names %d keys for a %s spend, "+
+			"which one key satisfies",
+			ErrConflictingInputMetadata, idx, records, spend)
+	}
+
+	return nil
+}
+
+// checkFieldsFitSpend reports whether the caller's records could belong to the
+// output this input spends.
+//
+// Funding carries the caller's own fields across without forming an opinion on
+// their contents, but a field that the spend cannot use at all is not metadata
+// worth preserving: a taproot leaf script on a segwit v0 input, or a witness
+// script on a spend that has no script to reveal. Carrying it would hand back
+// a packet describing a spend that cannot happen.
+//
+// An unclassified spend is left alone. The wallet has no view on it, so it has
+// no grounds to refuse anything either.
+func checkFieldsFitSpend(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	if spend == spendUnknown {
+		return nil
+	}
+
+	if spend == spendTaproot {
+		return checkTaprootFields(caller, spend, idx)
+	}
+
+	return checkWitnessFields(caller, spend, idx)
+}
+
+// checkTaprootFields refuses the segwit v0 scripts on a taproot spend, which
+// reveals neither.
+func checkTaprootFields(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	if len(caller.WitnessScript) > 0 {
+		return fieldFitError("witness script", spend, idx)
+	}
+
+	if len(caller.RedeemScript) > 0 {
+		return fieldFitError("redeem script", spend, idx)
+	}
+
+	return nil
+}
+
+// checkWitnessFields refuses the taproot records on a segwit v0 spend, and the
+// scripts that spend has nothing to reveal for.
+func checkWitnessFields(caller *psbt.PInput, spend spendKind,
+	idx int) error {
+
+	switch {
+	case len(caller.TaprootLeafScript) > 0:
+		return fieldFitError("taproot leaf script", spend, idx)
+
+	case len(caller.TaprootInternalKey) > 0:
+		return fieldFitError("taproot internal key", spend, idx)
+
+	case len(caller.TaprootMerkleRoot) > 0:
+		return fieldFitError("taproot merkle root", spend, idx)
+	}
+
+	// A single-key spend reveals no script, so there is nothing for a
+	// witness script to be.
+	if spend == spendWitnessKey && len(caller.WitnessScript) > 0 {
+		return fieldFitError("witness script", spend, idx)
+	}
+
+	// Only a P2SH spend has a redeem script to reveal.
+	if spend != spendNested && len(caller.RedeemScript) > 0 {
+		return fieldFitError("redeem script", spend, idx)
+	}
+
+	return nil
+}
+
+// fieldFitError names the field and the spend that cannot carry it.
+func fieldFitError(field string, spend spendKind, idx int) error {
+	return fmt.Errorf("%w: input %d carries a %s, which a %s spend cannot "+
+		"use", ErrConflictingInputMetadata, idx, field, spend)
+}
+
+// String names a spend kind for an error message.
+func (k spendKind) String() string {
+	switch k {
+	case spendUnknown:
+		return "unclassified"
+
+	case spendWitnessKey:
+		return "witness key"
+
+	case spendWitnessScript:
+		return "witness script"
+
+	case spendNested:
+		return "nested witness"
+
+	case spendTaproot:
+		return "taproot"
+
+	default:
+		return "unclassified"
+	}
 }
 
 // checkCallerInputAgrees reports whether the caller's records for an input can
@@ -215,6 +418,13 @@ func reconcileBip32(wallet, caller []*psbt.Bip32Derivation,
 			},
 		)
 		if at < 0 {
+			// Nobody else may claim the wallet's own place in the
+			// derivation tree.
+			err := checkNoImpostor(merged, w, idx)
+			if err != nil {
+				return nil, err
+			}
+
 			merged = append(merged, w)
 
 			continue
@@ -227,6 +437,33 @@ func reconcileBip32(wallet, caller []*psbt.Bip32Derivation,
 	}
 
 	return merged, nil
+}
+
+// checkNoImpostor refuses a caller record that claims the wallet's own
+// fingerprint and path for some other key.
+//
+// Matching records by key alone is not enough. A caller that names the
+// wallet's master fingerprint and derivation path while naming a different key
+// is not a cosigner: it is asserting that the wallet's own path produces a key
+// that it does not. Keeping such a record would leave the packet saying so.
+func checkNoImpostor(caller []*psbt.Bip32Derivation,
+	wallet *psbt.Bip32Derivation, idx int) error {
+
+	for _, c := range caller {
+		if c.MasterKeyFingerprint != wallet.MasterKeyFingerprint {
+			continue
+		}
+
+		if !slices.Equal(c.Bip32Path, wallet.Bip32Path) {
+			continue
+		}
+
+		return fmt.Errorf("%w: input %d names the wallet's own "+
+			"derivation path for another key",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	return nil
 }
 
 // reconcileTaproot is reconcileBip32 for taproot derivations, matching records
@@ -250,6 +487,11 @@ func reconcileTaproot(wallet, caller []*psbt.TaprootBip32Derivation,
 			},
 		)
 		if at < 0 {
+			err := checkNoTaprootImpostor(merged, w, idx)
+			if err != nil {
+				return nil, err
+			}
+
 			merged = append(merged, w)
 
 			continue
@@ -262,6 +504,27 @@ func reconcileTaproot(wallet, caller []*psbt.TaprootBip32Derivation,
 	}
 
 	return merged, nil
+}
+
+// checkNoTaprootImpostor is checkNoImpostor for taproot derivations.
+func checkNoTaprootImpostor(caller []*psbt.TaprootBip32Derivation,
+	wallet *psbt.TaprootBip32Derivation, idx int) error {
+
+	for _, c := range caller {
+		if c.MasterKeyFingerprint != wallet.MasterKeyFingerprint {
+			continue
+		}
+
+		if !slices.Equal(c.Bip32Path, wallet.Bip32Path) {
+			continue
+		}
+
+		return fmt.Errorf("%w: input %d names the wallet's own "+
+			"derivation path for another key",
+			ErrConflictingInputMetadata, idx)
+	}
+
+	return nil
 }
 
 // bip32DerivationEqual compares two BIP32 derivation records, treating a pair
