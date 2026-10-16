@@ -138,9 +138,12 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	h.MineBlocks(5)
 }
 
-// testManagerCreateDuplicate verifies that both a live wallet cache entry and
-// a completed wallet in the durable store reject a duplicate creation.
+// testManagerCreateDuplicate verifies cached and durable duplicates share one
+// public identity and preserve the original Wallet and credentials on reopen.
 func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
+	// Arrange: Keep the original inputs while a rejected request supplies new
+	// credentials. SQL also permits an empty peer Manager whose cache cannot
+	// identify the winner once another Manager persists it.
 	params := h.TestWalletParams()
 
 	manager := h.NewWalletManager()
@@ -148,14 +151,40 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to start wallet manager")
 	require.Empty(h, loaded, "empty store loaded wallets")
 
+	var peer *wallet.Manager
+
+	if *dbBackend != "kvdb" {
+		peer = h.NewWalletManager()
+		peerWallets, err := peer.Start(h.Context())
+		require.NoError(h, err)
+		require.Empty(h, peerWallets)
+	}
+
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 
-	duplicate, err := manager.Create(params)
+	replacement := params
+	replacement.PrivatePassphrase = []byte("rejected-private")
 
-	require.Error(h, err, "duplicate create not rejected by live wallet cache")
+	// Act: Reject the occupied active name before any new runtime is assembled.
+	duplicate, err := manager.Create(replacement)
+
+	// Assert: The existing live Wallet still authenticates with its original
+	// credential, and callers see the wallet-owned duplicate sentinel.
+	require.ErrorIs(h, err, wallet.ErrWalletExists)
 	require.Nil(h, duplicate, "duplicate create returned a wallet")
+	h.UnlockWallet(w)
+
+	// Only SQL can open a peer handle: kvdb exclusively owns its one database.
+	// The public outcome is identical when the peer must consult durable state.
+	if peer != nil {
+		duplicate, err = peer.Create(replacement)
+		require.ErrorIs(h, err, wallet.ErrWalletExists)
+		require.Nil(h, duplicate)
+		require.NoError(h, peer.Stop())
+		require.True(h, h.ReleaseManager(peer))
+	}
 
 	// Stop the aggregate, then open a new Manager over the durable store.
 	require.NoError(h, manager.Stop(), "failed to stop manager")
@@ -167,9 +196,13 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 	require.Len(h, loaded, 1, "replacement manager lost durable wallet")
 	h.RegisterWallet(manager, loaded[0])
 
-	// A fresh manager must reject creation over the completed durable wallet.
-	duplicate, err = manager.Create(params)
-	require.Error(h, err, "duplicate create not rejected against durable store")
+	// The reopened Wallet must retain the winner's identity and persisted
+	// credential even after both cached and uncached rejection paths.
+	require.Equal(h, w.ID(), loaded[0].ID())
+	h.UnlockWallet(loaded[0])
+
+	duplicate, err = manager.Create(replacement)
+	require.ErrorIs(h, err, wallet.ErrWalletExists)
 	require.Nil(h, duplicate, "duplicate create returned a wallet")
 }
 

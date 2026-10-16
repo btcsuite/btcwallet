@@ -3,10 +3,13 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Ensure Store satisfies the WalletStore interface.
@@ -14,7 +17,8 @@ var _ db.WalletStore = (*Store)(nil)
 
 // CreateWallet creates a new wallet in the database with the provided
 // parameters. It returns the created wallet info or an error if the
-// creation fails.
+// creation fails. An occupied name returns db.ErrWalletExists without changing
+// the existing wallet; other failures retain their original classification.
 func (s *Store) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (*db.WalletInfo, error) {
 
@@ -50,17 +54,28 @@ type createWalletOps struct {
 // Ensure createWalletOps implements db.CreateWalletOps at compile time.
 var _ db.CreateWalletOps = (*createWalletOps)(nil)
 
-// CreateWallet implements db.CreateWalletOps.
+// CreateWallet classifies only the wallet-name index violation and preserves
+// the driver cause for normal SQL error classification.
 func (o createWalletOps) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (int64, error) {
 
-	return o.q.CreateWallet(ctx, sqlc.CreateWalletParams{
+	id, err := o.q.CreateWallet(ctx, sqlc.CreateWalletParams{
 		WalletName:     params.Name,
 		IsImported:     params.IsImported,
 		ManagerVersion: params.ManagerVersion,
 		IsWatchOnly:    params.IsWatchOnly,
 		MasterHdPubKey: params.MasterPubKey,
 	})
+	// Other unique indexes can fail this insert too; the existing schema's
+	// wallet-name index alone establishes the duplicate identity.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation &&
+		pgErr.ConstraintName == "uidx_wallets_name" {
+
+		err = fmt.Errorf("%w: %w", db.ErrWalletExists, err)
+	}
+
+	return id, err
 }
 
 // InsertWalletSecrets implements db.CreateWalletOps.

@@ -107,6 +107,7 @@ type Querier interface {
 	CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error)
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
+	// Only wallet-name occupancy produces an empty result; other constraints fail.
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int64) error
 	// Deletes blocks at and after the provided height.
