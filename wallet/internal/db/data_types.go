@@ -776,8 +776,9 @@ type AddressInfo struct {
 	// ambiguous, such as P2TR key-path versus P2TR script-path imports.
 	HasScript bool
 
-	// IsWatchOnly includes external custody for imported account children.
-	// Raw imports retain their existing wallet-mode secret policy.
+	// IsWatchOnly includes wallet mode and imported-account custody. Raw
+	// imports without private-key ciphertext are watch-only in either root
+	// mode; storing script ciphertext alone never supplies a signing key.
 	IsWatchOnly bool
 
 	// IsUsed reports whether the address has a non-abandoned
@@ -1463,7 +1464,8 @@ type UtxoInfo struct {
 	HasScript bool
 
 	// Spendable optionally overrides wallet-level spendability for outputs
-	// without a local signing path, including imported account children.
+	// without a local signing path, including imported account children and
+	// raw imports without private-key ciphertext.
 	Spendable *bool
 
 	// IsLocked is true when the UTXO has an active (non-expired) lease.
