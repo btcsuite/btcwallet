@@ -7,6 +7,7 @@
 package itest
 
 import (
+	"bytes"
 	"sync"
 	"testing"
 
@@ -40,17 +41,10 @@ func testAddressManagerRawImportPublicKey(h *bwtest.HarnessTest) {
 		h.Skip("unmined raw import payments require a full node")
 	}
 
-	// Arrange: use real persistence and chain registration. SQL requires a
-	// watch-only shell; kvdb's seeded Wallet supplies the existing scopes
-	// for its mixed-mode imports. Public-key imports need no unlocked key.
+	// Arrange: use real persistence and chain registration in a signing
+	// Wallet. Public-key imports need no unlocked local signing keys.
 	ctx := h.Context()
-
-	sqlWallet := *dbBackend == string(wallet.DBBackendSQLite) ||
-		*dbBackend == string(wallet.DBBackendPostgres)
-
-	w, _ := h.NewWallet(bwtest.WalletFixture{
-		WatchOnly: sqlWallet,
-	})
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	// Unfunded creation supplies no sync boundary. Finish startup watch
 	// reconstruction so it cannot register the later import for this test.
@@ -126,17 +120,16 @@ func testAddressManagerRawImportTaprootScript(h *bwtest.HarnessTest) {
 		h.Skip("unmined raw import payments require a full node")
 	}
 
-	// Arrange: keep one revealed spending leaf for a later key-only repeat.
-	// SQL needs an unlocked watch-only shell; kvdb's seeded Wallet supplies
-	// existing scopes and a public script key that is usable while locked.
+	// Arrange: retain a revealed leaf in a signing Wallet so a later
+	// key-only repeat must reuse it. SQL needs an unlocked script key;
+	// kvdb supplies its public script key while locked.
 	ctx := h.Context()
 
 	sqlWallet := *dbBackend == string(wallet.DBBackendSQLite) ||
 		*dbBackend == string(wallet.DBBackendPostgres)
 
 	w, _ := h.NewWallet(bwtest.WalletFixture{
-		WatchOnly: sqlWallet,
-		Unlocked:  sqlWallet,
+		Unlocked: sqlWallet,
 	})
 
 	// Unfunded creation supplies no sync boundary. Finish startup watch
@@ -1384,4 +1377,195 @@ func withoutFingerprint(info wallet.AddressInfo) wallet.AddressInfo {
 	info.Derivation = &derivation
 
 	return info
+}
+
+// testAddressManagerRawImportTracking verifies external raw outputs retain
+// balances, custody, and future delivery in one signing wallet through reopen.
+func testAddressManagerRawImportTracking(h *bwtest.HarnessTest) {
+	// Arrange: keep both private keys outside the signing Wallet. The script
+	// requires the external leaf key, so retaining it cannot supply a signer.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	publicKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err)
+	scriptKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err)
+
+	keyAddr, err := waddrmgr.WitnessPubKey.AddrFromPubKeyBytes(
+		publicKey.PubKey().SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+	leafScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(scriptKey.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(h, err)
+
+	tapscript := waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypePartialReveal,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: scriptKey.PubKey(),
+			LeafVersion: txscript.BaseLeafVersion,
+		},
+		RevealedScript: leafScript,
+	}
+
+	// Act: import public material through the existing Wallet APIs, then fund
+	// only after their successful registrations. Mining supplies receipt on
+	// full nodes and SPV alike; SPV does not supply external mempool events.
+	require.NoError(h, w.ImportPublicKey(
+		ctx, publicKey.PubKey(), waddrmgr.WitnessPubKey,
+	))
+	scriptInfo, err := w.ImportTaprootScript(ctx, tapscript)
+	require.NoError(h, err)
+
+	cases := []struct {
+		addr     address.Address
+		addrType waddrmgr.AddressType
+		amount   btcutil.Amount
+		script   []byte
+		outpoint wire.OutPoint
+		info     wallet.AddressInfo
+	}{
+		{
+			addr:     keyAddr,
+			addrType: waddrmgr.WitnessPubKey,
+			amount:   oneBTC,
+		},
+		{
+			addr:     scriptInfo.Addr,
+			addrType: waddrmgr.TaprootScript,
+			amount:   2 * oneBTC,
+		},
+	}
+
+	outputs := make([]*wire.TxOut, len(cases))
+	for i := range cases {
+		// Public script construction is the funding oracle; ownership is read
+		// back through Wallet results rather than inferred from SQL row shape.
+		cases[i].script, err = txscript.PayToAddrScript(cases[i].addr)
+		require.NoError(h, err)
+
+		outputs[i] = wire.NewTxOut(int64(cases[i].amount), cases[i].script)
+	}
+
+	payment := h.SendOutputs(outputs, bwtest.MinerFeeRate)
+	funding := h.AssertTxInMempool(*payment)
+	h.MineBlockWithTx(funding)
+
+	// Match miner outputs by script because it may sort outputs or add change.
+	// The public point lookup below proves each resulting outpoint is owned.
+	for i := range cases {
+		for index, output := range funding.TxOut {
+			if bytes.Equal(output.PkScript, cases[i].script) {
+				cases[i].outpoint = wire.OutPoint{
+					Hash:  *payment,
+					Index: uint32(index),
+				}
+			}
+		}
+	}
+
+	// Assert: mining establishes receipt before direct public reads. Capture
+	// complete reports so reopen cannot hide a lost credit or changed custody.
+	require.False(h, w.IsWatchOnly())
+	beforeTx, err := w.GetTx(ctx, *payment)
+	require.NoError(h, err)
+	require.NotNil(h, beforeTx.Block)
+
+	beforeUtxos, err := w.ListUnspent(ctx, wallet.UtxoQuery{
+		Account:  waddrmgr.ImportedAddrAccountName,
+		MinConfs: 1,
+		MaxConfs: 100,
+	})
+	require.NoError(h, err)
+	require.Len(h, beforeUtxos, len(cases))
+
+	for i := range cases {
+		tc := &cases[i]
+		info, err := w.GetAddressInfo(ctx, tc.addr)
+		require.NoError(h, err)
+		require.True(h, info.Imported)
+		require.Nil(h, info.Derivation)
+		require.Equal(h, tc.addrType, info.AddrType)
+		addresses, err := w.ListAddresses(
+			ctx, waddrmgr.ImportedAddrAccountName, tc.addrType,
+		)
+		require.NoError(h, err)
+		require.Len(h, addresses, 1)
+		require.Equal(h, tc.addr, addresses[0].Address)
+		require.Equal(h, tc.amount, addresses[0].Balance)
+
+		utxo, err := w.GetUtxo(ctx, tc.outpoint)
+		require.NoError(h, err)
+		require.Equal(h, tc.amount, utxo.Amount)
+		require.Equal(h, waddrmgr.ImportedAddrAccountName, utxo.Account)
+		require.False(h, utxo.Spendable)
+		require.Contains(h, beforeUtxos, utxo)
+
+		// Store the full address result as the independent reopen snapshot.
+		tc.info = info
+	}
+
+	// Act: cross the supported close/reopen boundary visibly. Readiness
+	// establishes rebuilt watches; unlocking restores the signing fixture.
+	w = h.ReloadWallet(w)
+	h.AssertWalletSynced(w)
+	h.UnlockWallet(w)
+
+	// Assert: compare complete durable reports after readiness without polling.
+	// The root stays signing while its external outputs retain their custody.
+	require.False(h, w.IsWatchOnly())
+	afterTx, err := w.GetTx(ctx, *payment)
+	require.NoError(h, err)
+	require.Equal(h, beforeTx, afterTx)
+
+	afterUtxos, err := w.ListUnspent(ctx, wallet.UtxoQuery{
+		Account:  waddrmgr.ImportedAddrAccountName,
+		MinConfs: 1,
+		MaxConfs: 100,
+	})
+	require.NoError(h, err)
+	require.Equal(h, beforeUtxos, afterUtxos)
+
+	for i := range cases {
+		tc := &cases[i]
+		info, err := w.GetAddressInfo(ctx, tc.addr)
+		require.NoError(h, err)
+		require.Equal(h, tc.info, info)
+		addresses, err := w.ListAddresses(
+			ctx, waddrmgr.ImportedAddrAccountName, tc.addrType,
+		)
+		require.NoError(h, err)
+		require.Len(h, addresses, 1)
+		require.Equal(h, tc.addr, addresses[0].Address)
+		require.Equal(h, tc.amount, addresses[0].Balance)
+
+		// Membership in the unchanged full list also verifies point-read
+		// custody and every output field, beyond selected balance values.
+		utxo, err := w.GetUtxo(ctx, tc.outpoint)
+		require.NoError(h, err)
+		require.Contains(h, afterUtxos, utxo)
+	}
+
+	// Assert: the reopened Wallet retains script bytes but has no private key
+	// for the external public import, even with its own signing vault unlocked.
+	script, err := w.ScriptForOutput(ctx, wire.TxOut{
+		PkScript: cases[1].script,
+	})
+	require.NoError(h, err)
+	require.Equal(h, leafScript, script.Script)
+
+	_, err = w.GetPrivKeyForAddress(ctx, keyAddr)
+	require.ErrorIs(h, err, wallet.ErrNoAssocPrivateKey)
+
+	// Act: pay the reopened import only after watch reconstruction is ready.
+	// A new confirmed receipt proves durability includes future delivery.
+	future := h.SendOutput(outputs[0], bwtest.MinerFeeRate)
+	h.MineBlockWithTx(h.AssertTxInMempool(*future))
+
+	// Assert: block readiness makes the future public transaction read direct,
+	// preserving one lifecycle owner and the same chain-neutral contract.
+	delivered, err := w.GetTx(ctx, *future)
+	require.NoError(h, err)
+	require.NotNil(h, delivered.Block)
 }

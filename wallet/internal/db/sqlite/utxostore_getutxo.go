@@ -105,6 +105,13 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 
 	utxo.Spendable = shape.SpendabilityOverride()
 
+	// Raw imports have no account provenance; the query's key-material
+	// result supplies their custody without changing the HD override.
+	if row.RawIsWatchOnly {
+		spendable := false
+		utxo.Spendable = &spendable
+	}
+
 	if hasScope {
 		utxo.KeyScope = keyScope
 	}
