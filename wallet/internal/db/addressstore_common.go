@@ -134,8 +134,9 @@ type AddressInfoRow[TypeID any] struct {
 	// address is derived. Raw imported addresses leave this NULL.
 	AccountIsDerived sql.NullBool
 
-	// WalletIsWatchOnly indicates whether the wallet is watch-only.
-	WalletIsWatchOnly bool
+	// IsWatchOnly includes wallet mode or raw-address custody from the
+	// adapter. AddressRowToInfo also applies HD account provenance.
+	IsWatchOnly bool
 
 	// HasScript indicates whether the address has an encrypted script.
 	HasScript bool
@@ -401,7 +402,8 @@ func convertAddressPath(hasDerivedPath bool, branch,
 // struct. It handles type conversion and validation for each field.
 //
 // HD children inherit imported account custody in addition to wallet mode.
-// Raw imports retain wallet mode; secret presence does not infer custody.
+// Raw imports use adapter-supplied custody: wallet mode or absent/empty private
+// key ciphertext. Script ciphertext alone cannot make a raw address signable.
 func AddressRowToInfo[TypeID any](
 	row AddressInfoRow[TypeID]) (*AddressInfo, error) {
 
@@ -456,7 +458,7 @@ func AddressRowToInfo[TypeID any](
 		Bool:  true,
 		Valid: true,
 	})
-	watchOnly := row.WalletIsWatchOnly || row.AccountIsDerived == (sql.NullBool{
+	watchOnly := row.IsWatchOnly || row.AccountIsDerived == (sql.NullBool{
 		Bool:  false,
 		Valid: true,
 	})
