@@ -3,11 +3,15 @@
 package itest
 
 import (
+	"bytes"
+
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -147,6 +151,88 @@ func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
 	leases, err := w.ListLeasedOutputs(h.Context())
 	require.NoError(h, err, "failed to list leased outputs")
 	require.Empty(h, leases, "creating a transaction reserved a coin")
+}
+
+// testCreateTransactionWatchChange proves an authored change address is live
+// before CreateTransaction returns: a later unmined payment to it is observed
+// without any block or restart revealing it.
+func testCreateTransactionWatchChange(h *bwtest.HarnessTest) {
+	// Kvdb keeps its legacy unwatched change allocation.
+	//nolint:staticcheck // This guard intentionally selects legacy kvdb.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("live change registration requires SQL")
+	}
+
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("SPV does not deliver mempool transactions")
+	}
+
+	// Arrange: Author a payment from the funded account that leaves change,
+	// and resolve that change output's script.
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{twoBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs:      []wire.TxOut{payment},
+		Inputs:       &wallet.InputsPolicy{Source: account},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+	require.GreaterOrEqual(h, authored.ChangeIndex, 0, "no change output")
+
+	changeScript := authored.Tx.TxOut[authored.ChangeIndex].PkScript
+
+	// Act: Pay the change address from outside the wallet, leaving the
+	// payment unmined so only the live watch can deliver it.
+	received := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: changeScript,
+	}, bwtest.MinerFeeRate)
+
+	// Assert: The unmined payment becomes a spendable wallet coin on the
+	// change address before any block could reveal it.
+	paymentTx := h.AssertTxInMempool(*received)
+
+	paid := wire.OutPoint{Hash: *received, Index: 0}
+	for i, txOut := range paymentTx.TxOut {
+		if bytes.Equal(txOut.PkScript, changeScript) {
+			paid.Index = uint32(i)
+		}
+	}
+
+	var utxo *wallet.Utxo
+
+	err = wait.NoError(func() error {
+		var err error
+
+		utxo, err = w.GetUtxo(h.Context(), paid)
+
+		return err
+	}, pollTimeout)
+	require.NoError(h, err, "authored change missed unmined payment")
+	require.Equal(h, changeScript, utxo.PkScript, "unexpected coin script")
+	require.Equal(
+		h, btcutil.Amount(oneBTC), utxo.Amount, "unexpected coin amount",
+	)
+	require.Zero(h, utxo.Confirmations, "payment was already confirmed")
+	require.True(h, utxo.Spendable, "change payment is not spendable")
+
+	// The harness requires an empty miner mempool when a case succeeds.
+	h.MineBlocksAndAssertNumTxns(1, 1)
 }
 
 // testCreateTransactionMultipleOutputs verifies that every requested output

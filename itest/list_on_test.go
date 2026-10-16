@@ -480,6 +480,10 @@ var allTestCases = []*testCase{
 		TestFunc: testCreateTransactionSelectCoins,
 	},
 	{
+		Name:     "txcreator watch change",
+		TestFunc: testCreateTransactionWatchChange,
+	},
+	{
 		Name:     "txcreator multiple outputs",
 		TestFunc: testCreateTransactionMultipleOutputs,
 	},
