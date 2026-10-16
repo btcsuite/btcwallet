@@ -65,3 +65,6 @@ relationship metadata, but do not rewrite its historical decision body.
   Ownership](./0015-sql-shared-chain-ownership.md) supersedes ADR 0002, applies
   aggregate lifecycle and admission to every maintained Manager, and assigns
   SQL shared-chain ownership.
+- [ADR 0016: Wallet Transaction
+  Subscriptions](./0016-wallet-transaction-subscriptions.md) defines
+  best-effort Wallet notifications with bounded subscriber queues.
