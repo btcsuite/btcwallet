@@ -1118,6 +1118,51 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 	require.IsType(t, &InputsPolicy{}, intent.Inputs)
 }
 
+// TestCreateTransactionWatchesChange verifies that CreateTransaction registers
+// kept change before returning, and returns no transaction when that
+// registration fails.
+func TestCreateTransactionWatchesChange(t *testing.T) {
+	t.Parallel()
+
+	for _, watchErr := range []error{nil, errChainMock} {
+		// Arrange: Prepare a payment that leaves change from the
+		// default fixture's 100,000-sat UTXO.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		changeAddr, _, _ := expectedStoreAddress(
+			t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
+		)
+		mocks.chain.On(
+			"WatchAddrsFromTip", w.lifetimeCtx,
+			[]address.Address{changeAddr},
+		).Return(watchErr).Once()
+
+		// Act: Author the payment through the public wrapper.
+		tx, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{{
+				Value:    50_000,
+				PkScript: fixture.payment.PkScript,
+			}},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: Kept change was registered once; a registration
+		// failure returns no transaction.
+		mocks.chain.AssertNumberOfCalls(t, "WatchAddrsFromTip", 1)
+
+		if watchErr != nil {
+			require.ErrorIs(t, err, watchErr)
+			require.Nil(t, tx)
+
+			continue
+		}
+
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, tx.ChangeIndex, 0)
+	}
+}
+
 // TestCreateTransactionInvalidIntent tests that an error is returned when an
 // invalid transaction intent is provided.
 func TestCreateTransactionInvalidIntent(t *testing.T) {
