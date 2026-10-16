@@ -583,6 +583,16 @@ var allTestCases = []*testCase{
 		Name:     "txreader durable reopen",
 		TestFunc: testTxReaderDurableReopen,
 	},
+	// Local publication provides observations without an incoming mempool feed.
+	{
+		Name:     "transaction subscription publication",
+		TestFunc: testTransactionSubscriptionPublication,
+	},
+	// External observations reach subscribers through committed syncer work.
+	{
+		Name:     "transaction subscription observation",
+		TestFunc: testTransactionSubscriptionObservation,
+	},
 	{
 		Name:     "txwriter label transaction",
 		TestFunc: testLabelTx,
