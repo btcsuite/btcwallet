@@ -486,32 +486,43 @@ func validateTxIntent(intent *TxIntent) error {
 	return nil
 }
 
+// authoredChange carries the change child a change source allocated during
+// authoring to the public wrapper, which registers it only if the authored
+// result keeps a change output.
+type authoredChange struct {
+	// stored is the committed SQL change child awaiting live registration.
+	// The change callback sets it at most once, and only for accounts that
+	// require chain sync; it stays nil for kvdb and NoChainSync accounts.
+	stored *db.AddressInfo
+}
+
 // prepareTxAuthSources creates the input and change sources required to
-// author a transaction.
+// author a transaction, plus the record of change that needs registration.
 func (w *Wallet) prepareTxAuthSources(ctx context.Context, intent *TxIntent) (
-	txauthor.InputSource, *txauthor.ChangeSource, error) {
+	txauthor.InputSource, *txauthor.ChangeSource, *authoredChange, error) {
 
 	// Determine the change source. If not specified, a default will be
 	// used.
 	changeAccount := w.determineChangeSource(intent)
 
-	changeSource, err := w.createChangeSource(ctx, changeAccount)
+	changeSource, change, err := w.createChangeSource(ctx, changeAccount)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	inputSource, err := w.createInputSource(ctx, intent)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return inputSource, changeSource, nil
+	return inputSource, changeSource, change, nil
 }
 
 // createChangeSource creates a store-backed change source for transaction
-// authoring.
+// authoring and the record of the change it allocates.
 func (w *Wallet) createChangeSource(ctx context.Context,
-	changeAccount *ScopedAccount) (*txauthor.ChangeSource, error) {
+	changeAccount *ScopedAccount) (*txauthor.ChangeSource, *authoredChange,
+	error) {
 
 	accountName := changeAccount.AccountName
 
@@ -538,12 +549,12 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 			},
 		)
 		if errors.Is(err, db.ErrAccountNotFound) {
-			return nil, fmt.Errorf("%w: account %d",
+			return nil, nil, fmt.Errorf("%w: account %d",
 				ErrAccountNotFound, derivedAccount)
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("get account %d: %w",
+			return nil, nil, fmt.Errorf("get account %d: %w",
 				derivedAccount, err)
 		}
 
@@ -565,12 +576,12 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 			},
 		)
 		if errors.Is(err, db.ErrAccountNotFound) {
-			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+			return nil, nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
 				accountName)
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("get account %q: %w",
+			return nil, nil, fmt.Errorf("get account %q: %w",
 				accountName, err)
 		}
 
@@ -581,29 +592,31 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 		derivationAccount.AddrSchema.InternalAddrType, false,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	scriptSize, err := addrType.ScriptPubKeySize()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+		return nil, nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
 			addrType)
 	}
+
+	change := &authoredChange{}
 
 	return &txauthor.ChangeSource{
 		ScriptSize: scriptSize,
 		NewScript: w.newChangeScriptFunc(
-			ctx, changeAccount.KeyScope, derivationAccount,
+			ctx, changeAccount.KeyScope, derivationAccount, change,
 		),
-	}, nil
+	}, change, nil
 }
 
 // newChangeScriptFunc allocates fresh change within the admitted authoring
-// request. SQL registers the committed script unless its account excludes live
-// tracking; kvdb keeps legacy allocation.
+// request. SQL records the committed child for the wrapper to register unless
+// its account excludes live tracking; kvdb keeps legacy allocation.
 func (w *Wallet) newChangeScriptFunc(ctx context.Context,
-	scope waddrmgr.KeyScope,
-	derivationAccount *db.AccountInfo) func() ([]byte, error) {
+	scope waddrmgr.KeyScope, derivationAccount *db.AccountInfo,
+	change *authoredChange) func() ([]byte, error) {
 
 	if w.addrStore == nil {
 		params := db.NewDerivedAddressParams{
@@ -620,10 +633,7 @@ func (w *Wallet) newChangeScriptFunc(ctx context.Context,
 			}
 
 			if !derivationAccount.NoChainSync {
-				_, err = w.deliverStoreAddresses(ctx, stored)
-				if err != nil {
-					return nil, err
-				}
+				change.stored = &stored[0]
 			}
 
 			return stored[0].ScriptPubKey, nil
@@ -683,9 +693,13 @@ type authoredTxResp struct {
 // CreateTransaction creates a new unsigned transaction spending unspent outputs
 // to the given outputs. It is the direct-transaction wrapper around the neutral
 // authoring boundary and the main implementation of the TxCreator interface.
-// Direct-transaction watch delivery belongs to this wrapper; PSBT funding calls
-// the neutral boundary independently so its lease, cleanup, and publication
-// obligations remain in FundPsbt.
+// Direct-transaction watch delivery belongs to this wrapper: on SQL wallets,
+// change kept by the returned transaction is registered from the live tip
+// before return, and a registration failure returns no transaction while the
+// committed change address stays in the wallet. Kvdb change and change for
+// NoChainSync accounts are not registered. PSBT funding calls the neutral
+// boundary independently so its lease, cleanup, and publication obligations
+// remain in FundPsbt.
 // Accepted authoring and any supplied coin selector finish before return,
 // even if the caller cancels after admission.
 func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
@@ -725,17 +739,49 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 		return
 	}
 
-	inputSource, changeSource, err := w.prepareTxAuthSources(r.ctx, r.intent)
+	inputSource, changeSource, change, err := w.prepareTxAuthSources(
+		r.ctx, r.intent,
+	)
 	if err != nil {
 		r.respChan <- authoredTxResp{err: err}
 
 		return
 	}
 
-	responseTx, responseErr := w.authorTransaction(
+	tx, err := w.authorTransaction(
 		r.intent.Outputs, r.intent.FeeRate, inputSource, changeSource,
 	)
-	r.respChan <- authoredTxResp{tx: responseTx, err: responseErr}
+	if err != nil {
+		r.respChan <- authoredTxResp{err: err}
+
+		return
+	}
+
+	// Register kept change before the caller can sign or publish it.
+	err = w.watchAuthoredChange(r.ctx, tx.ChangeIndex, change)
+	if err != nil {
+		r.respChan <- authoredTxResp{err: err}
+
+		return
+	}
+
+	r.respChan <- authoredTxResp{tx: tx}
+}
+
+// watchAuthoredChange registers committed change that the authored result
+// keeps through the Wallet's live-watch path. Results without change, and
+// change that needs no watch, register nothing. On failure the committed
+// change child stays in the Store.
+func (w *Wallet) watchAuthoredChange(ctx context.Context, changeIndex int,
+	change *authoredChange) error {
+
+	if changeIndex < 0 || change.stored == nil {
+		return nil
+	}
+
+	_, err := w.deliverStoreAddresses(ctx, []db.AddressInfo{*change.stored})
+
+	return err
 }
 
 // authorTransaction creates an unsigned transaction from the outputs, fee rate,
