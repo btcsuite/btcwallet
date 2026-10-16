@@ -6,7 +6,7 @@ on:
       - "master"
   pull_request:
     branches:
-      - "*"
+      - "**"
 concurrency:
   # Cancel any previous workflows if they are from a PR or push.
   group: ${{ github.event.pull_request.number || github.ref }}
@@ -30,12 +30,14 @@ env:
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
+  BTCD_VERSION_LATEST: v0.25.0
+
 jobs:
   ########################
   # Format, compileation and lint check
   ########################
   lint-check:
-    name: Format, compilation and lint check
+    name: Static checks (format, compile, lint)
     runs-on: ubuntu-latest
     steps:
       - name: git checkout
@@ -63,6 +65,15 @@ jobs:
       - name: Check RPC format
         run: make rpc-check
 
+      - name: Check generated SQL code is up-to-date
+        run: make sqlc-check
+
+      - name: Check SQL formatting
+        run: make sql-format-check
+
+      - name: Check SQL linting
+        run: make sql-lint-check
+
       - name: compile code
         run: go install -v ./...
 
@@ -74,7 +85,7 @@ jobs:
 
   check-commits:
     if: github.event_name == 'pull_request'
-    name: Check commits
+    name: Commit checks
     runs-on: ubuntu-latest
     steps:
       - name: git checkout
@@ -90,17 +101,20 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
-      - name: fetch and rebase on ${{ github.base_ref }}
+      - name: fetch and rebase on the PR base
+        id: rebase
         uses: ./.github/actions/rebase
 
       - name: check commits
-        run: scripts/check-each-commit.sh upstream/${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ steps.rebase.outputs.base-ref }}
+        run: scripts/check-each-commit.sh "upstream/${BASE_REF}"
 
   ########################
   # run unit tests
   ########################
   unit-test:
-    name: run unit tests
+    name: Unit tests (${{ matrix.unit_type }})
     runs-on: ubuntu-latest
     strategy:
       # Allow other tests in the matrix to continue if one fails.
@@ -112,27 +126,28 @@ jobs:
     steps:
       - name: extract bitcoind from docker image
         run: |-
-          docker pull ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }}
-          CONTAINER_ID=$(docker create ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }})
-          sudo docker cp $CONTAINER_ID:/opt/bitcoin-${{ env.BITCOIND_VERSION }}/bin/bitcoind /usr/local/bin/bitcoind
+          IMAGE=${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }}
+          docker pull $IMAGE
+
+          BIN_PATH=$(docker run --rm --entrypoint sh $IMAGE -c '
+            command -v bitcoind ||
+            find /opt /usr -type f -name bitcoind 2>/dev/null | head -n 1
+          ')
+          if [ -z "$BIN_PATH" ]; then
+            echo "could not locate bitcoind in $IMAGE" >&2
+            exit 1
+          fi
+
+          CONTAINER_ID=$(docker create $IMAGE)
+          sudo docker cp $CONTAINER_ID:$BIN_PATH /usr/local/bin/bitcoind
           docker rm $CONTAINER_ID
+          bitcoind --version
 
       - name: git checkout
         uses: actions/checkout@v5
 
       - name: Clean up runner space
         uses: ./.github/actions/cleanup-space
-
-      - name: go cache
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/work/go
-          key: btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-
-            btcwallet-${{ runner.os }}-go-
 
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v5
@@ -143,9 +158,236 @@ jobs:
         run: make ${{ matrix.unit_type }}
 
       - name: Send coverage
-        uses: shogo82148/actions-goveralls@v1
+        uses: coverallsapp/github-action@v2
         if: matrix.unit_type == 'unit-cover'
         continue-on-error: true
         with:
-          path-to-profile: coverage.txt
+          file: coverage.txt
+          flag-name: unit
+          format: golang
           parallel: true
+
+  ########################
+  # run integration tests (SQLite + Postgres)
+  ########################
+  itest-db:
+    name: Database itest (${{ matrix.db }}, ${{ matrix.race && 'race' || 'cover' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, postgres]
+        race: [false, true]
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: run ${{ matrix.db }} itest-db (coverage)
+        if: ${{ !matrix.race }}
+        run: make itest-db db=${{ matrix.db }} cover=1 verbose=1
+
+      - name: run ${{ matrix.db }} itest-db-race
+        if: matrix.race
+        run: make itest-db-race db=${{ matrix.db }} verbose=1
+
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        if: ${{ !matrix.race }}
+        continue-on-error: true
+        with:
+          file: coverage-itest-${{ matrix.db }}.txt
+          flag-name: itest-db-${{ matrix.db }}
+          format: golang
+          parallel: true
+
+  ########################
+  # Run bwtest integration tests against each supported chain backend.
+  #
+  # btcd and neutrino run with kvdb and sqlite. The bitcoind matrix crosses
+  # every supported bitcoind version with kvdb, sqlite, and postgres so it
+  # catches compatibility bugs specific to a node version and wallet database.
+  ########################
+  itest-btcd:
+    name: Wallet itest (btcd, ${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [kvdb, sqlite]
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: add go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: install btcd ${{ env.BTCD_VERSION_LATEST }}
+        run: go install -v github.com/btcsuite/btcd@${{ env.BTCD_VERSION_LATEST }}
+
+      - name: check btcd version
+        run: btcd --version
+
+      # The btcd backend job runs btcd for both the shared miner and the chain
+      # backend under test.
+      - name: run itest (btcd, ${{ matrix.db }})
+        run: make itest chain=btcd db=${{ matrix.db }}
+
+      - name: upload itest logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: itest-logs-btcd-${{ matrix.db }}
+          path: itest/test-logs
+          retention-days: 5
+
+  ########################
+  # Run bwtest integration tests with the neutrino backend.
+  #
+  # Job flow:
+  # - Install btcd `${{ env.BTCD_VERSION_LATEST }}`.
+  # - Use btcd as the shared miner for the suite.
+  # - Run `make itest chain=neutrino db=${{ matrix.db }}` so wallets use the
+  #   in-process neutrino backend while blocks/peers come from btcd.
+  ########################
+  itest-neutrino:
+    name: Wallet itest (neutrino, ${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [kvdb, sqlite]
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: add go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: install btcd ${{ env.BTCD_VERSION_LATEST }}
+        run: go install -v github.com/btcsuite/btcd@${{ env.BTCD_VERSION_LATEST }}
+
+      - name: check btcd version
+        run: btcd --version
+
+      # Neutrino runs in-process, but it still relies on the shared btcd miner
+      # for chain data and peer connectivity.
+      - name: run itest (neutrino, ${{ matrix.db }})
+        run: make itest chain=neutrino db=${{ matrix.db }}
+
+      - name: upload itest logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: itest-logs-neutrino-${{ matrix.db }}
+          path: itest/test-logs
+          retention-days: 5
+
+  ########################
+  # Run bwtest integration tests with the bitcoind backend.
+  #
+  # Job flow:
+  # - Install btcd `${{ env.BTCD_VERSION_LATEST }}` as the shared miner.
+  # - Cross bitcoind versions `30` (latest) and `28` (older) with every wallet
+  #   database so each version/database combination is tested independently.
+  # - Extract each matrix binary from the docker image and run
+  #   `make itest chain=bitcoind db=${{ matrix.db }}`.
+  ########################
+  itest-bitcoind:
+    name: Wallet itest (bitcoind v${{ matrix.bitcoind_version }}, ${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bitcoind_version: ['30', '28']
+        db: [kvdb, sqlite, postgres]
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: add go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: install btcd ${{ env.BTCD_VERSION_LATEST }}
+        run: go install -v github.com/btcsuite/btcd@${{ env.BTCD_VERSION_LATEST }}
+
+      - name: check btcd version
+        run: btcd --version
+
+      # For bitcoind backend tests, btcd remains the shared miner while the
+      # matrix covers both bitcoind v30 (latest) and v28 (older).
+      - name: extract bitcoind from docker image (${{ matrix.bitcoind_version }})
+        run: |-
+          IMAGE=${{ env.BITCOIND_IMAGE }}:${{ matrix.bitcoind_version }}
+          docker pull $IMAGE
+
+          BIN_PATH=$(docker run --rm --entrypoint sh $IMAGE -c '
+            command -v bitcoind ||
+            find /opt /usr -type f -name bitcoind 2>/dev/null | head -n 1
+          ')
+          if [ -z "$BIN_PATH" ]; then
+            echo "could not locate bitcoind in $IMAGE" >&2
+            exit 1
+          fi
+
+          CONTAINER_ID=$(docker create $IMAGE)
+          sudo docker cp $CONTAINER_ID:$BIN_PATH /usr/local/bin/bitcoind
+          docker rm $CONTAINER_ID
+          bitcoind --version
+
+      - name: run itest (bitcoind, ${{ matrix.db }})
+        run: make itest chain=bitcoind db=${{ matrix.db }}
+
+      - name: upload itest logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: itest-logs-bitcoind-${{ matrix.bitcoind_version }}-${{ matrix.db }}
+          path: itest/test-logs
+          retention-days: 5
+
+  ########################
+  # Complete parallel coverage uploads
+  ########################
+  finish:
+    name: Coverage upload
+    if: ${{ !cancelled() }}
+    needs: [unit-test, itest-db]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finish parallel Coveralls upload
+        uses: coverallsapp/github-action@v2
+        continue-on-error: true
+        with:
+          parallel-finished: true

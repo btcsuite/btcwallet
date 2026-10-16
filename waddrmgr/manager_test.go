@@ -1407,7 +1407,11 @@ func testChangePassphrase(tc *testContext) bool {
 func testNewAccount(tc *testContext) bool {
 	if tc.watchingOnly {
 		// Creating new accounts in watching-only mode should return ErrWatchingOnly
-		err := tc.manager.CanAddAccount()
+		err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			_, err := tc.manager.NewAccount(ns, "acct-watch-only")
+			return err
+		})
 		if !checkManagerError(
 			tc.t, "Create account in watching-only mode", err,
 			ErrWatchingOnly,
@@ -1418,7 +1422,11 @@ func testNewAccount(tc *testContext) bool {
 		return true
 	}
 	// Creating new accounts when wallet is locked should return ErrLocked
-	err := tc.manager.CanAddAccount()
+	err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		_, err := tc.manager.NewAccount(ns, "acct-locked")
+		return err
+	})
 	if !checkManagerError(
 		tc.t, "Create account when wallet is locked", err, ErrLocked,
 	) {
@@ -1960,7 +1968,7 @@ func TestManager(t *testing.T) {
 		{
 			name:                "created with seed",
 			createdWatchingOnly: false,
-			rootKey:             rootKey,
+			rootKey:             testRootKey(t),
 			privPassphrase:      privPassphrase,
 		},
 		{
@@ -2340,7 +2348,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2592,6 +2600,71 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 	}
 }
 
+// TestManagerLockWipesLastAccountAddresses verifies that locking the root
+// manager also zeroes the cleartext private key bytes held by the account-level
+// last external and internal managed addresses.
+func TestManagerLockWipesLastAccountAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then warm the default account info
+	// while unlocked so its cached last addresses hold cleartext private keys.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	var (
+		lastExternalAddr *managedAddress
+		lastInternalAddr *managedAddress
+	)
+
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		scopedMgr.mtx.Lock()
+		defer scopedMgr.mtx.Unlock()
+
+		acctInfo, err := scopedMgr.loadAccountInfo(ns, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
+
+		var ok bool
+
+		lastExternalAddr, ok = acctInfo.lastExternalAddr.(*managedAddress)
+		require.True(t, ok)
+
+		lastInternalAddr, ok = acctInfo.lastInternalAddr.(*managedAddress)
+		require.True(t, ok)
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, lastExternalAddr.privKeyCT)
+	require.NotEmpty(t, lastInternalAddr.privKeyCT)
+
+	// Act: Lock the root manager, which should wipe all cached cleartext key
+	// material.
+	mgr.mtx.Lock()
+	mgr.lock()
+	mgr.mtx.Unlock()
+
+	// Assert: The account-level last addresses no longer retain cleartext key
+	// bytes.
+	require.Nil(t, lastExternalAddr.privKeyCT)
+	require.Nil(t, lastInternalAddr.privKeyCT)
+}
+
 // TestRootHDKeyNeutering tests that callers are unable to create new scoped
 // managers once the root HD key has been deleted from the database.
 func TestRootHDKeyNeutering(t *testing.T) {
@@ -2609,7 +2682,7 @@ func TestRootHDKeyNeutering(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2701,7 +2774,7 @@ func TestNewRawAccount(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2817,15 +2890,16 @@ func TestNewRawAccountWatchingOnly(t *testing.T) {
 // TestNewRawAccountHybrid is similar to TestNewRawAccountWatchingOnly
 // except that the manager is created normally with a seed. This test
 // shows that watch-only accounts can be added to managers with
-// non-watch-only accounts.
+// non-watch-only accounts, including extension across unlocking.
 func TestNewRawAccountHybrid(t *testing.T) {
 	t.Parallel()
 
 	teardown, db := emptyDB(t)
 	defer teardown()
 
-	// We'll start the test by creating a new root manager that will be
-	// used for the duration of the test.
+	// Arrange a locked signing manager, then import an external account and
+	// derive its public children. This loads the watch-only account and its
+	// last-address cache entries that previously broke local unlocking.
 	var mgr *Manager
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
@@ -2833,7 +2907,7 @@ func TestNewRawAccountHybrid(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2882,6 +2956,30 @@ func TestNewRawAccountHybrid(t *testing.T) {
 	}
 
 	testNewRawAccount(t, mgr, db, accountNum, scopedMgr)
+
+	// Act by extending the external branch past its next index while locked,
+	// unlocking the local root, and extending again with the root unlocked.
+	// These are the same public extension/unlock paths used by recovery.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendExternalAddresses(ns, accountNum, 3)
+		if err != nil {
+			return err
+		}
+
+		err = mgr.Unlock(ns, privPassphrase)
+		if err != nil {
+			return err
+		}
+
+		return scopedMgr.ExtendExternalAddresses(ns, accountNum, 5)
+	})
+
+	// Assert external public derivation remains valid in both lock states
+	// and never prevents the containing signing manager from unlocking.
+	require.NoError(t, err)
+	require.False(t, mgr.IsLocked())
 }
 
 func testNewRawAccount(t *testing.T, _ *Manager, db walletdb.DB,
@@ -2956,7 +3054,7 @@ func TestDeriveFromKeyPathCache(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -3202,7 +3300,7 @@ func TestManagedAddressValidation(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
