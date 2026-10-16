@@ -7532,31 +7532,14 @@ func TestScanBatchAncestry(t *testing.T) {
 	// Arrange: Confirm a real transaction on the old branch, then expose a
 	// higher backend tip whose next block extends a replacement height one.
 	// The existing worker stays behind its mocked backend-readiness gate.
-	_, client, w := newLiveWatchManager(t)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Once()
-
-	recv, err := w.NewAddress(t.Context(), NewAccountSelectorByName(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
-	), false)
-	require.NoError(t, err)
-	script, err := txscript.PayToAddrScript(recv.Addr)
-	require.NoError(t, err)
+	w, client, script := subscriptionWallet(t)
 
 	s, ok := w.sync.(*syncer)
 	require.True(t, ok)
 
 	s.cfg.SyncMethod = SyncMethodFullBlocks
 
-	tx := wire.NewMsgTx(2)
-	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{
-		Hash:  chainhash.Hash{1},
-		Index: 460,
-	}, nil, nil))
-	tx.AddTxOut(&wire.TxOut{
-		Value:    1000,
-		PkScript: script,
-	})
+	tx := subscriptionTx(script, 460)
 	record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	require.NoError(t, err)
 

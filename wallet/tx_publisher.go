@@ -230,6 +230,12 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// to prevent subsequent attempts with stale transaction data.
 	err = w.publishTx(r.tx, ourAddrs)
 	if err == nil {
+		// Only recorded Wallet transactions have a detail to announce.
+		// Best-effort notification cannot undo a successful publication.
+		if recorded {
+			w.notifyTx(r.ctx, r.tx.TxHash())
+		}
+
 		r.respErrChan <- nil
 
 		return
