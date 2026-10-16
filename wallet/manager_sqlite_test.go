@@ -41,7 +41,7 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 		AccountNumber: &number, NoChainSync: true,
 	})
 	require.NoError(t, err)
-	source, err := w.createChangeSource(t.Context(), &ScopedAccount{
+	source, _, err := w.createChangeSource(t.Context(), &ScopedAccount{
 		KeyScope: scope, AccountName: account.AccountName,
 	})
 	require.NoError(t, err)

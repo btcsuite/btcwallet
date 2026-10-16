@@ -183,15 +183,14 @@ type defaultAuthoringFixture struct {
 }
 
 // expectFreshChangeAddress configures one SQL change allocation: exactly one
-// fresh internal child, registered on the wallet lifetime before its script is
-// returned. It returns the expected change script.
+// fresh internal child. It returns the expected change script.
 func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 	accountName string, scope waddrmgr.KeyScope,
 	addrType db.AddressType) []byte {
 
 	t.Helper()
 
-	addr, script, pubKey := expectedStoreAddress(
+	_, script, pubKey := expectedStoreAddress(
 		t, storeDerivationAccountPubKey(t), addrType, 1, 0,
 	)
 	mocks.store.On("NewDerivedAddresses", mock.Anything,
@@ -208,9 +207,6 @@ func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 		ScriptPubKey:      script,
 		PubKey:            pubKey,
 	}}, nil).Once()
-	mocks.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
-	).Return(nil).Once()
 
 	return script
 }
@@ -1292,7 +1288,7 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 				db.WitnessPubKey,
 			)
 
-			changeSource, err := w.createChangeSource(
+			changeSource, _, err := w.createChangeSource(
 				t.Context(), &ScopedAccount{
 					AccountName: tc.accountName,
 					KeyScope:    scope,
@@ -1338,7 +1334,7 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 		}),
 	).Return(nil, db.ErrAccountNotFound).Once()
 
-	_, err := w.createChangeSource(
+	_, _, err := w.createChangeSource(
 		t.Context(), &ScopedAccount{
 			AccountName: accountName,
 			KeyScope:    scope,
@@ -1395,7 +1391,7 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 		db.WitnessPubKey,
 	)
 
-	changeSource, err := w.createChangeSource(
+	changeSource, _, err := w.createChangeSource(
 		t.Context(), &ScopedAccount{
 			AccountName: accountName,
 			KeyScope:    scope,
