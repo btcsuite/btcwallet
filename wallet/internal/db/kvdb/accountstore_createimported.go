@@ -21,7 +21,7 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 	mgr := s.addrStore
 	walletIsWatchOnly := mgr.WatchOnly()
 
-	pubKey, err := validateImportedAccountParams(
+	pubKey, addrSchema, err := validateImportedAccountParams(
 		params, walletIsWatchOnly,
 	)
 	if err != nil {
@@ -33,6 +33,11 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 		Coin:    params.Scope.Coin,
 	}
 
+	// bbolt releases its writer before OnCommit registers new scopes.
+	// Serialize admission through those callbacks with other Store writes.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	var info *db.AccountInfo
 
 	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
@@ -42,7 +47,7 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 		}
 
 		built, err := s.putImportedAccount(
-			ns, scope, params, pubKey, walletIsWatchOnly,
+			ns, scope, params, pubKey, addrSchema, walletIsWatchOnly,
 		)
 		if err != nil {
 			return err
@@ -57,6 +62,12 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 		return nil
 	})
 	if err != nil {
+		// Keep Store capacity errors independent of the native writer.
+		if waddrmgr.IsError(err, waddrmgr.ErrAccountNumTooHigh) {
+			return nil, fmt.Errorf("%w: %w",
+				db.ErrMaxAccountNumberReached, err)
+		}
+
 		if params.DryRun && errors.Is(err, walletdb.ErrDryRunRollBack) {
 			return info, nil
 		}
@@ -68,58 +79,61 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 }
 
 // validateImportedAccountParams performs kvdb-specific import validation and
-// returns the parsed account public key.
+// returns the parsed key and native schema before opening a write transaction.
 func validateImportedAccountParams(params db.CreateImportedAccountParams,
-	walletIsWatchOnly bool) (*hdkeychain.ExtendedKey, error) {
+	walletIsWatchOnly bool) (*hdkeychain.ExtendedKey,
+	*waddrmgr.ScopeAddrSchema, error) {
 
 	err := params.Validate()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	err = params.ValidateWatchOnly(walletIsWatchOnly)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if len(params.EncryptedPrivateKey) > 0 && !walletIsWatchOnly {
-		return nil, errImportedAccountWithPriv
+		return nil, nil, errImportedAccountWithPriv
 	}
 
 	pubKey, err := hdkeychain.NewKeyFromString(string(params.PublicKey))
 	if err != nil {
-		return nil, fmt.Errorf("parse account public key: %w", err)
+		return nil, nil, fmt.Errorf("parse account public key: %w", err)
 	}
 
 	if pubKey.IsPrivate() {
-		return nil, errImportedAccountWithPriv
+		return nil, nil, errImportedAccountWithPriv
 	}
 
-	return pubKey, nil
-}
-
-// putImportedAccount writes a validated imported account using waddrmgr's
-// legacy watch-only account creation path.
-func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
-	scope waddrmgr.KeyScope, params db.CreateImportedAccountParams,
-	pubKey *hdkeychain.ExtendedKey,
-	walletIsWatchOnly bool) (*db.AccountInfo, error) {
-
+	// Schema conversion belongs to validation, so persistence can reuse the
+	// native value without another conversion helper.
 	var addrSchema *waddrmgr.ScopeAddrSchema
 	if params.AddrSchema != nil {
 		converted, err := db.ScopeAddrSchemaToWaddrmgr(
 			*params.AddrSchema,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("address schema: %w", err)
+			return nil, nil, fmt.Errorf("address schema: %w", err)
 		}
 
 		addrSchema = &converted
 	}
 
+	return pubKey, addrSchema, nil
+}
+
+// putImportedAccount writes a validated imported account using waddrmgr's
+// legacy watch-only account creation path.
+func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
+	scope waddrmgr.KeyScope, params db.CreateImportedAccountParams,
+	pubKey *hdkeychain.ExtendedKey, addrSchema *waddrmgr.ScopeAddrSchema,
+	walletIsWatchOnly bool) (*db.AccountInfo, error) {
+
 	// Resolve once so admission and registration use the same scope schema.
 	scopedMgr, scopeSchema, err := s.resolveImportedAccountScope(
-		scope, addrSchema, params.DryRun,
+		scope, addrSchema, params, walletIsWatchOnly,
 	)
 	if err != nil {
 		return nil, err
@@ -130,44 +144,61 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
-	err = checkAccountIdentity(ns, s.addrStore, db.AccountInfo{
-		KeyScope:    params.Scope,
-		AccountName: params.Name,
-		PublicKey:   params.PublicKey,
-		AddrSchema:  schema,
-	})
+	// Keep the admitted request for comparison with a missing scope's default.
+	candidate := db.AccountInfo{
+		KeyScope:      params.Scope,
+		AccountName:   params.Name,
+		AccountNumber: params.AccountNumber,
+		PublicKey:     params.PublicKey,
+		AddrSchema:    schema,
+	}
+
+	err = checkAccountIdentity(ns, s.addrStore, candidate)
 	if err != nil {
 		return nil, err
 	}
 
 	// Register after admission so a collision cannot publish a scope.
 	scopedMgr, err = s.scopedManagerOrCreate(
-		ns, scope, scopedMgr, scopeSchema,
+		ns, scope, scopedMgr, scopeSchema, candidate,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	accountNumber, err := scopedMgr.NewAccountWatchingOnly(
-		ns, params.Name, pubKey, params.MasterFingerprint, addrSchema,
-	)
+	// Known paths reuse the native exact-slot writer. Inferred imports keep
+	// the legacy sequential assignment, including its allocation limit.
+	var accountNumber uint32
+	if params.AccountNumber != nil {
+		accountNumber = *params.AccountNumber
+		err = scopedMgr.PutWatchOnlyAccountWithKeys(
+			ns, accountNumber, params.Name, pubKey,
+			params.MasterFingerprint, addrSchema,
+		)
+	} else {
+		accountNumber, err = scopedMgr.NewAccountWatchingOnly(
+			ns, params.Name, pubKey, params.MasterFingerprint, addrSchema,
+		)
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
 	if params.DryRun {
 		return dryRunImportedAccount(
-			ns, scopedMgr, accountNumber, walletIsWatchOnly,
+			ns, scopedMgr, accountNumber, params.AccountNumber,
+			walletIsWatchOnly,
 		)
 	}
 
-	// Persist the creation timestamp into the kvdb-owned side
-	// bucket. The subsequent loadAccountInfo call reads it back.
+	// Retain a declared number with the timestamp in the same transaction;
+	// numberless imports continue writing the original timestamp-only value.
 	err = putAccountCreatedAt(
-		ns, scope, accountNumber, time.Now().UTC(),
+		ns, scope, accountNumber, time.Now().UTC(), params.AccountNumber,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("persist created-at: %w", err)
+		return nil, fmt.Errorf("persist account metadata: %w", err)
 	}
 
 	return loadAccountInfo(
@@ -175,31 +206,84 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 	)
 }
 
-// scopedManagerOrCreate registers a missing scope after admission succeeds.
+// scopedManagerOrCreate admits the actual native default before commit can
+// publish a new scope, using its returned transaction-local manager.
 func (s *Store) scopedManagerOrCreate(ns walletdb.ReadWriteBucket,
 	scope waddrmgr.KeyScope, scopedMgr waddrmgr.AccountStore,
-	schema waddrmgr.ScopeAddrSchema) (waddrmgr.AccountStore, error) {
+	schema waddrmgr.ScopeAddrSchema, candidate db.AccountInfo) (
+	waddrmgr.AccountStore, error) {
 
 	if scopedMgr != nil {
 		return scopedMgr, nil
 	}
 
+	// Native creation supplies the default key without publishing the scope.
+	// Reuse that account for admission instead of deriving a second copy.
 	scopedMgr, err := s.addrStore.NewScopedKeyManager(ns, scope, schema)
 	if err != nil {
 		return nil, fmt.Errorf("new scoped key manager: %w", err)
 	}
 
+	err = s.checkDefaultAccountIdentity(ns, scopedMgr, candidate)
+	if err != nil {
+		return nil, err
+	}
+
 	return scopedMgr, nil
+}
+
+// checkDefaultAccountIdentity reads the new scope's seed-derived default before
+// commit, then checks its keys against the request and existing owners.
+func (s *Store) checkDefaultAccountIdentity(ns walletdb.ReadBucket,
+	scopedMgr waddrmgr.AccountStore, candidate db.AccountInfo) error {
+
+	// Watch-only scopes create no seed-derived default, so only the supplied
+	// account needs the existing import admission check.
+	if s.addrStore.WatchOnly() {
+		return nil
+	}
+
+	// Admission must not leave a cached default for the legacy numberless
+	// allocator, which can reuse this scope's first account slot.
+	defer scopedMgr.InvalidateAccountCache(waddrmgr.DefaultAccountNum)
+
+	account, err := loadAccountInfo(
+		ns, scopedMgr, waddrmgr.DefaultAccountNum, false,
+	)
+	if err != nil {
+		return fmt.Errorf("read default account: %w", err)
+	}
+
+	// Neither new account is globally visible yet. Compare the native default
+	// with the request explicitly before checking the committed owners.
+	err = db.CheckAccountIdentity(*account, []db.AccountInfo{candidate})
+	if err != nil {
+		return err
+	}
+
+	return checkAccountIdentity(ns, s.addrStore, *account)
 }
 
 // dryRunImportedAccount validates an imported account by deriving one external
 // and one internal address, then returns the refreshed account snapshot. The
 // caller rolls back the surrounding transaction.
 func dryRunImportedAccount(ns walletdb.ReadWriteBucket,
-	scopedMgr waddrmgr.AccountStore, accountNumber uint32,
+	scopedMgr waddrmgr.AccountStore, accountNumber uint32, knownNumber *uint32,
 	walletIsWatchOnly bool) (*db.AccountInfo, error) {
 
 	defer scopedMgr.InvalidateAccountCache(accountNumber)
+
+	// A numbered preview needs declaration metadata for its returned account
+	// path. Rollback removes the record; ordinary previews stay unchanged.
+	if knownNumber != nil {
+		err := putAccountCreatedAt(
+			ns, scopedMgr.Scope(), accountNumber, time.Now().UTC(),
+			knownNumber,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("preview account metadata: %w", err)
+		}
+	}
 
 	_, err := scopedMgr.NextExternalAddresses(ns, accountNumber, 1)
 	if err != nil {
@@ -219,7 +303,8 @@ func dryRunImportedAccount(ns walletdb.ReadWriteBucket,
 // resolveImportedAccountScope returns the existing manager or the schema for
 // a missing scope, letting admission finish before registration mutates it.
 func (s *Store) resolveImportedAccountScope(scope waddrmgr.KeyScope,
-	override *waddrmgr.ScopeAddrSchema, dryRun bool) (
+	override *waddrmgr.ScopeAddrSchema, params db.CreateImportedAccountParams,
+	walletIsWatchOnly bool) (
 	waddrmgr.AccountStore, waddrmgr.ScopeAddrSchema, error) {
 
 	existing, err := s.addrStore.FetchScopedKeyManager(scope)
@@ -233,19 +318,31 @@ func (s *Store) resolveImportedAccountScope(scope waddrmgr.KeyScope,
 		return nil, empty, translateAccountErr(err, db.ErrAccountNotFound)
 	}
 
-	// Dry runs cannot create scopes because walletdb rollback would leave
-	// NewScopedKeyManager's in-memory registration behind.
-	if dryRun {
-		return nil, empty, translateAccountErr(err, db.ErrKeyScopeNotFound)
-	}
-
+	var schema waddrmgr.ScopeAddrSchema
 	if override != nil {
-		return nil, *override, nil
+		schema = *override
+	} else {
+		var ok bool
+
+		schema, ok = waddrmgr.ScopeAddrMap[scope]
+		if !ok {
+			return nil, empty, fmt.Errorf("%w %s", errNoDefaultSchema, scope)
+		}
 	}
 
-	schema, ok := waddrmgr.ScopeAddrMap[scope]
-	if !ok {
-		return nil, empty, fmt.Errorf("%w %s", errNoDefaultSchema, scope)
+	// A new spendable scope seeds account zero named default. Refuse either
+	// collision before registration: a duplicate name would roll back the
+	// database but leave a live scope, while an exact zero would replace it.
+	if !walletIsWatchOnly {
+		if params.Name == waddrmgr.DefaultAccountName {
+			return nil, empty, db.ErrAccountNameConflict
+		}
+
+		if params.AccountNumber != nil &&
+			*params.AccountNumber == waddrmgr.DefaultAccountNum {
+
+			return nil, empty, db.ErrAccountNumberConflict
+		}
 	}
 
 	return nil, schema, nil

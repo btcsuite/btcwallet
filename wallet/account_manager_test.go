@@ -1517,8 +1517,12 @@ func TestImportAccount(t *testing.T) {
 			// Act: Import with the versioned XPub and requested address
 			// type so the public path resolves the per-account schema.
 			info, err := w.ImportAccount(
-				t.Context(), testAccountName, key, fingerprint,
-				test.addrType, test.dryRun,
+				t.Context(), ImportAccountParams{
+					Name:                 testAccountName,
+					XPub:                 key,
+					AddrType:             test.addrType,
+					MasterKeyFingerprint: fingerprint,
+				}, test.dryRun,
 			)
 
 			// Assert: Check the returned identity; shared fixture cleanup
@@ -1549,8 +1553,12 @@ func TestImportAccountOccupiedName(t *testing.T) {
 
 	// Act: Import the public key using the occupied account name.
 	_, err := w.ImportAccount(
-		t.Context(), name, accountKey, masterFP,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), ImportAccountParams{
+			Name:                 name,
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: masterFP,
+		}, false,
 	)
 
 	// Assert: The conflict identity proves preflight refused mutation.
@@ -1577,6 +1585,26 @@ func TestImportAccountStoreErrors(t *testing.T) {
 			name:     "name conflict",
 			storeErr: db.ErrAccountNameConflict,
 			want:     ErrAccountAlreadyExists,
+		},
+		{
+			name:     "number conflict",
+			storeErr: db.ErrAccountNumberConflict,
+			want:     ErrAccountAlreadyExists,
+		},
+		{
+			name:     "unsupported numbered import",
+			storeErr: db.ErrAccountOperationUnsupported,
+			want:     ErrAccountOperationUnsupported,
+		},
+		{
+			name:     "account sequence exhausted",
+			storeErr: db.ErrMaxAccountNumberReached,
+			want:     ErrAccountDerivationExhausted,
+		},
+		{
+			name:     "invalid declared branch types",
+			storeErr: db.ErrInvalidParam,
+			want:     ErrInvalidParam,
 		},
 		{
 			name:     "absent legacy scope",
@@ -1614,8 +1642,12 @@ func TestImportAccountStoreErrors(t *testing.T) {
 
 			// Act: Import through public translation after name preflight.
 			_, err := w.ImportAccount(
-				t.Context(), testAccountName, accountKey, masterFP,
-				waddrmgr.WitnessPubKey, false,
+				t.Context(), ImportAccountParams{
+					Name:                 testAccountName,
+					XPub:                 accountKey,
+					AddrType:             waddrmgr.WitnessPubKey,
+					MasterKeyFingerprint: masterFP,
+				}, false,
 			)
 
 			// Assert: Preserve each public identity without the backend cause.
@@ -1640,8 +1672,12 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 
 	// Act: Try an empty account name with valid public key material.
 	_, err := w.ImportAccount(
-		t.Context(), "", accountKey, masterFP,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), ImportAccountParams{
+			Name:                 "",
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: masterFP,
+		}, false,
 	)
 
 	// Assert: Name validation returns the wallet-owned parameter identity.
@@ -1649,8 +1685,12 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 
 	// Act: A valid name allows the unsupported address type to be checked.
 	_, err = w.ImportAccount(
-		t.Context(), testAccountName, accountKey, masterFP,
-		waddrmgr.PubKeyHash, false,
+		t.Context(), ImportAccountParams{
+			Name:                 testAccountName,
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.PubKeyHash,
+			MasterKeyFingerprint: masterFP,
+		}, false,
 	)
 
 	// Assert: Address validation also hides internal error identities.
@@ -1661,8 +1701,14 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 	cancel()
 
 	// Act: Retry with an already-canceled caller and valid key material.
-	_, err = w.ImportAccount(ctx, "", accountKey, masterFP,
-		waddrmgr.WitnessPubKey, false)
+	_, err = w.ImportAccount(
+		ctx, ImportAccountParams{
+			Name:                 "",
+			XPub:                 accountKey,
+			AddrType:             waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: masterFP,
+		}, false,
+	)
 
 	// Assert: Caller cancellation precedes name validation and Store work.
 	require.ErrorIs(t, err, context.Canceled)
@@ -1687,8 +1733,12 @@ func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		_, err := w.ImportAccount(
-			ctx, testAccountName, accountKey, masterFP,
-			waddrmgr.WitnessPubKey, false,
+			ctx, ImportAccountParams{
+				Name:                 testAccountName,
+				XPub:                 accountKey,
+				AddrType:             waddrmgr.WitnessPubKey,
+				MasterKeyFingerprint: masterFP,
+			}, false,
 		)
 		result <- err
 	}()
@@ -1709,7 +1759,7 @@ func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
 
 	req, ok := rawReq.(importAccountReq)
 	require.True(t, ok)
-	require.Equal(t, wantKey, req.accountKey.String())
+	require.Equal(t, wantKey, req.account.XPub.String())
 }
 
 // TestImportAccountRejectsInvalidKeyBeforeAdmission verifies invalid key
@@ -1756,8 +1806,11 @@ func TestImportAccountRejectsInvalidKeyBeforeAdmission(t *testing.T) {
 
 			// Act: Attempt to import the invalid key through the public API.
 			_, err := w.ImportAccount(
-				ctx, testAccountName, test.key, 0,
-				waddrmgr.WitnessPubKey, false,
+				ctx, ImportAccountParams{
+					Name:     testAccountName,
+					XPub:     test.key,
+					AddrType: waddrmgr.WitnessPubKey,
+				}, false,
 			)
 
 			// Assert: The account-key sentinel, rather than caller
@@ -1874,8 +1927,11 @@ func TestImportAccountRejectsStopped(t *testing.T) {
 
 	// Act: Attempt to import the invalid key through the terminal Wallet.
 	_, err := w.ImportAccount(
-		t.Context(), testAccountName, nil, 0,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), ImportAccountParams{
+			Name:     testAccountName,
+			XPub:     nil,
+			AddrType: waddrmgr.WitnessPubKey,
+		}, false,
 	)
 
 	// Assert: The terminal sentinel proves shutdown wins before key validation
@@ -2581,4 +2637,178 @@ func TestNewAccountExistingScopeSchema(t *testing.T) {
 			require.Equal(t, test.persisted, info.AddrSchema)
 		})
 	}
+}
+
+// TestImportAccountDeclaredScope verifies the public API forwards the declared
+// path, branch schema and fingerprint rather than inferring them from version.
+func TestImportAccountDeclaredScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		scope  waddrmgr.KeyScope
+		schema *waddrmgr.ScopeAddrSchema
+		want   db.ScopeAddrSchema
+		fp     uint32
+	}{
+		{
+			name:  "canonical default",
+			scope: waddrmgr.KeyScopeBIP0049Plus,
+			want:  db.ScopeAddrMap[db.KeyScopeBIP0049Plus],
+		},
+		{
+			name: "custom schema",
+			scope: waddrmgr.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			},
+			schema: &waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+			want: db.ScopeAddrMap[db.KeyScopeBIP0084],
+			fp:   0x11223344,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: use an account-zero XPub with generic version bytes
+			// and require the declared scope/schema in exactly one Store call.
+			w, deps := createStartedWalletWithMocks(t)
+			key, _ := importAccountTestKey(t, 44)
+			number := uint32(0)
+
+			expectAccountNameAvailable(deps, tc.scope, testAccountName)
+			deps.store.On("CreateImportedAccount", mock.Anything,
+				db.CreateImportedAccountParams{
+					Name:              testAccountName,
+					Scope:             db.KeyScope(tc.scope),
+					AccountNumber:     &number,
+					AddrSchema:        &tc.want,
+					PublicKey:         []byte(key.String()),
+					MasterFingerprint: tc.fp,
+				}).Return(&db.AccountInfo{
+				AccountName:          testAccountName,
+				AccountNumber:        &number,
+				KeyScope:             db.KeyScope(tc.scope),
+				AddrSchema:           tc.want,
+				IsImported:           true,
+				MasterKeyFingerprint: &tc.fp,
+			}, nil).Once()
+
+			// Act: import through admission with the common account record;
+			// AddrType is omitted because declared scope selects the schema.
+			info, err := w.ImportAccount(t.Context(), ImportAccountParams{
+				Name:                 testAccountName,
+				XPub:                 key,
+				Scope:                &tc.scope,
+				AddrSchema:           tc.schema,
+				MasterKeyFingerprint: tc.fp,
+			}, false)
+
+			// Assert: the public result retains imported identity and both
+			// zero/nonzero fingerprints. Fixture cleanup verifies all calls.
+			require.NoError(t, err)
+			require.True(t, info.IsImported)
+			require.Equal(t, AccountNumber(0), *info.AccountNumber)
+			require.Equal(t, tc.scope, info.KeyScope)
+			require.Equal(
+				t, MasterFingerprint(tc.fp), *info.MasterKeyFingerprint,
+			)
+		})
+	}
+}
+
+// TestImportAccountDeclaredScopeValidation verifies the new scope/schema input
+// restrictions fail before any Store access, including script-type conversion.
+func TestImportAccountDeclaredScopeValidation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: valid public account material isolates scope/schema failures;
+	// no Store expectations permit a rejected input to reach persistence.
+	key, _ := importAccountTestKey(t, 44)
+	custom := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	canonical := waddrmgr.KeyScopeBIP0084
+	witness := waddrmgr.ScopeAddrMap[canonical]
+
+	tests := []struct {
+		name   string
+		scope  *waddrmgr.KeyScope
+		schema *waddrmgr.ScopeAddrSchema
+	}{
+		{
+			name:  "custom requires schema",
+			scope: &custom,
+		},
+		{
+			name:   "schema requires scope",
+			schema: &witness,
+		},
+		{
+			name:  "script branch rejected before conversion",
+			scope: &canonical,
+			schema: &waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.TaprootScript,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: start request admission with the existing mock fixture;
+			// its cleanup owns the single expectation check for each mock.
+			w, _ := createStartedWalletWithMocks(t)
+
+			// Act: submit the selected invalid new-form input with a valid key.
+			info, err := w.ImportAccount(t.Context(), ImportAccountParams{
+				Name:       testAccountName,
+				XPub:       key,
+				Scope:      tc.scope,
+				AddrSchema: tc.schema,
+			}, false)
+
+			// Assert: public parameter refusal returns no account before any
+			// persistence call can consume a name, number or scope.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestImportAccountNumberedKVDB verifies declared imports retain their known
+// number and schema through the real kvdb Store and public account reads.
+func TestImportAccountNumberedKVDB(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use a started watch-only kvdb Wallet and an account-zero XPub.
+	// Declaring its scope must select the exact slot, including a zero number.
+	m := testKVDBManager(t)
+	w, err := m.Create(managerLifecycleCreateParams("numbered-kvdb"))
+	require.NoError(t, err)
+	key, _ := importAccountTestKey(t, 84)
+	scope := waddrmgr.KeyScopeBIP0084
+	number := AccountNumber(0)
+
+	// Act: import through the same declared-scope API used by SQL Wallets.
+	info, err := w.ImportAccount(t.Context(), ImportAccountParams{
+		Name:  testAccountName,
+		XPub:  key,
+		Scope: &scope,
+	}, false)
+
+	// Assert: the imported key has a known number, default witness schema and
+	// present-zero fingerprint; the persisted public read agrees with creation.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Equal(t, &number, info.AccountNumber)
+	require.Equal(t, scope, info.KeyScope)
+	require.Equal(t, waddrmgr.ScopeAddrMap[scope], info.AddrSchema)
+	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
+	stored, err := w.GetAccount(t.Context(), scope, testAccountName)
+	require.NoError(t, err)
+	require.Equal(t, info, stored)
 }

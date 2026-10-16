@@ -11,6 +11,9 @@ type CreateImportedAccountInsertRequest struct {
 	// ScopeID is the resolved key-scope row ID for the account's scope pair.
 	ScopeID int64
 
+	// AccountNumber retains a known path while the key remains imported.
+	AccountNumber *uint32
+
 	// Name is the imported account's display name.
 	Name string
 
@@ -37,6 +40,19 @@ func (params *CreateImportedAccountParams) Validate() error {
 
 	if len(params.PublicKey) == 0 {
 		return ErrMissingAccountPublicKey
+	}
+
+	// A known number uses the same hardened path and account-branch rules as
+	// wallet-derived rows. Reuse that validation without derivation material.
+	if params.AccountNumber != nil {
+		path := CreateDerivedAccountParams{
+			Name:          params.Name,
+			Scope:         params.Scope,
+			AccountNumber: params.AccountNumber,
+			AddrSchema:    params.AddrSchema,
+		}
+
+		return path.Validate()
 	}
 
 	return requireUnreservedAccountName(params.Name)
@@ -84,8 +100,8 @@ type CreateImportedAccountOps interface {
 	EnsureKeyScope(ctx context.Context, walletID uint32, scope KeyScope,
 		addrSchema *ScopeAddrSchema) (int64, error)
 
-	// CreateImportedAccount inserts the imported account row for the provided
-	// request and returns its row ID.
+	// CreateImportedAccount inserts the row and advances the scope cursor for
+	// a known number in the same write transaction, then returns the row ID.
 	CreateImportedAccount(ctx context.Context,
 		req CreateImportedAccountInsertRequest) (int64, error)
 
@@ -157,6 +173,7 @@ func CreateImportedAccountWithOps(ctx context.Context,
 	// with different branch types; scope creation alone cannot retain it.
 	insertReq := CreateImportedAccountInsertRequest{
 		ScopeID:           scopeID,
+		AccountNumber:     params.AccountNumber,
 		Name:              params.Name,
 		PublicKey:         params.PublicKey,
 		MasterFingerprint: params.MasterFingerprint,

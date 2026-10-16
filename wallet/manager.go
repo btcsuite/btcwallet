@@ -56,11 +56,16 @@ const (
 	ModeShell
 )
 
-// WatchOnlyAccount contains the information needed to import a watch-only
-// account.
-type WatchOnlyAccount struct {
-	// Scope is the key scope of the account.
-	Scope waddrmgr.KeyScope
+// ImportAccountParams contains the input shared by ImportAccount and
+// initial wallet imports.
+type ImportAccountParams struct {
+	// Scope declares the purpose and coin type and retains
+	// XPub's account number. Nil uses version/AddrType without retaining it.
+	Scope *waddrmgr.KeyScope
+
+	// AddrSchema selects branch types and requires Scope. Custom scopes need
+	// it; canonical scopes default to their existing schema.
+	AddrSchema *waddrmgr.ScopeAddrSchema
 
 	// XPub is the extended public key for the account.
 	XPub *hdkeychain.ExtendedKey
@@ -94,7 +99,7 @@ type CreateWalletParams struct {
 	// InitialAccounts is optional and names watch-only accounts to import
 	// after the wallet is created. It requires WatchOnly and is only
 	// honored for ModeShell.
-	InitialAccounts []WatchOnlyAccount
+	InitialAccounts []ImportAccountParams
 
 	// WatchOnly requests a watch-only wallet and is valid only for ModeShell.
 	WatchOnly bool
@@ -465,14 +470,9 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 	// Reject bad import inputs before persistence can turn their errors into
 	// a shutdown of the Manager and its running Wallets.
 	for _, account := range params.InitialAccounts {
-		err := validateExtendedPubKey(
-			account.XPub, true, &m.config.ChainParams,
+		_, err := importAccountParams(
+			account, 0, &m.config.ChainParams, false,
 		)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrWalletParams, err)
-		}
-
-		_, _, err = keyScopeFromPubKey(account.XPub, &account.AddrType)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrWalletParams, err)
 		}
@@ -501,13 +501,10 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 // importInitialAccounts imports a list of watch-only accounts into the wallet.
 // This is typically used during wallet initialization in shell mode.
 func (w *Wallet) importInitialAccounts(ctx context.Context,
-	accounts []WatchOnlyAccount) error {
+	accounts []ImportAccountParams) error {
 
 	for _, account := range accounts {
-		_, err := w.importAccountInternal(
-			ctx, account.Name, account.XPub,
-			account.MasterKeyFingerprint, account.AddrType, false,
-		)
+		_, err := w.importAccountInternal(ctx, account, false)
 		if err != nil {
 			return fmt.Errorf("failed to import account %s: %w",
 				account.Name, err)
@@ -612,7 +609,7 @@ func (p *CreateWalletParams) validate() error {
 }
 
 // validateInitialAccountKeys requires public keys for shell account imports.
-func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
+func validateInitialAccountKeys(accounts []ImportAccountParams) error {
 	for i, account := range accounts {
 		switch {
 		case account.XPub == nil:

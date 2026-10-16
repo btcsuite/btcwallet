@@ -2926,57 +2926,111 @@ func expectImportedScanAddressPage(store *walletmock.Store,
 	)).Return(result, nil).Once()
 }
 
-// TestResolveScanTargetsDoesNotUseSQLAccountID verifies the backend boundary
-// of targeted name resolution: an imported row's store AccountID is a legacy
-// waddrmgr account number only for kvdb. Without the legacy address manager the
-// backend is SQL, where AccountID is an unrelated relational row ID, so a
-// numeric target matching no derived account must be a genuine not-found rather
-// than silently selecting whichever imported row shares that integer.
+// TestResolveScanTargetsDoesNotUseSQLAccountID verifies that a matching SQL
+// row ID cannot stand in for a missing or different BIP44 account number.
 func TestResolveScanTargetsDoesNotUseSQLAccountID(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a Store-backed syncer with no legacy address manager, holding
-	// one imported account whose row ID equals the caller's target number
-	// while its own account number does not.
-	const (
-		walletID   uint32 = 3
-		targetNum  uint32 = 7
-		otherNum   uint32 = 12
-		importedID uint32 = 7
-	)
+	// Arrange: both rows share the requested number as their SQL identity,
+	// while their known path component is absent or different. These data-only
+	// cases share the refusal fixture and assertions.
+	otherNumber := uint32(12)
 
-	scope := waddrmgr.KeyScopeBIP0084
-
-	store := &walletmock.Store{}
-	s := newSyncer(
-		Config{}, nil, nil, &mockTxPublisher{}, store, walletID,
-	)
-	require.Nil(t, s.addrStore)
-
-	id := importedID
-	number := otherNum
-	// Require scan-only selection at the Store boundary before loading rows.
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance &&
-				query.ChainSyncOnly
+	tests := []struct {
+		name   string
+		number *uint32
+	}{
+		{
+			name: "numberless import",
 		},
-	)).Return([]db.AccountInfo{{
-		AccountID:     &id,
-		AccountNumber: &number,
-		AccountName:   "imported-xpub",
-		KeyScope:      db.KeyScope(scope),
-		IsImported:    true,
-	}}, nil).Once()
+		{
+			name:   "mismatched number",
+			number: &otherNumber,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Act: target the number that collides with the imported row's ID.
+			// Arrange: the bare Store mock supplies one imported row to a
+			// SQL syncer; no legacy manager can translate its internal ID.
+			number := uint32(7)
+			scope := waddrmgr.KeyScopeBIP0084
+			store := &walletmock.Store{}
+			s := newSyncer(Config{}, nil, nil, nil, store, 3)
+			store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
+				WalletID:      3,
+				SkipBalance:   true,
+				ChainSyncOnly: true,
+			}).Return([]db.AccountInfo{
+				{
+					AccountID:     &number,
+					AccountNumber: tc.number,
+					AccountName:   "imported-xpub",
+					KeyScope:      db.KeyScope(scope),
+					IsImported:    true,
+				},
+			}, nil).Once()
+
+			// Act: request that coincident row ID as a semantic path number.
+			resolved, err := s.resolveScanTargets(t.Context(),
+				[]waddrmgr.AccountScope{
+					{
+						Scope:   scope,
+						Account: number,
+					},
+				},
+			)
+
+			// Assert: neither row's ID becomes a path, so no target resolves.
+			// The bare mock has no cleanup; verify its one read here.
+			require.ErrorIs(t, err, db.ErrAccountNotFound)
+			require.Nil(t, resolved)
+			store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestResolveScanTargetsSuppliedPath verifies an imported account's known
+// number resolves to its durable name for a targeted SQL scan.
+func TestResolveScanTargetsSuppliedPath(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: return an imported account with its real number. Target
+	// resolution reads only Store metadata, so no publisher or chain is needed.
+	number := uint32(7)
+	scope := waddrmgr.KeyScopeBIP0084
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil, store, 3)
+	store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
+		WalletID:      3,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo{
+		{
+			AccountID:     &number,
+			AccountNumber: &number,
+			AccountName:   "supplied",
+			KeyScope:      db.KeyScope(scope),
+			IsImported:    true,
+		},
+	}, nil).Once()
+
+	// Act: resolve the imported account by the caller's scope and number.
 	resolved, err := s.resolveScanTargets(t.Context(),
-		[]waddrmgr.AccountScope{{Scope: scope, Account: targetNum}},
+		[]waddrmgr.AccountScope{
+			{
+				Scope:   scope,
+				Account: number,
+			},
+		},
 	)
 
-	// Assert: the row ID was never treated as an account number.
-	require.ErrorIs(t, err, db.ErrAccountNotFound)
-	require.Nil(t, resolved)
+	// Assert: the known number selects the imported account's durable name;
+	// the bare mock has no fixture cleanup, so verify its required read here.
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	require.Equal(t, "supplied", resolved[0].AccountName)
 	store.AssertExpectations(t)
 }
 

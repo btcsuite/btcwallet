@@ -309,7 +309,7 @@ func validateAddressAccountShape[TypeID any](
 			errAddressShapeCorruption)
 	}
 
-	return validateAddressAccountNumberShape(
+	return validateAccountShape(
 		row.AccountIsDerived.Bool, row.AccountNumber,
 	)
 }
@@ -326,28 +326,6 @@ func validateRawAddressAccountShape[TypeID any](
 
 		return fmt.Errorf("%w: raw imported address has account metadata",
 			errAddressShapeCorruption)
-	}
-
-	return nil
-}
-
-// validateAddressAccountNumberShape verifies address account metadata uses
-// account numbers only for wallet-derived accounts.
-func validateAddressAccountNumberShape(accountIsDerived bool,
-	accountNumber sql.NullInt64) error {
-
-	if !accountIsDerived {
-		if accountNumber.Valid {
-			return fmt.Errorf("%w: non-derived account has derived "+
-				"account number", errAccountShapeCorruption)
-		}
-
-		return nil
-	}
-
-	if !accountNumber.Valid {
-		return fmt.Errorf("%w: derived account missing account number",
-			errAccountShapeCorruption)
 	}
 
 	return nil

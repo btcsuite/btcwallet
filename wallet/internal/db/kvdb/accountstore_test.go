@@ -774,46 +774,113 @@ func TestCreateImportedAccountDryRunRollsBack(t *testing.T) {
 }
 
 // TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope verifies a
-// dry run does not leave a missing scope registered in memory after the
-// database transaction rolls back.
+// missing purpose-1017 scope can be previewed without retaining scope state.
 func TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope(
 	t *testing.T) {
 
 	t.Parallel()
 
-	store, _, cleanup := newAccountStoreFixture(t)
-	t.Cleanup(cleanup)
+	number := uint32(7)
 
-	seed := bytes.Repeat([]byte{0xC2}, hdkeychain.RecommendedSeedLen)
-	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
-	require.NoError(t, err)
-	masterPub, err := master.Neuter()
-	require.NoError(t, err)
-
-	scope := db.KeyScope{Purpose: 1234, Coin: 0}
-	mgrScope := waddrmgr.KeyScope(scope)
-	addrSchema := db.ScopeAddrSchema{
-		ExternalAddrType: db.WitnessPubKey,
-		InternalAddrType: db.WitnessPubKey,
-	}
-
-	_, err = store.addrStore.FetchScopedKeyManager(mgrScope)
-	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
-
-	_, err = store.CreateImportedAccount(t.Context(),
-		db.CreateImportedAccountParams{
-			Scope:             scope,
-			Name:              "dry-run-missing-scope",
-			MasterFingerprint: 0xDEADBEEF,
-			PublicKey:         []byte(masterPub.String()),
-			AddrSchema:        &addrSchema,
-			DryRun:            true,
+	cases := []struct {
+		name   string
+		number *uint32
+	}{
+		{
+			name: "numberless",
 		},
-	)
-	require.ErrorIs(t, err, db.ErrKeyScopeNotFound)
+		{
+			name:   "numbered",
+			number: &number,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err = store.addrStore.FetchScopedKeyManager(mgrScope)
-	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+			// Arrange: derive an account key without creating the absent
+			// scope, and retain the public state a preview must preserve.
+			// Both inputs differ only in whether their number is declared.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := db.KeyScope{Purpose: 1017, Coin: 0}
+			schema := db.ScopeAddrMap[db.KeyScopeBIP0084]
+			derive := kvdbDeriveFnFixture(t, mgr)
+			key, err := derive(t.Context(), scope, number, false)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{SkipBalance: true}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			external := append([]waddrmgr.KeyScope(nil),
+				mgr.ScopesForExternalAddrType(waddrmgr.WitnessPubKey)...)
+			internal := append([]waddrmgr.KeyScope(nil),
+				mgr.ScopesForInternalAddrTypes(waddrmgr.WitnessPubKey)...)
+			params := db.CreateImportedAccountParams{
+				Scope:             scope,
+				Name:              "missing scope preview",
+				AccountNumber:     tc.number,
+				PublicKey:         key.PublicKey,
+				MasterFingerprint: 0xDEADBEEF,
+				AddrSchema:        &schema,
+				DryRun:            true,
+			}
+
+			// Act: preview, capture the public state before any commit,
+			// then commit identical input as the positive control that
+			// rolled-back scope rows cannot block the real import.
+			preview, previewErr := store.CreateImportedAccount(
+				t.Context(), params,
+			)
+			after, listErr := store.ListAccounts(t.Context(), query)
+			_, scopeErr := mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+			afterExternal := append([]waddrmgr.KeyScope(nil),
+				mgr.ScopesForExternalAddrType(waddrmgr.WitnessPubKey)...)
+			afterInternal := append([]waddrmgr.KeyScope(nil),
+				mgr.ScopesForInternalAddrTypes(waddrmgr.WitnessPubKey)...)
+			params.DryRun = false
+			committed, commitErr := store.CreateImportedAccount(
+				t.Context(), params,
+			)
+
+			// Assert: preview returns the requested identity without
+			// publishing any scope/index or changing the account listing.
+			// The committed result agrees on the same portable identity.
+			require.NoError(t, previewErr)
+			require.NotNil(t, preview)
+			require.Equal(t, scope, preview.KeyScope)
+			require.Equal(t, tc.number, preview.AccountNumber)
+			require.Equal(t, key.PublicKey, preview.PublicKey)
+			require.Equal(t, schema, preview.AddrSchema)
+			require.NotNil(t, preview.MasterKeyFingerprint)
+			require.Equal(
+				t, params.MasterFingerprint,
+				*preview.MasterKeyFingerprint,
+			)
+			require.NoError(t, listErr)
+			require.ElementsMatch(t, before, after)
+			require.True(t, waddrmgr.IsError(
+				scopeErr, waddrmgr.ErrScopeNotFound,
+			))
+			require.Equal(t, external, afterExternal)
+			require.Equal(t, internal, afterInternal)
+			require.NoError(t, commitErr)
+			require.NotNil(t, committed)
+			require.Equal(t, preview.KeyScope, committed.KeyScope)
+			require.Equal(t, preview.AccountNumber, committed.AccountNumber)
+			require.Equal(t, preview.PublicKey, committed.PublicKey)
+			require.Equal(t, preview.AddrSchema, committed.AddrSchema)
+			require.Equal(
+				t, preview.MasterKeyFingerprint,
+				committed.MasterKeyFingerprint,
+			)
+
+			_, err = mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+			require.NoError(t, err)
+		})
+	}
 }
 
 // TestCreateImportedAccountUsesAddrSchema verifies that kvdb forwards the
@@ -1647,34 +1714,62 @@ func TestCreateImportedAccountIdentityNamePrecedence(t *testing.T) {
 	require.ElementsMatch(t, before, after)
 }
 
-// TestCreateImportedAccountIdentityConcurrent checks that walletdb serializes
-// same-scope and cross-scope conflicting requests without consuming loser IDs.
+// TestCreateImportedAccountIdentityConcurrent checks account admission waits
+// for scope registration without admitting duplicate owners or consuming IDs.
 func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 	t.Parallel()
 
+	missing := db.KeyScope{Purpose: 1017, Coin: 0}
+	otherMissing := db.KeyScope{Purpose: 1018, Coin: 0}
+	schema := db.ScopeAddrMap[db.KeyScopeBIP0084]
+
 	tests := []struct {
-		name  string
-		scope db.KeyScope
-		other string
-		want  error
+		name       string
+		firstScope db.KeyScope
+		scope      db.KeyScope
+		other      string
+		want       error
+		wantSlot   uint32
 	}{
 		{
-			name:  "same scope",
-			scope: db.KeyScopeBIP0084,
-			other: "second",
-			want:  db.ErrAccountIdentityCollision,
+			name:       "same scope",
+			firstScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   1,
 		},
 		{
-			name:  "cross scope",
-			scope: db.KeyScopeBIP0049Plus,
-			other: "second",
-			want:  db.ErrAccountIdentityCollision,
+			name:       "cross scope",
+			firstScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0049Plus,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   1,
 		},
 		{
-			name:  "occupied name",
-			scope: db.KeyScopeBIP0084,
-			other: "first",
-			want:  db.ErrAccountNameConflict,
+			name:       "occupied name",
+			firstScope: db.KeyScopeBIP0084,
+			scope:      db.KeyScopeBIP0084,
+			other:      "first",
+			want:       db.ErrAccountNameConflict,
+			wantSlot:   1,
+		},
+		{
+			name:       "missing same scope",
+			firstScope: missing,
+			scope:      missing,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   0,
+		},
+		{
+			name:       "missing cross scope",
+			firstScope: missing,
+			scope:      otherMissing,
+			other:      "second",
+			want:       db.ErrAccountIdentityCollision,
+			wantSlot:   0,
 		},
 	}
 	for _, tc := range tests {
@@ -1683,6 +1778,8 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 
 			// Arrange: both workers wait at a shared start barrier; buffered
 			// outcomes let every worker finish even if an assertion fails.
+			// Missing scopes exercise the commit/registration interval;
+			// their legacy numberless allocator starts at slot zero.
 			store, _, cleanup := newAccountStoreFixture(t)
 			t.Cleanup(cleanup)
 
@@ -1701,14 +1798,16 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 
 			for _, params := range []db.CreateImportedAccountParams{
 				{
-					Scope:     db.KeyScopeBIP0084,
-					Name:      "first",
-					PublicKey: []byte(pub.String()),
+					Scope:      tc.firstScope,
+					Name:       "first",
+					PublicKey:  []byte(pub.String()),
+					AddrSchema: &schema,
 				},
 				{
-					Scope:     tc.scope,
-					Name:      tc.other,
-					PublicKey: []byte(pub.String()),
+					Scope:      tc.scope,
+					Name:       tc.other,
+					PublicKey:  []byte(pub.String()),
+					AddrSchema: &schema,
 				},
 			} {
 				go func() {
@@ -1742,7 +1841,7 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 				if account.IsImported {
 					imported++
 
-					require.Equal(t, uint32(1), *account.AccountID)
+					require.Equal(t, tc.wantSlot, *account.AccountID)
 				}
 			}
 
@@ -1767,7 +1866,7 @@ func TestCreateImportedAccountIdentityConcurrent(t *testing.T) {
 				return nil
 			})
 			require.NoError(t, err)
-			require.Equal(t, uint32(1), allocated)
+			require.Equal(t, tc.wantSlot, allocated)
 		})
 	}
 }
@@ -1822,4 +1921,556 @@ func TestCreateDerivedAccountIdentityRollback(t *testing.T) {
 	next, err := store.CreateDerivedAccount(t.Context(), params, derive)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), *next.AccountNumber)
+}
+
+// TestCreateImportedAccountNumberedCursor verifies exact imports and lower
+// holes share the native cursor without numbering later inferred imports.
+func TestCreateImportedAccountNumberedCursor(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use kvdbDeriveFnFixture to derive keys from the fixture seed
+	// without creating rows, so only the subject imports advance allocation.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scoped, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	derive := kvdbDeriveFnFixture(t, mgr)
+
+	number, hole := uint32(7), uint32(2)
+	cases := []struct {
+		name   string
+		number *uint32
+		child  uint32
+	}{
+		{
+			name:   "exact import",
+			number: &number,
+			child:  number,
+		},
+		{
+			name:   "lower hole",
+			number: &hole,
+			child:  hole,
+		},
+		{
+			name:  "inferred next",
+			child: number + 1,
+		},
+	}
+
+	params := make([]db.CreateImportedAccountParams, len(cases))
+	for i, tc := range cases {
+		data, err := derive(t.Context(), db.KeyScope(scope), tc.child, false)
+		require.NoError(t, err)
+
+		params[i] = db.CreateImportedAccountParams{
+			Scope:         db.KeyScope(scope),
+			Name:          tc.name,
+			AccountNumber: tc.number,
+			PublicKey:     data.PublicKey,
+		}
+	}
+
+	// Act: import the high slot, then its lower hole, then an inferred account.
+	infos := make([]*db.AccountInfo, len(params))
+	for i, input := range params {
+		infos[i], err = store.CreateImportedAccount(t.Context(), input)
+		require.NoError(t, err)
+	}
+
+	// Assert: exact paths remain known while the inferred key stays numberless,
+	// even though its key child and assigned slot coincide. The native public
+	// cursor must continue beyond the high slot without rewinding to the hole.
+	for i, tc := range cases {
+		require.Equal(t, tc.number, infos[i].AccountNumber)
+	}
+
+	var last uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		var err error
+
+		last, err = scoped.LastAccount(tx.ReadBucket(waddrmgr.NamespaceKey))
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Equal(t, number+1, last)
+}
+
+// TestCreateImportedAccountNumberedConflict verifies every occupied native slot
+// is protected, including numberless imports, before key-identity checks run.
+func TestCreateImportedAccountNumberedConflict(t *testing.T) {
+	t.Parallel()
+
+	number := uint32(7)
+	cases := []struct {
+		name        string
+		ownerNumber *uint32
+		ownerChild  uint32
+	}{
+		{
+			name:        "numbered same key",
+			ownerNumber: &number,
+			ownerChild:  number,
+		},
+		{
+			name:       "numberless different key",
+			ownerChild: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: derive fixture keys without creating accounts, then
+			// import the owner and resolve its native slot with LookupAccount.
+			// The contender at that slot reuses the numbered owner's key but
+			// differs from the numberless owner's, isolating slot admission.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := waddrmgr.KeyScopeBIP0084
+			scoped, err := mgr.FetchScopedKeyManager(scope)
+			require.NoError(t, err)
+
+			derive := kvdbDeriveFnFixture(t, mgr)
+			ownerData, err := derive(
+				t.Context(), db.KeyScope(scope), tc.ownerChild, false,
+			)
+			require.NoError(t, err)
+
+			params := db.CreateImportedAccountParams{
+				Scope:         db.KeyScope(scope),
+				Name:          "slot owner",
+				AccountNumber: tc.ownerNumber,
+				PublicKey:     ownerData.PublicKey,
+			}
+			owner, err := store.CreateImportedAccount(t.Context(), params)
+			require.NoError(t, err)
+
+			var slot uint32
+
+			err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+				ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+				var err error
+
+				slot, err = scoped.LookupAccount(ns, params.Name)
+
+				return err
+			})
+			require.NoError(t, err)
+			contender, err := derive(
+				t.Context(), db.KeyScope(scope), slot, false,
+			)
+			require.NoError(t, err)
+
+			params.Name = "slot contender"
+			params.AccountNumber = &slot
+			params.PublicKey = contender.PublicKey
+
+			// Act: declare the occupied number under a different name
+			// through Store, which must refuse before replacing any key.
+			info, err := store.CreateImportedAccount(t.Context(), params)
+
+			// Assert: slot refusal wins over key collision, no result
+			// escapes, and the complete owner remains unchanged by name,
+			// including its numberless status when no path was declared.
+			require.ErrorIs(t, err, db.ErrAccountNumberConflict)
+			require.Nil(t, info)
+			stored, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+				Scope:       db.KeyScope(scope),
+				Name:        &owner.AccountName,
+				SkipBalance: true,
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.ownerNumber, stored.AccountNumber)
+			require.Equal(t, owner, stored)
+		})
+	}
+}
+
+// TestCreateImportedAccountNumberedPreview verifies preview retains the known
+// number without occupying its slot or consuming committed child indexes.
+func TestCreateImportedAccountNumberedPreview(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: derive a fixture key without creating a row and use an existing
+	// scope, isolating preview rollback from legacy scope registration.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	derive := kvdbDeriveFnFixture(t, mgr)
+
+	number := uint32(7)
+
+	data, err := derive(t.Context(), db.KeyScope(scope), number, false)
+	require.NoError(t, err)
+
+	params := db.CreateImportedAccountParams{
+		Scope:         db.KeyScope(scope),
+		Name:          "numbered preview",
+		AccountNumber: &number,
+		PublicKey:     data.PublicKey,
+		DryRun:        true,
+	}
+
+	// Act: preview the numbered write with transaction rollback enabled.
+	preview, err := store.CreateImportedAccount(t.Context(), params)
+
+	// Assert: preview reports the known path but no persisted account resolves.
+	// Committing the identical request proves rollback left the slot reusable
+	// and both address branches start at their unconsumed index zero.
+	require.NoError(t, err)
+	require.Equal(t, &number, preview.AccountNumber)
+	_, err = store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope:         db.KeyScope(scope),
+		AccountNumber: &number,
+		SkipBalance:   true,
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	params.DryRun = false
+	created, err := store.CreateImportedAccount(t.Context(), params)
+	require.NoError(t, err)
+	require.Equal(t, &number, created.AccountNumber)
+	require.Zero(t, created.ExternalKeyCount)
+	require.Zero(t, created.InternalKeyCount)
+}
+
+// TestCreateImportedAccountNumberedExhaustion verifies a cursor jump to the
+// maximum cannot let the next inferred import overwrite the raw-import bucket.
+func TestCreateImportedAccountNumberedExhaustion(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: derive keys with the existing fixture without allocating rows,
+	// import the maximum, and retain the raw pseudo-account before exhaustion.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scoped, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	derive := kvdbDeriveFnFixture(t, mgr)
+
+	number := db.MaxAccountNumber
+
+	data, err := derive(t.Context(), db.KeyScope(scope), number, false)
+	require.NoError(t, err)
+	next, err := derive(t.Context(), db.KeyScope(scope), 1, false)
+	require.NoError(t, err)
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:         db.KeyScope(scope),
+			Name:          "last slot",
+			AccountNumber: &number,
+			PublicKey:     data.PublicKey,
+		},
+	)
+	require.NoError(t, err)
+
+	importedName := waddrmgr.ImportedAddrAccountName
+	query := db.GetAccountQuery{
+		Scope:       db.KeyScope(scope),
+		Name:        &importedName,
+		SkipBalance: true,
+	}
+	before, err := store.GetAccount(t.Context(), query)
+	require.NoError(t, err)
+
+	// Act: import an ordinary account after exhausting the shared sequence.
+	info, err := store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:     db.KeyScope(scope),
+			Name:      "after limit",
+			PublicKey: next.PublicKey,
+		},
+	)
+
+	// Assert: the existing capacity identity replaces the reserved-slot write;
+	// the pseudo-account and public native cursor remain exactly as committed.
+	require.ErrorIs(t, err, db.ErrMaxAccountNumberReached)
+	require.Nil(t, info)
+	after, err := store.GetAccount(t.Context(), query)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	var last uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		var err error
+
+		last, err = scoped.LastAccount(tx.ReadBucket(waddrmgr.NamespaceKey))
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Equal(t, number, last)
+}
+
+// TestCreateImportedAccountNumberedDefaultConflict verifies collisions with a
+// new spendable scope's seeded default are refused before scope registration.
+func TestCreateImportedAccountNumberedDefaultConflict(t *testing.T) {
+	t.Parallel()
+
+	// Number, name and key collisions share the same fixture and refusal
+	// assertions; keyChild varies the key independently of the supplied slot.
+	cases := []struct {
+		name        string
+		number      uint32
+		keyChild    uint32
+		accountName string
+		wantErr     error
+	}{
+		{
+			name:        "default number",
+			number:      waddrmgr.DefaultAccountNum,
+			keyChild:    waddrmgr.DefaultAccountNum,
+			accountName: "default contender",
+			wantErr:     db.ErrAccountNumberConflict,
+		},
+		{
+			name:        "default name at nonzero number",
+			number:      7,
+			keyChild:    7,
+			accountName: waddrmgr.DefaultAccountName,
+			wantErr:     db.ErrAccountNameConflict,
+		},
+		{
+			name:        "default key at nonzero number",
+			number:      7,
+			keyChild:    waddrmgr.DefaultAccountNum,
+			accountName: "default key contender",
+			wantErr:     db.ErrAccountIdentityCollision,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: derive a valid XPub for an absent spendable scope
+			// without creating a row, and retain the public account list.
+			// Registration would seed default at zero before the import.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := db.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			}
+			schema := db.ScopeAddrSchema{
+				ExternalAddrType: db.WitnessPubKey,
+				InternalAddrType: db.WitnessPubKey,
+			}
+			derive := kvdbDeriveFnFixture(t, mgr)
+			data, err := derive(t.Context(), scope, tc.keyChild, false)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{
+				SkipBalance: true,
+			}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			// Act: import an account whose supplied number, name or key
+			// collides with the default that registration would create.
+			info, err := store.CreateImportedAccount(t.Context(),
+				db.CreateImportedAccountParams{
+					Scope:         scope,
+					Name:          tc.accountName,
+					AccountNumber: &tc.number,
+					PublicKey:     data.PublicKey,
+					AddrSchema:    &schema,
+				},
+			)
+
+			// Assert: admission returns the conflict without an account
+			// or registered scope. Listing remains usable and unchanged,
+			// proving rollback cannot leave a manager for missing data.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, info)
+			after, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+			require.ElementsMatch(t, before, after)
+
+			_, err = mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+			require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+		})
+	}
+}
+
+// TestCreateImportedAccountDefaultIdentity checks that scope creation admits
+// its additional default account before assigning a second owner of its keys.
+func TestCreateImportedAccountDefaultIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Both rows create a stored owner; only its key differs from the native
+	// default. The request-only collision is in the default-conflict table.
+	cases := []struct {
+		name       string
+		ownerChild uint32
+		wantErr    error
+	}{
+		{
+			name:       "existing owner matches default",
+			ownerChild: 0,
+			wantErr:    db.ErrAccountIdentityCollision,
+		},
+		{
+			name:       "different existing owner",
+			ownerChild: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: derive keys for an absent spendable scope, whose
+			// registration also creates account zero. Always import its
+			// zero or one key under BIP84 so the same subject distinguishes
+			// a duplicate default from an unrelated existing owner.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := db.KeyScope{
+				Purpose: 1017,
+				Coin:    0,
+			}
+			schema := db.ScopeAddrSchema{
+				ExternalAddrType: db.WitnessPubKey,
+				InternalAddrType: db.WitnessPubKey,
+			}
+			derive := kvdbDeriveFnFixture(t, mgr)
+			data, err := derive(t.Context(), scope, 7, false)
+			require.NoError(t, err)
+
+			key, err := derive(t.Context(), scope, tc.ownerChild, false)
+			require.NoError(t, err)
+			owner, err := store.CreateImportedAccount(t.Context(),
+				db.CreateImportedAccountParams{
+					Scope:      db.KeyScopeBIP0084,
+					Name:       "existing imported owner",
+					PublicKey:  key.PublicKey,
+					AddrSchema: &schema,
+				},
+			)
+			require.NoError(t, err)
+
+			query := db.ListAccountsQuery{
+				SkipBalance: true,
+			}
+			before, err := store.ListAccounts(t.Context(), query)
+			require.NoError(t, err)
+
+			number := uint32(7)
+
+			// Act: request the nonzero slot through Store, which accepts
+			// key and number fields independently. Both the requested key
+			// and the additional default must pass ownership admission.
+			info, err := store.CreateImportedAccount(t.Context(),
+				db.CreateImportedAccountParams{
+					Scope:         scope,
+					Name:          "declared import",
+					AccountNumber: &number,
+					PublicKey:     data.PublicKey,
+					AddrSchema:    &schema,
+				},
+			)
+
+			// Assert: either duplicate refuses the entire operation with
+			// usable, unchanged listing and no registered scope. An
+			// unrelated owner permits the import and remains unchanged.
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				require.Nil(t, info)
+				after, err := store.ListAccounts(t.Context(), query)
+				require.NoError(t, err)
+				require.ElementsMatch(t, before, after)
+
+				_, err = mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+				require.True(t, waddrmgr.IsError(
+					err, waddrmgr.ErrScopeNotFound,
+				))
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, info)
+
+			stored, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+				Scope:       db.KeyScopeBIP0084,
+				Name:        &owner.AccountName,
+				SkipBalance: true,
+			})
+			require.NoError(t, err)
+			require.Equal(t, owner, stored)
+		})
+	}
+}
+
+// TestRenameAccountNumberedImported checks the numeric rename selector accepts
+// an imported account whose declared BIP44 number is retained by the store.
+func TestRenameAccountNumberedImported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: import a valid fixture key at a declared number, keeping the
+	// existing numberless/raw refusal tests as independent negative controls.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := db.KeyScopeBIP0084
+	number := uint32(7)
+	derive := kvdbDeriveFnFixture(t, mgr)
+	data, err := derive(t.Context(), scope, number, false)
+	require.NoError(t, err)
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:         scope,
+			Name:          "numbered rename",
+			AccountNumber: &number,
+			PublicKey:     data.PublicKey,
+		},
+	)
+	require.NoError(t, err)
+
+	name := "renamed import"
+
+	// Act: rename through the public number rather than the mutable name.
+	err = store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope:         scope,
+		AccountNumber: &number,
+		NewName:       name,
+	})
+
+	// Assert: both public selectors read the new name and unchanged declared
+	// number, proving numeric rename does not discard the import's known path.
+	require.NoError(t, err)
+
+	for _, query := range []db.GetAccountQuery{
+		{
+			Scope:         scope,
+			AccountNumber: &number,
+			SkipBalance:   true,
+		},
+		{
+			Scope:       scope,
+			Name:        &name,
+			SkipBalance: true,
+		},
+	} {
+		info, err := store.GetAccount(t.Context(), query)
+		require.NoError(t, err)
+		require.Equal(t, name, info.AccountName)
+		require.Equal(t, &number, info.AccountNumber)
+	}
 }

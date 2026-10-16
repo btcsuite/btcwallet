@@ -168,8 +168,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			name: "ModeShell",
 			params: CreateWalletParams{
 				Mode: ModeShell,
-				InitialAccounts: []WatchOnlyAccount{{
-					Scope:                waddrmgr.KeyScopeBIP0049Plus,
+				InitialAccounts: []ImportAccountParams{{
 					XPub:                 acctXPub,
 					MasterKeyFingerprint: 0,
 					Name:                 "test-shell-account",
@@ -215,7 +214,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 					t.Context(), db.GetAccountQuery{
 						WalletID: w.id,
 						Scope: db.KeyScope(
-							tc.params.InitialAccounts[0].Scope,
+							waddrmgr.KeyScopeBIP0049Plus,
 						),
 						Name: &tc.params.InitialAccounts[0].Name,
 					},
@@ -252,14 +251,14 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	accountXPub, err := accountKey.Neuter()
 	require.NoError(t, err)
 
-	initialXPub := []WatchOnlyAccount{
+	initialXPub := []ImportAccountParams{
 		{
 			XPub:     accountXPub,
 			AddrType: waddrmgr.WitnessPubKey,
 		},
 	}
-	initialXPrv := []WatchOnlyAccount{{XPub: rootKey}}
-	initialNil := []WatchOnlyAccount{{}}
+	initialXPrv := []ImportAccountParams{{XPub: rootKey}}
+	initialNil := []ImportAccountParams{{}}
 
 	tests := []struct {
 		name       string
@@ -1011,7 +1010,7 @@ func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
 			require.NoError(t, err)
 
 			params := managerLifecycleCreateParams("candidate")
-			params.InitialAccounts = []WatchOnlyAccount{
+			params.InitialAccounts = []ImportAccountParams{
 				{
 					Name:     "initial-account",
 					XPub:     tc.key,
@@ -1644,4 +1643,77 @@ func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
 			require.NoError(t, m.Stop())
 		})
 	}
+}
+
+// TestManagerCreateImportsDeclaredAccount verifies pre-start SQL imports use
+// the same declared scope/schema and encoded account number as public imports.
+func TestManagerCreateImportsDeclaredAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use generic XPub version bytes with lnd's custom witness scope,
+	// which must pass declared-input preflight before wallet persistence.
+	m := testSQLiteManager(t)
+	key, _ := importAccountTestKey(t, 44)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	params := managerLifecycleCreateParams("declared-initial")
+	params.InitialAccounts = []ImportAccountParams{
+		{
+			Name:       testAccountName,
+			XPub:       key,
+			Scope:      &scope,
+			AddrSchema: &schema,
+		},
+	}
+
+	// Act: create the shell with its initial imported account before startup,
+	// then inspect the returned account through the started public interface.
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	info, err := w.GetAccount(t.Context(), scope, testAccountName)
+
+	// Assert: initial import retains declared identity and a present-zero
+	// fingerprint, with witness branch types instead of version inference.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Equal(t, AccountNumber(0), *info.AccountNumber)
+	require.Equal(t, scope, info.KeyScope)
+	require.Equal(t, schema, info.AddrSchema)
+	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
+}
+
+// TestManagerCreateImportsDeclaredKVDBAccount verifies initial kvdb imports
+// use the same custom scope, schema and known number as live imports.
+func TestManagerCreateImportsDeclaredKVDBAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a generic account XPub declares lnd's custom key-family scope.
+	// Its explicit witness schema supplies the missing canonical scope default.
+	m := testKVDBManager(t)
+	key, _ := importAccountTestKey(t, 84)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	params := managerLifecycleCreateParams("kvdb-initial")
+	params.InitialAccounts = []ImportAccountParams{
+		{
+			Name:       testAccountName,
+			XPub:       key,
+			Scope:      &scope,
+			AddrSchema: &schema,
+		},
+	}
+
+	// Act: create and start the Wallet with its declared import before startup.
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	info, err := w.GetAccount(t.Context(), scope, testAccountName)
+
+	// Assert: declaration metadata survives Manager preflight and native kvdb
+	// persistence, including account zero and its caller-supplied fingerprint.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Equal(t, AccountNumber(0), *info.AccountNumber)
+	require.Equal(t, scope, info.KeyScope)
+	require.Equal(t, schema, info.AddrSchema)
+	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
 }

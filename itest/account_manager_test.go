@@ -115,22 +115,25 @@ func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
 	h.Helper()
 
 	ctx := h.Context()
-	bip84Shared, err := w.ImportAccount(
-		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
-		waddrmgr.WitnessPubKey, false,
-	)
+	account := wallet.ImportAccountParams{
+		Name:                 "query shared",
+		XPub:                 keys.accountKey,
+		AddrType:             waddrmgr.WitnessPubKey,
+		MasterKeyFingerprint: keys.masterKeyFingerprint,
+	}
+	bip84Shared, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
-	bip84Suffix, err := w.ImportAccount(
-		ctx, "query shared suffix", keys.otherAccountKey, 0,
-		waddrmgr.WitnessPubKey, false,
-	)
+	// Copy the common import options so the suffix keeps a zero fingerprint.
+	suffix := account
+	suffix.Name = "query shared suffix"
+	suffix.XPub = keys.otherAccountKey
+	suffix.MasterKeyFingerprint = 0
+	bip84Suffix, err := w.ImportAccount(ctx, suffix, false)
 	require.NoError(h, err)
 
-	bip49Shared, err := w.ImportAccount(
-		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
-		waddrmgr.NestedWitnessPubKey, false,
-	)
+	account.AddrType = waddrmgr.NestedWitnessPubKey
+	bip49Shared, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
 	return watchOnlyQueryAccounts{
@@ -572,16 +575,17 @@ func testAccountManagerQueryMissingName(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
-	_, err := w.ImportAccount(
-		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
-		waddrmgr.WitnessPubKey, false,
-	)
+	account := wallet.ImportAccountParams{
+		Name:                 "query shared",
+		XPub:                 keys.accountKey,
+		AddrType:             waddrmgr.WitnessPubKey,
+		MasterKeyFingerprint: keys.masterKeyFingerprint,
+	}
+	_, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
-	_, err = w.ImportAccount(
-		ctx, "query shared", keys.accountKey, keys.masterKeyFingerprint,
-		waddrmgr.NestedWitnessPubKey, false,
-	)
+	account.AddrType = waddrmgr.NestedWitnessPubKey
+	_, err = w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
 	control, err := w.ListAccountsByName(ctx, "query shared")
@@ -1346,8 +1350,7 @@ func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
-				Scope:                keys.scope,
+			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 sourceName,
@@ -1539,8 +1542,7 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
-				Scope:                keys.scope,
+			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1550,8 +1552,12 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 	)
 
 	imported, err := w.ImportAccount(
-		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
-		keys.addrType, false,
+		ctx, wallet.ImportAccountParams{
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+		}, false,
 	)
 
 	require.NoError(h, err, "failed to import account")
@@ -1688,9 +1694,8 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 
 			var fixture bwtest.WalletFixture
 
-			fixture.InitialAccounts = []wallet.WatchOnlyAccount{
+			fixture.InitialAccounts = []wallet.ImportAccountParams{
 				{
-					Scope:                waddrmgr.KeyScopeBIP0049Plus,
 					XPub:                 initialKey,
 					MasterKeyFingerprint: keys.masterKeyFingerprint,
 					Name:                 "schema seed",
@@ -1706,8 +1711,12 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 			// reopen, read that durable snapshot, and request both branches
 			// again through the same public selector.
 			imported, err := w.ImportAccount(
-				ctx, accountName, accountKey, keys.masterKeyFingerprint,
-				tc.addrType, false,
+				ctx, wallet.ImportAccountParams{
+					Name:                 accountName,
+					XPub:                 accountKey,
+					MasterKeyFingerprint: keys.masterKeyFingerprint,
+					AddrType:             tc.addrType,
+				}, false,
 			)
 			require.NoError(h, err)
 			external, err := w.NewAddress(ctx, selector, false)
@@ -1774,8 +1783,7 @@ func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
-				Scope:                keys.scope,
+			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1785,7 +1793,11 @@ func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
 	)
 
 	imported, err := w.ImportAccount(
-		ctx, accountName, keys.accountKey, 0, keys.addrType, false,
+		ctx, wallet.ImportAccountParams{
+			Name:     accountName,
+			XPub:     keys.accountKey,
+			AddrType: keys.addrType,
+		}, false,
 	)
 
 	require.NoError(h, err, "failed to import zero fingerprint account")
@@ -1852,8 +1864,7 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
-				Scope:                keys.scope,
+			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.otherAccountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1863,8 +1874,12 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 	)
 
 	preview, err := w.ImportAccount(
-		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
-		keys.addrType, true,
+		ctx, wallet.ImportAccountParams{
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+		}, true,
 	)
 
 	require.NoError(h, err, "failed to preview account import")
@@ -1897,8 +1912,7 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
-				Scope:                keys.scope,
+			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -1947,8 +1961,12 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	for _, tc := range testCases {
 		for range tc.attempts {
 			info, err := w.ImportAccount(
-				ctx, tc.accountName, tc.accountKey,
-				keys.masterKeyFingerprint, keys.addrType, false,
+				ctx, wallet.ImportAccountParams{
+					Name:                 tc.accountName,
+					XPub:                 tc.accountKey,
+					AddrType:             keys.addrType,
+					MasterKeyFingerprint: keys.masterKeyFingerprint,
+				}, false,
 			)
 
 			// Assert: each failure keeps its public error and returns no
@@ -1976,8 +1994,7 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
-			InitialAccounts: []wallet.WatchOnlyAccount{{
-				Scope:                keys.scope,
+			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.accountKey,
 				MasterKeyFingerprint: keys.masterKeyFingerprint,
 				Name:                 existingName,
@@ -2008,8 +2025,12 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 
 	for _, tc := range testCases {
 		_, err := w.ImportAccount(
-			ctx, tc.accountName, tc.accountKey, keys.masterKeyFingerprint,
-			keys.addrType, false,
+			ctx, wallet.ImportAccountParams{
+				Name:                 tc.accountName,
+				XPub:                 tc.accountKey,
+				AddrType:             keys.addrType,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+			}, false,
 		)
 
 		require.ErrorIs(h, err, wallet.ErrInvalidAccountKey)
@@ -2043,8 +2064,12 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 	live := h.ReloadWallet(w)
 
 	_, err = w.ImportAccount(
-		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
-		keys.addrType, false,
+		ctx, wallet.ImportAccountParams{
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+		}, false,
 	)
 
 	// A rejected import must leave no partial account, so the target stays
@@ -2067,10 +2092,13 @@ func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
 	keys := deterministicImportedAccountKeys(h)
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
-	_, err := w.ImportAccount(
-		ctx, "owner", keys.accountKey, keys.masterKeyFingerprint,
-		keys.addrType, false,
-	)
+	account := wallet.ImportAccountParams{
+		Name:                 "owner",
+		XPub:                 keys.accountKey,
+		AddrType:             keys.addrType,
+		MasterKeyFingerprint: keys.masterKeyFingerprint,
+	}
+	_, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
 	before, err := w.ListAccounts(ctx)
@@ -2078,10 +2106,10 @@ func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
 
 	// Act: request the same XPub under a vacant name without deriving any
 	// children. The import must fail at account admission.
-	info, err := w.ImportAccount(
-		ctx, "candidate", keys.accountKey, keys.masterKeyFingerprint+1,
-		keys.addrType, false,
-	)
+	candidate := account
+	candidate.Name = "candidate"
+	candidate.MasterKeyFingerprint++
+	info, err := w.ImportAccount(ctx, candidate, false)
 
 	// Assert: the caller sees the wallet sentinel and no candidate account.
 	require.ErrorIs(h, err, wallet.ErrAccountIdentityCollision)
@@ -2124,8 +2152,12 @@ func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
 	// then allocating its first external child through the public selector.
 	keys := deterministicImportedAccountKeys(h)
 	externalAccount, err := w.ImportAccount(
-		ctx, "external custody", keys.accountKey, keys.masterKeyFingerprint,
-		keys.addrType, false,
+		ctx, wallet.ImportAccountParams{
+			Name:                 "external custody",
+			XPub:                 keys.accountKey,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			AddrType:             keys.addrType,
+		}, false,
 	)
 	require.NoError(h, err)
 	require.True(h, externalAccount.IsWatchOnly)
@@ -2275,4 +2307,157 @@ func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
 	// Assert ownership never grants local signing authority for external keys.
 	require.ErrorIs(h, err, wallet.ErrNoAssocPrivateKey)
 	require.Nil(h, unlocking)
+}
+
+// testAccountManagerDerivePathBoundAddress preserves imported BIP49 paths,
+// received balance and account identity through reopening.
+func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
+	// Arrange: import the fixture's account-one XPub with BIP49's mixed schema
+	// and a present-zero fingerprint, using only the declared scope and key.
+	keys := deterministicImportedAccountKeys(h)
+	scope := waddrmgr.KeyScopeBIP0049Plus
+	schema := waddrmgr.ScopeAddrMap[scope]
+	number := wallet.AccountNumber(1)
+	fingerprint := wallet.MasterFingerprint(0)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	params := wallet.ImportAccountParams{
+		Name:       "numbered receiving",
+		Scope:      &scope,
+		AddrSchema: &schema,
+		XPub:       keys.otherAccountKey,
+	}
+	created, err := w.ImportAccount(h.Context(), params, false)
+	require.NoError(h, err)
+	require.True(h, created.IsImported)
+	require.Equal(h, &number, created.AccountNumber)
+	require.Equal(h, &fingerprint, created.MasterKeyFingerprint)
+	require.Equal(h, schema, created.AddrSchema)
+
+	selector := wallet.NewAccountSelectorByNumber(scope, number)
+
+	// Act: allocate both branches through the same numbered public selector.
+	external, err := w.NewAddress(h.Context(), selector, false)
+	require.NoError(h, err)
+	internal, err := w.NewAddress(h.Context(), selector, true)
+
+	// Assert: the mixed schema and known number survive address conversion;
+	// each branch starts at its own child zero with the declared scope.
+	require.NoError(h, err)
+	require.Equal(h, schema.ExternalAddrType, external.AddrType)
+	require.Equal(h, schema.InternalAddrType, internal.AddrType)
+	require.Equal(h, &wallet.AddressDerivation{
+		KeyScope: scope,
+		Account:  uint32(number),
+	}, external.Derivation)
+	require.Equal(h, &wallet.AddressDerivation{
+		KeyScope: scope,
+		Account:  uint32(number),
+		Branch:   1,
+	}, internal.Derivation)
+
+	// Fund the receiving child and wait for its mined block so the balance
+	// observation checks committed ownership rather than mempool timing.
+	script, err := txscript.PayToAddrScript(external.Addr)
+	require.NoError(h, err)
+
+	const amount = btcutil.Amount(17000)
+
+	txid := h.SendOutput(&wire.TxOut{
+		Value:    int64(amount),
+		PkScript: script,
+	}, bwtest.MinerFeeRate)
+	h.MineBlockWithTx(h.AssertTxInMempool(*txid))
+	before, err := w.GetAccount(h.Context(), scope, params.Name)
+	require.NoError(h, err)
+	require.Equal(h, &number, before.AccountNumber)
+	require.Equal(h, []byte(params.XPub.String()), before.PublicKey)
+	require.Equal(h, &fingerprint, before.MasterKeyFingerprint)
+	require.Equal(h, scope, before.KeyScope)
+	require.True(h, before.IsImported)
+
+	// Reopen through the harness so persisted identity, branch children and
+	// credited membership are read by a replacement Wallet instance.
+	w = h.ReloadWallet(w)
+	after, err := w.GetAccount(h.Context(), scope, params.Name)
+	require.NoError(h, err)
+	require.Equal(h, before, after)
+
+	for _, info := range []wallet.AddressInfo{external, internal} {
+		stored, err := w.GetAddressInfo(h.Context(), info.Addr)
+		require.NoError(h, err)
+		require.Equal(h, info, stored)
+	}
+
+	listed, err := w.ListAddresses(
+		h.Context(), params.Name, waddrmgr.NestedWitnessPubKey,
+	)
+	require.NoError(h, err)
+	require.Contains(h, listed, wallet.AddressProperty{
+		Address: external.Addr,
+		Balance: amount,
+	})
+}
+
+// testAccountManagerAllocatePathBoundKey verifies imported purpose-1017 keys
+// keep their declared origin and resume at the next child after reopening.
+func testAccountManagerAllocatePathBoundKey(h *bwtest.HarnessTest) {
+	// Arrange: declare the custom scope with a witness schema and nonzero
+	// fingerprint. Direct XPub derivation supplies an independent child oracle.
+	keys := deterministicImportedAccountKeys(h)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	schema := waddrmgr.ScopeAddrMap[keys.scope]
+	number := wallet.AccountNumber(0)
+	fingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	require.NotZero(h, fingerprint)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	params := wallet.ImportAccountParams{
+		Name:                 "numbered allocation",
+		Scope:                &scope,
+		AddrSchema:           &schema,
+		XPub:                 keys.accountKey,
+		MasterKeyFingerprint: uint32(fingerprint),
+	}
+	_, err := w.ImportAccount(h.Context(), params, false)
+	require.NoError(h, err)
+
+	selector := wallet.NewAccountSelectorByNumber(scope, number)
+	branch, err := keys.accountKey.Derive(0)
+	require.NoError(h, err)
+
+	// Act: allocate once on each side of the harness-owned reopen boundary.
+	for index := range uint32(2) {
+		allocated, err := w.AllocateNextKey(h.Context(), selector, false)
+
+		// Assert: independent child keys and complete declared origins match
+		// the stored cursor, including its continuation after reopening.
+		require.NoError(h, err)
+		child, err := branch.Derive(index)
+		require.NoError(h, err)
+		pub, err := child.ECPubKey()
+		require.NoError(h, err)
+		require.Equal(h, pub, allocated.PubKey)
+		require.Equal(h, index, allocated.Index)
+		require.Zero(h, allocated.Branch)
+		require.Equal(h, &wallet.KeyOrigin{
+			KeyScope:             scope,
+			Account:              uint32(number),
+			MasterKeyFingerprint: uint32(fingerprint),
+		}, allocated.Origin)
+
+		if index == 0 {
+			// Read the actual declared identity before reopening so agreeing
+			// reads alone cannot hide a lost scope, number or fingerprint.
+			before, err := w.GetAccount(h.Context(), scope, params.Name)
+			require.NoError(h, err)
+			require.Equal(h, &number, before.AccountNumber)
+			require.Equal(h, scope, before.KeyScope)
+			require.Equal(h, schema, before.AddrSchema)
+			require.Equal(h, &fingerprint, before.MasterKeyFingerprint)
+			require.True(h, before.IsImported)
+			w = h.ReloadWallet(w)
+			after, err := w.GetAccount(h.Context(), scope, params.Name)
+			require.NoError(h, err)
+			require.Equal(h, before, after)
+		}
+	}
 }

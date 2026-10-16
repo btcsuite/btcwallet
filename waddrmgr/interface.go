@@ -162,7 +162,8 @@ type AddrStore interface {
 		account uint32) (bool, error)
 
 	// NewScopedKeyManager creates a new scoped key manager from the root
-	// manager.
+	// manager. Use the returned manager inside the transaction; root lookups
+	// and address-type indexes include it only after commit.
 	NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		scope KeyScope,
 		addrSchema ScopeAddrSchema) (AccountStore, error)
@@ -297,9 +298,9 @@ type AccountStore interface {
 		uint32, error)
 
 	// PutWatchOnlyAccountWithKeys persists an imported (watch-only)
-	// account row using the supplied extended public key. Must run in
-	// the same walletdb.Update transaction as
-	// AllocateImportedAccountNumber.
+	// account row at the supplied number and advances the account cursor.
+	// Run in walletdb.Update; sequential callers may allocate first with
+	// AllocateImportedAccountNumber in the same transaction.
 	PutWatchOnlyAccountWithKeys(ns walletdb.ReadWriteBucket,
 		account uint32, name string,
 		pubKey *hdkeychain.ExtendedKey,
