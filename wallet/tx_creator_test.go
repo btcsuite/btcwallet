@@ -213,7 +213,7 @@ func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 
 // expectDefaultAuthoringSources configures automatic selection from the default
 // BIP0086 account. It registers the account-by-name and account-by-number
-// lookups, a chain tip at height 100, one 100,000-sat P2WPKH UTXO mined at
+// lookups, a processed tip at height 100, one 100,000-sat P2WPKH UTXO mined at
 // height 1, and one P2TR-sized derived change script. The requested payment is
 // 99,700 sat, so the remainder after fees is below the change threshold: the
 // authoring result must contain one input, the payment output, and no change.
@@ -247,8 +247,8 @@ func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
 	}).Return(accountInfo, nil).Once()
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", mock.Anything).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 	utxo := db.UtxoInfo{
 		OutPoint: validUTXO, Amount: inputAmount, PkScript: inputScript,
@@ -1677,8 +1677,8 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", t.Context()).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 
 	// The default account must be resolved by number 0, never by the
@@ -1736,8 +1736,8 @@ func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 		Height:   100,
 	}}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", t.Context()).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id,
@@ -1806,8 +1806,8 @@ func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 		AccountName: db.DefaultImportedAccountName,
 	}}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", t.Context()).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 
 	// The imported alias has no account row, so a real GetAccount returns
@@ -1858,8 +1858,8 @@ func TestGetEligibleUTXOsSourceUTXOsValue(t *testing.T) {
 		Height:   100,
 	}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", t.Context()).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
@@ -1885,8 +1885,8 @@ func TestGetEligibleUTXOsNilSourceAccountNotFound(t *testing.T) {
 	// Arrange.
 	w, mocks := createTestWalletWithMocks(t)
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", t.Context()).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 
 	// The default-account resolution by number 0 reports not found.
@@ -1951,8 +1951,8 @@ func TestCreateManualInputSource(t *testing.T) {
 			// Arrange.
 			w, mocks := createTestWalletWithMocks(t)
 
-			mocks.chain.On("BlockStamp").Return(
-				&waddrmgr.BlockStamp{Height: tipHeight}, nil,
+			mocks.syncer.On("syncedTo", t.Context()).Return(
+				waddrmgr.BlockStamp{Height: tipHeight}, nil,
 			).Once()
 
 			credit := &db.UtxoInfo{
@@ -2168,7 +2168,7 @@ func corruptAmountPkScript() []byte {
 }
 
 // expectCorruptAmountSources stands the store up to return one default-account
-// UTXO per given amount and registers the account and chain lookups an input
+// UTXO per given amount and registers the account and sync-tip lookups an input
 // source performs on the way. It serves both selection paths: automatic
 // selection lists the account's UTXOs, while manual selection fetches each of
 // the returned outpoints by name.
@@ -2191,18 +2191,17 @@ func expectCorruptAmountSources(t *testing.T, w *Wallet,
 		AddrSchema:    db.ScopeAddrMap[scope],
 	}
 
-	// The account and chain reads differ in number between the two paths
-	// and are only scaffolding for the amounts under test, so they are not
-	// pinned to a count.
+	// Account reads differ between the two source paths. Both paths read
+	// the processed tip once before examining the amounts under test.
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
 	}).Return(accountInfo, nil).Maybe()
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
 	}).Return(accountInfo, nil).Maybe()
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
-	).Maybe()
+	mocks.syncer.On("syncedTo", mock.Anything).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
 
 	script := corruptAmountPkScript()
 	utxos := make([]db.UtxoInfo, len(amounts))

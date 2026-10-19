@@ -986,12 +986,10 @@ func (w *Wallet) createManualInputSource(ctx context.Context,
 	inputs *InputsManual) (
 	txauthor.InputSource, error) {
 
-	// Coinbase maturity is measured against the current chain tip, so we
-	// resolve the block stamp once for all selected UTXOs.
-	//
-	// TODO(yy): remove this block stamp check. The block stamp should be
-	// passed in as a parameter.
-	bs, err := w.cfg.Chain.BlockStamp()
+	// Match listing's processed tip: the chain cache can lag Wallet state.
+	// Read once so every coin uses the same maturity height, including a
+	// lower processed tip after rollback.
+	bs, err := w.sync.syncedTo(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1103,9 +1101,10 @@ func (w *Wallet) createPolicyInputSource(ctx context.Context,
 func (w *Wallet) getEligibleUTXOs(ctx context.Context,
 	source CoinSource, minconf uint32) ([]db.UtxoInfo, error) {
 
-	// TODO(yy): remove this block stamp check. The block stamp should be
-	// passed in as a parameter.
-	bs, err := w.cfg.Chain.BlockStamp()
+	// Match listing's processed tip rather than a lagging chain cache.
+	// All eligibility predicates share this snapshot, including a lower
+	// processed height after rollback.
+	bs, err := w.sync.syncedTo(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1114,23 +1113,23 @@ func (w *Wallet) getEligibleUTXOs(ctx context.Context,
 	switch source := source.(type) {
 	// If the source is nil, we'll use the default account.
 	case nil:
-		return w.getEligibleUTXOsFromDefaultAccount(ctx, minconf, bs)
+		return w.getEligibleUTXOsFromDefaultAccount(ctx, minconf, &bs)
 
 	// If the source is a scoped account, we find all eligible outputs for
 	// that specific account and key scope.
 	case ScopedAccount:
-		return w.getEligibleUTXOsFromAccount(ctx, &source, minconf, bs)
+		return w.getEligibleUTXOsFromAccount(ctx, &source, minconf, &bs)
 
 	case *ScopedAccount:
-		return w.getEligibleUTXOsFromAccount(ctx, source, minconf, bs)
+		return w.getEligibleUTXOsFromAccount(ctx, source, minconf, &bs)
 
 	// If the source is a list of UTXOs, we validate and fetch each UTXO
 	// from the provided list.
 	case CoinSourceUTXOs:
-		return w.getEligibleUTXOsFromList(ctx, &source, minconf, bs)
+		return w.getEligibleUTXOsFromList(ctx, &source, minconf, &bs)
 
 	case *CoinSourceUTXOs:
-		return w.getEligibleUTXOsFromList(ctx, source, minconf, bs)
+		return w.getEligibleUTXOsFromList(ctx, source, minconf, &bs)
 
 	// Any other source type is unsupported.
 	default:
