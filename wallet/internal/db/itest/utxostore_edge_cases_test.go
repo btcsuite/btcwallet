@@ -181,21 +181,7 @@ func TestDeleteExpiredLeasesRemovesOnlyExpired(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	query := "UPDATE utxo_leases SET expires_at = ? " +
-		"WHERE wallet_id = ? AND lock_id = ?"
-	if _, ok := any(store).(*pg.Store); ok {
-		query = "UPDATE utxo_leases SET expires_at = $1 " +
-			"WHERE wallet_id = $2 AND lock_id = $3"
-	}
-
-	result, err := store.DB().ExecContext(
-		t.Context(), query, time.Now().Add(-time.Hour).UTC(),
-		int64(walletID), expiredID[:],
-	)
-	require.NoError(t, err)
-	rows, err := result.RowsAffected()
-	require.NoError(t, err)
-	require.Equal(t, int64(1), rows)
+	expireLease(t, store.DB(), walletID, expiredID)
 
 	err = store.DeleteExpiredLeases(t.Context(), walletID)
 	require.NoError(t, err)
