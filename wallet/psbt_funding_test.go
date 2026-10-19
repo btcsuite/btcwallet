@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -19,10 +21,65 @@ import (
 // testWalletUtxo is the output the wallet is taken to have looked up for the
 // input the funding helpers are exercised against.
 func testWalletUtxo() *wire.TxOut {
-	return &wire.TxOut{
-		Value:    100000,
-		PkScript: bytes.Repeat([]byte{0x51}, 22),
+	return &wire.TxOut{Value: 100000, PkScript: testP2WPKHScript()}
+}
+
+// testP2WPKHScript, testP2WSHScript and testP2TRScript return real scripts of
+// each kind the wallet spends.
+//
+// The funding path classifies a spend by the script the wallet looked up, so a
+// fixture carrying filler bytes is nonstandard and exercises none of it.
+func testP2WPKHScript() []byte {
+	key := testKey(1)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(key.SerializeCompressed()), &chainParams,
+	)
+	if err != nil {
+		panic(err)
 	}
+
+	return mustPayToAddr(addr)
+}
+
+func testP2WSHScript(witnessScript []byte) []byte {
+	addr, err := address.NewAddressWitnessScriptHash(
+		chainhash.HashB(witnessScript), &chainParams,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func testP2TRScript() []byte {
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(testKey(1)), &chainParams,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func testP2SHScript(redeemScript []byte) []byte {
+	addr, err := address.NewAddressScriptHash(redeemScript, &chainParams)
+	if err != nil {
+		panic(err)
+	}
+
+	return mustPayToAddr(addr)
+}
+
+func mustPayToAddr(addr address.Address) []byte {
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		panic(err)
+	}
+
+	return script
 }
 
 // testWalletDerivation is the derivation the wallet is taken to have derived
@@ -56,11 +113,73 @@ func testWalletTaprootDerivation() []*psbt.TaprootBip32Derivation {
 
 // testDecoratedInput returns an input record as the wallet's own decoration
 // would leave it.
+// testMultisigDecoratedInput is testDecoratedInput for a spend that admits
+// more than one key, which is the only kind that has cosigners to describe.
+func testMultisigDecoratedInput() psbt.PInput {
+	in := testDecoratedInput()
+	in.WitnessUtxo = &wire.TxOut{
+		Value:    100000,
+		PkScript: testP2WSHScript([]byte{0x51, 0x52}),
+	}
+
+	return in
+}
+
 func testDecoratedInput() psbt.PInput {
 	return psbt.PInput{
 		WitnessUtxo:     testWalletUtxo(),
 		SighashType:     txscript.SigHashAll,
 		Bip32Derivation: testWalletDerivation(),
+	}
+}
+
+// TestClassifySpend verifies that an input is classified by the script the
+// wallet recorded for the coin, not by anything the caller attached.
+func TestClassifySpend(t *testing.T) {
+	t.Parallel()
+
+	witnessScript := []byte{0x51, 0x52}
+
+	tests := []struct {
+		name  string
+		utxo  *wire.TxOut
+		want  spendKind
+		alone bool
+	}{{
+		name:  "a p2wpkh output",
+		utxo:  &wire.TxOut{PkScript: testP2WPKHScript()},
+		want:  spendWitnessKey,
+		alone: true,
+	}, {
+		name: "a p2wsh output",
+		utxo: &wire.TxOut{PkScript: testP2WSHScript(witnessScript)},
+		want: spendWitnessScript,
+	}, {
+		name:  "a taproot output",
+		utxo:  &wire.TxOut{PkScript: testP2TRScript()},
+		want:  spendTaproot,
+		alone: true,
+	}, {
+		name: "a p2sh output",
+		utxo: &wire.TxOut{PkScript: testP2SHScript(witnessScript)},
+		want: spendNested,
+	}, {
+		name: "an output the wallet did not record",
+		want: spendUnknown,
+	}, {
+		name: "an output of no known kind",
+		utxo: &wire.TxOut{PkScript: []byte{0x51, 0x52, 0x53}},
+		want: spendUnknown,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := classifySpend(&psbt.PInput{WitnessUtxo: tc.utxo})
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.alone, got.singleKey())
+		})
 	}
 }
 
@@ -106,30 +225,71 @@ func TestIndexCallerInputs(t *testing.T) {
 	)
 }
 
-// TestRestoreInputMetadataKeepsCallerFields verifies that the fields the
-// wallet never derives survive funding, which is the whole point of keying the
-// caller's records by outpoint in the first place.
-func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
+// TestRestoreInputMetadataKeepsWitnessScript verifies that a caller's witness
+// script survives on a spend that has a script to reveal.
+func TestRestoreInputMetadataKeepsWitnessScript(t *testing.T) {
 	t.Parallel()
 
 	outPoint := wire.OutPoint{Index: 3}
+	witnessScript := []byte{0x53, 0x54}
 
-	caller := psbt.PInput{
-		WitnessScript:     []byte{0x53, 0x54},
-		TaprootMerkleRoot: bytes.Repeat([]byte{0x09}, 32),
-		TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
-			ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
-			Script:       []byte{0x51},
-			LeafVersion:  txscript.BaseLeafVersion,
-		}},
-		TaprootInternalKey: bytes.Repeat([]byte{0x02}, 32),
+	decorated := testDecoratedInput()
+	decorated.WitnessUtxo = &wire.TxOut{
+		Value:    100000,
+		PkScript: testP2WSHScript(witnessScript),
 	}
 
 	packet := &psbt.Packet{
 		UnsignedTx: &wire.MsgTx{
 			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
 		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
+		Inputs: []psbt.PInput{decorated},
+	}
+
+	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
+		outPoint: {pInput: psbt.PInput{WitnessScript: witnessScript}},
+	})
+	require.NoError(t, err)
+
+	restored := packet.Inputs[0]
+	require.Equal(t, witnessScript, restored.WitnessScript)
+
+	// The wallet's own facts about the coin stay the wallet's.
+	require.Equal(t, decorated.WitnessUtxo, restored.WitnessUtxo)
+	require.Equal(t, testWalletDerivation(), restored.Bip32Derivation)
+}
+
+// TestRestoreInputMetadataKeepsTaprootFields verifies that the records only a
+// taproot spend can carry survive on a taproot input.
+func TestRestoreInputMetadataKeepsTaprootFields(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Index: 3}
+
+	decorated := psbt.PInput{
+		WitnessUtxo: &wire.TxOut{
+			Value:    100000,
+			PkScript: testP2TRScript(),
+		},
+		SighashType:            txscript.SigHashDefault,
+		TaprootBip32Derivation: testWalletTaprootDerivation(),
+	}
+
+	caller := psbt.PInput{
+		TaprootMerkleRoot: bytes.Repeat([]byte{0x09}, 32),
+		TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
+			ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
+			Script:       []byte{0x51},
+			LeafVersion:  txscript.BaseLeafVersion,
+		}},
+		TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
+	}
+
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+		},
+		Inputs: []psbt.PInput{decorated},
 	}
 
 	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
@@ -138,18 +298,89 @@ func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
 	require.NoError(t, err)
 
 	restored := packet.Inputs[0]
-
-	// The caller's own fields come back untouched.
-	require.Equal(t, caller.WitnessScript, restored.WitnessScript)
 	require.Equal(t, caller.TaprootMerkleRoot, restored.TaprootMerkleRoot)
 	require.Equal(t, caller.TaprootLeafScript, restored.TaprootLeafScript)
 	require.Equal(
 		t, caller.TaprootInternalKey, restored.TaprootInternalKey,
 	)
+	require.Equal(t, decorated.WitnessUtxo, restored.WitnessUtxo)
+}
 
-	// The wallet's own facts about the coin stay the wallet's.
-	require.Equal(t, testWalletUtxo(), restored.WitnessUtxo)
-	require.Equal(t, testWalletDerivation(), restored.Bip32Derivation)
+// TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse verifies that a
+// record the spend has no use for is refused rather than carried.
+//
+// Preserving one would hand back a packet describing a spend that cannot
+// happen: a taproot leaf script on a segwit v0 input, or a witness script on a
+// spend that reveals no script.
+func TestRestoreInputMetadataRejectsFieldsTheSpendCannotUse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		utxo   *wire.TxOut
+		caller psbt.PInput
+	}{{
+		name: "a taproot leaf script on a witness key spend",
+		utxo: &wire.TxOut{PkScript: testP2WPKHScript()},
+		caller: psbt.PInput{
+			TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
+				ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
+				Script:       []byte{0x51},
+				LeafVersion:  txscript.BaseLeafVersion,
+			}},
+		},
+	}, {
+		name: "a taproot internal key on a witness key spend",
+		utxo: &wire.TxOut{PkScript: testP2WPKHScript()},
+		caller: psbt.PInput{
+			TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
+		},
+	}, {
+		name: "a taproot merkle root on a witness script spend",
+		utxo: &wire.TxOut{PkScript: testP2WSHScript([]byte{0x51})},
+		caller: psbt.PInput{
+			TaprootMerkleRoot: bytes.Repeat([]byte{0x09}, 32),
+		},
+	}, {
+		name:   "a witness script on a witness key spend",
+		utxo:   &wire.TxOut{PkScript: testP2WPKHScript()},
+		caller: psbt.PInput{WitnessScript: []byte{0x53}},
+	}, {
+		name:   "a witness script on a taproot spend",
+		utxo:   &wire.TxOut{PkScript: testP2TRScript()},
+		caller: psbt.PInput{WitnessScript: []byte{0x53}},
+	}, {
+		name:   "a redeem script on a taproot spend",
+		utxo:   &wire.TxOut{PkScript: testP2TRScript()},
+		caller: psbt.PInput{RedeemScript: []byte{0x53}},
+	}, {
+		name:   "a redeem script on a witness key spend",
+		utxo:   &wire.TxOut{PkScript: testP2WPKHScript()},
+		caller: psbt.PInput{RedeemScript: []byte{0x53}},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{{WitnessUtxo: tc.utxo}},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
+	}
 }
 
 // TestRestoreInputMetadataRejectsConflicts verifies that a caller telling the
@@ -444,7 +675,7 @@ func TestRestoreInputMetadataKeepsCosignerDerivations(t *testing.T) {
 		UnsignedTx: &wire.MsgTx{
 			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
 		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
+		Inputs: []psbt.PInput{testMultisigDecoratedInput()},
 	}
 
 	caller := psbt.PInput{
@@ -486,7 +717,7 @@ func TestRestoreInputMetadataReconcilesWalletDerivation(t *testing.T) {
 		UnsignedTx: &wire.MsgTx{
 			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
 		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
+		Inputs: []psbt.PInput{testMultisigDecoratedInput()},
 	}
 
 	caller := psbt.PInput{
@@ -502,6 +733,212 @@ func TestRestoreInputMetadataReconcilesWalletDerivation(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, packet.Inputs[0].Bip32Derivation, 2)
+}
+
+// TestRestoreInputMetadataRejectsCosignersOnSingleKeySpend verifies that a
+// spend one key satisfies is refused several derivation records.
+//
+// A P2WPKH or key-path taproot output has no cosigners to describe, so a
+// caller naming more keys is describing an input that does not exist.
+func TestRestoreInputMetadataRejectsCosignersOnSingleKeySpend(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		script []byte
+		caller psbt.PInput
+	}{{
+		name:   "two bip32 keys on a witness key spend",
+		script: testP2WPKHScript(),
+		caller: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{{
+				PubKey: testKey(2).SerializeCompressed(),
+			}, {
+				PubKey: testKey(3).SerializeCompressed(),
+			}},
+		},
+	}, {
+		name:   "two taproot keys on a taproot spend",
+		script: testP2TRScript(),
+		caller: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.
+				TaprootBip32Derivation{{
+				XOnlyPubKey: schnorr.SerializePubKey(
+					testKey(2),
+				),
+			}, {
+				XOnlyPubKey: schnorr.SerializePubKey(
+					testKey(3),
+				),
+			}},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{{
+					WitnessUtxo: &wire.TxOut{
+						PkScript: tc.script,
+					},
+				}},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
+	}
+}
+
+// TestRestoreInputMetadataKeepsOneKeyOnSingleKeySpend verifies that the single
+// record a one-key spend does admit is still kept.
+func TestRestoreInputMetadataKeepsOneKeyOnSingleKeySpend(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Index: 3}
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+		},
+		Inputs: []psbt.PInput{{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2WPKHScript(),
+			},
+			Bip32Derivation: testWalletDerivation(),
+		}},
+	}
+
+	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
+		outPoint: {pInput: psbt.PInput{
+			Bip32Derivation: testWalletDerivation(),
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, packet.Inputs[0].Bip32Derivation, 1)
+}
+
+// TestRestoreInputMetadataRejectsImpostorDerivation verifies that a caller
+// naming the wallet's own fingerprint and path for a different key is refused.
+//
+// Matching records by key alone would treat this as a cosigner. It is not: it
+// asserts that the wallet's own derivation path produces a key that it does
+// not, and preserving it would leave the packet saying so.
+func TestRestoreInputMetadataRejectsImpostorDerivation(t *testing.T) {
+	t.Parallel()
+
+	walletRec := testWalletDerivation()[0]
+	walletTap := testWalletTaprootDerivation()[0]
+
+	tests := []struct {
+		name      string
+		decorated psbt.PInput
+		caller    psbt.PInput
+	}{{
+		name: "a bip32 key on the wallet's own path",
+		decorated: psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2WPKHScript(),
+			},
+			Bip32Derivation: testWalletDerivation(),
+		},
+		caller: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{{
+				PubKey: testKey(9).SerializeCompressed(),
+				MasterKeyFingerprint: walletRec.
+					MasterKeyFingerprint,
+				Bip32Path: walletRec.Bip32Path,
+			}},
+		},
+	}, {
+		name: "a taproot key on the wallet's own path",
+		decorated: psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2TRScript(),
+			},
+			TaprootBip32Derivation: testWalletTaprootDerivation(),
+		},
+		caller: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.
+				TaprootBip32Derivation{{
+				XOnlyPubKey: schnorr.SerializePubKey(
+					testKey(9),
+				),
+				MasterKeyFingerprint: walletTap.
+					MasterKeyFingerprint,
+				Bip32Path: walletTap.Bip32Path,
+			}},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{tc.decorated},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
+	}
+}
+
+// TestRestoreInputMetadataKeepsCosignerOnItsOwnPath verifies that a cosigner
+// naming its own fingerprint and path is still kept, so the impostor check
+// refuses only the records that claim the wallet's place.
+func TestRestoreInputMetadataKeepsCosignerOnItsOwnPath(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Index: 3}
+	cosigner := &psbt.Bip32Derivation{
+		PubKey:               testKey(9).SerializeCompressed(),
+		MasterKeyFingerprint: 99,
+		Bip32Path:            []uint32{48, 0, 0, 2, 0},
+	}
+
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+		},
+		Inputs: []psbt.PInput{{
+			WitnessUtxo: &wire.TxOut{
+				PkScript: testP2WSHScript([]byte{0x51}),
+			},
+			Bip32Derivation: testWalletDerivation(),
+		}},
+	}
+
+	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
+		outPoint: {pInput: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{cosigner},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, packet.Inputs[0].Bip32Derivation, 2)
+	require.Contains(t, packet.Inputs[0].Bip32Derivation, cosigner)
 }
 
 // TestRestoreInputMetadataAgreeingValues verifies that a caller which repeats
