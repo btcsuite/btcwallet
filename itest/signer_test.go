@@ -307,10 +307,13 @@ func testSignerDerivePubKeyWatchOnly(h *bwtest.HarnessTest) {
 	// derived without the wallet.
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	w, _ := h.NewWallet(bwtest.WalletFixture{
 		InitialAccounts: []wallet.ImportAccountParams{{
 			XPub:                 keys.accountKey,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 			Name:                 accountName,
 			AddrType:             keys.addrType,
 		}},
@@ -539,10 +542,13 @@ func testSignerECDHWatchOnly(h *bwtest.HarnessTest) {
 	// backend can reach: kvdb has no private material to unlock at all.
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	w, _ := h.NewWallet(bwtest.WalletFixture{
 		InitialAccounts: []wallet.ImportAccountParams{{
 			XPub:                 keys.accountKey,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 			Name:                 accountName,
 			AddrType:             keys.addrType,
 		}},
@@ -672,10 +678,13 @@ func testSignerDeriveImportedXPub(h *bwtest.HarnessTest) {
 	// the wallet's initial accounts.
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	w, _ := h.NewWallet(bwtest.WalletFixture{
 		InitialAccounts: []wallet.ImportAccountParams{{
 			XPub:                 keys.accountKey,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 			Name:                 accountName,
 			AddrType:             keys.addrType,
 		}},
@@ -1743,13 +1752,16 @@ func testSignerRejectWatchOnly(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
 
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+
 	w, _ := h.NewWallet(bwtest.WalletFixture{
 		InitialAccounts: []wallet.ImportAccountParams{
 			{
 				XPub:                 keys.accountKey,
 				Name:                 accountName,
 				AddrType:             keys.addrType,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 			},
 		},
 	})

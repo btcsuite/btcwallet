@@ -196,8 +196,10 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 			name: "derived internal",
 			mutate: func(info *db.AddressInfo) {
 				accountNumber := uint32(3)
+				fingerprint := uint32(0)
 
 				info.AccountName = defaultAccountName
+				info.MasterKeyFingerprint = &fingerprint
 				info.AccountNumber = &accountNumber
 				info.HasDerivationPath = true
 				info.Branch = waddrmgr.InternalBranch

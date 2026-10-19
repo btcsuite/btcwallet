@@ -256,7 +256,7 @@ func (tc AccountTestCase) ImportedParams(
 		WalletID:          walletID,
 		Name:              tc.Name,
 		Scope:             tc.Scope,
-		MasterFingerprint: 12345,
+		MasterFingerprint: uint32Ptr(12345),
 		PublicKey:         RandomBytes(32),
 	}
 

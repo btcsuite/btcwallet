@@ -71,8 +71,10 @@ type ImportAccountParams struct {
 	// XPub is the extended public key for the account.
 	XPub *hdkeychain.ExtendedKey
 
-	// MasterKeyFingerprint is the fingerprint of the master key.
-	MasterKeyFingerprint uint32
+	// MasterKeyFingerprint optionally identifies the caller's root key.
+	// SQL preserves nil as absent and non-nil zero as a valid fingerprint.
+	// Legacy kvdb defaults omitted metadata to its native scalar zero.
+	MasterKeyFingerprint *MasterFingerprint
 
 	// Name is the name of the account.
 	Name string

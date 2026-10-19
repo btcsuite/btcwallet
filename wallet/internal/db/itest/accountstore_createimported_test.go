@@ -359,7 +359,8 @@ func TestCreateImportedAccountIdentity(t *testing.T) {
 			candidate := owner
 			candidate.Name, candidate.PublicKey = "candidate", []byte(tc.key)
 			candidate.Scope, candidate.AddrSchema = tc.scope, tc.schema
-			candidate.MasterFingerprint, candidate.DryRun = 123, tc.dryRun
+			candidate.MasterFingerprint = uint32Ptr(123)
+			candidate.DryRun = tc.dryRun
 
 			// Act: attempt the second import within the real SQL write.
 			info, err := store.CreateImportedAccount(t.Context(), candidate)

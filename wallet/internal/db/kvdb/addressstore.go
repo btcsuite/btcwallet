@@ -1236,8 +1236,15 @@ func managedAddressInfo(
 		return nil, err
 	}
 
-	var accountNumberPtr *uint32
+	var (
+		accountNumberPtr  *uint32
+		masterFingerprint *uint32
+	)
 	if derivation.hasPath {
+		// Native HD rows carry a scalar fingerprint, including their legacy
+		// zero default. Raw imports have no such origin metadata.
+		masterFingerprint = &derivation.fingerprint
+
 		// Retain declared imported paths without treating an ordinary imported
 		// internal ID as an account component. Raw imports have no HD path.
 		if accountImported {
@@ -1256,7 +1263,7 @@ func managedAddressInfo(
 		AccountNumber:        accountNumberPtr,
 		AccountName:          accountName,
 		KeyScope:             derivation.keyScope,
-		MasterKeyFingerprint: derivation.fingerprint,
+		MasterKeyFingerprint: masterFingerprint,
 		AddrType:             addrType.Type,
 		IsImported:           isImported,
 		HasDerivationPath:    derivation.hasPath,
