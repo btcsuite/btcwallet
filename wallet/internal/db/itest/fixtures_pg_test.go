@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -996,4 +997,27 @@ func createDerivedAddressRaw(t *testing.T, queries *sqlc.Queries,
 			AddressID:     addr.ID,
 		},
 	)
+}
+
+// expireLease moves the wallet's lease held by lockID into the past directly
+// through the database, so tests can exercise expiry without sleeping.
+func expireLease(t *testing.T, dbConn *sql.DB, walletID uint32,
+	lockID [32]byte) {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE utxo_leases
+		SET expires_at = $1
+		WHERE wallet_id = $2 AND lock_id = $3`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, time.Now().Add(-time.Hour).UTC(),
+		int64(walletID), lockID[:],
+	)
+	require.NoError(t, err)
+
+	rows, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rows)
 }
