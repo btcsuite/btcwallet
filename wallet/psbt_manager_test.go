@@ -1955,13 +1955,14 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 	// Arrange: Mock Address lookup (used for both input decoration and
 	// change output info).
 	accountNumber := uint32(0)
+	fingerprint := uint32(1)
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
 		Return(&db.AddressInfo{
 			ScriptPubKey:         p2wkhScript,
 			AddrType:             db.WitnessPubKey,
 			AccountNumber:        &accountNumber,
 			KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
-			MasterKeyFingerprint: 1,
+			MasterKeyFingerprint: &fingerprint,
 			HasDerivationPath:    true,
 			PubKey:               pubKey.SerializeCompressed(),
 		}, nil)
@@ -5583,6 +5584,7 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	// The change output is only looked up once funding gets as far as
 	// decorating it, which a run that is refused earlier never does.
 	changeAccountNum := uint32(0)
+	changeFingerprint := uint32(1)
 	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
 		WalletID: w.id, ScriptPubKey: changeScript,
 	}).Maybe().Return(&db.AddressInfo{
@@ -5590,7 +5592,7 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 		AddrType:             db.TaprootPubKey,
 		AccountNumber:        &changeAccountNum,
 		KeyScope:             scope,
-		MasterKeyFingerprint: 1,
+		MasterKeyFingerprint: &changeFingerprint,
 		HasDerivationPath:    true,
 		PubKey:               changeKey.PubKey().SerializeCompressed(),
 	}, nil)

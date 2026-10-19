@@ -132,6 +132,9 @@ func TestManagerCreateSuccess(t *testing.T) {
 	acctXPub, err := acctKey.Neuter()
 	require.NoError(t, err)
 
+	// Supply zero explicitly so the shell retains its origin metadata.
+	fingerprint := MasterFingerprint(0)
+
 	// Arrange: Define test cases for different creation modes.
 	tests := []struct {
 		name   string
@@ -170,7 +173,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 				Mode: ModeShell,
 				InitialAccounts: []ImportAccountParams{{
 					XPub:                 acctXPub,
-					MasterKeyFingerprint: 0,
+					MasterKeyFingerprint: &fingerprint,
 					Name:                 "test-shell-account",
 					AddrType:             waddrmgr.NestedWitnessPubKey,
 				}},
@@ -251,10 +254,12 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	accountXPub, err := accountKey.Neuter()
 	require.NoError(t, err)
 
+	fingerprint := MasterFingerprint(0)
 	initialXPub := []ImportAccountParams{
 		{
-			XPub:     accountXPub,
-			AddrType: waddrmgr.WitnessPubKey,
+			MasterKeyFingerprint: &fingerprint,
+			XPub:                 accountXPub,
+			AddrType:             waddrmgr.WitnessPubKey,
 		},
 	}
 	initialXPrv := []ImportAccountParams{{XPub: rootKey}}
@@ -1009,12 +1014,14 @@ func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
 			)
 			require.NoError(t, err)
 
+			fingerprint := MasterFingerprint(0)
 			params := managerLifecycleCreateParams("candidate")
 			params.InitialAccounts = []ImportAccountParams{
 				{
-					Name:     "initial-account",
-					XPub:     tc.key,
-					AddrType: tc.addrType,
+					MasterKeyFingerprint: &fingerprint,
+					Name:                 "initial-account",
+					XPub:                 tc.key,
+					AddrType:             tc.addrType,
 				},
 			}
 
@@ -1911,14 +1918,16 @@ func TestManagerCreateImportsDeclaredAccount(t *testing.T) {
 	key, _ := importAccountTestKey(t, 44)
 	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
 	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	fingerprint := MasterFingerprint(0)
 	params := managerLifecycleCreateParams("declared-initial")
 	params.InitialAccounts = []ImportAccountParams{
 		{
-			Name:        testAccountName,
-			XPub:        key,
-			Scope:       &scope,
-			AddrSchema:  &schema,
-			NoChainSync: true,
+			MasterKeyFingerprint: &fingerprint,
+			Name:                 testAccountName,
+			XPub:                 key,
+			Scope:                &scope,
+			AddrSchema:           &schema,
+			NoChainSync:          true,
 		},
 	}
 
@@ -1950,13 +1959,15 @@ func TestManagerCreateImportsDeclaredKVDBAccount(t *testing.T) {
 	key, _ := importAccountTestKey(t, 84)
 	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
 	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	fingerprint := MasterFingerprint(0)
 	params := managerLifecycleCreateParams("kvdb-initial")
 	params.InitialAccounts = []ImportAccountParams{
 		{
-			Name:       testAccountName,
-			XPub:       key,
-			Scope:      &scope,
-			AddrSchema: &schema,
+			MasterKeyFingerprint: &fingerprint,
+			Name:                 testAccountName,
+			XPub:                 key,
+			Scope:                &scope,
+			AddrSchema:           &schema,
 		},
 	}
 

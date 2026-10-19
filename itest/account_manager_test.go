@@ -114,12 +114,14 @@ func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
 
 	h.Helper()
 
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	account := wallet.ImportAccountParams{
 		Name:                 "query shared",
 		XPub:                 keys.accountKey,
 		AddrType:             waddrmgr.WitnessPubKey,
-		MasterKeyFingerprint: keys.masterKeyFingerprint,
+		MasterKeyFingerprint: &inputFingerprint,
 	}
 	bip84Shared, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
@@ -128,7 +130,8 @@ func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
 	suffix := account
 	suffix.Name = "query shared suffix"
 	suffix.XPub = keys.otherAccountKey
-	suffix.MasterKeyFingerprint = 0
+	zeroFingerprint := wallet.MasterFingerprint(0)
+	suffix.MasterKeyFingerprint = &zeroFingerprint
 	bip84Suffix, err := w.ImportAccount(ctx, suffix, false)
 	require.NoError(h, err)
 
@@ -574,12 +577,15 @@ func testAccountManagerQueryMissingName(h *bwtest.HarnessTest) {
 	// merely because the wallet contains no accounts.
 	ctx := h.Context()
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	account := wallet.ImportAccountParams{
 		Name:                 "query shared",
 		XPub:                 keys.accountKey,
 		AddrType:             waddrmgr.WitnessPubKey,
-		MasterKeyFingerprint: keys.masterKeyFingerprint,
+		MasterKeyFingerprint: &inputFingerprint,
 	}
 	_, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
@@ -1347,12 +1353,15 @@ func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
 	)
 
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.accountKey,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 				Name:                 sourceName,
 				AddrType:             keys.addrType,
 			}},
@@ -1539,12 +1548,15 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 	)
 
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.otherAccountKey,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 				Name:                 existingName,
 				AddrType:             keys.addrType,
 			}},
@@ -1556,7 +1568,7 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 			Name:                 accountName,
 			XPub:                 keys.accountKey,
 			AddrType:             keys.addrType,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, false,
 	)
 
@@ -1685,6 +1697,11 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 			const accountName = "schema import"
 
 			keys := deterministicImportedAccountKeys(h)
+
+			// Supply the fixture origin explicitly so zero stays present.
+			inputFingerprint := wallet.MasterFingerprint(
+				keys.masterKeyFingerprint,
+			)
 			initialKey, err := keys.otherAccountKey.CloneWithVersion(
 				version49,
 			)
@@ -1697,7 +1714,7 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 			fixture.InitialAccounts = []wallet.ImportAccountParams{
 				{
 					XPub:                 initialKey,
-					MasterKeyFingerprint: keys.masterKeyFingerprint,
+					MasterKeyFingerprint: &inputFingerprint,
 					Name:                 "schema seed",
 					AddrType:             tc.initialAddrType,
 				},
@@ -1714,7 +1731,7 @@ func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 				ctx, wallet.ImportAccountParams{
 					Name:                 accountName,
 					XPub:                 accountKey,
-					MasterKeyFingerprint: keys.masterKeyFingerprint,
+					MasterKeyFingerprint: &inputFingerprint,
 					AddrType:             tc.addrType,
 				}, false,
 			)
@@ -1780,23 +1797,28 @@ func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
 	)
 
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.otherAccountKey,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 				Name:                 existingName,
 				AddrType:             keys.addrType,
 			}},
 		},
 	)
 
+	zeroFingerprint := wallet.MasterFingerprint(0)
 	imported, err := w.ImportAccount(
 		ctx, wallet.ImportAccountParams{
-			Name:     accountName,
-			XPub:     keys.accountKey,
-			AddrType: keys.addrType,
+			MasterKeyFingerprint: &zeroFingerprint,
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
 		}, false,
 	)
 
@@ -1861,12 +1883,15 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 	)
 
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.otherAccountKey,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 				Name:                 existingName,
 				AddrType:             keys.addrType,
 			}},
@@ -1878,7 +1903,7 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 			Name:                 accountName,
 			XPub:                 keys.accountKey,
 			AddrType:             keys.addrType,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, true,
 	)
 
@@ -1909,12 +1934,15 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	// Arrange: seed an imported account and snapshot the public inventory so
 	// each rejected request can be checked for unintended account creation.
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.accountKey,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 				Name:                 existingName,
 				AddrType:             keys.addrType,
 			}},
@@ -1965,7 +1993,7 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 					Name:                 tc.accountName,
 					XPub:                 tc.accountKey,
 					AddrType:             keys.addrType,
-					MasterKeyFingerprint: keys.masterKeyFingerprint,
+					MasterKeyFingerprint: &inputFingerprint,
 				}, false,
 			)
 
@@ -1991,12 +2019,15 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	const existingName = "account manager existing import"
 
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(
 		bwtest.WalletFixture{
 			InitialAccounts: []wallet.ImportAccountParams{{
 				XPub:                 keys.accountKey,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 				Name:                 existingName,
 				AddrType:             keys.addrType,
 			}},
@@ -2029,7 +2060,7 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 				Name:                 tc.accountName,
 				XPub:                 tc.accountKey,
 				AddrType:             keys.addrType,
-				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				MasterKeyFingerprint: &inputFingerprint,
 			}, false,
 		)
 
@@ -2051,6 +2082,9 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 	const accountName = "account manager stopped import"
 
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 
@@ -2068,7 +2102,7 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 			Name:                 accountName,
 			XPub:                 keys.accountKey,
 			AddrType:             keys.addrType,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, false,
 	)
 
@@ -2090,13 +2124,16 @@ func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
 	// Arrange: import one childless account into a started watch-only wallet
 	// and snapshot its inventory through the public API.
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	account := wallet.ImportAccountParams{
 		Name:                 "owner",
 		XPub:                 keys.accountKey,
 		AddrType:             keys.addrType,
-		MasterKeyFingerprint: keys.masterKeyFingerprint,
+		MasterKeyFingerprint: &inputFingerprint,
 	}
 	_, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
@@ -2108,7 +2145,8 @@ func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
 	// children. The import must fail at account admission.
 	candidate := account
 	candidate.Name = "candidate"
-	candidate.MasterKeyFingerprint++
+	candidateFingerprint := *account.MasterKeyFingerprint + 1
+	candidate.MasterKeyFingerprint = &candidateFingerprint
 	info, err := w.ImportAccount(ctx, candidate, false)
 
 	// Assert: the caller sees the wallet sentinel and no candidate account.
@@ -2151,11 +2189,14 @@ func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
 	// Act by importing public material through the existing AccountManager,
 	// then allocating its first external child through the public selector.
 	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	externalAccount, err := w.ImportAccount(
 		ctx, wallet.ImportAccountParams{
 			Name:                 "external custody",
 			XPub:                 keys.accountKey,
-			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			MasterKeyFingerprint: &inputFingerprint,
 			AddrType:             keys.addrType,
 		}, false,
 	)
@@ -2318,7 +2359,7 @@ func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
 		XPub:                 keys.otherAccountKey,
 		Scope:                &scope,
 		AddrSchema:           &schema,
-		MasterKeyFingerprint: keys.masterKeyFingerprint,
+		MasterKeyFingerprint: &inputFingerprint,
 	}, false)
 	require.NoError(h, err)
 	numberedChild, err := w.NewAddress(ctx, wallet.NewAccountSelectorByName(
@@ -2362,10 +2403,11 @@ func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
 	fingerprint := wallet.MasterFingerprint(0)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	params := wallet.ImportAccountParams{
-		Name:       "numbered receiving",
-		Scope:      &scope,
-		AddrSchema: &schema,
-		XPub:       keys.otherAccountKey,
+		MasterKeyFingerprint: &fingerprint,
+		Name:                 "numbered receiving",
+		Scope:                &scope,
+		AddrSchema:           &schema,
+		XPub:                 keys.otherAccountKey,
 	}
 	created, err := w.ImportAccount(h.Context(), params, false)
 	require.NoError(h, err)
@@ -2456,7 +2498,7 @@ func testAccountManagerAllocatePathBoundKey(h *bwtest.HarnessTest) {
 		Scope:                &scope,
 		AddrSchema:           &schema,
 		XPub:                 keys.accountKey,
-		MasterKeyFingerprint: uint32(fingerprint),
+		MasterKeyFingerprint: &fingerprint,
 	}
 	_, err := w.ImportAccount(h.Context(), params, false)
 	require.NoError(h, err)

@@ -1895,7 +1895,7 @@ func TestListAddresses(t *testing.T) {
 					require.Equal(t, "test-account", addr.AccountName)
 					require.Equal(t, db.KeyScopeBIP0044, addr.KeyScope)
 					require.Equal(
-						t, uint32(0xC0DEC0DE),
+						t, uint32Ptr(0xC0DEC0DE),
 						addr.MasterKeyFingerprint,
 					)
 				}
@@ -2130,7 +2130,7 @@ func TestNewDerivedAddress(t *testing.T) {
 			require.Equal(t, account.KeyScope, info.KeyScope)
 			require.NotNil(t, account.MasterKeyFingerprint)
 			require.Equal(
-				t, *account.MasterKeyFingerprint,
+				t, account.MasterKeyFingerprint,
 				info.MasterKeyFingerprint,
 			)
 
