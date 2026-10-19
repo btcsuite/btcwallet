@@ -41,7 +41,7 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 		AccountNumber: &number, NoChainSync: true,
 	})
 	require.NoError(t, err)
-	source, change, err := w.createChangeSource(
+	changeAccount, _, err := w.resolveChangeAccount(
 		t.Context(), &ScopedAccount{
 			KeyScope: scope, AccountName: account.AccountName,
 		},
@@ -50,9 +50,13 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 
 	// Act: allocate fresh change on the excluded account and register it as
 	// kept change.
-	script, err := source.NewScript()
+	change, err := w.allocateChangeAddress(t.Context(), scope, changeAccount)
 	require.NoError(t, err)
-	require.NoError(t, w.watchAuthoredChange(t.Context(), 0, change))
+	require.NoError(t, w.watchAuthoredChange(
+		t.Context(), 0, changeAccount, change,
+	))
+
+	script := change.ScriptPubKey
 
 	// Assert: the fresh child persists without live script registration.
 	stored, err := w.store.GetAddress(t.Context(), db.GetAddressQuery{
@@ -92,15 +96,17 @@ func TestChangeWatchFailureSQLiteKeepsChange(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	source, change, err := w.createChangeSource(
+	changeAccount, _, err := w.resolveChangeAccount(
 		t.Context(), &ScopedAccount{
 			KeyScope: scope, AccountName: "synced-change",
 		},
 	)
 	require.NoError(t, err)
 
-	script, err := source.NewScript()
+	change, err := w.allocateChangeAddress(t.Context(), scope, changeAccount)
 	require.NoError(t, err)
+
+	script := change.ScriptPubKey
 
 	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, &chainParams)
 	require.NoError(t, err)
@@ -108,7 +114,7 @@ func TestChangeWatchFailureSQLiteKeepsChange(t *testing.T) {
 		Return(errChainMock).Once()
 
 	// Act: Register the kept change and fail the backend registration.
-	err = w.watchAuthoredChange(t.Context(), 0, change)
+	err = w.watchAuthoredChange(t.Context(), 0, changeAccount, change)
 
 	// Assert: The failure is returned and the committed child remains.
 	require.ErrorIs(t, err, errChainMock)

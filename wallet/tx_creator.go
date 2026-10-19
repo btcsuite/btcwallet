@@ -486,43 +486,10 @@ func validateTxIntent(intent *TxIntent) error {
 	return nil
 }
 
-// authoredChange carries the change child a change source allocated during
-// authoring to the public wrapper, which registers it only if the authored
-// result keeps a change output.
-type authoredChange struct {
-	// stored is the committed SQL change child awaiting live registration.
-	// The change callback sets it at most once, and only for accounts that
-	// require chain sync; it stays nil for kvdb and NoChainSync accounts.
-	stored *db.AddressInfo
-}
-
-// prepareTxAuthSources creates the input and change sources required to
-// author a transaction, plus the record of change that needs registration.
-func (w *Wallet) prepareTxAuthSources(ctx context.Context, intent *TxIntent) (
-	txauthor.InputSource, *txauthor.ChangeSource, *authoredChange, error) {
-
-	// Determine the change source. If not specified, a default will be
-	// used.
-	changeAccount := w.determineChangeSource(intent)
-
-	changeSource, change, err := w.createChangeSource(ctx, changeAccount)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	inputSource, err := w.createInputSource(ctx, intent)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	return inputSource, changeSource, change, nil
-}
-
-// createChangeSource creates a store-backed change source for transaction
-// authoring and the record of the change it allocates.
-func (w *Wallet) createChangeSource(ctx context.Context,
-	changeAccount *ScopedAccount) (*txauthor.ChangeSource, *authoredChange,
-	error) {
+// resolveChangeAccount resolves the account that receives change for
+// transaction authoring and the size of the change scripts it produces.
+func (w *Wallet) resolveChangeAccount(ctx context.Context,
+	changeAccount *ScopedAccount) (*db.AccountInfo, int, error) {
 
 	accountName := changeAccount.AccountName
 
@@ -549,12 +516,12 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 			},
 		)
 		if errors.Is(err, db.ErrAccountNotFound) {
-			return nil, nil, fmt.Errorf("%w: account %d",
+			return nil, 0, fmt.Errorf("%w: account %d",
 				ErrAccountNotFound, derivedAccount)
 		}
 
 		if err != nil {
-			return nil, nil, fmt.Errorf("get account %d: %w",
+			return nil, 0, fmt.Errorf("get account %d: %w",
 				derivedAccount, err)
 		}
 
@@ -576,12 +543,12 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 			},
 		)
 		if errors.Is(err, db.ErrAccountNotFound) {
-			return nil, nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+			return nil, 0, fmt.Errorf("%w: %s", ErrAccountNotFound,
 				accountName)
 		}
 
 		if err != nil {
-			return nil, nil, fmt.Errorf("get account %q: %w",
+			return nil, 0, fmt.Errorf("get account %q: %w",
 				accountName, err)
 		}
 
@@ -592,69 +559,43 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 		derivationAccount.AddrSchema.InternalAddrType, false,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 
 	scriptSize, err := addrType.ScriptPubKeySize()
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+		return nil, 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
 			addrType)
 	}
 
-	change := &authoredChange{}
-
-	return &txauthor.ChangeSource{
-		ScriptSize: scriptSize,
-		NewScript: w.newChangeScriptFunc(
-			ctx, changeAccount.KeyScope, derivationAccount, change,
-		),
-	}, change, nil
+	return derivationAccount, scriptSize, nil
 }
 
-// newChangeScriptFunc allocates fresh change within the admitted authoring
-// request. SQL records the committed child for the wrapper to register unless
-// its account excludes live tracking; kvdb keeps legacy allocation.
-func (w *Wallet) newChangeScriptFunc(ctx context.Context,
-	scope waddrmgr.KeyScope, derivationAccount *db.AccountInfo,
-	change *authoredChange) func() ([]byte, error) {
+// allocateChangeAddress allocates a fresh change address on account in scope
+// within the admitted authoring request and returns the committed address. SQL
+// allocation goes through the shared derived-address path; kvdb keeps legacy
+// allocation.
+func (w *Wallet) allocateChangeAddress(ctx context.Context,
+	scope waddrmgr.KeyScope, account *db.AccountInfo) (*db.AddressInfo,
+	error) {
 
-	if w.addrStore == nil {
-		params := db.NewDerivedAddressParams{
-			WalletID:    w.id,
-			AccountName: derivationAccount.AccountName,
-			Scope:       db.KeyScope(scope),
-			Change:      true,
-		}
-
-		return func() ([]byte, error) {
-			stored, err := w.allocateDerivedAddresses(ctx, params, 1)
-			if err != nil {
-				return nil, err
-			}
-
-			if !derivationAccount.NoChainSync {
-				change.stored = &stored[0]
-			}
-
-			return stored[0].ScriptPubKey, nil
-		}
+	params := db.NewDerivedAddressParams{
+		WalletID:    w.id,
+		AccountName: account.AccountName,
+		Scope:       db.KeyScope(scope),
+		Change:      true,
 	}
 
-	return func() ([]byte, error) {
-		addrInfo, err := w.store.NewDerivedAddress(
-			ctx, db.NewDerivedAddressParams{
-				WalletID:    w.id,
-				AccountName: derivationAccount.AccountName,
-				Scope:       db.KeyScope(scope),
-				Change:      true,
-			},
-		)
+	if w.addrStore == nil {
+		stored, err := w.allocateDerivedAddresses(ctx, params, 1)
 		if err != nil {
 			return nil, err
 		}
 
-		return addrInfo.ScriptPubKey, nil
+		return &stored[0], nil
 	}
+
+	return w.store.NewDerivedAddress(ctx, params)
 }
 
 // normalizeAndValidateTxIntent applies the default input policy and validates
@@ -739,8 +680,10 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 		return
 	}
 
-	inputSource, changeSource, change, err := w.prepareTxAuthSources(
-		r.ctx, r.intent,
+	changeScope := w.determineChangeSource(r.intent)
+
+	changeAccount, changeScriptSize, err := w.resolveChangeAccount(
+		r.ctx, changeScope,
 	)
 	if err != nil {
 		r.respChan <- authoredTxResp{err: err}
@@ -748,17 +691,35 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 		return
 	}
 
-	tx, err := w.authorTransaction(
-		r.intent.Outputs, r.intent.FeeRate, inputSource, changeSource,
+	inputSource, err := w.createInputSource(r.ctx, r.intent)
+	if err != nil {
+		r.respChan <- authoredTxResp{err: err}
+
+		return
+	}
+
+	selection, err := w.selectTxInputs(
+		r.intent.Outputs, r.intent.FeeRate, inputSource, changeScriptSize,
 	)
 	if err != nil {
 		r.respChan <- authoredTxResp{err: err}
 
 		return
 	}
+
+	change, err := w.allocateChangeAddress(
+		r.ctx, changeScope.KeyScope, changeAccount,
+	)
+	if err != nil {
+		r.respChan <- authoredTxResp{err: err}
+
+		return
+	}
+
+	tx := completeTransaction(selection, change.ScriptPubKey)
 
 	// Register kept change before the caller can sign or publish it.
-	err = w.watchAuthoredChange(r.ctx, tx.ChangeIndex, change)
+	err = w.watchAuthoredChange(r.ctx, tx.ChangeIndex, changeAccount, change)
 	if err != nil {
 		r.respChan <- authoredTxResp{err: err}
 
@@ -769,52 +730,61 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 }
 
 // watchAuthoredChange registers committed change that the authored result
-// keeps through the Wallet's live-watch path. Results without change, and
-// change that needs no watch, register nothing. On failure the committed
-// change child stays in the Store.
+// keeps through the Wallet's live-watch path. Results without change register
+// nothing, nor do kvdb wallets and accounts excluded from chain sync. On
+// failure the committed change child stays in the Store.
 func (w *Wallet) watchAuthoredChange(ctx context.Context, changeIndex int,
-	change *authoredChange) error {
+	account *db.AccountInfo, change *db.AddressInfo) error {
 
-	if changeIndex < 0 || change.stored == nil {
+	if changeIndex < 0 || w.addrStore != nil || account.NoChainSync {
 		return nil
 	}
 
-	_, err := w.deliverStoreAddresses(ctx, []db.AddressInfo{*change.stored})
+	_, err := w.deliverStoreAddresses(ctx, []db.AddressInfo{*change})
 
 	return err
 }
 
-// authorTransaction creates an unsigned transaction from the outputs, fee rate,
-// and precomputed input and change sources shared by both public wrappers. Its
-// narrow request keeps wrapper-owned input policies, change accounts, labels,
-// and lifecycle effects outside the neutral boundary.
-func (w *Wallet) authorTransaction(outputs []wire.TxOut,
-	feeRate btcunit.SatPerKVByte,
-	inputSource txauthor.InputSource,
-	changeSource *txauthor.ChangeSource) (*txauthor.AuthoredTx, error) {
+// selectTxInputs selects inputs that pay for outputs at feeRate, sizing the fee
+// for a change script of changeScriptSize bytes. It is the neutral authoring
+// boundary shared by both public wrappers: its narrow request keeps
+// wrapper-owned input policies, change accounts, labels, and lifecycle effects
+// outside it.
+func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
+	feeRate btcunit.SatPerKVByte, inputSource txauthor.InputSource,
+	changeScriptSize int) (*txauthor.InputSelection, error) {
 
-	// The txauthor.NewUnsignedTransaction function expects a slice of
-	// *wire.TxOut, but our intent has a slice of wire.TxOut. We perform
-	// the conversion here.
+	// The txauthor.SelectInputs function expects a slice of *wire.TxOut,
+	// but our intent has a slice of wire.TxOut. We perform the conversion
+	// here.
 	//
-	// TODO(yy): change the signature of `NewUnsignedTransaction` to take a
-	// list of `wire.TxOut`.
+	// TODO(yy): change the signature of `SelectInputs` to take a list of
+	// `wire.TxOut`.
 	txOutputs := make([]*wire.TxOut, 0, len(outputs))
 	for _, output := range outputs {
 		txOutputs = append(txOutputs, &output)
 	}
 
-	// With the input source and change source prepared, we can now call the
-	// txauthor package to perform the actual coin selection and create the
-	// unsigned transaction.
+	// With the input source prepared, we can now call the txauthor package
+	// to perform the actual coin selection and fee calculation.
 	feeSatPerKb := feeRate.Val()
 
-	tx, err := txauthor.NewUnsignedTransaction(
-		txOutputs, feeSatPerKb, inputSource, changeSource,
+	selection, err := txauthor.SelectInputs(
+		txOutputs, feeSatPerKb, inputSource, changeScriptSize,
 	)
 	if err != nil {
 		return nil, translateAuthorError(err)
 	}
+
+	return selection, nil
+}
+
+// completeTransaction builds the unsigned transaction from selection, paying
+// change to changeScript when txauthor's dust rules keep a change output.
+func completeTransaction(selection *txauthor.InputSelection,
+	changeScript []byte) *txauthor.AuthoredTx {
+
+	tx := selection.Complete(changeScript)
 
 	// Randomize the position of the change output, if one was created. This
 	// helps to improve privacy by making it harder to distinguish change
@@ -823,7 +793,7 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 		tx.RandomizeChangePosition()
 	}
 
-	return tx, nil
+	return tx
 }
 
 // authorError gives an authoring failure a wallet-facing identity without
@@ -872,7 +842,7 @@ func (e *authorError) Is(target error) bool {
 // Everything else is returned untouched: an InputSourceError, so "cannot fund
 // this" stays distinguishable from "will not author this", and the checked
 // arithmetic classes no caller can observe. A nil output cannot occur, because
-// authorTransaction takes its outputs by value; the add and subtract guards
+// selectTxInputs takes its outputs by value; the add and subtract guards
 // cannot fire, because CheckOutputsAmount bounds the target before every
 // addition and the sufficiency checks bound the rest. Naming those in the
 // wallet would be exported API with nothing behind it.
