@@ -736,25 +736,24 @@ func TestDetermineChangeSource(t *testing.T) {
 	}
 }
 
-// TestAuthorTransaction verifies the shared authoring boundary preserves
+// TestSelectTxInputs verifies the shared authoring boundary preserves
 // transaction results, callback timing, and source errors without wrapper
-// effects.
-func TestAuthorTransaction(t *testing.T) {
+// effects, and that completing its selection keeps or drops change.
+func TestSelectTxInputs(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Use a 50,000-sat payment and distinct input and change
 	// scripts. Each table row controls the surplus returned by the input
-	// source or injects the exact callback error authoring must propagate.
+	// source or injects the exact callback error selection must propagate.
 	inputScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
 	changeScript := append([]byte(nil), inputScript...)
-	changeScript[len(changeScript)-1] = 1
+	changeScript[len(changeScript)-1] = 1 // Differ from inputScript.
 	output := wire.TxOut{Value: 50_000, PkScript: inputScript}
 
 	testCases := []struct {
 		name         string
 		changeAmount btcutil.Amount
 		inputErr     error
-		changeErr    error
 	}{
 		{
 			name: "direct no change",
@@ -768,10 +767,6 @@ func TestAuthorTransaction(t *testing.T) {
 			inputErr: errDBMock,
 		},
 		{
-			name:      "change source failure",
-			changeErr: errChainMock,
-		},
-		{
 			name:     "cancellation",
 			inputErr: context.Canceled,
 		},
@@ -781,15 +776,15 @@ func TestAuthorTransaction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Build counting callbacks so the test records the
-			// input target requested by txauthor and whether change-script
-			// allocation is attempted. A successful input callback returns
-			// exactly the requested target plus the case's change amount.
+			// Arrange: Build a counting input callback so the test records
+			// the input target requested by txauthor. A successful input
+			// callback returns exactly the requested target plus the case's
+			// change amount.
 			w, _ := createTestWalletWithMocks(t)
 
 			var (
-				inputCalls, changeCalls int
-				inputTarget             btcutil.Amount
+				inputCalls  int
+				inputTarget btcutil.Amount
 			)
 
 			inputSource := func(target btcutil.Amount) (btcutil.Amount,
@@ -807,49 +802,29 @@ func TestAuthorTransaction(t *testing.T) {
 				return total, []*wire.TxIn{{}},
 					[]btcutil.Amount{total}, [][]byte{inputScript}, nil
 			}
-			changeSource := &txauthor.ChangeSource{
-				ScriptSize: len(changeScript),
-				NewScript: func() ([]byte, error) {
-					changeCalls++
-					return changeScript, tc.changeErr
-				},
-			}
-
-			wantErr := tc.inputErr
-			if wantErr == nil {
-				wantErr = tc.changeErr
-			}
-
 			// Act: Invoke the neutral authoring boundary directly, without
 			// either public wallet wrapper.
-			authored, err := w.authorTransaction(
+			selection, err := w.selectTxInputs(
 				[]wire.TxOut{output}, defaultFeeRate, inputSource,
-				changeSource,
+				len(changeScript),
 			)
 
 			// Assert: The input source is queried exactly once and an
 			// injected callback error is returned unchanged without
-			// publishing a partially authored transaction.
-			require.ErrorIs(t, err, wantErr)
+			// publishing a partial selection.
+			require.ErrorIs(t, err, tc.inputErr)
 			require.Equal(t, 1, inputCalls)
 
-			if wantErr != nil {
-				require.Nil(t, authored)
-
-				if tc.inputErr != nil {
-					require.Zero(t, changeCalls)
-				} else {
-					require.Equal(t, 1, changeCalls)
-				}
+			if tc.inputErr != nil {
+				require.Nil(t, selection)
 
 				return
 			}
 
-			// A successful result must allocate the change script once,
-			// spend one input, preserve its previous script and total
-			// amount, and charge the target amount above the payment as
-			// its fee.
-			require.Equal(t, 1, changeCalls)
+			// A completed selection must spend one input, preserve its
+			// previous script and total amount, and charge the target
+			// amount above the payment as its fee.
+			authored := completeTransaction(selection, changeScript)
 			require.Len(t, authored.Tx.TxIn, 1)
 			require.Equal(t, inputScript, authored.PrevScripts[0])
 			require.Equal(t, inputTarget+tc.changeAmount,
@@ -869,7 +844,7 @@ func TestAuthorTransaction(t *testing.T) {
 			} else {
 				// With a 10,000-sat surplus, the randomized change
 				// position must identify an output with that exact value
-				// and the change callback's script.
+				// and the supplied change script.
 				require.GreaterOrEqual(t, authored.ChangeIndex, 0)
 				require.Len(t, authored.Tx.TxOut, 2)
 				change := authored.Tx.TxOut[authored.ChangeIndex]
@@ -880,9 +855,9 @@ func TestAuthorTransaction(t *testing.T) {
 	}
 }
 
-// TestAuthorTransactionChecksAmounts verifies that an output set which is
+// TestSelectTxInputsChecksAmounts verifies that an output set which is
 // individually payable but sums above the maximum is refused at the authoring
-// boundary, under the wallet's own error, before either callback is consulted.
+// boundary, under the wallet's own error, before the input source is consulted.
 //
 // This is the only amount condition the boundary uniquely owns. Every other one
 // txauthor reports is either screened earlier by validateTxIntent, so it never
@@ -890,12 +865,12 @@ func TestAuthorTransaction(t *testing.T) {
 // outputs by value, so a nil element is unrepresentable, and the checked add
 // and subtract guards cannot fire behind CheckOutputsAmount. The nested module
 // covers those conditions and TestTranslateAuthorError covers their mappings.
-func TestAuthorTransactionChecksAmounts(t *testing.T) {
+func TestSelectTxInputsChecksAmounts(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Two outputs, each payable on its own, whose total is one
-	// satoshi past the maximum. Count both callbacks so the test can prove
-	// the refusal landed before either was consulted.
+	// satoshi past the maximum. Count input calls so the test can prove the
+	// refusal landed before the input source was consulted.
 	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
 	outputs := []wire.TxOut{{
 		Value: btcutil.MaxSatoshi - 1e8, PkScript: script,
@@ -905,7 +880,7 @@ func TestAuthorTransactionChecksAmounts(t *testing.T) {
 
 	w, _ := createTestWalletWithMocks(t)
 
-	var inputCalls, changeCalls int
+	var inputCalls int
 
 	inputSource := func(target btcutil.Amount) (btcutil.Amount,
 		[]*wire.TxIn, []btcutil.Amount, [][]byte, error) {
@@ -915,29 +890,19 @@ func TestAuthorTransactionChecksAmounts(t *testing.T) {
 		return target, []*wire.TxIn{{}}, []btcutil.Amount{target},
 			[][]byte{script}, nil
 	}
-	changeSource := &txauthor.ChangeSource{
-		ScriptSize: len(script),
-		NewScript: func() ([]byte, error) {
-			changeCalls++
-
-			return script, nil
-		},
-	}
-
 	// Act: Author directly, bypassing the intent-level checks the public
 	// wrappers apply.
-	authored, err := w.authorTransaction(
-		outputs, defaultFeeRate, inputSource, changeSource,
+	selection, err := w.selectTxInputs(
+		outputs, defaultFeeRate, inputSource, len(script),
 	)
 
 	// Assert: The wallet's own error identifies the violation, the
-	// originating txauthor error stays in the chain, no transaction is
-	// produced, and neither callback ran.
+	// originating txauthor error stays in the chain, no selection is
+	// produced, and the input source never ran.
 	require.ErrorIs(t, err, ErrOutputTotalExceedsMax)
 	require.ErrorIs(t, err, txauthor.ErrOutputTotalExceedsMax)
-	require.Nil(t, authored)
+	require.Nil(t, selection)
 	require.Zero(t, inputCalls)
-	require.Zero(t, changeCalls)
 }
 
 // TestTranslateAuthorError verifies that each txauthor condition the wallet
@@ -1002,7 +967,7 @@ func TestTranslateAuthorError(t *testing.T) {
 	}
 
 	// Conditions the wallet deliberately does not name arrive unchanged.
-	// A nil output cannot occur through authorTransaction, which takes its
+	// A nil output cannot occur through selectTxInputs, which takes its
 	// outputs by value, and the checked add and subtract guards cannot fire
 	// behind CheckOutputsAmount and the sufficiency checks.
 	unnamed := []struct {
@@ -1218,10 +1183,9 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 		FeeRate: btcunit.NewSatPerKVByte(1000),
 	}
 
-	// createChangeSource now goes through w.store.GetAccount instead
-	// of the legacy waddrmgr FetchScopedKeyManager + LookupAccount
-	// path. The wrapped ErrAccountNotFound bubbles up through
-	// prepareTxAuthSources.
+	// resolveChangeAccount goes through w.store.GetAccount instead of
+	// the legacy waddrmgr FetchScopedKeyManager + LookupAccount path. The
+	// wrapped ErrAccountNotFound bubbles up through CreateTransaction.
 	mocks.store.On("GetAccount", mock.Anything,
 		mock.MatchedBy(func(q db.GetAccountQuery) bool {
 			return q.Name != nil && *q.Name == "unknown"
@@ -1236,12 +1200,12 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 	require.Nil(t, tx)
 }
 
-// TestCreateChangeSourceRedirectsDefaultImported verifies how change is routed
-// for imported accounts: a non-default imported xpub account keeps its own
-// change destination, while the reserved imported alias redirects change to
-// derived account 0 resolved by number (so it follows a renamed account 0
+// TestResolveChangeAccountRedirectsDefaultImported verifies how change is
+// routed for imported accounts: a non-default imported xpub account keeps its
+// own change destination, while the reserved imported alias redirects change
+// to derived account 0 resolved by number (so it follows a renamed account 0
 // rather than assuming the literal "default" name).
-func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
+func TestResolveChangeAccountRedirectsDefaultImported(t *testing.T) {
 	t.Parallel()
 
 	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
@@ -1291,7 +1255,7 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			isImportedAlias := tc.derivedName != ""
 
 			// The reserved imported alias has no account row on the
-			// SQL/runtime store, so createChangeSource must not look it
+			// SQL/runtime store, so resolveChangeAccount must not look it
 			// up by name. Only a real named account is resolved that way.
 			if !isImportedAlias {
 				mocks.store.On("GetAccount", mock.Anything,
@@ -1333,7 +1297,7 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 				db.WitnessPubKey,
 			)
 
-			changeSource, _, err := w.createChangeSource(
+			account, _, err := w.resolveChangeAccount(
 				t.Context(), &ScopedAccount{
 					AccountName: tc.accountName,
 					KeyScope:    scope,
@@ -1341,9 +1305,11 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			script, err := changeSource.NewScript()
+			change, err := w.allocateChangeAddress(
+				t.Context(), scope, account,
+			)
 			require.NoError(t, err)
-			require.Equal(t, changeScript, script)
+			require.Equal(t, changeScript, change.ScriptPubKey)
 
 			// The imported alias change path must not hit the by-name
 			// lookup; before the fix it did and failed on SQL backends.
@@ -1359,10 +1325,10 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 	}
 }
 
-// TestCreateChangeSourceDefaultImportedMissingAccountZero verifies that a
+// TestResolveChangeAccountDefaultImportedMissingAccountZero verifies that a
 // not-found error while resolving derived account 0 for default-imported
 // change surfaces as the wallet-level ErrAccountNotFound.
-func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
+func TestResolveChangeAccountDefaultImportedMissingAccountZero(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createTestWalletWithMocks(t)
@@ -1379,7 +1345,7 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 		}),
 	).Return(nil, db.ErrAccountNotFound).Once()
 
-	_, _, err := w.createChangeSource(
+	_, _, err := w.resolveChangeAccount(
 		t.Context(), &ScopedAccount{
 			AccountName: accountName,
 			KeyScope:    scope,
@@ -1388,14 +1354,14 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 	require.ErrorIs(t, err, ErrAccountNotFound)
 }
 
-// TestCreateChangeSourceImportedAliasBypassesGetAccount verifies that change
+// TestResolveChangeAccountImportedAliasBypassesGetAccount verifies that change
 // directed at the reserved imported alias succeeds on a SQL/runtime backend,
 // where that alias has no account row. The alias cannot derive its own change,
-// so createChangeSource must skip the by-name lookup (which would fail with
+// so resolveChangeAccount must skip the by-name lookup (which would fail with
 // ErrAccountNotFound) and redirect change to derived account 0. Before the fix
 // the unconditional by-name lookup ran first and the change path errored out
 // before it could redirect.
-func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
+func TestResolveChangeAccountImportedAliasBypassesGetAccount(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createSQLWalletWithMocks(t)
@@ -1436,7 +1402,7 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 		db.WitnessPubKey,
 	)
 
-	changeSource, _, err := w.createChangeSource(
+	account, _, err := w.resolveChangeAccount(
 		t.Context(), &ScopedAccount{
 			AccountName: accountName,
 			KeyScope:    scope,
@@ -1444,9 +1410,9 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	script, err := changeSource.NewScript()
+	change, err := w.allocateChangeAddress(t.Context(), scope, account)
 	require.NoError(t, err)
-	require.Equal(t, changeScript, script)
+	require.Equal(t, changeScript, change.ScriptPubKey)
 
 	// The imported alias must redirect to account 0 without an account
 	// existence check by name. Before the fix GetAccount by name runs first
@@ -1457,6 +1423,36 @@ func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
 			Scope:    db.KeyScope(scope),
 			Name:     &accountName,
 		})
+}
+
+// TestAllocateChangeAddressFailure verifies that a failed change allocation is
+// returned to the authoring wrapper rather than yielding a change address, now
+// that allocation no longer runs inside txauthor's change callback.
+func TestAllocateChangeAddressFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A SQL wallet whose Store refuses the change allocation.
+	w, mocks := createSQLWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	account := &db.AccountInfo{AccountName: defaultAccountName}
+	mocks.store.On("NewDerivedAddresses", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID:    w.id,
+			AccountName: defaultAccountName,
+			Scope:       db.KeyScope(scope),
+			Change:      true,
+		}, uint32(1),
+	).Return(nil, errDBMock).Once()
+
+	// Act: Allocate change on the account.
+	change, err := w.allocateChangeAddress(t.Context(), scope, account)
+
+	// Assert: The Store failure is returned and no address is produced.
+	// The public address error keeps the Store's message but not its chain.
+	require.EqualError(t, err, errDBMock.Error())
+	require.Nil(t, change)
 }
 
 // TestFilterEligibleOutputsIncludesWatchOnlyOutputs verifies that tx authoring
