@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"iter"
 	"testing"
@@ -237,6 +238,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 type createWalletPolicyCase struct {
 	name       string
 	params     CreateWalletParams
+	wantErr    error
 	wantErrMsg string
 }
 
@@ -264,8 +266,8 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	accountXPub, err := accountKey.Neuter()
 	require.NoError(t, err)
 
-	// Keep the account baseline valid while root fixtures independently
-	// exercise each origin field and the selected network.
+	// Supply valid zero metadata so rejection fixtures isolate declared
+	// paths and script ownership rather than optional origin presence.
 	fingerprint := MasterFingerprint(0)
 	initialXPub := []ImportAccountParams{
 		{
@@ -433,7 +435,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	// Keep genesis fixture variants in a data-only builder so every mode and
 	// identity row still exercises the same public call and strict mock.
 	tests = append(tests, genesisKeyPolicyCases(
-		t, rootKey,
+		t, rootKey, initialXPub[0],
 	)...)
 
 	for _, tc := range tests {
@@ -468,6 +470,10 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 
 			require.ErrorIs(t, err, ErrWalletParams)
 
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			}
+
 			if tc.wantErrMsg != "" {
 				require.ErrorContains(t, err, tc.wantErrMsg)
 			}
@@ -480,7 +486,8 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 // genesisKeyPolicyCases constructs only malformed identity fixtures; the
 // caller owns Manager invocation, dependency expectations, and assertions.
 func genesisKeyPolicyCases(t *testing.T,
-	rootKey *hdkeychain.ExtendedKey) []createWalletPolicyCase {
+	rootKey *hdkeychain.ExtendedKey,
+	initialAccount ImportAccountParams) []createWalletPolicyCase {
 
 	t.Helper()
 
@@ -506,7 +513,102 @@ func genesisKeyPolicyCases(t *testing.T,
 	)
 	require.NoError(t, err)
 
+	// Keep key material fixed while varying origin metadata and version
+	// bytes, proving that neither can distinguish overlapping script owners.
+	accountXPub := initialAccount.XPub
+	pubKey, err := accountXPub.ECPubKey()
+	require.NoError(t, err)
+
+	alias := hdkeychain.NewExtendedKey(
+		binary.BigEndian.AppendUint32(
+			nil, uint32(waddrmgr.HDVersionTestNetBIP0084),
+		),
+		pubKey.SerializeCompressed(), accountXPub.ChainCode(),
+		[]byte{1, 2, 3, 4}, 3, hdkeychain.HardenedKeyStart+1, false,
+	)
+	otherFingerprint := MasterFingerprint(1)
+	aliasAccount := initialAccount
+	aliasAccount.Name = "alias"
+	aliasAccount.XPub = alias
+	aliasAccount.MasterKeyFingerprint = &otherFingerprint
+
+	// Hybrid BIP49 shares its internal witness branch with the BIP84 alias,
+	// so equal payloads still conflict across those different scopes.
+	upubVersion := binary.BigEndian.AppendUint32(
+		nil, uint32(waddrmgr.HDVersionTestNetBIP0049),
+	)
+	upub, err := accountXPub.CloneWithVersion(upubVersion)
+	require.NoError(t, err)
+
+	plusAccount := initialAccount
+	plusAccount.XPub = upub
+
+	// Custom scopes have no canonical schema; leaving their account override
+	// absent must fail before dependencies can establish incomplete identity.
+	missingSchema := initialAccount
+	missingSchema.Scope = &waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    0,
+	}
+
+	// Distinct keys at hardened child zero isolate occupied numbered slots
+	// from payload collisions, independently of optional origin metadata.
+	otherKey, _ := importAccountTestKey(t, 84)
+	numberedFirst := initialAccount
+	numberedScope := waddrmgr.KeyScopeBIP0084
+	numberedFirst.Scope = &numberedScope
+	numberedOther := numberedFirst
+	numberedOther.Name = "other"
+	numberedOther.XPub = otherKey
+
 	return []createWalletPolicyCase{
+		{
+			name: "shell custom scope requires schema",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					missingSchema,
+				},
+			},
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name: "shell payload overlap within scope",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					initialAccount,
+					aliasAccount,
+				},
+			},
+			wantErr: ErrAccountIdentityCollision,
+		},
+		{
+			name: "shell internal overlap across scopes",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					plusAccount,
+					aliasAccount,
+				},
+			},
+			wantErr: ErrAccountIdentityCollision,
+		},
+		{
+			name: "shell declared account number conflict",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					numberedFirst,
+					numberedOther,
+				},
+			},
+			wantErr: ErrAccountAlreadyExists,
+		},
 		{
 			name: "root depth must be zero",
 			params: CreateWalletParams{
@@ -1133,6 +1235,71 @@ func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
 			require.NotNil(t, candidate)
 		})
 	}
+}
+
+// TestManagerCreatePreservesInitialAccountIdentity verifies genesis accepts
+// equal XPub payloads with disjoint scripts and per-account BIP49 schemas.
+func TestManagerCreatePreservesInitialAccountIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Distinct BIP49 keys share a scope with strict and hybrid
+	// schemas. Keep the original key for a disjoint Taproot alias, while
+	// inferred scopes avoid numbered slots in all three accounts. Omit the
+	// first fingerprint and supply zero on its peer to retain both origins.
+	key, _ := importAccountTestKey(t, 44)
+	otherKey, _ := importAccountTestKey(t, 84)
+	upubVersion := binary.BigEndian.AppendUint32(
+		nil, uint32(waddrmgr.HDVersionTestNetBIP0049),
+	)
+	strictKey, err := key.CloneWithVersion(upubVersion)
+	require.NoError(t, err)
+	hybridKey, err := otherKey.CloneWithVersion(upubVersion)
+	require.NoError(t, err)
+
+	fingerprint := MasterFingerprint(0)
+	bip49Scope := waddrmgr.KeyScopeBIP0049Plus
+	m := testSQLiteManager(t)
+	params := managerLifecycleCreateParams("identities")
+	params.InitialAccounts = []ImportAccountParams{
+		{
+			Name:     "first",
+			XPub:     strictKey,
+			AddrType: waddrmgr.NestedWitnessPubKey,
+		},
+		{
+			Name:                 "second",
+			XPub:                 key,
+			MasterKeyFingerprint: &fingerprint,
+			AddrType:             waddrmgr.TaprootPubKey,
+		},
+		{
+			Name:                 "third",
+			XPub:                 hybridKey,
+			MasterKeyFingerprint: &fingerprint,
+			AddrType:             waddrmgr.WitnessPubKey,
+		},
+	}
+
+	// Act: Create the shell through Manager admission with all three accounts.
+	w, err := m.Create(params)
+
+	// Assert: Creation keeps every account and its effective branch schema;
+	// a reused scope must not replace requested types or collapse omitted
+	// origin metadata into a supplied-zero fingerprint.
+	require.NoError(t, err)
+	accounts, err := w.ListAccounts(t.Context())
+	require.NoError(t, err)
+	require.Len(t, accounts, len(params.InitialAccounts))
+
+	strict, err := w.GetAccount(t.Context(), bip49Scope, "first")
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.KeyScopeBIP0049AddrSchema, strict.AddrSchema)
+	require.Nil(t, strict.MasterKeyFingerprint)
+
+	hybrid, err := w.GetAccount(t.Context(), bip49Scope, "third")
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.ScopeAddrMap[bip49Scope], hybrid.AddrSchema)
+	require.Equal(t, &fingerprint, hybrid.MasterKeyFingerprint)
 }
 
 // TestManagerCreateLifecycleSerializesStop verifies accepted creation finishes
