@@ -136,6 +136,14 @@ func (m *mockChainSyncer) syncState() syncState {
 	return args.Get(0).(syncState)
 }
 
+// syncedTo exposes the processed tip and errors expected by wallet callers.
+func (m *mockChainSyncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp,
+	error) {
+
+	args := m.Called(ctx)
+	return args.Get(0).(waddrmgr.BlockStamp), args.Error(1)
+}
+
 // mockTxPublisher is a mock implementation of the TxPublisher interface.
 type mockTxPublisher struct {
 	mock.Mock
