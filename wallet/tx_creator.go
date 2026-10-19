@@ -680,43 +680,12 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 		return
 	}
 
-	changeScope := w.determineChangeSource(r.intent)
-
-	changeAccount, changeScriptSize, err := w.resolveChangeAccount(
-		r.ctx, changeScope,
-	)
+	tx, changeAccount, change, err := w.authorTxIntent(r.ctx, r.intent)
 	if err != nil {
 		r.respChan <- authoredTxResp{err: err}
 
 		return
 	}
-
-	inputSource, err := w.createInputSource(r.ctx, r.intent)
-	if err != nil {
-		r.respChan <- authoredTxResp{err: err}
-
-		return
-	}
-
-	selection, err := w.selectTxInputs(
-		r.intent.Outputs, r.intent.FeeRate, inputSource, changeScriptSize,
-	)
-	if err != nil {
-		r.respChan <- authoredTxResp{err: err}
-
-		return
-	}
-
-	change, err := w.allocateChangeAddress(
-		r.ctx, changeScope.KeyScope, changeAccount,
-	)
-	if err != nil {
-		r.respChan <- authoredTxResp{err: err}
-
-		return
-	}
-
-	tx := completeTransaction(selection, change.ScriptPubKey)
 
 	// Register kept change before the caller can sign or publish it.
 	err = w.watchAuthoredChange(r.ctx, tx.ChangeIndex, changeAccount, change)
@@ -727,6 +696,48 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 	}
 
 	r.respChan <- authoredTxResp{tx: tx}
+}
+
+// authorTxIntent authors an unsigned transaction for a normalized intent and is
+// the neutral authoring boundary shared by both public wrappers. It resolves
+// the change account once, selects inputs sized for that account's change
+// script, allocates a fresh change address, and completes the transaction.
+// The change account and address are returned so the wrapper can register
+// kept change once its own result is final.
+func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
+	*txauthor.AuthoredTx, *db.AccountInfo, *db.AddressInfo, error) {
+
+	changeScope := w.determineChangeSource(intent)
+
+	changeAccount, changeScriptSize, err := w.resolveChangeAccount(
+		ctx, changeScope,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	inputSource, err := w.createInputSource(ctx, intent)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	selection, err := w.selectTxInputs(
+		intent.Outputs, intent.FeeRate, inputSource, changeScriptSize,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	change, err := w.allocateChangeAddress(
+		ctx, changeScope.KeyScope, changeAccount,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	tx := completeTransaction(selection, change.ScriptPubKey)
+
+	return tx, changeAccount, change, nil
 }
 
 // watchAuthoredChange registers committed change that the authored result
@@ -746,10 +757,9 @@ func (w *Wallet) watchAuthoredChange(ctx context.Context, changeIndex int,
 }
 
 // selectTxInputs selects inputs that pay for outputs at feeRate, sizing the fee
-// for a change script of changeScriptSize bytes. It is the neutral authoring
-// boundary shared by both public wrappers: its narrow request keeps
+// for a change script of changeScriptSize bytes. Its narrow request keeps
 // wrapper-owned input policies, change accounts, labels, and lifecycle effects
-// outside it.
+// outside coin selection.
 func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
 	feeRate btcunit.SatPerKVByte, inputSource txauthor.InputSource,
 	changeScriptSize int) (*txauthor.InputSelection, error) {

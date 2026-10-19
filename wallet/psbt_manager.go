@@ -665,9 +665,9 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 //
 // It executes the funding logic by:
 //  1. Validation: Checking the `FundIntent` for consistency.
-//  2. Creation: Converting the intent into a `TxIntent`, resolving its change
-//     account and input source, selecting inputs through the shared authoring
-//     boundary, allocating a change address, and completing the transaction.
+//  2. Creation: Converting the intent into a `TxIntent` and authoring it
+//     through the shared `authorTxIntent` boundary, which selects inputs,
+//     allocates a change address, and completes the transaction.
 //  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
 //     change output to the PSBT structure and sort it according to BIP 69.
 //  4. Registration: On SQL wallets, registering change kept by the funded
@@ -734,44 +734,15 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 		return
 	}
 
-	changeScope := w.determineChangeSource(txIntent)
-
-	changeAccount, changeScriptSize, err := w.resolveChangeAccount(
-		r.ctx, changeScope,
+	// Author the transaction through the shared authoring boundary.
+	authoredTx, changeAccount, change, err := w.authorTxIntent(
+		r.ctx, txIntent,
 	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
 
 		return
 	}
-
-	inputSource, err := w.createInputSource(r.ctx, txIntent)
-	if err != nil {
-		r.respChan <- fundPsbtResp{err: err}
-
-		return
-	}
-
-	// Select inputs through the shared authoring boundary.
-	selection, err := w.selectTxInputs(
-		txIntent.Outputs, txIntent.FeeRate, inputSource, changeScriptSize,
-	)
-	if err != nil {
-		r.respChan <- fundPsbtResp{err: err}
-
-		return
-	}
-
-	change, err := w.allocateChangeAddress(
-		r.ctx, changeScope.KeyScope, changeAccount,
-	)
-	if err != nil {
-		r.respChan <- fundPsbtResp{err: err}
-
-		return
-	}
-
-	authoredTx := completeTransaction(selection, change.ScriptPubKey)
 
 	// Populate the PSBT packet with the new transaction details.
 	packet, changeIndex, err := w.populatePsbtPacket(
