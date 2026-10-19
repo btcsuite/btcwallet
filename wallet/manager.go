@@ -477,13 +477,9 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 
 	// Reject bad import inputs before persistence can turn their errors into
 	// a shutdown of the Manager and its running Wallets.
-	for _, account := range params.InitialAccounts {
-		_, err := importAccountParams(
-			account, 0, &m.config.ChainParams, false,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrWalletParams, err)
-		}
+	err = m.validateInitialAccounts(params.InitialAccounts)
+	if err != nil {
+		return nil, err
 	}
 
 	rootKey, err := m.deriveRootKey(params)
@@ -511,6 +507,70 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 	}
 
 	return newManagedWallet(walletCfg, data), nil
+}
+
+// validateInitialAccounts checks resolved scope and script ownership before
+// backend access, sharing import validation and the Store's collision rules.
+func (m *Manager) validateInitialAccounts(
+	accounts []ImportAccountParams) error {
+
+	// These request-local indexes enforce occupied account slots and script
+	// ownership while retaining each account's independently resolved schema.
+	numbers := make(map[[3]uint32]struct{})
+	identities := make(map[string][]db.ScopeAddrSchema)
+
+	for _, account := range accounts {
+		params, err := importAccountParams(
+			account, 0, &m.config.ChainParams, false,
+		)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrWalletParams, err)
+		}
+
+		// Declared imports retain a number; reject an occupied scope/number
+		// before the Store's unique constraint could leave partial genesis.
+		if params.AccountNumber != nil {
+			slot := [3]uint32{
+				params.Scope.Purpose, params.Scope.Coin,
+				*params.AccountNumber,
+			}
+			if _, exists := numbers[slot]; exists {
+				return fmt.Errorf("%w: %w", ErrWalletParams,
+					ErrAccountAlreadyExists)
+			}
+
+			numbers[slot] = struct{}{}
+		}
+
+		// Normalize once: origin fields and serialization versions cannot
+		// distinguish scripts derived from the same key and chain code.
+		payload := db.AccountXPubPayload(params.PublicKey)
+		if payload == nil {
+			return fmt.Errorf("%w: %w", ErrWalletParams,
+				ErrInvalidAccountKey)
+		}
+
+		identity := string(payload)
+
+		overlaps := slices.ContainsFunc(identities[identity],
+			func(previous db.ScopeAddrSchema) bool {
+				return db.AccountSchemasOverlap(
+					previous, *params.AddrSchema,
+				)
+			},
+		)
+		if overlaps {
+			return fmt.Errorf("%w: %w", ErrWalletParams,
+				ErrAccountIdentityCollision)
+		}
+
+		// Retain only validated identities for the following peer checks.
+		identities[identity] = append(
+			identities[identity], *params.AddrSchema,
+		)
+	}
+
+	return nil
 }
 
 // importInitialAccounts imports a list of watch-only accounts into the wallet.
