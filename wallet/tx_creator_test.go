@@ -48,6 +48,11 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 			deps.syncer.On("syncState").Return(syncStateSynced).Once()
 
 			fixture := expectDefaultAuthoringSources(t, w, deps)
+			// Successful authoring allocates change even when it drops dust.
+			expectFreshChangeAddress(
+				t, w, deps, defaultAccountName,
+				waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
+			)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			t.Cleanup(cancel)
 
@@ -213,10 +218,10 @@ func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 
 // expectDefaultAuthoringSources configures automatic selection from the default
 // BIP0086 account. It registers the account-by-name and account-by-number
-// lookups, a processed tip at height 100, one 100,000-sat P2WPKH UTXO mined at
-// height 1, and one P2TR-sized derived change script. The requested payment is
-// 99,700 sat, so the remainder after fees is below the change threshold: the
-// authoring result must contain one input, the payment output, and no change.
+// lookups, a processed tip at height 100, and one 100,000-sat P2WPKH UTXO
+// mined at that tip. The requested payment is 99,700 sat, leaving a sub-dust
+// remainder after fees. Successful callers register change allocation
+// separately so rejection tests do not permit an unreachable callback.
 func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	mocks *mockWalletDeps) defaultAuthoringFixture {
 
@@ -252,15 +257,11 @@ func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	).Once()
 	utxo := db.UtxoInfo{
 		OutPoint: validUTXO, Amount: inputAmount, PkScript: inputScript,
-		Height: 1,
+		Height: 100,
 	}
 	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
 		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
 	}).Return([]db.UtxoInfo{utxo}, nil).Once()
-	expectFreshChangeAddress(
-		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
-		db.TaprootPubKey,
-	)
 
 	return defaultAuthoringFixture{
 		payment: payment, utxo: utxo, inputKey: inputKey,
@@ -1095,6 +1096,12 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 	fixture := expectDefaultAuthoringSources(t, w, mocks)
+	// Successful authoring allocates change even when it drops dust.
+	expectFreshChangeAddress(
+		t, w, mocks, defaultAccountName,
+		waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
+	)
+
 	intent := &TxIntent{
 		Outputs: []wire.TxOut{fixture.payment},
 		FeeRate: defaultFeeRate,
@@ -1130,6 +1137,13 @@ func TestCreateTransactionWatchesChange(t *testing.T) {
 		w, mocks := createStartedSQLWalletWithMocks(t)
 		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		// Keep allocation explicit because the shared input fixture also
+		// serves rejection paths that must never allocate change.
+		expectFreshChangeAddress(
+			t, w, mocks, defaultAccountName,
+			waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
+		)
+
 		changeAddr, _, _ := expectedStoreAddress(
 			t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
 		)
@@ -1161,6 +1175,69 @@ func TestCreateTransactionWatchesChange(t *testing.T) {
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, tx.ChangeIndex, 0)
 	}
+}
+
+// TestCreateTransactionConfirmationHeight checks public automatic selection
+// against the processed tip when cached chain notifications disagree.
+func TestCreateTransactionConfirmationHeight(t *testing.T) {
+	t.Parallel()
+
+	t.Run("accept processed tip coin", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: the input fixture is confirmed at processed height 100,
+		// while the cached chain notification still reports height 99.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		mocks.chain.On("BlockStamp").Return(
+			&waddrmgr.BlockStamp{Height: 99}, nil,
+		).Maybe()
+		expectFreshChangeAddress(
+			t, w, mocks, defaultAccountName,
+			waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
+		)
+
+		// Act: request one confirmation through the public authoring API.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{fixture.payment},
+			Inputs:  &InputsPolicy{MinConfs: 1},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: the processed-tip coin funds the payment despite the
+		// lagging cache, matching a one-confirmation listing.
+		require.NoError(t, err)
+		require.Len(t, authored.Tx.TxIn, 1)
+		require.Equal(t, fixture.utxo.OutPoint,
+			authored.Tx.TxIn[0].PreviousOutPoint)
+	})
+
+	t.Run("reject under confirmed coin", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a cached pre-rollback height of 101 cannot give the
+		// processed-tip coin a second confirmation. No change is allocated.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		mocks.chain.On("BlockStamp").Return(
+			&waddrmgr.BlockStamp{Height: 101}, nil,
+		).Maybe()
+
+		// Act: require two confirmations for the same one-confirmation coin.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{fixture.payment},
+			Inputs:  &InputsPolicy{MinConfs: 2},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: the public funding error and nil result show that the
+		// confirmation floor is preserved after the processed tip rolls back.
+		var sourceErr txauthor.InputSourceError
+		require.ErrorAs(t, err, &sourceErr)
+		require.Nil(t, authored)
+	})
 }
 
 // TestCreateTransactionInvalidIntent tests that an error is returned when an
@@ -1905,94 +1982,121 @@ func TestGetEligibleUTXOsNilSourceAccountNotFound(t *testing.T) {
 	require.Nil(t, eligible)
 }
 
-// TestCreateManualInputSource verifies the coinbase-maturity gate on manually
-// selected inputs. A manual UTXO that is an immature coinbase must be rejected
-// with ErrUtxoNotEligible, matching account-based selection, while a mature
-// coinbase must be accepted and surfaced by the resulting input source.
-func TestCreateManualInputSource(t *testing.T) {
+// expectManualCoinbaseSources configures the shared public authoring reads at
+// processed height 100. The supplied coinbase and cached heights distinguish
+// the maturity cases; callers retain change and watch expectations themselves.
+func expectManualCoinbaseSources(t *testing.T, w *Wallet,
+	mocks *mockWalletDeps, coinbaseHeight uint32,
+	cachedHeight int32) *db.UtxoInfo {
+
+	t.Helper()
+
+	ctx := t.Context()
+
+	// Pin the processed tip for both boundaries. The divergent cache is
+	// optional because correct authoring never uses it for eligibility.
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+	mocks.syncer.On("syncedTo", ctx).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: cachedHeight}, nil,
+	).Maybe()
+
+	// Authoring loads change-account metadata before checking the coin,
+	// including on the immature rejection path.
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+	mocks.store.On("GetAccount", ctx, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+	}).Return(&db.AccountInfo{
+		AccountName: defaultAccountName,
+		AddrSchema:  db.ScopeAddrMap[scope],
+	}, nil).Once()
+	credit := &db.UtxoInfo{
+		OutPoint:     validUTXO,
+		Amount:       btcutil.Amount(100_000),
+		PkScript:     singleAddrPkScript(t),
+		Height:       coinbaseHeight,
+		FromCoinBase: true,
+	}
+	mocks.store.On("GetUtxo", ctx, db.GetUtxoQuery{
+		WalletID: w.id, OutPoint: credit.OutPoint,
+	}).Return(credit, nil).Once()
+
+	return credit
+}
+
+// TestCreateTransactionManualConfirmationHeight checks public manual-input
+// maturity at the processed tip, including a cached tip ahead after rollback.
+func TestCreateTransactionManualConfirmationHeight(t *testing.T) {
 	t.Parallel()
 
-	// The wallet treats an output as a mature coinbase only once it has
-	// reached CoinbaseMaturity confirmations against the chain tip. With
-	// the tip at height 100 and regtest maturity of 100, a coinbase mined
-	// at height 1 has exactly 100 confirmations (mature) while one mined at
-	// height 100 has a single confirmation (immature).
-	const tipHeight = 100
+	t.Run("accept mature coinbase", func(t *testing.T) {
+		t.Parallel()
 
-	matureCoinbase := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
-	immatureCoinbase := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+		// Arrange: height 1 has exactly 100 confirmations at the processed
+		// tip, while the cached height 99 would incorrectly reject it.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		credit := expectManualCoinbaseSources(t, w, mocks, 1, 99)
+		expectFreshChangeAddress(
+			t, w, mocks, defaultAccountName,
+			waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
+		)
 
-	tests := []struct {
-		name       string
-		outPoint   wire.OutPoint
-		height     uint32
-		wantErr    bool
-		wantAmount btcutil.Amount
-	}{
-		{
-			name:     "immature coinbase rejected",
-			outPoint: immatureCoinbase,
-			height:   tipHeight,
-			wantErr:  true,
-		},
-		{
-			name:       "mature coinbase accepted",
-			outPoint:   matureCoinbase,
-			height:     1,
-			wantErr:    false,
-			wantAmount: btcutil.Amount(10000),
-		},
-	}
+		// This payment keeps change, so the maintained wrapper registers
+		// the committed child before returning the mature-input result.
+		changeAddr, _, _ := expectedStoreAddress(
+			t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
+		)
+		mocks.chain.On(
+			"WatchAddrsFromTip", w.lifetimeCtx,
+			[]address.Address{changeAddr},
+		).Return(nil).Once()
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange.
-			w, mocks := createTestWalletWithMocks(t)
-
-			mocks.syncer.On("syncedTo", t.Context()).Return(
-				waddrmgr.BlockStamp{Height: tipHeight}, nil,
-			).Once()
-
-			credit := &db.UtxoInfo{
-				OutPoint:     tc.outPoint,
-				Amount:       btcutil.Amount(10000),
-				PkScript:     singleAddrPkScript(t),
-				Height:       tc.height,
-				FromCoinBase: true,
-			}
-			mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
-				WalletID: w.id,
-				OutPoint: tc.outPoint,
-			}).Return(credit, nil).Once()
-
-			// Act.
-			source, err := w.createManualInputSource(
-				t.Context(), &InputsManual{
-					UTXOs: []wire.OutPoint{tc.outPoint},
-				},
-			)
-
-			// Assert: an immature coinbase is rejected, a mature one
-			// is dispensed by the resulting input source.
-			if tc.wantErr {
-				require.ErrorIs(t, err, ErrUtxoNotEligible)
-				require.Nil(t, source)
-
-				return
-			}
-
-			require.NoError(t, err)
-			require.NotNil(t, source)
-
-			total, inputs, _, _, err := source(0)
-			require.NoError(t, err)
-			require.Len(t, inputs, 1)
-			require.Equal(t, tc.outPoint, inputs[0].PreviousOutPoint)
-			require.Equal(t, tc.wantAmount, total)
+		// Act: explicitly select the boundary coin through public authoring.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{{
+				Value: 99_000, PkScript: credit.PkScript,
+			}},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{credit.OutPoint},
+			},
+			FeeRate: defaultFeeRate,
 		})
-	}
+
+		// Assert: the mature coin is selected and the exact admitted context
+		// reaches the tip accessor, as checked by its required expectation.
+		require.NoError(t, err)
+		require.Len(t, authored.Tx.TxIn, 1)
+		require.Equal(t, credit.OutPoint,
+			authored.Tx.TxIn[0].PreviousOutPoint)
+	})
+
+	t.Run("reject immature coinbase", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: height 2 has only 99 confirmations at processed height
+		// 100. A cached pre-rollback height of 101 must not make it mature.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		credit := expectManualCoinbaseSources(t, w, mocks, 2, 101)
+
+		// Act: explicitly select the immature coin without permitting any
+		// change allocation, since eligibility must reject it first.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{{
+				Value: 99_000, PkScript: credit.PkScript,
+			}},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{credit.OutPoint},
+			},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: manual inputs retain the maturity gate and return no
+		// authored transaction even when the cached chain tip is higher.
+		require.ErrorIs(t, err, ErrUtxoNotEligible)
+		require.Nil(t, authored)
+	})
 }
 
 // TestGetEligibleUTXOsFromList verifies that policy-selected CoinSourceUTXOs
