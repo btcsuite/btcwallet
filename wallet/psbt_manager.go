@@ -665,8 +665,9 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 //
 // It executes the funding logic by:
 //  1. Validation: Checking the `FundIntent` for consistency.
-//  2. Creation: Converting the intent into a `TxIntent`, preparing its input
-//     and change sources, and invoking the shared transaction authoring method.
+//  2. Creation: Converting the intent into a `TxIntent`, resolving its change
+//     account and input source, selecting inputs through the shared authoring
+//     boundary, allocating a change address, and completing the transaction.
 //  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
 //     change output to the PSBT structure and sort it according to BIP 69.
 //  4. Registration: On SQL wallets, registering change kept by the funded
@@ -733,8 +734,10 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 		return
 	}
 
-	inputSource, changeSource, change, err := w.prepareTxAuthSources(
-		r.ctx, txIntent,
+	changeScope := w.determineChangeSource(txIntent)
+
+	changeAccount, changeScriptSize, err := w.resolveChangeAccount(
+		r.ctx, changeScope,
 	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
@@ -742,15 +745,33 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 		return
 	}
 
-	// Create the transaction through the shared authoring boundary.
-	authoredTx, err := w.authorTransaction(
-		txIntent.Outputs, txIntent.FeeRate, inputSource, changeSource,
+	inputSource, err := w.createInputSource(r.ctx, txIntent)
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	// Select inputs through the shared authoring boundary.
+	selection, err := w.selectTxInputs(
+		txIntent.Outputs, txIntent.FeeRate, inputSource, changeScriptSize,
 	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
 
 		return
 	}
+
+	change, err := w.allocateChangeAddress(
+		r.ctx, changeScope.KeyScope, changeAccount,
+	)
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	authoredTx := completeTransaction(selection, change.ScriptPubKey)
 
 	// Populate the PSBT packet with the new transaction details.
 	packet, changeIndex, err := w.populatePsbtPacket(
@@ -764,7 +785,9 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 
 	// Register kept change before the caller can observe the packet. A
 	// negative sorted index means authoring dropped the change output.
-	err = w.watchAuthoredChange(r.ctx, int(changeIndex), change)
+	err = w.watchAuthoredChange(
+		r.ctx, int(changeIndex), changeAccount, change,
+	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
 
