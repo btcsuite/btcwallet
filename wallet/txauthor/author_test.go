@@ -360,6 +360,17 @@ func TestNewUnsignedTransactionChecksAmounts(t *testing.T) {
 			require.Nil(t, tx)
 			require.Zero(t, sources.inputCalls)
 			require.Zero(t, sources.changeCalls)
+
+			// SelectInputs owns these checks, so calling it directly
+			// must refuse the request just as early.
+			selection, err := SelectInputs(
+				tc.outputs, tc.relayFee, sources.input,
+				sources.change.ScriptSize,
+			)
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, selection)
+			require.Zero(t, sources.inputCalls)
 		})
 	}
 }
@@ -414,4 +425,75 @@ func TestNewUnsignedTransactionNoChange(t *testing.T) {
 	// alone, so there is nothing left over to pay out as change.
 	require.Equal(t, -1, tx.ChangeIndex)
 	require.Empty(t, tx.Tx.TxOut)
+}
+
+// TestInputSelectionComplete verifies that completing a selection keeps the
+// caller's change script only when the leftover value survives the dust rules,
+// and that completion never grows the caller's output slice in place.
+func TestInputSelectionComplete(t *testing.T) {
+	t.Parallel()
+
+	changeScript := p2wpkhScript()
+	changeScript[len(changeScript)-1] = 1 // Differ from input scripts.
+
+	tests := []struct {
+		name       string
+		surplus    btcutil.Amount
+		wantChange bool
+	}{{
+		name:    "zero leftover adds no change",
+		surplus: 0,
+	}, {
+		name:    "dust leftover is added to the fee",
+		surplus: 100,
+	}, {
+		name:       "non-dust leftover pays the change script",
+		surplus:    50_000,
+		wantChange: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Select inputs for one payment whose source funds
+			// the requested target plus the case's surplus. Give the
+			// output slice spare capacity so an in-place append would be
+			// observable.
+			sources := newCountedSources(t, tc.surplus)
+			outputs := make([]*wire.TxOut, 1, 2)
+			outputs[0] = p2pkhOutputs(1e6)[0]
+
+			selection, err := SelectInputs(
+				outputs, 1e3, sources.input, len(changeScript),
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, sources.inputCalls)
+
+			// Act: Complete the selection with the caller's script.
+			tx := selection.Complete(changeScript)
+
+			// Assert: The inputs are carried over and the caller's
+			// output slice keeps its original element.
+			require.Len(t, tx.Tx.TxIn, 1)
+			require.Len(t, tx.PrevScripts, 1)
+			require.Equal(t, tx.PrevInputValues[0], tx.TotalInput)
+			require.Nil(t, outputs[:cap(outputs)][1])
+
+			if !tc.wantChange {
+				require.Equal(t, -1, tx.ChangeIndex)
+				require.Len(t, tx.Tx.TxOut, 1)
+
+				return
+			}
+
+			// Kept change is appended after the payment and carries the
+			// exact surplus to the caller's script.
+			require.Equal(t, 1, tx.ChangeIndex)
+			require.Len(t, tx.Tx.TxOut, 2)
+			change := tx.Tx.TxOut[tx.ChangeIndex]
+			require.Equal(t, int64(tc.surplus), change.Value)
+			require.Equal(t, changeScript, change.PkScript)
+		})
+	}
 }
