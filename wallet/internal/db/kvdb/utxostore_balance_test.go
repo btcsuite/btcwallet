@@ -311,6 +311,9 @@ func TestBalanceSkipsUnownedAddress(t *testing.T) {
 func TestBalanceNameFilter(t *testing.T) {
 	t.Parallel()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+
 	store, mgr, txStore, cleanup := newCreditedFixture(t)
 	t.Cleanup(cleanup)
 
@@ -331,7 +334,7 @@ func TestBalanceNameFilter(t *testing.T) {
 		db.CreateImportedAccountParams{
 			Scope:             dbScope,
 			Name:              importedName,
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 		},
 	)

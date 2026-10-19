@@ -640,6 +640,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 		accountKey, masterFingerprint, addrT := generateTestExtendedKey(
 			b, accountGrowth[i],
 		)
+		inputFingerprint := MasterFingerprint(masterFingerprint)
 
 		name := fmt.Sprintf("%0*d-Accounts", accountGrowthPadding,
 			accountGrowth[i])
@@ -701,7 +702,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 						Name:                 accountName,
 						XPub:                 accountKey,
 						AddrType:             addrT,
-						MasterKeyFingerprint: masterFingerprint,
+						MasterKeyFingerprint: &inputFingerprint,
 					}, dryRun,
 				)
 				require.NoError(b, err)

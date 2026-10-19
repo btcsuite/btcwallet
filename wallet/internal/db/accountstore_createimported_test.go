@@ -116,7 +116,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 		KeyScope:             params.Scope,
 		AddrSchema:           ScopeAddrMap[params.Scope],
 		PublicKey:            params.PublicKey,
-		MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
+		MasterKeyFingerprint: params.MasterFingerprint,
 		NoChainSync:          true,
 	}
 
@@ -164,7 +164,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 	require.Equal(t, params.PublicKey, info.PublicKey)
 	require.NotNil(t, info.MasterKeyFingerprint)
 	require.Equal(t, params.MasterFingerprint,
-		*info.MasterKeyFingerprint)
+		info.MasterKeyFingerprint)
 	require.True(t, info.NoChainSync)
 	ops.AssertExpectations(t)
 }
@@ -257,7 +257,7 @@ func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 				KeyScope:             params.Scope,
 				AddrSchema:           ScopeAddrMap[params.Scope],
 				PublicKey:            params.PublicKey,
-				MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
+				MasterKeyFingerprint: params.MasterFingerprint,
 			}
 			ops := &mockCreateImportedAccountOps{}
 			walletCall := ops.On(
@@ -480,7 +480,7 @@ func testCreateImportedAccountParams() CreateImportedAccountParams {
 			Purpose: 84,
 			Coin:    0,
 		},
-		MasterFingerprint:   0x1234,
+		MasterFingerprint:   ptrUint32(0x1234),
 		PublicKey:           []byte{0x02, 0xab},
 		EncryptedPrivateKey: []byte{0xde, 0xad},
 	}

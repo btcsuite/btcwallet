@@ -20,8 +20,9 @@ type CreateImportedAccountInsertRequest struct {
 	// PublicKey is the extended public key for the imported account.
 	PublicKey []byte
 
-	// MasterFingerprint is the master key fingerprint for the imported account.
-	MasterFingerprint uint32
+	// MasterFingerprint is optional origin metadata. Nil binds SQL NULL;
+	// a supplied zero retains that valid fingerprint value.
+	MasterFingerprint *uint32
 
 	// NoChainSync is the immutable automatic synchronization policy to store
 	// with this account row.

@@ -1427,6 +1427,11 @@ func TestImportAccount(t *testing.T) {
 	witnessSchema := db.ScopeAddrMap[db.KeyScopeBIP0084]
 	hybridSchema := db.ScopeAddrMap[db.KeyScopeBIP0049Plus]
 	taprootSchema := db.ScopeAddrMap[db.KeyScopeBIP0086]
+
+	// Explicit public and Store values distinguish omission from valid zero
+	// while keeping the existing schema rows as nonzero metadata controls.
+	publicZero, publicSet := MasterFingerprint(0), MasterFingerprint(0x1234)
+	storeZero, storeSet := uint32(0), uint32(0x1234)
 	tests := []struct {
 		name       string
 		purpose    uint32
@@ -1435,9 +1440,11 @@ func TestImportAccount(t *testing.T) {
 		addrType   waddrmgr.AddressType
 		addrSchema *db.ScopeAddrSchema
 		dryRun     bool
+		inputFP    *MasterFingerprint
+		storeFP    *uint32
 	}{
 		{
-			name:       "persist account",
+			name:       "persist account without fingerprint",
 			purpose:    84,
 			version:    waddrmgr.HDVersionTestNetBIP0044,
 			scope:      waddrmgr.KeyScopeBIP0084,
@@ -1445,7 +1452,9 @@ func TestImportAccount(t *testing.T) {
 			addrSchema: &witnessSchema,
 		},
 		{
-			name:       "preview account",
+			name:       "preview account with zero fingerprint",
+			inputFP:    &publicZero,
+			storeFP:    &storeZero,
 			purpose:    84,
 			version:    waddrmgr.HDVersionTestNetBIP0044,
 			scope:      waddrmgr.KeyScopeBIP0084,
@@ -1455,6 +1464,8 @@ func TestImportAccount(t *testing.T) {
 		},
 		{
 			name:     "override address schema",
+			inputFP:  &publicSet,
+			storeFP:  &storeSet,
 			purpose:  49,
 			version:  waddrmgr.HDVersionTestNetBIP0049,
 			scope:    waddrmgr.KeyScopeBIP0049Plus,
@@ -1468,6 +1479,8 @@ func TestImportAccount(t *testing.T) {
 			// A BIP49-version key selects the hybrid scope even though
 			// the requested native witness type does not identify BIP49.
 			name:       "preserve hybrid schema",
+			inputFP:    &publicSet,
+			storeFP:    &storeSet,
 			purpose:    49,
 			version:    waddrmgr.HDVersionTestNetBIP0049,
 			scope:      waddrmgr.KeyScopeBIP0049Plus,
@@ -1477,6 +1490,8 @@ func TestImportAccount(t *testing.T) {
 		},
 		{
 			name:       "resolve taproot schema",
+			inputFP:    &publicSet,
+			storeFP:    &storeSet,
 			purpose:    86,
 			version:    waddrmgr.HDVersionTestNetBIP0044,
 			scope:      waddrmgr.KeyScopeBIP0086,
@@ -1493,9 +1508,9 @@ func TestImportAccount(t *testing.T) {
 			// Arrange: Clone the fixture key to the row's HD version so
 			// scope selection sees the caller's serialized identity. After
 			// name preflight, require one exact Store call carrying the
-			// strict override or resolved canonical branch schema.
+			// schema and optional origin metadata unchanged.
 			w, deps := createStartedWalletWithMocks(t)
-			key, fingerprint := importAccountTestKey(t, test.purpose)
+			key, _ := importAccountTestKey(t, test.purpose)
 			version := make([]byte, 4)
 			binary.BigEndian.PutUint32(version, uint32(test.version))
 			key, err := key.CloneWithVersion(version)
@@ -1506,7 +1521,7 @@ func TestImportAccount(t *testing.T) {
 				db.CreateImportedAccountParams{
 					Name:              testAccountName,
 					Scope:             db.KeyScope(test.scope),
-					MasterFingerprint: fingerprint,
+					MasterFingerprint: test.storeFP,
 					PublicKey:         []byte(key.String()),
 					AddrSchema:        test.addrSchema,
 					DryRun:            test.dryRun,
@@ -1515,13 +1530,13 @@ func TestImportAccount(t *testing.T) {
 			}, nil).Once()
 
 			// Act: Import with the versioned XPub and requested address
-			// type so the public path resolves the per-account schema.
+			// type and optional metadata through public admission.
 			info, err := w.ImportAccount(
 				t.Context(), ImportAccountParams{
 					Name:                 testAccountName,
 					XPub:                 key,
 					AddrType:             test.addrType,
-					MasterKeyFingerprint: fingerprint,
+					MasterKeyFingerprint: test.inputFP,
 				}, test.dryRun,
 			)
 
@@ -1542,6 +1557,7 @@ func TestImportAccountOccupiedName(t *testing.T) {
 	// Arrange: Occupy the name in the key-derived scope and allow no write.
 	w, deps := createStartedWalletWithMocks(t)
 	accountKey, masterFP := importAccountTestKey(t, 84)
+	inputFingerprint := MasterFingerprint(masterFP)
 	scope := waddrmgr.KeyScopeBIP0084
 	name := testAccountName
 	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
@@ -1557,7 +1573,7 @@ func TestImportAccountOccupiedName(t *testing.T) {
 			Name:                 name,
 			XPub:                 accountKey,
 			AddrType:             waddrmgr.WitnessPubKey,
-			MasterKeyFingerprint: masterFP,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, false,
 	)
 
@@ -1645,6 +1661,7 @@ func TestImportAccountStoreErrors(t *testing.T) {
 			// wraps cancellation, so this tests the delivered result mapping.
 			w, deps := createStartedWalletWithMocks(t)
 			accountKey, masterFP := importAccountTestKey(t, 84)
+			inputFingerprint := MasterFingerprint(masterFP)
 			scope := waddrmgr.KeyScopeBIP0084
 			expectAccountNameAvailable(deps, scope, testAccountName)
 			deps.store.On(
@@ -1657,7 +1674,7 @@ func TestImportAccountStoreErrors(t *testing.T) {
 					Name:                 testAccountName,
 					XPub:                 accountKey,
 					AddrType:             waddrmgr.WitnessPubKey,
-					MasterKeyFingerprint: masterFP,
+					MasterKeyFingerprint: &inputFingerprint,
 				}, false,
 			)
 
@@ -1684,6 +1701,7 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 	// requests must fail before persistence.
 	w, _ := createStartedWalletWithMocks(t)
 	accountKey, masterFP := importAccountTestKey(t, 44)
+	inputFingerprint := MasterFingerprint(masterFP)
 
 	// Act: Try an empty account name with valid public key material.
 	_, err := w.ImportAccount(
@@ -1691,7 +1709,7 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 			Name:                 "",
 			XPub:                 accountKey,
 			AddrType:             waddrmgr.WitnessPubKey,
-			MasterKeyFingerprint: masterFP,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, false,
 	)
 
@@ -1704,7 +1722,7 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 			Name:                 testAccountName,
 			XPub:                 accountKey,
 			AddrType:             waddrmgr.PubKeyHash,
-			MasterKeyFingerprint: masterFP,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, false,
 	)
 
@@ -1721,7 +1739,7 @@ func TestImportAccountInvalidRequest(t *testing.T) {
 			Name:                 "",
 			XPub:                 accountKey,
 			AddrType:             waddrmgr.WitnessPubKey,
-			MasterKeyFingerprint: masterFP,
+			MasterKeyFingerprint: &inputFingerprint,
 		}, false,
 	)
 
@@ -1742,6 +1760,8 @@ func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
 	require.NoError(t, w.state.toStarted())
 
 	accountKey, masterFP := importAccountTestKey(t, 84)
+
+	inputFingerprint := MasterFingerprint(masterFP)
 	wantKey := accountKey.String()
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -1752,7 +1772,7 @@ func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
 				Name:                 testAccountName,
 				XPub:                 accountKey,
 				AddrType:             waddrmgr.WitnessPubKey,
-				MasterKeyFingerprint: masterFP,
+				MasterKeyFingerprint: &inputFingerprint,
 			}, false,
 		)
 		result <- err
@@ -2695,6 +2715,7 @@ func TestImportAccountDeclaredScope(t *testing.T) {
 			// and require the declared schema and SQL chain policy in one call.
 			w, deps := createStartedWalletWithMocks(t)
 			key, _ := importAccountTestKey(t, 44)
+			inputFingerprint := MasterFingerprint(tc.fp)
 			number := uint32(0)
 
 			expectAccountNameAvailable(deps, tc.scope, testAccountName)
@@ -2705,7 +2726,7 @@ func TestImportAccountDeclaredScope(t *testing.T) {
 					AccountNumber:     &number,
 					AddrSchema:        &tc.want,
 					PublicKey:         []byte(key.String()),
-					MasterFingerprint: tc.fp,
+					MasterFingerprint: &tc.fp,
 					NoChainSync:       tc.noChainSync,
 				}).Return(&db.AccountInfo{
 				AccountName:          testAccountName,
@@ -2724,7 +2745,7 @@ func TestImportAccountDeclaredScope(t *testing.T) {
 				XPub:                 key,
 				Scope:                &tc.scope,
 				AddrSchema:           tc.schema,
-				MasterKeyFingerprint: tc.fp,
+				MasterKeyFingerprint: &inputFingerprint,
 				NoChainSync:          tc.noChainSync,
 			}, false)
 
@@ -2750,6 +2771,7 @@ func TestImportAccountDeclaredScopeValidation(t *testing.T) {
 	// Arrange: valid public account material isolates scope/schema failures;
 	// no Store expectations permit a rejected input to reach persistence.
 	key, _ := importAccountTestKey(t, 44)
+	fingerprint := MasterFingerprint(0)
 	custom := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
 	canonical := waddrmgr.KeyScopeBIP0084
 	witness := waddrmgr.ScopeAddrMap[canonical]
@@ -2786,10 +2808,11 @@ func TestImportAccountDeclaredScopeValidation(t *testing.T) {
 
 			// Act: submit the selected invalid new-form input with a valid key.
 			info, err := w.ImportAccount(t.Context(), ImportAccountParams{
-				Name:       testAccountName,
-				XPub:       key,
-				Scope:      tc.scope,
-				AddrSchema: tc.schema,
+				MasterKeyFingerprint: &fingerprint,
+				Name:                 testAccountName,
+				XPub:                 key,
+				Scope:                tc.scope,
+				AddrSchema:           tc.schema,
 			}, false)
 
 			// Assert: public parameter refusal returns no account before any
@@ -2811,14 +2834,16 @@ func TestImportAccountNumberedKVDB(t *testing.T) {
 	w, err := m.Create(managerLifecycleCreateParams("numbered-kvdb"))
 	require.NoError(t, err)
 	key, _ := importAccountTestKey(t, 84)
+	fingerprint := MasterFingerprint(0)
 	scope := waddrmgr.KeyScopeBIP0084
 	number := AccountNumber(0)
 
 	// Act: import through the same declared-scope API used by SQL Wallets.
 	info, err := w.ImportAccount(t.Context(), ImportAccountParams{
-		Name:  testAccountName,
-		XPub:  key,
-		Scope: &scope,
+		MasterKeyFingerprint: &fingerprint,
+		Name:                 testAccountName,
+		XPub:                 key,
+		Scope:                &scope,
 	}, false)
 
 	// Assert: the imported key has a known number, default witness schema and

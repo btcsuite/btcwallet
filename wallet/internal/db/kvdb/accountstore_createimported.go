@@ -166,6 +166,13 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
+	// Native watch-only rows have no presence bit. Preserve kvdb's legacy
+	// zero default; SQL retains absence in its nullable account row.
+	var masterFingerprint uint32
+	if params.MasterFingerprint != nil {
+		masterFingerprint = *params.MasterFingerprint
+	}
+
 	// Known paths reuse the native exact-slot writer. Inferred imports keep
 	// the legacy sequential assignment, including its allocation limit.
 	var accountNumber uint32
@@ -173,11 +180,11 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 		accountNumber = *params.AccountNumber
 		err = scopedMgr.PutWatchOnlyAccountWithKeys(
 			ns, accountNumber, params.Name, pubKey,
-			params.MasterFingerprint, addrSchema,
+			masterFingerprint, addrSchema,
 		)
 	} else {
 		accountNumber, err = scopedMgr.NewAccountWatchingOnly(
-			ns, params.Name, pubKey, params.MasterFingerprint, addrSchema,
+			ns, params.Name, pubKey, masterFingerprint, addrSchema,
 		)
 	}
 

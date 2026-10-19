@@ -222,32 +222,28 @@ func convertAddressID(id int64) (uint32, error) {
 // fields on AddressInfo.
 func convertAccountMetadata(accountNumber sql.NullInt64,
 	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (*uint32,
-	uint32, KeyScope, error) {
+	*uint32, KeyScope, error) {
 
 	account, err := optionalAccountNumber(accountNumber)
 	if err != nil {
-		return nil, 0, KeyScope{}, err
+		return nil, nil, KeyScope{}, err
 	}
 
-	var fingerprint uint32
-	if masterFingerprint.Valid {
-		converted, err := Int64ToUint32(masterFingerprint.Int64)
-		if err != nil {
-			return nil, 0, KeyScope{},
-				fmt.Errorf("master fingerprint: %w", err)
-		}
-
-		fingerprint = converted
+	// Child metadata must retain SQL NULL separately from a valid zero,
+	// just as the owning account does, so callers cannot invent an origin.
+	fingerprint, err := optionalMasterFingerprint(masterFingerprint)
+	if err != nil {
+		return nil, nil, KeyScope{}, err
 	}
 
 	convertedPurpose, err := Int64ToUint32(purpose)
 	if err != nil {
-		return nil, 0, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
+		return nil, nil, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
 	}
 
 	convertedCoin, err := Int64ToUint32(coinType)
 	if err != nil {
-		return nil, 0, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
+		return nil, nil, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
 	}
 
 	return account, fingerprint, KeyScope{
@@ -260,26 +256,21 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 // address row. SQL backends may fetch account properties separately to avoid
 // widening address queries.
 func convertAddressAccountMetadata[TypeID any](
-	row AddressInfoRow[TypeID]) (*uint32, string, uint32,
+	row AddressInfoRow[TypeID]) (*uint32, string, *uint32,
 	KeyScope, error) {
 
 	if row.AccountProps != nil {
-		var masterFingerprint uint32
-		if row.AccountProps.MasterKeyFingerprint != nil {
-			masterFingerprint = *row.AccountProps.MasterKeyFingerprint
-		}
-
 		return row.AccountProps.AccountNumber, row.AccountProps.AccountName,
-			masterFingerprint,
+			row.AccountProps.MasterKeyFingerprint,
 			row.AccountProps.KeyScope, nil
 	}
 
 	if !row.IsDerived {
-		return nil, "", 0, KeyScope{}, nil
+		return nil, "", nil, KeyScope{}, nil
 	}
 
 	if !row.AccountName.Valid || !row.Purpose.Valid || !row.CoinType.Valid {
-		return nil, "", 0, KeyScope{}, fmt.Errorf("%w: derived address "+
+		return nil, "", nil, KeyScope{}, fmt.Errorf("%w: derived address "+
 			"missing account scope metadata", errAddressShapeCorruption)
 	}
 
@@ -289,7 +280,7 @@ func convertAddressAccountMetadata[TypeID any](
 			row.CoinType.Int64,
 		)
 	if err != nil {
-		return nil, "", 0, KeyScope{}, err
+		return nil, "", nil, KeyScope{}, err
 	}
 
 	return accountNumber, row.AccountName.String, masterFingerprint, keyScope,

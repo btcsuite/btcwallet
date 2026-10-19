@@ -1023,6 +1023,9 @@ func createImportedXpubAccount(t *testing.T, store *Store,
 
 	t.Helper()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+
 	seed := bytes.Repeat([]byte{seedByte}, hdkeychain.RecommendedSeedLen)
 	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
 	require.NoError(t, err)
@@ -1052,7 +1055,7 @@ func createImportedXpubAccount(t *testing.T, store *Store,
 			AccountNumber:     accountNumber,
 			Scope:             dbScope,
 			Name:              name,
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 		},
 	)

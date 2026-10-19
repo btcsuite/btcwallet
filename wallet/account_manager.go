@@ -1183,7 +1183,7 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 	}
 
 	// Own all pointer inputs before admission so a canceled caller cannot
-	// change the key path or branch schema seen by the handler.
+	// change the key path, fingerprint or branch schema seen by the handler.
 	account.XPub = accountKeySnapshot
 	if account.Scope != nil {
 		scope := *account.Scope
@@ -1193,6 +1193,11 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 	if account.AddrSchema != nil {
 		schema := *account.AddrSchema
 		account.AddrSchema = &schema
+	}
+
+	if account.MasterKeyFingerprint != nil {
+		fingerprint := *account.MasterKeyFingerprint
+		account.MasterKeyFingerprint = &fingerprint
 	}
 
 	req := importAccountReq{
@@ -1286,16 +1291,25 @@ func importAccountParams(account ImportAccountParams, walletID uint32,
 		return params, err
 	}
 
+	// Copy supplied metadata into the Store's optional value, keeping
+	// omission distinct from a valid all-zero four-byte fingerprint.
+	var masterFingerprint *uint32
+	if account.MasterKeyFingerprint != nil {
+		value := uint32(*account.MasterKeyFingerprint)
+		masterFingerprint = &value
+	}
+
 	// Inferred imports retain the existing version/address-type selection.
 	// Declared imports use the key's child index and existing path validator.
 	var scope waddrmgr.KeyScope
 
 	schema := account.AddrSchema
-	if account.Scope == nil && schema != nil {
-		return params, fmt.Errorf("schema requires scope: %w", ErrInvalidParam)
-	}
-
 	if account.Scope == nil {
+		if schema != nil {
+			return params, fmt.Errorf("schema requires scope: %w",
+				ErrInvalidParam)
+		}
+
 		scope, schema, err = keyScopeFromPubKey(account.XPub, &account.AddrType)
 	} else {
 		scope = *account.Scope
@@ -1343,7 +1357,7 @@ func importAccountParams(account ImportAccountParams, walletID uint32,
 		Name:              account.Name,
 		Scope:             db.KeyScope(scope),
 		AccountNumber:     params.AccountNumber,
-		MasterFingerprint: account.MasterKeyFingerprint,
+		MasterFingerprint: masterFingerprint,
 		PublicKey:         []byte(account.XPub.String()),
 		DryRun:            dryRun,
 		AddrSchema:        params.AddrSchema,

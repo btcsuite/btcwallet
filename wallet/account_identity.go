@@ -23,9 +23,10 @@ var ErrInvalidAccountSelector = errors.New(
 // account zero.
 type AccountNumber uint32
 
-// MasterFingerprint is the BIP32 master key fingerprint. A nil pointer means
-// the fingerprint is absent, while a non-nil zero is a present-zero
-// fingerprint.
+// MasterFingerprint is the first four bytes of HASH160 of the compressed
+// master public key, as defined by BIP32. Those bytes can all be zero, so a
+// non-nil zero is a valid supplied fingerprint. A nil pointer means the
+// fingerprint was omitted.
 type MasterFingerprint uint32
 
 // AccountSelector identifies an account by its portable wallet semantics.

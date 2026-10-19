@@ -110,10 +110,9 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 			PublicKey:      req.PublicKey,
 			InternalTypeID: internalType,
 			ExternalTypeID: externalType,
-			MasterFingerprint: sql.NullInt64{
-				Int64: int64(req.MasterFingerprint),
-				Valid: true,
-			},
+			MasterFingerprint: db.NullableUint32ToSQLInt64(
+				req.MasterFingerprint,
+			),
 		},
 	)
 	if err != nil {

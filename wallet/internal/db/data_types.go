@@ -554,8 +554,9 @@ type CreateImportedAccountParams struct {
 	// Nil preserves a numberless import on every backend.
 	AccountNumber *uint32
 
-	// MasterFingerprint is the fingerprint of the master key.
-	MasterFingerprint uint32
+	// MasterFingerprint retains optional origin metadata on SQL: nil is
+	// absent, and a supplied zero is valid. Legacy kvdb defaults nil to zero.
+	MasterFingerprint *uint32
 
 	// PublicKey is the extended public key for the account.
 	PublicKey []byte
@@ -729,9 +730,9 @@ type AddressInfo struct {
 	// KeyScope identifies the wallet scope that owns the address.
 	KeyScope KeyScope
 
-	// MasterKeyFingerprint is the root fingerprint associated with the owning
-	// account. It is 0 when the database does not store one for the account.
-	MasterKeyFingerprint uint32
+	// MasterKeyFingerprint is the owning account's optional root fingerprint.
+	// Nil means unknown; a supplied zero remains a known fingerprint.
+	MasterKeyFingerprint *uint32
 
 	// AddrType is the type of address (P2PKH, P2WPKH, P2TR, etc.).
 	AddrType AddressType

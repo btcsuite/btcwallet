@@ -97,19 +97,25 @@ are separate facts. The supported account shapes are:
 | --- | --- | --- | --- | --- |
 | Generated seed | spendable | wallet-derived | required | computed |
 | Imported private root | spendable | wallet-derived | required | computed |
-| Imported XPub, unnumbered | watch-only | imported | absent | required |
-| Imported XPub, numbered | watch-only | imported | required | required |
+| Imported XPub, unnumbered | watch-only | imported | absent | optional |
+| Imported XPub, numbered | watch-only | imported | required | optional |
 
 The persisted `is_derived` fact and public `IsImported` result distinguish a
 wallet-derived account key from an imported account key. An optional account
 number distinguishes numberless imports from imports with a known number.
 Accounts derived from an imported private wallet root remain wallet-derived.
 
-For a numbered import, the caller supplies the master fingerprint, purpose
-and coin type; the account number comes from the XPub's hardened child index.
+For a numbered import, the caller declares purpose and coin type and may
+supply the master fingerprint; the account number comes from the XPub's
+hardened child index.
 The wallet validates the key's network, depth and hardened account child. It
 cannot authenticate the hardened purpose or coin ancestors or the supplied
-fingerprint. `MasterKeyFingerprint` remains a scalar `uint32`, including zero.
+fingerprint. `ImportAccountParams.MasterKeyFingerprint` uses the wallet-owned
+`*MasterFingerprint`: SQL preserves nil as absent and a non-nil zero as a
+valid supplied fingerprint. The BIP32 fingerprint is a four-byte hash prefix
+and can be all zero, so it cannot also represent omission. Legacy kvdb rows
+have only a scalar fingerprint and retain their existing zero default when
+metadata is omitted; this does not add optional-metadata parity to kvdb.
 Wallet-derived accounts use the wallet-computed fingerprint.
 
 #### Account Creation Requests
@@ -368,8 +374,10 @@ Cons:
 - `AddressDerivationParams` carries an optional account number. Unnumbered-XPub
   child addresses must not synthesize `0` and accidentally claim a full public
   origin or derive wallet-seed keys. A numbered caller-supplied child may
-  report its caller-declared origin without claiming the wallet authenticated
-  its hardened ancestors.
+  report its caller-declared origin when its fingerprint is also known,
+  without claiming the wallet authenticated its hardened ancestors. Missing
+  fingerprint metadata omits the complete public origin while retaining the
+  child's branch/index; an explicitly supplied zero remains known.
 - `ListAddressesQuery` uses pointer selectors: both `Scope` and `AccountName`
   set means account-scoped derived children; both nil means raw imported
   addresses; one set without the other is invalid.

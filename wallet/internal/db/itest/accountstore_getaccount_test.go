@@ -133,23 +133,78 @@ func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
 		derived.MasterKeyFingerprint, derivedRead.MasterKeyFingerprint,
 	)
 
-	importedPubKey := RandomBytes(32)
-	_, err = store.CreateImportedAccount(
-		t.Context(), db.CreateImportedAccountParams{
-			WalletID:            walletID,
-			Name:                "imported-xpub",
-			Scope:               scope,
-			PublicKey:           importedPubKey,
-			EncryptedPrivateKey: RandomBytes(32),
-		},
-	)
-	require.NoError(t, err)
+	// Arrange: The existing imported-key readback also distinguishes an
+	// omitted origin from an explicitly supplied all-zero fingerprint.
+	zero := uint32(0)
 
-	importedRead, err := store.GetAccount(
-		t.Context(), getAccountQueryByName(walletID, scope, "imported-xpub"),
-	)
-	require.NoError(t, err)
-	require.Equal(t, importedPubKey, importedRead.PublicKey)
+	cases := []struct {
+		name        string
+		fingerprint *uint32
+	}{
+		{
+			name: "omitted fingerprint",
+		},
+		{
+			name:        "supplied zero fingerprint",
+			fingerprint: &zero,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange: Isolate each nullable write with distinct names
+			// and keys while reusing the existing wallet and import path.
+			// Known distinct numbers also give the test deriver distinct
+			// child scripts, so each read observes its own account metadata.
+			accountNumber := uint32(i + 1)
+			importedPubKey := RandomBytes(32)
+			params := db.CreateImportedAccountParams{
+				WalletID:            walletID,
+				Name:                tc.name,
+				Scope:               scope,
+				AccountNumber:       &accountNumber,
+				PublicKey:           importedPubKey,
+				MasterFingerprint:   tc.fingerprint,
+				EncryptedPrivateKey: RandomBytes(32),
+			}
+
+			// Act: Create the account and independently read its row;
+			// allocate and re-read a child to exercise both address
+			// projections of the same nullable account fingerprint.
+			created, createErr := store.CreateImportedAccount(
+				t.Context(), params,
+			)
+			importedRead, readErr := store.GetAccount(
+				t.Context(), getAccountQueryByName(
+					walletID, scope, tc.name,
+				),
+			)
+
+			require.NoError(t, createErr)
+			child := newDerivedAddress(
+				t, store, walletID, scope, tc.name, false,
+			)
+			childRead, childReadErr := store.GetAddress(
+				t.Context(), db.GetAddressQuery{
+					WalletID:     walletID,
+					ScriptPubKey: child.ScriptPubKey,
+				},
+			)
+
+			// Assert: Account and child results preserve the supplied
+			// presence and value; SQL NULL cannot invent a zero origin.
+			require.NoError(t, readErr)
+			require.NoError(t, childReadErr)
+			require.Equal(t, importedPubKey, importedRead.PublicKey)
+			require.Equal(t, tc.fingerprint,
+				created.MasterKeyFingerprint)
+			require.Equal(t, tc.fingerprint,
+				importedRead.MasterKeyFingerprint)
+			require.Equal(t, tc.fingerprint,
+				child.MasterKeyFingerprint)
+			require.Equal(t, tc.fingerprint,
+				childRead.MasterKeyFingerprint)
+		})
+	}
 }
 
 // TestGetAccountPopulatesBalance verifies that GetAccount returns the

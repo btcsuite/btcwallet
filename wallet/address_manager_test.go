@@ -312,7 +312,7 @@ func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
 	info.AccountName = waddrmgr.DefaultAccountName
 	info.AccountNumber = &accountNumber
 	info.KeyScope = db.KeyScope(scope)
-	info.MasterKeyFingerprint = fingerprint
+	info.MasterKeyFingerprint = &fingerprint
 	info.HasDerivationPath = true
 	info.Index = index
 
@@ -393,17 +393,20 @@ func storeChild(t *testing.T, key *hdkeychain.ExtendedKey,
 	addr, script, pubKey := expectedStoreAddress(
 		t, key, addrType, branch, index,
 	)
+	// Receiving fixtures need a known origin; supply zero explicitly.
 	number := uint32(0)
+	fingerprint := uint32(0)
 
 	return addr, db.AddressInfo{
-		AddrType:          addrType,
-		AccountNumber:     &number,
-		KeyScope:          db.KeyScope(waddrmgr.KeyScopeBIP0084),
-		HasDerivationPath: true,
-		Branch:            branch,
-		Index:             index,
-		ScriptPubKey:      script,
-		PubKey:            pubKey,
+		AddrType:             addrType,
+		AccountNumber:        &number,
+		MasterKeyFingerprint: &fingerprint,
+		KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		HasDerivationPath:    true,
+		Branch:               branch,
+		Index:                index,
+		ScriptPubKey:         script,
+		PubKey:               pubKey,
 	}
 }
 
@@ -479,8 +482,9 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	}
 
 	if keyScope != (waddrmgr.KeyScope{}) {
+		fingerprint := uint32(1)
 		storeInfo.KeyScope = db.KeyScope(keyScope)
-		storeInfo.MasterKeyFingerprint = 1
+		storeInfo.MasterKeyFingerprint = &fingerprint
 	}
 
 	deps.store.On(
@@ -2366,6 +2370,8 @@ func TestNewBulkAddressesReturnsWatchedBatch(t *testing.T) {
 				number = new(uint32)
 			}
 
+			// A known receiving origin includes its supplied zero fingerprint.
+			fingerprint := uint32(0)
 			stored := make([]db.AddressInfo, 0, tc.count)
 
 			watched := make([]address.Address, 0, tc.count)
@@ -2374,14 +2380,15 @@ func TestNewBulkAddressesReturnsWatchedBatch(t *testing.T) {
 					t, key, db.WitnessPubKey, branch, index,
 				)
 				stored = append(stored, db.AddressInfo{
-					AddrType:          db.WitnessPubKey,
-					IsImported:        tc.xpub,
-					AccountNumber:     number,
-					HasDerivationPath: true,
-					Branch:            branch,
-					Index:             index,
-					ScriptPubKey:      script,
-					PubKey:            pubKey,
+					AddrType:             db.WitnessPubKey,
+					IsImported:           tc.xpub,
+					AccountNumber:        number,
+					MasterKeyFingerprint: &fingerprint,
+					HasDerivationPath:    true,
+					Branch:               branch,
+					Index:                index,
+					ScriptPubKey:         script,
+					PubKey:               pubKey,
 				})
 				watched = append(watched, addr)
 			}
@@ -2743,6 +2750,8 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 
 	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 1}
 	account := uint32(7)
+	zeroFingerprint := uint32(0)
+	fingerprint := uint32(0x12345678)
 
 	name := "key-family"
 	for _, tc := range []struct {
@@ -2751,7 +2760,7 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 		queryName   string
 		queryNumber *uint32
 		branch      uint32
-		fingerprint uint32
+		fingerprint *uint32
 		imported    bool
 		numbered    bool
 	}{
@@ -2759,14 +2768,14 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 			name:        "external by name",
 			selector:    NewAccountSelectorByName(scope, name),
 			queryName:   name,
-			fingerprint: 0x12345678,
+			fingerprint: &fingerprint,
 		},
 		{
 			name:        "internal by name",
 			selector:    NewAccountSelectorByName(scope, name),
 			queryName:   name,
 			branch:      1,
-			fingerprint: 0x12345678,
+			fingerprint: &fingerprint,
 		},
 		{
 			name: "internal by number",
@@ -2775,6 +2784,7 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 			),
 			queryNumber: &account,
 			branch:      1,
+			fingerprint: &zeroFingerprint,
 		},
 		{
 			name: "external by number",
@@ -2782,19 +2792,22 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 				scope, AccountNumber(account),
 			),
 			queryNumber: &account,
+			fingerprint: &zeroFingerprint,
 		},
 		{
-			name:      "imported external by name",
-			selector:  NewAccountSelectorByName(scope, name),
-			queryName: name,
-			imported:  true,
+			name:        "imported external by name",
+			selector:    NewAccountSelectorByName(scope, name),
+			queryName:   name,
+			fingerprint: &zeroFingerprint,
+			imported:    true,
 		},
 		{
-			name:      "imported internal by name",
-			selector:  NewAccountSelectorByName(scope, name),
-			queryName: name,
-			branch:    1,
-			imported:  true,
+			name:        "imported internal by name",
+			selector:    NewAccountSelectorByName(scope, name),
+			queryName:   name,
+			branch:      1,
+			fingerprint: &zeroFingerprint,
+			imported:    true,
 		},
 		{
 			name: "supplied account path",
@@ -2802,7 +2815,16 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 				scope, AccountNumber(account),
 			),
 			queryNumber: &account,
-			fingerprint: 0x12345678,
+			fingerprint: &zeroFingerprint,
+			imported:    true,
+			numbered:    true,
+		},
+		{
+			name: "supplied path without fingerprint",
+			selector: NewAccountSelectorByNumber(
+				scope, AccountNumber(account),
+			),
+			queryNumber: &account,
 			imported:    true,
 			numbered:    true,
 		},
@@ -2830,8 +2852,8 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 				ScriptPubKey:         script,
 				PubKey:               pubKey,
 			}
-			// Only numberless imports omit origin; supplied numbered keys
-			// retain their declared path without entering chain registration.
+			// Keep declared account numbers separate from fingerprint presence:
+			// either can be unknown without discarding the child coordinates.
 			stored.IsImported = tc.imported
 			if tc.imported && !tc.numbered {
 				stored.AccountNumber = nil
@@ -2861,13 +2883,13 @@ func TestAllocateNextKeyReturnsLocator(t *testing.T) {
 			require.Equal(t, tc.branch, key.Branch)
 			require.Equal(t, stored.Index, key.Index)
 
-			if tc.imported && !tc.numbered {
+			if stored.AccountNumber == nil || tc.fingerprint == nil {
 				require.Nil(t, key.Origin)
 			} else {
 				require.Equal(t, &KeyOrigin{
 					KeyScope:             scope,
 					Account:              account,
-					MasterKeyFingerprint: tc.fingerprint,
+					MasterKeyFingerprint: *tc.fingerprint,
 				}, key.Origin)
 			}
 		})

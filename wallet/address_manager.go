@@ -117,8 +117,8 @@ type AddressInfo struct {
 	// PubKey is set for managed pubkey addresses.
 	PubKey *btcec.PublicKey
 
-	// Derivation is set when the wallet knows how to derive the address from a
-	// wallet scope.
+	// Derivation is set when the account path and root fingerprint are known,
+	// so a complete BIP32 origin can be reported without guessing metadata.
 	Derivation *AddressDerivation
 }
 
@@ -141,7 +141,7 @@ type AddressDerivation struct {
 	MasterKeyFingerprint uint32
 }
 
-// KeyOrigin records a known account path, either derived or caller-declared.
+// KeyOrigin records a known fingerprint and derived or declared account path.
 // Child coordinates belong to AllocatedKey so they are not repeated here.
 type KeyOrigin struct {
 	// KeyScope identifies the account's purpose and coin type.
@@ -166,7 +166,7 @@ type AllocatedKey struct {
 	// Index is the allocated child index within Branch.
 	Index uint32
 
-	// Origin is nil for numberless imports without a declared account path.
+	// Origin is nil when the account number or root fingerprint is unknown.
 	// Callers can use their account selector with Branch and Index to derive
 	// the same child again even when Origin is nil.
 	Origin *KeyOrigin
@@ -365,9 +365,9 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	// A path requires a real account number, including for imported accounts.
-	// Numberless imports cannot safely publish a wallet-relative account path.
-	if storeAddr.AccountNumber == nil {
+	// A complete origin needs both account number and fingerprint. Keep the
+	// public key without inventing root metadata when either is unknown.
+	if storeAddr.AccountNumber == nil || storeAddr.MasterKeyFingerprint == nil {
 		return info, nil
 	}
 
@@ -379,7 +379,7 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 		Account:              *storeAddr.AccountNumber,
 		Branch:               storeAddr.Branch,
 		Index:                storeAddr.Index,
-		MasterKeyFingerprint: storeAddr.MasterKeyFingerprint,
+		MasterKeyFingerprint: *storeAddr.MasterKeyFingerprint,
 	}
 
 	return info, nil

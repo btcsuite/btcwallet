@@ -301,6 +301,9 @@ func TestRenameAccountNotFound(t *testing.T) {
 func TestRenameAccountImported(t *testing.T) {
 	t.Parallel()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
@@ -320,7 +323,7 @@ func TestRenameAccountImported(t *testing.T) {
 		t.Context(), db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              name,
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 		},
 	)
@@ -665,6 +668,9 @@ var errTestBoom = errors.New("kvdb test boom")
 func TestCreateImportedAccount(t *testing.T) {
 	t.Parallel()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
@@ -682,7 +688,7 @@ func TestCreateImportedAccount(t *testing.T) {
 				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
 			},
 			Name:              "imported-xpub",
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 		},
 	)
@@ -709,6 +715,9 @@ func TestCreateImportedAccount(t *testing.T) {
 func TestCreateImportedAccountRejectsPrivateKey(t *testing.T) {
 	t.Parallel()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
@@ -725,7 +734,7 @@ func TestCreateImportedAccountRejectsPrivateKey(t *testing.T) {
 				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
 			},
 			Name:                "imported-spendable",
-			MasterFingerprint:   0xDEADBEEF,
+			MasterFingerprint:   &fingerprint,
 			PublicKey:           []byte(masterPub.String()),
 			EncryptedPrivateKey: []byte{0xAA, 0xBB},
 		},
@@ -738,6 +747,9 @@ func TestCreateImportedAccountRejectsPrivateKey(t *testing.T) {
 // import and derives sample addresses without persisting the imported row.
 func TestCreateImportedAccountDryRunRollsBack(t *testing.T) {
 	t.Parallel()
+
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
 
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
@@ -758,7 +770,7 @@ func TestCreateImportedAccountDryRunRollsBack(t *testing.T) {
 		db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              name,
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 			DryRun:            true,
 		},
@@ -779,6 +791,9 @@ func TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope(
 	t *testing.T) {
 
 	t.Parallel()
+
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
 
 	number := uint32(7)
 
@@ -823,7 +838,7 @@ func TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope(
 				Name:              "missing scope preview",
 				AccountNumber:     tc.number,
 				PublicKey:         key.PublicKey,
-				MasterFingerprint: 0xDEADBEEF,
+				MasterFingerprint: &fingerprint,
 				AddrSchema:        &schema,
 				DryRun:            true,
 			}
@@ -857,7 +872,7 @@ func TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope(
 			require.NotNil(t, preview.MasterKeyFingerprint)
 			require.Equal(
 				t, params.MasterFingerprint,
-				*preview.MasterKeyFingerprint,
+				preview.MasterKeyFingerprint,
 			)
 			require.NoError(t, listErr)
 			require.ElementsMatch(t, before, after)
@@ -888,6 +903,9 @@ func TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope(
 func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
 	t.Parallel()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
@@ -911,7 +929,7 @@ func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
 		db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              name,
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 			AddrSchema:        &addrSchema,
 		},
@@ -973,7 +991,7 @@ func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
 		t.Context(), db.CreateImportedAccountParams{
 			Scope:             bip44Scope,
 			Name:              bip44Name,
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 			AddrSchema:        &bip44Schema,
 		},
@@ -1486,6 +1504,10 @@ func TestListAccountsMissingScopeReturnsEmpty(t *testing.T) {
 func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 	t.Parallel()
 
+	// Retain supplied metadata through the optional Store input.
+	fingerprint := uint32(0xDEADBEEF)
+	otherFingerprint := uint32(0xFEEDFACE)
+
 	// Arrange: distinct XPub payloads share the legacy allocation cursor.
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
@@ -1509,7 +1531,7 @@ func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 		db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              "alice-import",
-			MasterFingerprint: 0xDEADBEEF,
+			MasterFingerprint: &fingerprint,
 			PublicKey:         []byte(masterPub.String()),
 		},
 	)
@@ -1521,7 +1543,7 @@ func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 		db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              "bob-import",
-			MasterFingerprint: 0xFEEDFACE,
+			MasterFingerprint: &otherFingerprint,
 			PublicKey:         []byte(secondPub.String()),
 		},
 	)
@@ -1648,7 +1670,10 @@ func TestCreateImportedAccountIdentity(t *testing.T) {
 			params.Scope, params.AddrSchema = tc.scope, tc.schema
 			params.Name, params.DryRun = "candidate", tc.dryRun
 			params.PublicKey = []byte(alias.String())
-			params.MasterFingerprint = 123
+
+			// Vary supplied metadata without changing script ownership.
+			fingerprint := uint32(123)
+			params.MasterFingerprint = &fingerprint
 
 			// Act: admit the same payload through the ordinary Store path.
 			info, err := store.CreateImportedAccount(t.Context(), params)
