@@ -232,11 +232,21 @@ func TestManagerCreateSuccess(t *testing.T) {
 	}
 }
 
-// TestCreateWalletParamsPolicy verifies the complete creation-mode matrix and
-// proves every rejected combination fails before backend creation.
+// createWalletPolicyCase keeps creation inputs and expected outcomes
+// together for the single public Manager policy-test loop.
+type createWalletPolicyCase struct {
+	name       string
+	params     CreateWalletParams
+	wantErrMsg string
+}
+
+// TestCreateWalletParamsPolicy proves invalid modes and genesis identities
+// fail before backend creation; successful modes have their own creation test.
 func TestCreateWalletParamsPolicy(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Keep valid mode inputs together and vary root metadata
+	// independently so a missing check cannot be hidden by another failure.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	require.NoError(t, err)
 
@@ -254,165 +264,187 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	accountXPub, err := accountKey.Neuter()
 	require.NoError(t, err)
 
+	// Keep the account baseline valid while root fixtures independently
+	// exercise each origin field and the selected network.
 	fingerprint := MasterFingerprint(0)
 	initialXPub := []ImportAccountParams{
 		{
-			MasterKeyFingerprint: &fingerprint,
+			Name:                 "initial",
 			XPub:                 accountXPub,
+			MasterKeyFingerprint: &fingerprint,
 			AddrType:             waddrmgr.WitnessPubKey,
 		},
 	}
 	initialXPrv := []ImportAccountParams{{XPub: rootKey}}
 	initialNil := []ImportAccountParams{{}}
 
-	tests := []struct {
-		name       string
-		params     CreateWalletParams
-		valid      bool
-		wantErrMsg string
-	}{
+	tests := []createWalletPolicyCase{
 		{
-			name:   "generated seed spendable",
-			params: CreateWalletParams{Mode: ModeGenSeed},
-			valid:  true,
+			name: "unknown mode",
+			params: CreateWalletParams{
+				Mode: ModeUnknown,
+			},
 		},
 		{
-			name:   "imported seed spendable",
-			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed},
-			valid:  true,
+			name: "generated seed watch-only",
+			params: CreateWalletParams{
+				Mode:      ModeGenSeed,
+				WatchOnly: true,
+			},
 		},
 		{
-			name: "private root spendable",
-			params: CreateWalletParams{Mode: ModeImportExtKey,
-				RootKey: rootKey},
-			valid: true,
+			name: "generated seed with explicit seed",
+			params: CreateWalletParams{
+				Mode: ModeGenSeed,
+				Seed: seed,
+			},
 		},
 		{
-			name: "watch-only shell with XPub",
-			params: CreateWalletParams{Mode: ModeShell, WatchOnly: true,
-				InitialAccounts: initialXPub},
-			valid: true,
-		},
-		{
-			name:   "unknown mode",
-			params: CreateWalletParams{Mode: ModeUnknown},
-		},
-		{
-			name:   "generated seed watch-only",
-			params: CreateWalletParams{Mode: ModeGenSeed, WatchOnly: true},
-		},
-		{
-			name:   "generated seed with explicit seed",
-			params: CreateWalletParams{Mode: ModeGenSeed, Seed: seed},
-		},
-		{
-			name:   "generated seed with root key",
-			params: CreateWalletParams{Mode: ModeGenSeed, RootKey: rootKey},
+			name: "generated seed with root key",
+			params: CreateWalletParams{
+				Mode:    ModeGenSeed,
+				RootKey: rootKey,
+			},
 		},
 		{
 			name: "generated seed with initial account",
-			params: CreateWalletParams{Mode: ModeGenSeed,
+			params: CreateWalletParams{
+				Mode:            ModeGenSeed,
 				InitialAccounts: initialXPub,
 			},
 		},
 		{
 			name: "imported seed watch-only",
-			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed,
-				WatchOnly: true},
+			params: CreateWalletParams{
+				Mode:      ModeImportSeed,
+				Seed:      seed,
+				WatchOnly: true,
+			},
 		},
 		{
-			name:   "imported seed missing seed",
-			params: CreateWalletParams{Mode: ModeImportSeed},
+			name: "imported seed missing seed",
+			params: CreateWalletParams{
+				Mode: ModeImportSeed,
+			},
 		},
 		{
 			name: "imported seed with root key",
-			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed,
-				RootKey: rootKey},
+			params: CreateWalletParams{
+				Mode:    ModeImportSeed,
+				Seed:    seed,
+				RootKey: rootKey,
+			},
 		},
 		{
 			name: "imported seed with initial account",
-			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed,
+			params: CreateWalletParams{
+				Mode:            ModeImportSeed,
+				Seed:            seed,
 				InitialAccounts: initialXPub,
 			},
 		},
 		{
 			name: "private root watch-only",
-			params: CreateWalletParams{Mode: ModeImportExtKey,
-				RootKey: rootKey, WatchOnly: true},
+			params: CreateWalletParams{
+				Mode:      ModeImportExtKey,
+				RootKey:   rootKey,
+				WatchOnly: true,
+			},
 		},
 		{
-			name:   "extended root missing key",
-			params: CreateWalletParams{Mode: ModeImportExtKey},
+			name: "extended root missing key",
+			params: CreateWalletParams{
+				Mode: ModeImportExtKey,
+			},
 		},
 		{
 			name: "XPub root spendable",
-			params: CreateWalletParams{Mode: ModeImportExtKey,
-				RootKey: rootXPub},
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootXPub,
+			},
 		},
 		{
 			name: "XPub root watch-only",
-			params: CreateWalletParams{Mode: ModeImportExtKey,
-				RootKey: rootXPub, WatchOnly: true},
+			params: CreateWalletParams{
+				Mode:      ModeImportExtKey,
+				RootKey:   rootXPub,
+				WatchOnly: true,
+			},
 		},
 		{
 			name: "extended root with seed",
-			params: CreateWalletParams{Mode: ModeImportExtKey,
-				RootKey: rootKey, Seed: seed},
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootKey,
+				Seed:    seed,
+			},
 		},
 		{
 			name: "extended root with initial account",
-			params: CreateWalletParams{Mode: ModeImportExtKey,
+			params: CreateWalletParams{
+				Mode:            ModeImportExtKey,
 				RootKey:         rootKey,
 				InitialAccounts: initialXPub,
 			},
 		},
 		{
-			name:   "spendable shell",
-			params: CreateWalletParams{Mode: ModeShell},
+			name: "spendable shell",
+			params: CreateWalletParams{
+				Mode: ModeShell,
+			},
 		},
 		{
 			name: "shell with seed",
-			params: CreateWalletParams{Mode: ModeShell, Seed: seed,
-				WatchOnly: true},
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				Seed:      seed,
+				WatchOnly: true,
+			},
 		},
 		{
 			name: "shell with root key",
-			params: CreateWalletParams{Mode: ModeShell, RootKey: rootKey,
-				WatchOnly: true},
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				RootKey:   rootKey,
+				WatchOnly: true,
+			},
 		},
 		{
 			name: "shell with nil account key",
-			params: CreateWalletParams{Mode: ModeShell, WatchOnly: true,
+			params: CreateWalletParams{
+				Mode:            ModeShell,
+				WatchOnly:       true,
 				InitialAccounts: initialNil,
 			},
 			wantErrMsg: "needs XPub",
 		},
 		{
 			name: "shell with private account key",
-			params: CreateWalletParams{Mode: ModeShell, WatchOnly: true,
+			params: CreateWalletParams{
+				Mode:            ModeShell,
+				WatchOnly:       true,
 				InitialAccounts: initialXPrv,
 			},
 			wantErrMsg: "needs XPub, not XPrv",
 		},
 	}
 
+	// Keep genesis fixture variants in a data-only builder so every mode and
+	// identity row still exercises the same public call and strict mock.
+	tests = append(tests, genesisKeyPolicyCases(
+		t, rootKey,
+	)...)
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Install a strict backend expectation only when the
-			// input is valid enough to reach durable creation. Invalid cases
-			// intentionally leave the mock with no accepted calls.
+			// Arrange: Allow no backend calls so each rejected input must
+			// fail before Vault preparation or Store mutation can begin.
 			backend := &managerBackendMock{}
 			params := tc.params
 			params.Name = testWalletName
-
-			if tc.valid {
-				backend.On(
-					"create", mock.Anything, params,
-					mock.Anything,
-				).Return(nil, errManagerBackendCreate).Once()
-			}
 
 			m := &Manager{
 				wallets: make(map[string]*Wallet),
@@ -429,18 +461,15 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			// allowing validation to decide whether backend mutation begins.
 			wallet, err := m.Create(params)
 
-			// Assert: Valid parameters reach exactly one expected backend
-			// call; invalid parameters stop at validation with no mock call.
+			// Assert: Validation returns the stable genesis error without
+			// publishing a Wallet or crossing the strict backend boundary.
 			require.Nil(t, wallet)
+			require.Empty(t, m.wallets)
 
-			if tc.valid {
-				require.ErrorIs(t, err, errManagerBackendCreate)
-			} else {
-				require.ErrorIs(t, err, ErrWalletParams)
+			require.ErrorIs(t, err, ErrWalletParams)
 
-				if tc.wantErrMsg != "" {
-					require.ErrorContains(t, err, tc.wantErrMsg)
-				}
+			if tc.wantErrMsg != "" {
+				require.ErrorContains(t, err, tc.wantErrMsg)
 			}
 
 			backend.AssertExpectations(t)
@@ -448,7 +477,66 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	}
 }
 
-var errManagerBackendCreate = errors.New("backend create called")
+// genesisKeyPolicyCases constructs only malformed identity fixtures; the
+// caller owns Manager invocation, dependency expectations, and assertions.
+func genesisKeyPolicyCases(t *testing.T,
+	rootKey *hdkeychain.ExtendedKey) []createWalletPolicyCase {
+
+	t.Helper()
+
+	// Construct malformed roots without a serialization round trip so the
+	// public Manager boundary must reject each invalid origin field itself.
+	rootPriv, err := rootKey.ECPrivKey()
+	require.NoError(t, err)
+
+	rootDepth := hdkeychain.NewExtendedKey(
+		rootKey.Version(), rootPriv.Serialize(), rootKey.ChainCode(),
+		[]byte{0, 0, 0, 0}, 1, 0, true,
+	)
+	rootParent := hdkeychain.NewExtendedKey(
+		rootKey.Version(), rootPriv.Serialize(), rootKey.ChainCode(),
+		[]byte{0, 0, 0, 1}, 0, 0, true,
+	)
+	rootChild := hdkeychain.NewExtendedKey(
+		rootKey.Version(), rootPriv.Serialize(), rootKey.ChainCode(),
+		[]byte{0, 0, 0, 0}, 0, 1, true,
+	)
+	wrongNetworkRoot, err := rootKey.CloneWithVersion(
+		chaincfg.MainNetParams.HDPrivateKeyID[:],
+	)
+	require.NoError(t, err)
+
+	return []createWalletPolicyCase{
+		{
+			name: "root depth must be zero",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootDepth,
+			},
+		},
+		{
+			name: "root parent fingerprint must be zero",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootParent,
+			},
+		},
+		{
+			name: "root child index must be zero",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootChild,
+			},
+		},
+		{
+			name: "root network must match",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: wrongNetworkRoot,
+			},
+		},
+	}
+}
 
 // managerBackendMock is the strict Manager storage-boundary test double.
 type managerBackendMock struct {
