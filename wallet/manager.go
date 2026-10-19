@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
@@ -469,7 +470,7 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	err = params.validate()
+	err = params.validate(&m.config.ChainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -528,14 +529,14 @@ func (w *Wallet) importInitialAccounts(ctx context.Context,
 	return nil
 }
 
-// validate ensures that the parameters are consistent with the chosen creation
-// mode.
+// validate checks the creation mode and imported-root identity against the
+// Manager network before key preparation or dependency access.
 //
 // We skip cyclop because this method performs exhaustive validation of
 // mutually exclusive fields across all creation modes.
 //
 //nolint:cyclop
-func (p *CreateWalletParams) validate() error {
+func (p *CreateWalletParams) validate(chainParams *chaincfg.Params) error {
 	if p.Mode != ModeShell && len(p.InitialAccounts) > 0 {
 		return fmt.Errorf("%w: initial accounts should only be set "+
 			"for ModeShell", ErrWalletParams)
@@ -574,23 +575,38 @@ func (p *CreateWalletParams) validate() error {
 		}
 
 	case ModeImportExtKey:
-		if p.RootKey == nil {
+		// Ordered cases preserve the nil guard and first-error policy
+		// without nesting another validation tree inside the mode switch.
+		switch {
+		case p.RootKey == nil:
 			return fmt.Errorf("%w: root key is required for "+
 				"ModeImportExtKey", ErrWalletParams)
-		}
 
-		if len(p.Seed) != 0 {
+		case len(p.Seed) != 0:
 			return fmt.Errorf("%w: seed should not be set for "+
 				"ModeImportExtKey", ErrWalletParams)
-		}
 
-		if !p.RootKey.IsPrivate() {
+		case !p.RootKey.IsPrivate():
 			return fmt.Errorf("%w: XPub-root wallet creation is "+
 				"unsupported; use ModeShell", ErrWalletParams)
-		}
 
-		if p.WatchOnly {
+		// Descendant metadata must not become the wallet's master
+		// identity, even when the key contains private material.
+		case p.RootKey.Depth() != 0,
+			p.RootKey.ParentFingerprint() != 0,
+			p.RootKey.ChildIndex() != 0:
+
+			return fmt.Errorf("%w: root key has non-root metadata",
+				ErrWalletParams)
+
+		case p.WatchOnly:
 			return fmt.Errorf("%w: ModeImportExtKey must be spendable",
+				ErrWalletParams)
+
+		// The earlier cases establish a valid private root before its
+		// network is compared with the Manager's selected chain.
+		case !p.RootKey.IsForNet(chainParams):
+			return fmt.Errorf("%w: root key network mismatch",
 				ErrWalletParams)
 		}
 
