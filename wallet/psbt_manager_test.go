@@ -1068,8 +1068,8 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			var stamp waddrmgr.BlockStamp
 
 			stamp.Height = 100
-			deps.chain.On("BlockStamp").Return(
-				&stamp, nil,
+			deps.syncer.On("syncedTo", t.Context()).Return(
+				stamp, nil,
 			).Once()
 
 			inputAddr, inputScript, inputKey := expectedStoreAddress(
@@ -1339,8 +1339,8 @@ func TestFundPsbtTranslatesAmountError(t *testing.T) {
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
 	}).Return(accountInfo, nil).Once()
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", t.Context()).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
 		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
@@ -5483,7 +5483,7 @@ func expectManualFundingSources(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 	)
 }
 
-// expectFundingSourcesForAddress registers the store and chain lookups a
+// expectFundingSourcesForAddress registers the store and sync-tip reads a
 // completion-mode funding run performs against a single caller-selected UTXO
 // paying to the given address.
 func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
@@ -5498,8 +5498,8 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 
 	utxo := &wire.TxOut{Value: 1_000_000, PkScript: inputScript}
 
-	mocks.chain.On("BlockStamp").Return(
-		&waddrmgr.BlockStamp{Height: 100}, nil,
+	mocks.syncer.On("syncedTo", mock.Anything).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
