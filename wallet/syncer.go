@@ -235,6 +235,10 @@ type chainSyncer interface {
 
 	// syncState returns the current synchronization state.
 	syncState() syncState
+
+	// syncedTo reads the processed wallet tip with the caller's context so
+	// eligibility decisions use committed wallet state.
+	syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error)
 }
 
 // syncer is a stateless blocking worker responsible for synchronizing the
