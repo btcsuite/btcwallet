@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -44,10 +43,10 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 			wantHeight int32
 			wantHash   chainhash.Hash
 		}{
-			{"behind", 0, *chaincfg.TestNet3Params.GenesisHash,
-				0, *chaincfg.TestNet3Params.GenesisHash},
+			{"behind", 0, *chainParams.GenesisHash,
+				0, *chainParams.GenesisHash},
 			{"matching", 1, chainhash.Hash{1},
-				0, *chaincfg.TestNet3Params.GenesisHash},
+				0, *chainParams.GenesisHash},
 			{"replacement", 1, chainhash.Hash{2},
 				1, chainhash.Hash{2}},
 			{"sparse", 2, chainhash.Hash{5},
@@ -57,9 +56,10 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 
-					w, cleanup := testWalletWatchingOnly(t)
-					t.Cleanup(cleanup)
+					w := testWalletWatchingOnly(t)
 					t.Cleanup(func() {
+						w.StopDeprecated()
+						w.WaitForShutdown()
 						require.NoError(t, w.db.Close())
 					})
 					w.SetChainSynced(synced)
@@ -101,9 +101,9 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 					require.NoError(t, err)
 
 					require.Equal(
-						t, tip.wantHeight, w.Manager.SyncedTo().Height,
+						t, tip.wantHeight, w.addrStore.SyncedTo().Height,
 					)
-					require.Equal(t, tip.wantHash, w.Manager.SyncedTo().Hash)
+					require.Equal(t, tip.wantHash, w.addrStore.SyncedTo().Hash)
 
 					err = walletdb.Update(w.db,
 						func(tx walletdb.ReadWriteTx) error {
@@ -136,9 +136,9 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 					require.NoError(t, err)
 					require.Equal(t, waddrmgr.BlockStamp{
 						Height:    0,
-						Hash:      *chaincfg.TestNet3Params.GenesisHash,
+						Hash:      *chainParams.GenesisHash,
 						Timestamp: time.Unix(1, 0),
-					}, w.Manager.SyncedTo())
+					}, w.addrStore.SyncedTo())
 					require.NotNil(t, w.NtfnServer.currentTxNtfn)
 					require.Equal(t, []*chainhash.Hash{&old.Hash},
 						w.NtfnServer.currentTxNtfn.DetachedBlocks)
@@ -224,9 +224,12 @@ func TestDisconnectMixedHistory(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 
-					w, cleanup := testWalletWatchingOnly(t)
-					t.Cleanup(cleanup)
-					t.Cleanup(func() { require.NoError(t, w.db.Close()) })
+					w := testWalletWatchingOnly(t)
+					t.Cleanup(func() {
+						w.StopDeprecated()
+						w.WaitForShutdown()
+						require.NoError(t, w.db.Close())
+					})
 
 					client := &reorgChainClient{
 						mockChainClient: &mockChainClient{
@@ -277,10 +280,10 @@ func TestDisconnectMixedHistory(t *testing.T) {
 						})
 					if wantErr {
 						require.ErrorIs(t, err, errReorgBackend)
-						require.Equal(t, old.Hash, w.Manager.SyncedTo().Hash)
+						require.Equal(t, old.Hash, w.addrStore.SyncedTo().Hash)
 					} else {
 						require.NoError(t, err)
-						require.Zero(t, w.Manager.SyncedTo().Height)
+						require.Zero(t, w.addrStore.SyncedTo().Height)
 					}
 
 					assertReorgHistory(t, w, records, wantHeights)
@@ -347,7 +350,7 @@ func addReorgCredit(t *testing.T, w *Wallet, tx walletdb.ReadWriteTx,
 
 	t.Helper()
 	require.NoError(t, w.addRelevantTx(tx, record, block))
-	require.NoError(t, w.TxStore.AddCredit(
+	require.NoError(t, w.txStore.AddCredit(
 		tx.ReadWriteBucket(wtxmgrNamespaceKey), record, block, 0, change,
 	))
 }
@@ -361,7 +364,7 @@ func assertReorgHistory(t *testing.T, w *Wallet,
 
 		var wantConfirmed int64
 		for i, record := range records {
-			detail, err := w.TxStore.TxDetails(ns, &record.Hash)
+			detail, err := w.txStore.TxDetails(ns, &record.Hash)
 			require.NoError(t, err)
 			require.NotNil(t, detail)
 			require.Equal(t, heights[i], detail.Block.Height)
@@ -378,11 +381,11 @@ func assertReorgHistory(t *testing.T, w *Wallet,
 			}
 		}
 
-		confirmed, err := w.TxStore.Balance(ns, 1, 4)
+		confirmed, err := w.txStore.Balance(ns, 1, 4)
 		require.NoError(t, err)
 		require.EqualValues(t, wantConfirmed, confirmed)
 
-		total, err := w.TxStore.Balance(ns, 0, 4)
+		total, err := w.txStore.Balance(ns, 0, 4)
 		require.NoError(t, err)
 		require.EqualValues(t, len(records)*1000, total)
 
