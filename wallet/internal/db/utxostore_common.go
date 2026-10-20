@@ -370,8 +370,9 @@ func LeaseOutputWithOps(ctx context.Context, params LeaseOutputParams,
 // the Release policy and sequencing while each backend keeps only query
 // details.
 type ReleaseOutputOps interface {
-	// LookupUtxoID resolves the current wallet-owned outpoint to its stable
-	// UTXO row ID.
+	// LookupUtxoID resolves the wallet-owned outpoint to its stable UTXO row
+	// ID. The output must be unspent, or held by a confirmation-controlled
+	// lease that outlives its spend.
 	LookupUtxoID(ctx context.Context, params ReleaseOutputParams) (int64, error)
 
 	// Release attempts to delete the lease row for the provided UTXO ID and

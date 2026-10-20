@@ -165,6 +165,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getOldestUnusedAddressStmt, err = db.PrepareContext(ctx, GetOldestUnusedAddress); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOldestUnusedAddress: %w", err)
 	}
+	if q.getReleasableUtxoIDByOutpointStmt, err = db.PrepareContext(ctx, GetReleasableUtxoIDByOutpoint); err != nil {
+		return nil, fmt.Errorf("error preparing query GetReleasableUtxoIDByOutpoint: %w", err)
+	}
 	if q.getTransactionByHashStmt, err = db.PrepareContext(ctx, GetTransactionByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query GetTransactionByHash: %w", err)
 	}
@@ -576,6 +579,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getOldestUnusedAddressStmt: %w", cerr)
 		}
 	}
+	if q.getReleasableUtxoIDByOutpointStmt != nil {
+		if cerr := q.getReleasableUtxoIDByOutpointStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getReleasableUtxoIDByOutpointStmt: %w", cerr)
+		}
+	}
 	if q.getTransactionByHashStmt != nil {
 		if cerr := q.getTransactionByHashStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getTransactionByHashStmt: %w", cerr)
@@ -947,6 +955,7 @@ type Queries struct {
 	getKeyScopeByWalletAndScopeStmt               *sql.Stmt
 	getKeyScopeSecretsStmt                        *sql.Stmt
 	getOldestUnusedAddressStmt                    *sql.Stmt
+	getReleasableUtxoIDByOutpointStmt             *sql.Stmt
 	getTransactionByHashStmt                      *sql.Stmt
 	getTransactionMetaByHashStmt                  *sql.Stmt
 	getUtxoByOutpointStmt                         *sql.Stmt
@@ -1057,6 +1066,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getKeyScopeByWalletAndScopeStmt:               q.getKeyScopeByWalletAndScopeStmt,
 		getKeyScopeSecretsStmt:                        q.getKeyScopeSecretsStmt,
 		getOldestUnusedAddressStmt:                    q.getOldestUnusedAddressStmt,
+		getReleasableUtxoIDByOutpointStmt:             q.getReleasableUtxoIDByOutpointStmt,
 		getTransactionByHashStmt:                      q.getTransactionByHashStmt,
 		getTransactionMetaByHashStmt:                  q.getTransactionMetaByHashStmt,
 		getUtxoByOutpointStmt:                         q.getUtxoByOutpointStmt,

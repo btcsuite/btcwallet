@@ -105,10 +105,13 @@ WHERE
 -- How:
 -- - Starts from utxo_leases, then joins utxos and transactions so the result
 --   can be returned as network outpoints.
--- - Filters out expired timed rows using the caller-supplied UTC timestamp.
---   Confirmation-controlled rows never expire by wall clock.
--- - Restricts the result to outputs that are still unspent and whose parent
---   transaction is still in `pending` or `published` status.
+-- - Timed rows require an unexpired lease (against the caller-supplied UTC
+--   timestamp), an unspent output, and a parent transaction still in
+--   `pending` or `published` status.
+-- - Confirmation-controlled rows stay listed until spend maturity or release,
+--   even after their output is spent or its parent is invalidated.
+-- - LEFT JOINs the spending transaction to report its confirmed height, which
+--   is NULL while the spend is unconfirmed or the output is unspent.
 -- Performance:
 -- - Restricts first by wallet and expiration, then joins only the surviving
 --   lease rows back to utxos/transactions.
@@ -118,18 +121,22 @@ SELECT
     l.lock_id,
     l.expires_at,
     l.release_after_spend_confs,
-    l.spend_disconnected
+    l.spend_disconnected,
+    spend.block_height AS spend_height
 FROM utxo_leases AS l
 INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id
+LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
 WHERE
     l.wallet_id = $1
     AND (
         l.release_after_spend_confs > 0
-        OR l.expires_at > sqlc.arg('now_utc')::TIMESTAMP
+        OR (
+            l.expires_at > sqlc.arg('now_utc')::TIMESTAMP
+            AND u.spent_by_tx_id IS NULL
+            AND t.tx_status IN (0, 1)
+        )
     )
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
 ORDER BY l.expires_at;
 
 -- name: DeleteExpiredUtxoLeases :execrows
@@ -148,3 +155,32 @@ WHERE
     wallet_id = $1
     AND release_after_spend_confs = 0
     AND expires_at <= sqlc.arg('now_utc')::TIMESTAMP;
+
+-- name: GetReleasableUtxoIDByOutpoint :one
+-- Retrieves the database ID of a UTXO whose lease can be released.
+--
+-- How:
+-- - Resolves the outpoint like GetUtxoIDByOutpoint.
+-- - Accepts an unspent output whose parent transaction is still in `pending`
+--   or `published` status, or any output held by a confirmation-controlled
+--   lease so its owner can release it after a spend or invalidation.
+-- Performance:
+-- - Uses the wallet-scoped transaction hash lookup first, then narrows to the
+--   unique `(tx_id, output_index)` outpoint and its unique lease key.
+SELECT u.id
+FROM transactions AS t
+INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id
+LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id
+WHERE
+    t.wallet_id = $1
+    AND a.wallet_id = $1
+    AND t.tx_hash = $2
+    AND u.output_index = $3
+    AND (
+        l.release_after_spend_confs > 0
+        OR (
+            t.tx_status IN (0, 1)
+            AND u.spent_by_tx_id IS NULL
+        )
+    );

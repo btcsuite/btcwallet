@@ -99,6 +99,38 @@ func (f *leasePolicyFixture) lease(t *testing.T, id db.LockID,
 	return lease
 }
 
+// publishSpend records the spending transaction as unmined.
+func (f *leasePolicyFixture) publishSpend(t *testing.T) {
+	t.Helper()
+
+	err := f.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: f.walletID,
+		Tx:       f.spendTx,
+		Received: time.Unix(1710007100, 0),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+}
+
+// confirmSpend confirms the recorded spending transaction at height through
+// the chain sync batch path.
+func (f *leasePolicyFixture) confirmSpend(t *testing.T, height uint32) {
+	t.Helper()
+
+	block := NewBlockFixture(height)
+	err := f.store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: f.walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: f.walletID,
+			Tx:       f.spendTx,
+			Received: time.Unix(1710007100, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+		}},
+	})
+	require.NoError(t, err)
+}
+
 // requireLease asserts that the fixture output is the only listed lease and
 // carries the expected owner and spend progress.
 func (f *leasePolicyFixture) requireLease(t *testing.T, id db.LockID,
@@ -210,4 +242,179 @@ func TestConfirmationLeaseIgnoresWallClockExpiry(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, balance.Total, balance.Locked)
+}
+
+// TestConfirmationLeaseTracksSpendAcrossRollback verifies that a
+// confirmation-controlled lease records the confirmed spend height, marks a
+// disconnected spend with -1, and records reconfirmation.
+func TestConfirmationLeaseTracksSpendAcrossRollback(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-confirmation-lease-rollback")
+	owner := db.LockID{1}
+
+	f.lease(t, owner, leaseReleaseDepth)
+	f.expireLeases(t)
+
+	// An unmined spend keeps the lease listed without progress, even when
+	// its unmined state is rewritten.
+	f.publishSpend(t)
+	err := f.store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: f.walletID,
+		Txid:     f.spendTx.TxHash(),
+		State:    &db.UpdateTxState{Status: db.TxStatusPublished},
+	})
+	require.NoError(t, err)
+	f.requireLease(t, owner, 0)
+
+	f.confirmSpend(t, leaseFundingHeight+1)
+	f.requireLease(t, owner, leaseFundingHeight+1)
+
+	err = f.store.RollbackToBlock(t.Context(), leaseFundingHeight+1)
+	require.NoError(t, err)
+	f.requireLease(t, owner, -1)
+
+	f.confirmSpend(t, leaseFundingHeight+2)
+	f.requireLease(t, owner, leaseFundingHeight+2)
+}
+
+// TestConfirmationLeaseRecordsDirectConfirmedSpend verifies that a spend first
+// recorded as already confirmed sets the lease progress, covering writers that
+// never move the spender from unmined to mined.
+func TestConfirmationLeaseRecordsDirectConfirmedSpend(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-confirmation-lease-direct")
+	owner := db.LockID{1}
+
+	f.lease(t, owner, leaseReleaseDepth)
+
+	// The spender is first seen in a block, so it is inserted confirmed.
+	f.confirmSpend(t, leaseFundingHeight+1)
+	f.requireLease(t, owner, leaseFundingHeight+1)
+}
+
+// TestConfirmationLeaseRewindMarksDisconnectedSpend verifies that a
+// wallet-scoped rewind below the spend height marks the observed spend as
+// disconnected.
+func TestConfirmationLeaseRewindMarksDisconnectedSpend(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-confirmation-lease-rewind")
+	owner := db.LockID{1}
+
+	f.lease(t, owner, leaseReleaseDepth)
+	f.publishSpend(t)
+	f.confirmSpend(t, leaseFundingHeight+1)
+	f.requireLease(t, owner, leaseFundingHeight+1)
+
+	err := f.store.RewindWallet(t.Context(), db.RewindWalletParams{
+		WalletID: f.walletID,
+		Block:    f.fundingBlock,
+	})
+	require.NoError(t, err)
+	f.requireLease(t, owner, -1)
+}
+
+// TestTimedLeaseEndsWithSpend verifies that a timed lease keeps its existing
+// contract: it is not listed once its output is spent, even after that spend
+// confirms and disconnects, and the spent output is no longer releasable.
+func TestTimedLeaseEndsWithSpend(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-timed-lease-spend")
+	owner := db.LockID{1}
+
+	lease := f.lease(t, owner, 0)
+	require.Zero(t, lease.ReleaseAfterSpendConfs)
+
+	f.publishSpend(t)
+	f.confirmSpend(t, leaseFundingHeight+1)
+
+	err := f.store.RollbackToBlock(t.Context(), leaseFundingHeight+1)
+	require.NoError(t, err)
+
+	leases, err := f.store.ListLeasedOutputs(t.Context(), f.walletID)
+	require.NoError(t, err)
+	require.Empty(t, leases)
+
+	err = f.store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
+		WalletID: f.walletID,
+		ID:       owner,
+		OutPoint: f.outPoint,
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// invalidateFunding disconnects the fixture's funding block and invalidates
+// the funding transaction.
+func (f *leasePolicyFixture) invalidateFunding(t *testing.T) {
+	t.Helper()
+
+	err := f.store.RollbackToBlock(t.Context(), leaseFundingHeight)
+	require.NoError(t, err)
+
+	err = f.store.InvalidateUnminedTx(
+		t.Context(), db.InvalidateUnminedTxParams{
+			WalletID: f.walletID,
+			Txid:     f.outPoint.Hash,
+		},
+	)
+	require.NoError(t, err)
+}
+
+// TestConfirmationLeaseOutlivesInvalidatedFunding verifies that a
+// confirmation-controlled lease stays listed and owner-releasable after its
+// funding transaction is invalidated, since neither expiry nor a spend can
+// remove it.
+func TestConfirmationLeaseOutlivesInvalidatedFunding(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-lease-invalid-funding")
+	owner := db.LockID{1}
+
+	f.lease(t, owner, leaseReleaseDepth)
+	f.invalidateFunding(t)
+	f.requireLease(t, owner, 0)
+
+	err := f.store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
+		WalletID: f.walletID,
+		ID:       db.LockID{2},
+		OutPoint: f.outPoint,
+	})
+	require.ErrorIs(t, err, db.ErrOutputUnlockNotAllowed)
+
+	err = f.store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
+		WalletID: f.walletID,
+		ID:       owner,
+		OutPoint: f.outPoint,
+	})
+	require.NoError(t, err)
+
+	leases, err := f.store.ListLeasedOutputs(t.Context(), f.walletID)
+	require.NoError(t, err)
+	require.Empty(t, leases)
+}
+
+// TestTimedLeaseEndsWithFundingInvalidation verifies that a timed lease is no
+// longer listed or releasable once its funding transaction is invalidated.
+func TestTimedLeaseEndsWithFundingInvalidation(t *testing.T) {
+	t.Parallel()
+
+	f := newLeasePolicyFixture(t, "wallet-timed-lease-invalid-funding")
+	owner := db.LockID{1}
+
+	f.lease(t, owner, 0)
+	f.invalidateFunding(t)
+
+	leases, err := f.store.ListLeasedOutputs(t.Context(), f.walletID)
+	require.NoError(t, err)
+	require.Empty(t, leases)
+
+	err = f.store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
+		WalletID: f.walletID,
+		ID:       owner,
+		OutPoint: f.outPoint,
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 }

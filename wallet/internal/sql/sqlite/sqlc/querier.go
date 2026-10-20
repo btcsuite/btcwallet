@@ -230,6 +230,17 @@ type Querier interface {
 	// the first unused child. Reuse-aware allocation runs it in the transaction
 	// that resolved the account, so it sees the row the index counter belongs to.
 	GetOldestUnusedAddress(ctx context.Context, arg GetOldestUnusedAddressParams) (GetOldestUnusedAddressRow, error)
+	// Retrieves the database ID of a UTXO whose lease can be released.
+	//
+	// How:
+	// - Resolves the outpoint like GetUtxoIDByOutpoint.
+	// - Accepts an unspent output whose parent transaction is still in `pending`
+	//   or `published` status, or any output held by a confirmation-controlled
+	//   lease so its owner can release it after a spend or invalidation.
+	// Performance:
+	// - Uses the wallet-scoped transaction hash lookup first, then narrows to the
+	//   unique `(tx_id, output_index)` outpoint and its unique lease key.
+	GetReleasableUtxoIDByOutpoint(ctx context.Context, arg GetReleasableUtxoIDByOutpointParams) (int64, error)
 	// Retrieves the full transaction row along with optional block metadata.
 	//
 	// How:
@@ -393,10 +404,13 @@ type Querier interface {
 	// How:
 	// - Starts from utxo_leases, then joins utxos and transactions so the result
 	//   can be returned as network outpoints.
-	// - Filters out expired timed rows using the caller-supplied UTC timestamp.
-	//   Confirmation-controlled rows never expire by wall clock.
-	// - Restricts the result to outputs that are still unspent and whose parent
-	//   transaction is still in `pending` or `published` status.
+	// - Timed rows require an unexpired lease (against the caller-supplied UTC
+	//   timestamp), an unspent output, and a parent transaction still in
+	//   `pending` or `published` status.
+	// - Confirmation-controlled rows stay listed until spend maturity or release,
+	//   even after their output is spent or its parent is invalidated.
+	// - LEFT JOINs the spending transaction to report its confirmed height, which
+	//   is NULL while the spend is unconfirmed or the output is unspent.
 	// Performance:
 	// - Restricts first by wallet and expiration, then joins only the surviving
 	//   lease rows back to utxos/transactions.

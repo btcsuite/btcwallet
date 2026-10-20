@@ -598,13 +598,16 @@ type UTXOStore interface {
 	// for coin selection again. Unlocking an already-unlocked or expired lease
 	// is a no-op. If another active lease still exists for the output, the lock
 	// ID must match the one that holds it or the call returns
-	// ErrOutputUnlockNotAllowed.
+	// ErrOutputUnlockNotAllowed. A confirmation-controlled lease can be
+	// released after its output is spent.
 	ReleaseOutput(ctx context.Context, params ReleaseOutputParams) error
 
 	// ListLeasedOutputs returns a slice of all currently leased UTXOs whose
 	// parent transaction is still `pending` or `published`.
-	// This can be used to inspect which still-unspent outputs are currently
-	// locked, when their leases expire, and their spend policy.
+	// This can be used to inspect which outputs are currently locked, when
+	// timed leases expire, and the progress of confirmation-controlled
+	// leases. Timed leases are listed only while their output is unspent;
+	// confirmation-controlled leases stay listed after their spend.
 	ListLeasedOutputs(ctx context.Context, walletID uint32) (
 		[]LeasedOutput, error)
 
