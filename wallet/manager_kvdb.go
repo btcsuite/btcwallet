@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
@@ -23,6 +26,9 @@ import (
 // Deprecated: remove this backend after kvdb wallet migration and support are
 // removed.
 type kvdbManagerBackend struct {
+	// chainSource is the same borrowed client as Manager's source. Resolve
+	// canonical identities here while Manager keeps Wallet writers prepared.
+	chainSource chain.Interface
 	db          walletdb.DB
 	chainParams *chaincfg.Params
 	pubPass     []byte
@@ -64,6 +70,7 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 	}
 
 	return &kvdbManagerBackend{
+		chainSource: cfg.ChainSource,
 		db:          dbConn,
 		chainParams: &cfg.ChainParams,
 		pubPass:     cfg.KVDBPubPassphrase,
@@ -172,7 +179,9 @@ func (b *kvdbManagerBackend) open(ctx context.Context, walletName string,
 	return data, nil
 }
 
-// rollbackToBlock reuses the single Wallet's atomic Store rewind.
+// rollbackToBlock reconciles disconnected identities while Manager keeps the
+// Wallet worker prepared. Resolve canonical membership before any Store write
+// so stale events cannot detach replacements or valid pending descendants.
 func (b *kvdbManagerBackend) rollbackToBlock(ctx context.Context,
 	block db.Block) error {
 
@@ -182,7 +191,141 @@ func (b *kvdbManagerBackend) rollbackToBlock(ctx context.Context,
 		return nil
 	}
 
-	return b.store.RollbackToBlock(ctx, block.Height)
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return fmt.Errorf("disconnect height: %w", err)
+	}
+
+	synced := b.addressMgr.SyncedTo()
+
+	_, sourceHeight, err := b.chainSource.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("disconnect source tip: %w", err)
+	}
+
+	fork, err := b.canonicalDisconnectFork(
+		ctx, min(synced.Height, height-1, sourceHeight), synced,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Classify every mined record after the retained fork. With no known
+	// common ancestor, the affected range begins at genesis.
+	start := max(0, fork.Height+1)
+
+	canonical, err := b.canonicalDisconnectHistory(ctx, start, sourceHeight)
+	if err != nil {
+		return err
+	}
+
+	return b.store.DisconnectBlock(
+		ctx, block, db.OptionalBlockFromBlockStamp(fork), canonical,
+	)
+}
+
+// canonicalDisconnectFork skips pruned manager hashes and fetches headers only
+// after proving canonical membership; Neutrino may already delete old headers.
+func (b *kvdbManagerBackend) canonicalDisconnectFork(ctx context.Context,
+	height int32, synced waddrmgr.BlockStamp) (waddrmgr.BlockStamp, error) {
+
+	for ; height >= 0; height-- {
+		// The loop bounds prove this manager height is non-negative.
+		h := uint32(height)
+
+		blocks, err := b.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				StartHeight: h, EndHeight: h,
+			},
+		)
+		if err != nil {
+			if errors.Is(err, db.ErrBlockNotFound) {
+				continue
+			}
+
+			var managerErr waddrmgr.ManagerError
+			if errors.As(err, &managerErr) &&
+				managerErr.ErrorCode == waddrmgr.ErrBlockNotFound {
+
+				continue
+			}
+
+			return waddrmgr.BlockStamp{}, err
+		}
+
+		hash, err := b.chainSource.GetBlockHash(int64(height))
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork hash: %w", err,
+			)
+		}
+
+		if *hash != blocks[0].Hash {
+			continue
+		}
+
+		if height == synced.Height {
+			return synced, nil
+		}
+
+		header, err := b.chainSource.GetBlockHeader(hash)
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork header: %w", err,
+			)
+		}
+
+		return waddrmgr.BlockStamp{
+			Height: height, Hash: *hash, Timestamp: header.Timestamp,
+		}, nil
+	}
+
+	return waddrmgr.BlockStamp{Height: -1}, nil
+}
+
+// canonicalDisconnectHistory snapshots each affected mined height once before
+// the Store write. Explicit nil entries classify heights beyond the source tip.
+func (b *kvdbManagerBackend) canonicalDisconnectHistory(ctx context.Context,
+	height, sourceHeight int32) (map[uint32]*chainhash.Hash, error) {
+
+	start, err := db.Int64ToUint32(int64(height))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history start: %w", err)
+	}
+
+	tip, err := db.Int64ToUint32(int64(sourceHeight))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history tip: %w", err)
+	}
+
+	history, err := b.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID: 0, StartHeight: start, EndHeight: math.MaxInt32,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history: %w", err)
+	}
+
+	canonical := make(map[uint32]*chainhash.Hash)
+	for _, info := range history {
+		h := info.Block.Height
+		if _, known := canonical[h]; known {
+			continue
+		}
+
+		if h > tip {
+			canonical[h] = nil
+			continue
+		}
+
+		hash, err := b.chainSource.GetBlockHash(int64(h))
+		if err != nil {
+			return nil, fmt.Errorf("disconnect history hash: %w", err)
+		}
+
+		canonical[h] = hash
+	}
+
+	return canonical, nil
 }
 
 // close releases the legacy address manager before its physical database.
