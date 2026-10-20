@@ -5626,9 +5626,8 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
 	return nil
 }
 
-// rollbackBlockHistory removes orphaned history while preserving canonical
-// records. Live notifications and rescans can interleave, so neither a matching
-// block nor a canonical descendant proves the identity of the remaining range.
+// rollbackBlockHistory preserves canonical history through the shared store
+// operation, then queues only final wallet-owned spentness notifications.
 func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
 	height int32) error {
 
@@ -5637,46 +5636,14 @@ func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
 		return err
 	}
 
-	// Rollback removes coinbase spends recursively. Save the spend chains
-	// of canonical coinbases before temporarily removing their parents.
-	unmined, err := w.preserveCoinbaseSpends(ns, canonical, orphaned)
+	unmined, err := w.txStore.(*wtxmgr.Store).RollbackBlockHistory(
+		ns, canonical, orphaned,
+	)
 	if err != nil {
 		return err
 	}
 
-	err = w.txStore.Rollback(ns, orphaned[0].Block.Height)
-	if err != nil {
-		return err
-	}
-
-	// Store holds only chain parameters, a clock and this callback. Use a
-	// private copy so replay cannot announce temporarily unspent credits
-	// or change notification behavior for other users of the shared store.
-	replay := *w.txStore.(*wtxmgr.Store)
-	replay.NotifyUnspent = nil
-
-	// Restore unmined records first, so replaying canonical transactions
-	// also removes any conflicting unmined spends through InsertTx.
-	for i := range unmined {
-		err := restoreHistoryTx(&replay, ns, &unmined[i], nil)
-		if err != nil {
-			return err
-		}
-	}
-
-	// The saved records retain block and transaction order. Restore credits
-	// before inserting their spenders so debit accounting is rebuilt too.
-	for i := range canonical {
-		detail := &canonical[i]
-
-		err := restoreHistoryTx(&replay, ns, detail, &detail.Block)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Compare restored credits with their original spentness only after
-	// all spenders and conflicts have been reconciled.
+	// Compare credits only after all spenders and conflicts are reconciled.
 	err = w.notifyUnspentHistory(ns, unmined)
 	if err != nil {
 		return err
@@ -5711,28 +5678,6 @@ func (w *Wallet) partitionBlockHistory(ns walletdb.ReadBucket, height int32) (
 			return hash != nil && *hash == block.Hash, nil
 		},
 	)
-}
-
-// restoreHistoryTx restores a transaction and its recorded credit metadata.
-// The caller supplies a store with replay notifications disabled.
-func restoreHistoryTx(store *wtxmgr.Store, ns walletdb.ReadWriteBucket,
-	detail *wtxmgr.TxDetails, block *wtxmgr.BlockMeta) error {
-
-	err := store.InsertTx(ns, &detail.TxRecord, block)
-	if err != nil {
-		return err
-	}
-
-	for _, credit := range detail.Credits {
-		err := store.AddCredit(
-			ns, &detail.TxRecord, block, credit.Index, credit.Change,
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // notifyUnspentHistory queues only real spent-to-unspent transitions among
@@ -5771,90 +5716,6 @@ func (w *Wallet) notifyUnspentHistory(ns walletdb.ReadWriteBucket,
 	}
 
 	return nil
-}
-
-// preserveCoinbaseSpends saves transactions that Rollback would remove solely
-// because their canonical coinbase ancestor is temporarily detached. Spends of
-// orphaned coinbases must remain removed, including their descendants.
-func (w *Wallet) preserveCoinbaseSpends(ns walletdb.ReadBucket,
-	canonical, orphaned []wtxmgr.TxDetails) ([]wtxmgr.TxDetails, error) {
-
-	retained := make(map[chainhash.Hash]bool)
-	for _, detail := range canonical {
-		if blockchain.IsCoinBaseTx(&detail.MsgTx) {
-			retained[detail.Hash] = true
-		}
-	}
-
-	if len(retained) == 0 {
-		return nil, nil
-	}
-
-	details := make(map[chainhash.Hash]wtxmgr.TxDetails)
-
-	mined := make(map[chainhash.Hash]bool)
-	for _, detail := range orphaned {
-		if blockchain.IsCoinBaseTx(&detail.MsgTx) {
-			retained[detail.Hash] = false
-		}
-
-		details[detail.Hash] = detail
-	}
-
-	err := w.txStore.RangeTransactions(ns, -1, -1,
-		func(unmined []wtxmgr.TxDetails) (bool, error) {
-			for _, detail := range unmined {
-				details[detail.Hash] = detail
-			}
-
-			return false, nil
-		})
-	if err != nil {
-		return nil, err
-	}
-
-	for _, detail := range canonical {
-		details[detail.Hash] = detail
-		mined[detail.Hash] = true
-	}
-
-	return retainedCoinbaseDescendants(details, retained, mined), nil
-}
-
-// retainedCoinbaseDescendants follows spends in dependency order. A spend of
-// any orphaned coinbase ancestor remains invalid even if other inputs survive.
-func retainedCoinbaseDescendants(details map[chainhash.Hash]wtxmgr.TxDetails,
-	retained, mined map[chainhash.Hash]bool) []wtxmgr.TxDetails {
-
-	txs := make(map[chainhash.Hash]*wire.MsgTx)
-
-	for hash, detail := range details {
-		txs[hash] = &detail.MsgTx
-	}
-
-	var unmined []wtxmgr.TxDetails
-	for _, tx := range wtxmgr.DependencySort(txs) {
-		if blockchain.IsCoinBaseTx(tx) {
-			continue
-		}
-
-		hash := tx.TxHash()
-		for _, input := range tx.TxIn {
-			keep, affected := retained[input.PreviousOutPoint.Hash]
-			if affected {
-				retained[hash] = keep
-				if !keep {
-					break
-				}
-			}
-		}
-
-		if retained[hash] && !mined[hash] {
-			unmined = append(unmined, details[hash])
-		}
-	}
-
-	return unmined
 }
 
 // disconnectedBlockStamp returns the preceding sync stamp only when the

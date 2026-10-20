@@ -1677,3 +1677,162 @@ func (s *Store) ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput,
 
 	return outputs, nil
 }
+
+// RollbackBlockHistory removes orphaned records and replays canonical records
+// and their valid unmined coinbase descendants. Pass ordered snapshots from
+// PartitionBlockHistory in this same write transaction. Returned pre-replay
+// unmined details let callers publish final spentness changes after commit.
+func (s *Store) RollbackBlockHistory(ns walletdb.ReadWriteBucket,
+	canonical, orphaned []TxDetails) ([]TxDetails, error) {
+
+	if len(orphaned) == 0 {
+		return nil, nil
+	}
+
+	// Rollback removes coinbase spends recursively. Save the spend chains
+	// of canonical coinbases before temporarily removing their parents.
+	unmined, err := s.preserveCoinbaseSpends(ns, canonical, orphaned)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.Rollback(ns, orphaned[0].Block.Height)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store holds only chain parameters, a clock and this callback. Use a
+	// private copy so replay cannot announce temporarily unspent credits
+	// or change notification behavior for other users of the shared store.
+	replay := *s
+	replay.NotifyUnspent = nil
+
+	// Restore unmined records first, so replaying canonical transactions
+	// also removes any conflicting unmined spends through InsertTx.
+	for i := range unmined {
+		err := restoreHistoryTx(&replay, ns, &unmined[i], nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// The saved records retain block and transaction order. Restore credits
+	// before inserting their spenders so debit accounting is rebuilt too.
+	for i := range canonical {
+		detail := &canonical[i]
+
+		err := restoreHistoryTx(&replay, ns, detail, &detail.Block)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return unmined, nil
+}
+
+// restoreHistoryTx restores a transaction and its recorded credit metadata.
+// The caller supplies a store with replay notifications disabled.
+func restoreHistoryTx(store *Store, ns walletdb.ReadWriteBucket,
+	detail *TxDetails, block *BlockMeta) error {
+
+	err := store.InsertTx(ns, &detail.TxRecord, block)
+	if err != nil {
+		return err
+	}
+
+	for _, credit := range detail.Credits {
+		err := store.AddCredit(
+			ns, &detail.TxRecord, block, credit.Index, credit.Change,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// preserveCoinbaseSpends saves transactions that Rollback would remove solely
+// because their canonical coinbase ancestor is temporarily detached. Spends of
+// orphaned coinbases must remain removed, including their descendants.
+func (s *Store) preserveCoinbaseSpends(ns walletdb.ReadBucket,
+	canonical, orphaned []TxDetails) ([]TxDetails, error) {
+
+	retained := make(map[chainhash.Hash]bool)
+	for _, detail := range canonical {
+		if blockchain.IsCoinBaseTx(&detail.MsgTx) {
+			retained[detail.Hash] = true
+		}
+	}
+
+	if len(retained) == 0 {
+		return nil, nil
+	}
+
+	details := make(map[chainhash.Hash]TxDetails)
+
+	mined := make(map[chainhash.Hash]bool)
+
+	for _, detail := range orphaned {
+		if blockchain.IsCoinBaseTx(&detail.MsgTx) {
+			retained[detail.Hash] = false
+		}
+
+		details[detail.Hash] = detail
+	}
+
+	err := s.RangeTransactions(ns, -1, -1,
+		func(unmined []TxDetails) (bool, error) {
+			for _, detail := range unmined {
+				details[detail.Hash] = detail
+			}
+
+			return false, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, detail := range canonical {
+		details[detail.Hash] = detail
+		mined[detail.Hash] = true
+	}
+
+	return retainedCoinbaseDescendants(details, retained, mined), nil
+}
+
+// retainedCoinbaseDescendants follows spends in dependency order. A spend of
+// any orphaned coinbase ancestor remains invalid even if other inputs survive.
+func retainedCoinbaseDescendants(details map[chainhash.Hash]TxDetails,
+	retained, mined map[chainhash.Hash]bool) []TxDetails {
+
+	txs := make(map[chainhash.Hash]*wire.MsgTx)
+
+	for hash, detail := range details {
+		txs[hash] = &detail.MsgTx
+	}
+
+	var unmined []TxDetails
+	for _, tx := range DependencySort(txs) {
+		if blockchain.IsCoinBaseTx(tx) {
+			continue
+		}
+
+		hash := tx.TxHash()
+		for _, input := range tx.TxIn {
+			keep, affected := retained[input.PreviousOutPoint.Hash]
+			if affected {
+				retained[hash] = keep
+				if !keep {
+					break
+				}
+			}
+		}
+
+		if retained[hash] && !mined[hash] {
+			unmined = append(unmined, details[hash])
+		}
+	}
+
+	return unmined
+}
