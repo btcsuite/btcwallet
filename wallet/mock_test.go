@@ -124,6 +124,15 @@ func (m *mockChainProcessor) run(ctx context.Context) error {
 	return args.Error(0)
 }
 
+// processChainEventBeforeSync records ordered mailbox work during startup or
+// retry so controller tests can require its exact acceptance and result.
+func (m *mockChainProcessor) processChainEventBeforeSync(ctx context.Context,
+	event chainEvent) error {
+
+	args := m.Called(ctx, event)
+	return args.Error(0)
+}
+
 // requestScan implements the chainProcessor interface.
 func (m *mockChainProcessor) requestScan(ctx context.Context,
 	req *scanReq) error {

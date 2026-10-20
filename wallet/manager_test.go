@@ -2906,16 +2906,32 @@ func TestManagerChainEventMembership(t *testing.T) {
 func TestManagerChainEventBlockedStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Backend readiness stays false, so this real processor does not
-	// consume its inbox. A second header forces reader delivery to block.
+	// Arrange: Hold the backend call itself, since an initialization wait now
+	// services its mailbox. A second header still forces delivery to block.
 	client := createTestChain(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+
+	client.On("IsCurrent").Unset()
+	client.On("IsCurrent").Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(false).Once()
+
 	notifications := make(chan any, 2)
 
 	client.On("Notifications").Unset()
 	client.On("Notifications").Return((<-chan any)(notifications)).Once()
 	manager := testSQLiteManagerWithChain(t, client)
+
+	// Release a held dependency before fixture Stop, even if a prerequisite
+	// fails. The backend call is existing blocking I/O, not another worker.
+	releaseBackend := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseBackend)
+
 	w, err := manager.Create(sqliteCreateParams(t))
 	require.NoError(t, err)
+
+	<-entered
 
 	notifications <- chain.BlockConnected{}
 
@@ -2932,6 +2948,9 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 	go func() {
 		stopped <- manager.Stop()
 	}()
+
+	<-w.lifetimeCtx.Done()
+	releaseBackend()
 
 	// Assert: Stop joins both reader and Wallet rather than waiting for
 	// initialization to become ready or closing Store underneath either one.
