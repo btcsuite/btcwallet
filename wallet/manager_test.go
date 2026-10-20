@@ -22,6 +22,7 @@ import (
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -44,26 +45,421 @@ func newChainEventTestWallet(t *testing.T, name string,
 	return w
 }
 
-// TestManagerChainEventRejectsDisconnect prevents connected fanout
-// from reaching the legacy per-Wallet rollback handler.
-func TestManagerChainEventRejectsDisconnect(t *testing.T) {
+// TestManagerChainEventRejectsUnsupported preserves rejection without delivery
+// or shutdown now that disconnects have their own supported Manager path.
+func TestManagerChainEventRejectsUnsupported(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A strict registered processor and Store permit no event or
-	// rollback call; only normal fixture shutdown may touch the Vault.
+	// Arrange: A published Wallet has a visible mailbox and a strict Store;
+	// unsupported control notifications must cause neither delivery nor writes.
 	w := newChainEventTestWallet(t, "first", 1)
 	manager := testSQLManager(t, &walletmock.Store{})
 	manager.wallets[w.cfg.Name] = w
 
-	// Act: Submit a disconnect to the connected-event entry point.
-	err := manager.dispatchChainEvent(
-		t.Context(), chain.BlockDisconnected{},
-	)
+	events := make(chan any, 1)
+	w.chainEventChan = events
 
-	// Assert: Rejection is local validation and does not stop the Manager or
-	// transfer ownership of the disconnect to any processor.
+	// Act: Submit a rescan progress notification that this entry point does
+	// not accept, rather than the now-supported disconnected-block example.
+	err := manager.dispatchChainEvent(t.Context(), &chain.RescanProgress{})
+
+	// Assert: Local validation leaves the mailbox empty and the Manager live;
+	// the fixture owns Store and Wallet expectation verification at cleanup.
 	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.Empty(t, events)
 	require.True(t, manager.started.Load())
+}
+
+// TestManagerChainRollbackOrder fences both published recipients before one
+// Store rollback and permits the next complete connected delivery afterward.
+func TestManagerChainRollbackOrder(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Capacity-one mailboxes first accept an ordinary event.
+		// A Store receipt exposes any rollback attempted before both pauses.
+		store := &walletmock.Store{}
+		first := newChainEventTestWallet(t, "first", 1)
+		second := newChainEventTestWallet(t, "second", 2)
+		m := testSQLManager(t, store)
+		m.wallets[first.cfg.Name], m.wallets[second.cfg.Name] = first, second
+		firstEvents, secondEvents := make(chan any, 1), make(chan any, 1)
+		first.chainEventChan, second.chainEventChan = firstEvents, secondEvents
+		event := chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 8}},
+		}
+		persisted := make(chan struct{})
+		store.On("RollbackToBlock", mock.Anything, uint32(8)).
+			Run(func(mock.Arguments) { close(persisted) }).Return(nil).Once()
+
+		// Act: One source caller accepts the prior event before rollback;
+		// each simulated worker acknowledges only after that event is read.
+		require.NoError(t, m.dispatchChainEvent(t.Context(), event))
+		require.Equal(t, event, <-firstEvents)
+		require.Equal(t, event, <-secondEvents)
+
+		rolled := make(chan error, 1)
+		go func() {
+			rolled <- m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+				Block: wtxmgr.Block{Height: 8},
+			})
+		}()
+
+		for range 2 {
+			var raw any
+			select {
+			case raw = <-firstEvents:
+			case raw = <-secondEvents:
+			}
+
+			pause, ok := raw.(chainPauseReq)
+			require.True(t, ok)
+			synctest.Wait()
+			require.Empty(t, persisted)
+			close(pause.ready)
+		}
+
+		// Assert: The sole rollback completes after both receipts; no raw
+		// disconnect reaches a Wallet, and later full fanout still succeeds.
+		require.NoError(t, <-rolled)
+		require.True(t, m.started.Load())
+		require.NoError(t, m.dispatchChainEvent(t.Context(), event))
+		require.Equal(t, event, <-firstEvents)
+		require.Equal(t, event, <-secondEvents)
+	})
+}
+
+// TestManagerChainRollbackStopsOnError makes definite and ambiguous Store
+// outcomes terminal while the operation still owns worker continuation.
+func TestManagerChainRollbackStopsOnError(t *testing.T) {
+	t.Parallel()
+
+	for _, failure := range []error{errDBMock, dbruntime.ErrAmbiguousTxCommit} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: The Store fails once after a real channel pause.
+			// Cleanup rejects either early continuation or a still-live Wallet.
+			store := &walletmock.Store{}
+			w := newChainEventTestWallet(t, "first", 1)
+			m := testSQLManager(t, store)
+			m.wallets[w.cfg.Name] = w
+			events := make(chan any, 1)
+			w.chainEventChan = events
+
+			store.On("RollbackToBlock", mock.Anything, uint32(8)).
+				Return(failure).Once()
+
+			result := make(chan error, 1)
+			event := chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}}
+
+			// Act: Admit disconnect, capture its pause, and release only its
+			// readiness receipt so Manager must retain continuation ownership.
+			go func() { result <- m.dispatchChainEvent(t.Context(), event) }()
+
+			pause, ok := (<-events).(chainPauseReq)
+			require.True(t, ok)
+			backend, ok := m.backend.(*sqlManagerBackend)
+			require.True(t, ok)
+
+			backend.closeFn = func() error {
+				if !errors.Is(w.state.validateStarted(), ErrWalletStopped) {
+					return errors.New("Store closes before Wallet stop")
+				}
+
+				select {
+				case <-pause.resume:
+					return errors.New("writers resume before Store close")
+				default:
+					return nil
+				}
+			}
+
+			close(pause.ready)
+
+			// Assert: Preserve the exact failure, reject later admission, and
+			// finish terminal teardown without Store retry or readback calls.
+			require.ErrorIs(t, <-result, failure)
+			require.ErrorIs(t, m.dispatchChainEvent(t.Context(), event),
+				ErrStateForbidden)
+			require.False(t, m.started.Load())
+			require.Nil(t, m.backend)
+		})
+	}
+}
+
+// TestManagerChainRollbackKVDB keeps disconnect outside the maintained
+// backend's independent source-consumption path.
+func TestManagerChainRollbackKVDB(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A Running KVDB Manager has no prepared SQL rollback owner.
+	m := testKVDBManager(t)
+
+	// Act: Submit the same private disconnect accepted by SQL Managers.
+	err := m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 8},
+	})
+
+	// Assert: Rejection preserves the live Manager and performs no SQL work.
+	require.ErrorIs(t, err, ErrStateForbidden)
+	require.True(t, m.started.Load())
+}
+
+// TestManagerChainRollbackCreate holds successful Create publication behind
+// an admitted rollback so the new Wallet cannot join its paused snapshot.
+func TestManagerChainRollbackCreate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Hold rollback for one published Wallet, and arrange precisely
+	// the Store calls needed to create and publish a second Wallet afterward.
+	store := &walletmock.Store{}
+	w := newChainEventTestWallet(t, "first", 1)
+	m := testSQLManager(t, store)
+	m.wallets[w.cfg.Name] = w
+
+	events := make(chan any, 1)
+	w.chainEventChan = events
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseWork := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseWork)
+	store.On("RollbackToBlock", mock.Anything, uint32(8)).
+		Run(func(mock.Arguments) {
+			close(entered)
+			<-release
+		}).Return(nil).Once()
+
+	params := managerLifecycleCreateParams("created")
+	store.On("CreateWallet", mock.Anything, mock.Anything).
+		Return(&db.WalletInfo{
+			ID: 2, Name: params.Name, IsWatchOnly: true,
+		}, nil).Once()
+	store.On("GetWallet", mock.Anything, params.Name).
+		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo{}, nil).Once()
+	store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
+		Return(nil).Once()
+
+	// Act: Race Create against the held rollback. The direct admission probe
+	// keeps this regression independent of when the Create goroutine is run.
+	rolled, created := make(chan error, 1), make(chan error, 1)
+	go func() {
+		rolled <- m.dispatchChainEvent(t.Context(),
+			chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+	}()
+
+	pause, ok := (<-events).(chainPauseReq)
+	require.True(t, ok)
+	close(pause.ready)
+	<-entered
+
+	admitted := m.TryLock()
+	if admitted {
+		m.Unlock()
+	}
+
+	require.False(t, admitted, "rollback releases admission early")
+
+	go func() {
+		_, err := m.Create(params)
+		created <- err
+	}()
+
+	releaseWork()
+
+	// Assert: Successful publication follows rollback and the fully started
+	// created Wallet belongs to a Manager that remains Running.
+	require.NoError(t, <-rolled)
+	require.NoError(t, <-created)
+	require.Contains(t, m.String(), params.Name)
+	require.True(t, m.started.Load())
+}
+
+// TestManagerChainRollbackStop joins an admitted rollback before closing Store
+// even when Stop interrupts the prepared admission path concurrently.
+func TestManagerChainRollbackStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep Store rollback held after the published worker pauses.
+	// Return an ordering error to Stop if Store closes before rollback ends.
+	store := &walletmock.Store{}
+	w := newChainEventTestWallet(t, "first", 1)
+	m := testSQLManager(t, store)
+	m.wallets[w.cfg.Name] = w
+
+	events := make(chan any, 1)
+	w.chainEventChan = events
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	rolledBack := make(chan struct{})
+	releaseWork := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseWork)
+	store.On("RollbackToBlock", mock.Anything, uint32(8)).
+		Run(func(mock.Arguments) {
+			close(entered)
+			<-release
+			close(rolledBack)
+		}).Return(nil).Once()
+
+	backend, ok := m.backend.(*sqlManagerBackend)
+	require.True(t, ok)
+
+	backend.closeFn = func() error {
+		select {
+		case <-rolledBack:
+			return nil
+
+		default:
+			return errors.New("Store closes during rollback")
+		}
+	}
+
+	// Act: Admit rollback before starting Stop. Probe its shared admission
+	// while Store is held, releasing any acquired probe before a fatal failure.
+	rolled, stopped := make(chan error, 1), make(chan error, 1)
+	go func() {
+		rolled <- m.dispatchChainEvent(t.Context(),
+			chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+	}()
+
+	pause, ok := (<-events).(chainPauseReq)
+	require.True(t, ok)
+	close(pause.ready)
+	<-entered
+
+	admitted := m.TryLock()
+	if admitted {
+		m.Unlock()
+	}
+
+	require.False(t, admitted, "rollback releases admission early")
+
+	go func() { stopped <- m.Stop() }()
+
+	releaseWork()
+
+	// Assert: Both callers settle, Store observes completed rollback, and no
+	// Running Manager remains after Stop joins the published Wallet.
+	require.NoError(t, <-rolled)
+	require.NoError(t, <-stopped)
+	require.False(t, m.started.Load())
+}
+
+// TestManagerChainRollbackStopDuringPause keeps Stop able to release both
+// a blocked control send and a control whose worker has not acknowledged it.
+func TestManagerChainRollbackStopDuringPause(t *testing.T) {
+	t.Parallel()
+
+	// Capacity is the only variation: an absent consumer blocks either the
+	// unbuffered handoff or the ready wait after buffered acceptance.
+	tests := []struct {
+		name     string
+		capacity int
+	}{
+		{
+			name:     "handoff blocked",
+			capacity: 0,
+		},
+		{
+			name:     "receipt blocked",
+			capacity: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				t.Helper()
+
+				// Arrange: This published Wallet has no mailbox consumer.
+				// Store forbids persistence before worker quiescence.
+				w := newChainEventTestWallet(t, "first", 1)
+				m := testSQLManager(t, &walletmock.Store{})
+				m.wallets[w.cfg.Name] = w
+				w.chainEventChan = make(chan any, test.capacity)
+				rolled := make(chan error, 1)
+
+				// Act: Let the accepted pause block, then Stop through the
+				// existing registry lock and Wallet lifetime cancellation.
+				go func() {
+					rolled <- m.dispatchChainEvent(t.Context(),
+						chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+				}()
+
+				synctest.Wait()
+				require.NoError(t, m.Stop())
+
+				// Assert: Shutdown releases the operation without any Store
+				// rollback, and the Manager has completed terminal cleanup.
+				require.ErrorIs(t, <-rolled, ErrManagerStopped)
+				require.False(t, m.started.Load())
+				require.Nil(t, m.backend)
+			})
+		})
+	}
+}
+
+// TestManagerChainRollbackCreateDuringPause fences a Wallet published while
+// an earlier recipient is still acknowledging the same disconnect.
+func TestManagerChainRollbackCreateDuringPause(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Hold the first receipt and create a second real Wallet whose
+	// backend is not current, so its mailbox can be serviced explicitly here.
+	store := &walletmock.Store{}
+	w := newChainEventTestWallet(t, "first", 1)
+	m := testSQLManager(t, store)
+	m.wallets[w.cfg.Name] = w
+	events := make(chan any, 1)
+	w.chainEventChan = events
+	persisted := make(chan struct{})
+	store.On("RollbackToBlock", mock.Anything, uint32(8)).
+		Run(func(mock.Arguments) { close(persisted) }).Return(nil).Once()
+
+	params := managerLifecycleCreateParams("created")
+	store.On("CreateWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{ID: 2, Name: params.Name, IsWatchOnly: true}, nil,
+	).Once()
+	store.On("GetWallet", mock.Anything, params.Name).
+		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo{}, nil).Once()
+	store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).Return(nil).Once()
+
+	rolled := make(chan error, 1)
+
+	// Act: Publish through public Create before the first worker receipt;
+	// the registry refresh must include that newly started writer as well.
+	go func() {
+		rolled <- m.dispatchChainEvent(t.Context(),
+			chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+	}()
+
+	first, ok := (<-events).(chainPauseReq)
+	require.True(t, ok)
+
+	created, err := m.Create(params)
+	require.NoError(t, err)
+
+	processor, ok := created.sync.(*syncer)
+	require.True(t, ok)
+	close(first.ready)
+
+	second, ok := (<-processor.chainEventChan).(chainPauseReq)
+	require.True(t, ok)
+	require.Empty(t, persisted)
+	close(second.ready)
+
+	// Assert: Only after the newly published writer acknowledges does the
+	// single Store call complete, preserving both published Wallets afterward.
+	require.NoError(t, <-rolled)
+	require.Contains(t, m.String(), params.Name)
+	require.True(t, m.started.Load())
 }
 
 // TestManagerChainEventOrder verifies asynchronous acceptance, bounded
