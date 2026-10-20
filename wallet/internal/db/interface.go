@@ -5,6 +5,7 @@ import (
 	"errors"
 	"iter"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 )
@@ -622,4 +623,17 @@ type UTXOStore interface {
 	// reason about lease state without issuing a second balance query.
 	Balance(ctx context.Context, params BalanceParams) (
 		BalanceResult, error)
+}
+
+// BlockDisconnectStore is the optional isolated-wallet recovery capability.
+// It detaches only a matching stored identity or a known empty manager block,
+// preserving canonical history and allowing an exact manager-only rewind.
+// previous is a complete canonical retained stamp below block; nil resets a
+// matching manager to its start block. canonical covers every affected mined
+// height: a present nil means above the source tip, while a missing entry is
+// unknown and must fail before mutation. The caller owns chain membership and
+// supplies an immutable snapshot; implementations own atomic persistence.
+type BlockDisconnectStore interface {
+	DisconnectBlock(ctx context.Context, block Block, previous *Block,
+		canonical map[uint32]*chainhash.Hash) error
 }

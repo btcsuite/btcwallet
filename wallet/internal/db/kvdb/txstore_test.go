@@ -4319,3 +4319,244 @@ func TestDeleteUnminedTxRejectsConfirmed(t *testing.T) {
 	)
 	require.ErrorIs(t, err, db.ErrDeleteRequiresUnmined)
 }
+
+// TestDisconnectBlockIdentities verifies public recovery independently of the
+// manager's progress, including sparse history, empty blocks and stale events.
+func TestDisconnectBlockIdentities(t *testing.T) {
+	t.Parallel()
+
+	// Describe mined input and expected output as data so every scenario
+	// uses the same real-store setup and transaction-detail assertions.
+	type minedRecord struct {
+		height     int32
+		seed       byte
+		wantHeight int32
+	}
+
+	cases := []struct {
+		name           string
+		tipHeight      int32
+		tipSeed        byte
+		tipTimestamp   int64
+		history        []minedRecord
+		failCommit     bool
+		wantTipHeight  int32
+		canonicalThird *chainhash.Hash
+	}{
+		{
+			name:          "history ahead of tip",
+			tipHeight:     1,
+			tipSeed:       1,
+			tipTimestamp:  123,
+			wantTipHeight: 1,
+			history: []minedRecord{
+				{
+					height:     2,
+					seed:       2,
+					wantHeight: -1,
+				},
+			},
+		},
+		{
+			name:           "sparse manager with canonical descendant",
+			tipHeight:      3,
+			tipSeed:        3,
+			tipTimestamp:   456,
+			wantTipHeight:  3,
+			canonicalThird: &chainhash.Hash{31, 3},
+			history: []minedRecord{
+				{
+					height:     2,
+					seed:       2,
+					wantHeight: -1,
+				},
+				{
+					height:     3,
+					seed:       3,
+					wantHeight: 3,
+				},
+			},
+		},
+		{
+			name:          "replacement with exact manager rewind",
+			tipHeight:     2,
+			tipSeed:       2,
+			tipTimestamp:  456,
+			wantTipHeight: 1,
+			history: []minedRecord{
+				{
+					height:     2,
+					seed:       22,
+					wantHeight: 2,
+				},
+			},
+		},
+		{
+			name:          "stale disconnect preserves replacement",
+			tipHeight:     2,
+			tipSeed:       22,
+			tipTimestamp:  456,
+			wantTipHeight: 2,
+			history: []minedRecord{
+				{
+					height:     2,
+					seed:       22,
+					wantHeight: 2,
+				},
+			},
+		},
+		{
+			name:          "known empty block detaches descendants",
+			tipHeight:     2,
+			tipSeed:       2,
+			tipTimestamp:  456,
+			wantTipHeight: 1,
+			history: []minedRecord{
+				{
+					height:     3,
+					seed:       3,
+					wantHeight: -1,
+				},
+			},
+		},
+		{
+			name:          "failed commit restores live tip and history",
+			tipHeight:     2,
+			tipSeed:       2,
+			tipTimestamp:  456,
+			failCommit:    true,
+			wantTipHeight: 2,
+			history: []minedRecord{
+				{
+					height:     2,
+					seed:       2,
+					wantHeight: 2,
+				},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange real stores with separately seeded manager/mined
+			// identities and the same failure-injection wrapper in every
+			// case. Only input records and the injected failure flag vary.
+			conn, cleanup := newTestDB(t)
+			t.Cleanup(cleanup)
+			mgr := newAddrStore(t, conn)
+			t.Cleanup(mgr.Close)
+			txs := newTxStore(t, conn)
+			previous := waddrmgr.BlockStamp{
+				Height:    1,
+				Hash:      chainhash.Hash{31, 1},
+				Timestamp: time.Unix(123, 0).UTC(),
+			}
+			writeSyncedTo(t, conn, mgr, previous)
+
+			tip := waddrmgr.BlockStamp{
+				Height:    tc.tipHeight,
+				Hash:      chainhash.Hash{31, tc.tipSeed},
+				Timestamp: time.Unix(tc.tipTimestamp, 0).UTC(),
+			}
+			writeSyncedTo(t, conn, mgr, tip)
+
+			records := make([]*wtxmgr.TxRecord, len(tc.history))
+			for i, item := range tc.history {
+				records[i] = insertConfirmedTxWithSeed(
+					t, conn, txs, item.height, item.seed,
+				)
+			}
+
+			canonical := map[uint32]*chainhash.Hash{
+				2: {31, 22},
+				3: tc.canonicalThird,
+			}
+			retained, err := db.BlockFromBlockStamp(previous)
+			require.NoError(t, err)
+
+			backing := &commitFailDB{DB: conn, failNext: tc.failCommit}
+			store := NewStore(backing, txs, mgr)
+
+			// Act through the public Store capability, without consulting
+			// buckets or using the manager tip as the mined identity.
+			err = store.DisconnectBlock(t.Context(), db.Block{
+				Height: 2,
+				Hash:   chainhash.Hash{31, 2},
+			}, retained, canonical)
+
+			// Assert persistence and live state agree immediately; a later
+			// rescan must not be needed to repair a partially applied write.
+			if tc.failCommit {
+				require.ErrorIs(t, err, errInjectedCommit)
+			} else {
+				require.NoError(t, err)
+			}
+
+			wantTip := tip
+			if tc.wantTipHeight == 1 {
+				wantTip = previous
+			}
+
+			require.Equal(t, wantTip, mgr.SyncedTo())
+
+			err = walletdb.View(conn, func(tx walletdb.ReadTx) error {
+				ns := tx.ReadBucket(wtxmgrNamespaceKey)
+				for i, item := range tc.history {
+					detail, err := txs.TxDetails(ns, &records[i].Hash)
+					require.NoError(t, err)
+					require.NotNil(t, detail)
+					require.Equal(t, item.wantHeight, detail.Block.Height)
+				}
+
+				return nil
+			})
+			require.NoError(t, err)
+			_, err = store.ListTxns(t.Context(), db.ListTxnsQuery{
+				EndHeight: math.MaxInt32,
+			})
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestDisconnectBlockIdentityError preserves history when manager identity is
+// unreadable for a genuine database failure rather than a missing old hash.
+func TestDisconnectBlockIdentityError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange real mined history and a mock manager that reports a database
+	// failure for the disconnected height; missing hashes alone are tolerated.
+	conn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	newAddrmgrNamespace(t, conn)
+	txs := newTxStore(t, conn)
+	record := insertConfirmedTxWithSeed(t, conn, txs, 2, 2)
+	mgr := &bwmock.AddrStore{}
+	t.Cleanup(func() { mgr.AssertExpectations(t) })
+	mgr.On("SyncedTo").Return(waddrmgr.BlockStamp{Height: 3}).Once()
+	mgr.On("BlockHash", mock.Anything, int32(2)).Return(
+		(*chainhash.Hash)(nil), errInducedFailure,
+	).Once()
+	store := NewStore(conn, txs, mgr)
+
+	// Act on an independently matching mined identity with unreadable manager
+	// history; recovery must preserve the causal error instead of guessing.
+	err := store.DisconnectBlock(t.Context(), db.Block{
+		Height: 2,
+		Hash:   chainhash.Hash{31, 2},
+	}, nil, nil)
+
+	// Assert that no transaction moved to unmined on the failed operation.
+	require.ErrorIs(t, err, errInducedFailure)
+	err = walletdb.View(conn, func(tx walletdb.ReadTx) error {
+		detail, err := txs.TxDetails(
+			tx.ReadBucket(wtxmgrNamespaceKey), &record.Hash,
+		)
+		require.NoError(t, err)
+		require.Equal(t, int32(2), detail.Block.Height)
+
+		return nil
+	})
+	require.NoError(t, err)
+}

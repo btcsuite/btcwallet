@@ -21,6 +21,9 @@ import (
 // A compile-time assertion to ensure Store implements the transaction store.
 var _ db.TxStore = (*Store)(nil)
 
+// KVDB reconciles disconnected history independently of its wallet sync tip.
+var _ db.BlockDisconnectStore = (*Store)(nil)
+
 // errLegacyHeightOverflow reports that one db height cannot fit into the
 // signed legacy wtxmgr height domain.
 var errLegacyHeightOverflow = errors.New("legacy height overflows int32")
@@ -1677,7 +1680,7 @@ func (s *Store) restoreCurrentBirthdayBlock(tx walletdb.ReadWriteTx,
 func (s *Store) populateRollbackForkTimestamp(txmgrNs walletdb.ReadBucket,
 	target *rollbackTarget) error {
 
-	if target.forkBlock == nil {
+	if target.forkBlock == nil || !target.forkBlock.Timestamp.IsZero() {
 		return nil
 	}
 
@@ -2358,4 +2361,157 @@ func nonNegativeInt32ToUint32(value int32) uint32 {
 	}
 
 	return uint32(value)
+}
+
+// DisconnectBlock reconciles matching history in one write and restores live
+// manager caches on failure. Source identities are resolved before this call.
+func (s *Store) DisconnectBlock(_ context.Context, block db.Block,
+	previous *db.Block, canonical map[uint32]*chainhash.Hash) error {
+
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return fmt.Errorf("disconnect height: %w", err)
+	}
+
+	fork, err := db.OptionalBlockStampFromBlock(previous)
+	if err != nil {
+		return fmt.Errorf("disconnect fork: %w", err)
+	}
+
+	var target *rollbackTarget
+
+	// Serialize commit-failure restoration with all other Store tip writes.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		target, err = s.disconnectStoredHistory(
+			tx, block, height, fork, canonical,
+		)
+
+		return err
+	})
+	if err != nil {
+		s.restoreRollbackState(target)
+
+		return fmt.Errorf("kvdb.Store.DisconnectBlock: %w", err)
+	}
+
+	return nil
+}
+
+// disconnectStoredHistory keeps reconciliation and any exact manager rewind in
+// the same update, returning the existing cache snapshot to the outer owner.
+func (s *Store) disconnectStoredHistory(tx walletdb.ReadWriteTx, block db.Block,
+	height int32, fork waddrmgr.BlockStamp,
+	canonical map[uint32]*chainhash.Hash) (*rollbackTarget, error) {
+
+	ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+	if ns == nil {
+		return nil, errMissingTxmgrNamespace
+	}
+
+	reconcile, rewind, err := s.disconnectedBlockMatches(tx, block, height)
+	if err != nil {
+		return nil, err
+	}
+
+	// The resolved fork is at or below both manager progress and the
+	// disconnect. With no retained fork, classify history from genesis.
+	start := max(0, fork.Height+1)
+
+	if reconcile {
+		err := s.disconnectBlockHistory(ns, start, canonical)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if !rewind {
+		// An empty target records that no live cache was changed.
+		return &rollbackTarget{}, nil
+	}
+
+	// Keep birthday/cache rules but replace the local predecessor guess
+	// with the complete stamp whose canonical membership was proven.
+	boundary, err := db.Int64ToUint32(int64(start))
+	if err != nil {
+		return nil, err
+	}
+
+	target, err := s.computeRollbackTarget(tx, boundary, start)
+	if err != nil {
+		return nil, err
+	}
+
+	target.forkBlock = nil
+	if fork.Height >= 0 {
+		target.forkBlock = &fork
+	}
+
+	return target, s.rewindRollbackState(tx, ns, target)
+}
+
+// disconnectBlockHistory applies the inherited replay algorithm only after all
+// affected mined heights are classified using the immutable source snapshot.
+func (s *Store) disconnectBlockHistory(ns walletdb.ReadWriteBucket,
+	height int32, canonical map[uint32]*chainhash.Hash) error {
+
+	kept, removed, err := s.txStore.PartitionBlockHistory(
+		ns, height, func(b wtxmgr.Block) (bool, error) {
+			h, err := db.Int64ToUint32(int64(b.Height))
+			if err != nil {
+				return false, err
+			}
+
+			hash, known := canonical[h]
+			if !known {
+				return false, fmt.Errorf("unknown canonical block at %d", h)
+			}
+
+			return hash != nil && *hash == b.Hash, nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.txStore.RollbackBlockHistory(ns, kept, removed)
+
+	return err
+}
+
+// disconnectedBlockMatches separates history applicability from manager-only
+// rewinds so a stale disconnect cannot remove an already stored replacement.
+func (s *Store) disconnectedBlockMatches(tx walletdb.ReadTx, block db.Block,
+	height int32) (bool, bool, error) {
+
+	stored, err := s.txStore.BlockHash(
+		tx.ReadBucket(wtxmgrNamespaceKey), height,
+	)
+	if err != nil {
+		return false, false, err
+	}
+
+	managerMatches := false
+	if s.addrStore != nil && height <= s.addrStore.SyncedTo().Height {
+		hash, err := s.addrStore.BlockHash(
+			tx.ReadBucket(waddrmgr.NamespaceKey), height,
+		)
+		switch {
+		case err == nil:
+			managerMatches = *hash == block.Hash
+
+		case !waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound):
+			return false, false, err
+		}
+	}
+
+	// A known empty manager block permits descendant reconciliation, while
+	// competing mined history permits only the independent manager rewind.
+	if stored != nil {
+		return *stored == block.Hash, managerMatches, nil
+	}
+
+	return managerMatches, managerMatches, nil
 }
