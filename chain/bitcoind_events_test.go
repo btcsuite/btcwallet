@@ -340,6 +340,7 @@ func testLookupInputMempoolSpend(t *testing.T, miner *rpctest.Harness,
 func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 	t.Helper()
 
+	// Arrange disconnected miners so the shorter branch becomes orphaned.
 	miner2 := setupReorgMiner(t, miner1)
 
 	require := require.New(t)
@@ -389,7 +390,7 @@ func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 	// experience a re-org, miner1 must generate fewer blocks here than
 	// miner2 so that when they reconnect, miner1 does a re-org to switch
 	// to the longer chain.
-	_, err = miner1.Client.Generate(3)
+	oldHashes, err := miner1.Client.Generate(3)
 	require.NoError(err)
 
 	// Read the notifications for the new blocks
@@ -409,9 +410,8 @@ func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 
 	require.False(hash1.IsEqual(hash2))
 
-	// Reconnect the miners. This should result in miner1 reorging to match
-	// miner2. Since our client is connected to a node connected to miner1,
-	// we should get the expected disconnected and connected notifications.
+	// Act by reconnecting the miners so miner1 reorganizes to miner2.
+	// Its connected client must report the old and replacement identities.
 	err = rpctest.ConnectNode(miner1, miner2)
 	require.NoError(err)
 
@@ -431,10 +431,13 @@ func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 	require.Equal(commonHeight+5, height1)
 	require.True(hash1.IsEqual(hash2))
 
-	// We expect our client to get 3 BlockDisconnected notifications first
-	// signaling the unwinding of its top 3 blocks.
+	// Assert each disconnected identity as well as height: a grandparent
+	// hash would prevent history recovery even though heights descend.
 	for i := 0; i < 3; i++ {
-		_ = waitForBlockNtfn(t, ntfns, commonHeight+int32(3-i), false)
+		hash := waitForBlockNtfn(
+			t, ntfns, commonHeight+int32(3-i), false,
+		)
+		require.Equal(*oldHashes[2-i], hash)
 	}
 
 	// Now we expect 5 BlockConnected notifications.
