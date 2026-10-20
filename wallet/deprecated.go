@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -5686,45 +5685,32 @@ func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
 	return w.notifyUnspentHistory(ns, canonical)
 }
 
-// partitionBlockHistory checks every affected block before any mutation. The
-// canonical records before the first orphan need no rollback or replay.
+// partitionBlockHistory keeps backend membership decisions with the wallet;
+// the transaction store partitions persisted records before rollback begins.
 func (w *Wallet) partitionBlockHistory(ns walletdb.ReadBucket, height int32) (
 	[]wtxmgr.TxDetails, []wtxmgr.TxDetails, error) {
 
 	client := w.ChainClient()
-
 	_, tipHeight, err := client.GetBestBlock()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var canonical, orphaned []wtxmgr.TxDetails
-
-	err = w.txStore.RangeTransactions(ns, height, math.MaxInt32,
-		func(details []wtxmgr.TxDetails) (bool, error) {
-			block := details[0].Block
-
-			var hash *chainhash.Hash
-			if block.Height <= tipHeight {
-				var err error
-
-				hash, err = client.GetBlockHash(int64(block.Height))
-				if err != nil {
-					return false, err
-				}
+	return w.txStore.(*wtxmgr.Store).PartitionBlockHistory(
+		ns, height, func(block wtxmgr.Block) (bool, error) {
+			// Heights beyond the backend tip cannot be canonical.
+			if block.Height > tipHeight {
+				return false, nil
 			}
 
-			if hash == nil || *hash != block.Hash {
-				orphaned = append(orphaned, details...)
-			} else if len(orphaned) != 0 {
-				// Copy the entries: RangeTransactions reuses its slice.
-				canonical = append(canonical, details...)
+			hash, err := client.GetBlockHash(int64(block.Height))
+			if err != nil {
+				return false, err
 			}
 
-			return false, nil
-		})
-
-	return canonical, orphaned, err
+			return hash != nil && *hash == block.Hash, nil
+		},
+	)
 }
 
 // restoreHistoryTx restores a transaction and its recorded credit metadata.
