@@ -938,7 +938,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		}
 
 		currentBlock.Height--
-		currentBlock.Hash = currentHeader.PrevBlock
+		// Keep the identity of the header just loaded, not its parent.
+		currentBlock.Hash = *prevBlock
 		currentBlock.Timestamp = currentHeader.Timestamp
 
 		// Store the correct block in our list in order to notify it
