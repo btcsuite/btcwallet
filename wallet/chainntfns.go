@@ -5,9 +5,10 @@
 package wallet
 
 import (
-	"bytes"
+	"math"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -276,50 +277,49 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 	return nil
 }
 
-// disconnectBlock handles a chain server reorganize by rolling back all
-// block history from the reorged block for a wallet in-sync with the chain
-// server.
-func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+// disconnectBlock handles a chain server reorganize by rolling back the
+// disconnected block and its descendants, even while the wallet is syncing.
+func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
+	b wtxmgr.BlockMeta) error {
+
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
-	if !w.ChainSynced() {
-		return nil
+	// A stale sync tip must not override a newer block in the store.
+	storedHash, err := w.TxStore.BlockHash(txmgrNs, b.Height)
+	if err != nil {
+		return err
 	}
 
-	// Disconnect the removed block and all blocks after it if we know about
-	// the disconnected block. Otherwise, the block is in the future.
-	if b.Height <= w.Manager.SyncedTo().Height {
-		hash, err := w.Manager.BlockHash(addrmgrNs, b.Height)
+	previous, err := w.disconnectedBlockStamp(addrmgrNs, &b.Block)
+	if err != nil {
+		return err
+	}
+
+	// Use either store or manager identity to recognize the disconnect.
+	// Reconcile the whole affected range: its blocks may come from
+	// different notification producers and need not share an ancestry.
+	rollback := previous != nil
+	if storedHash != nil {
+		rollback = *storedHash == b.Hash
+		if !rollback && previous == nil {
+			return nil
+		}
+	}
+
+	if rollback {
+		err := w.rollbackBlockHistory(txmgrNs, b.Height)
 		if err != nil {
 			return err
 		}
-		if bytes.Equal(hash[:], b.Hash[:]) {
-			bs := waddrmgr.BlockStamp{
-				Height: b.Height - 1,
-			}
-			hash, err = w.Manager.BlockHash(addrmgrNs, bs.Height)
-			if err != nil {
-				return err
-			}
-			b.Hash = *hash
+	}
 
-			client := w.ChainClient()
-			header, err := client.GetBlockHeader(hash)
-			if err != nil {
-				return err
-			}
-
-			bs.Timestamp = header.Timestamp
-			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
-			if err != nil {
-				return err
-			}
-
-			err = w.TxStore.Rollback(txmgrNs, b.Height)
-			if err != nil {
-				return err
-			}
+	if previous != nil {
+		// A delayed connection may leave the manager on the old block
+		// even when the store already holds its replacement.
+		err = w.Manager.SetSyncedTo(addrmgrNs, previous)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -327,6 +327,294 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 	w.NtfnServer.notifyDetachedBlock(&b.Hash)
 
 	return nil
+}
+
+// rollbackBlockHistory removes orphaned history while preserving canonical
+// records. Live notifications and rescans can interleave, so neither a matching
+// block nor a canonical descendant proves the identity of the remaining range.
+func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
+	height int32) error {
+
+	canonical, orphaned, err := w.partitionBlockHistory(ns, height)
+	if err != nil || len(orphaned) == 0 {
+		return err
+	}
+
+	// Rollback removes coinbase spends recursively. Save the spend chains
+	// of canonical coinbases before temporarily removing their parents.
+	unmined, err := w.preserveCoinbaseSpends(ns, canonical, orphaned)
+	if err != nil {
+		return err
+	}
+
+	err = w.TxStore.Rollback(ns, orphaned[0].Block.Height)
+	if err != nil {
+		return err
+	}
+
+	// Store holds only chain parameters, a clock and this callback. Use a
+	// private copy so replay cannot announce temporarily unspent credits
+	// or change notification behavior for other users of the shared store.
+	replay := *w.TxStore
+	replay.NotifyUnspent = nil
+
+	// Restore unmined records first, so replaying canonical transactions
+	// also removes any conflicting unmined spends through InsertTx.
+	for i := range unmined {
+		err := restoreHistoryTx(&replay, ns, &unmined[i], nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	// The saved records retain block and transaction order. Restore credits
+	// before inserting their spenders so debit accounting is rebuilt too.
+	for i := range canonical {
+		detail := &canonical[i]
+
+		err := restoreHistoryTx(&replay, ns, detail, &detail.Block)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Compare restored credits with their original spentness only after
+	// all spenders and conflicts have been reconciled.
+	err = w.notifyUnspentHistory(ns, unmined)
+	if err != nil {
+		return err
+	}
+
+	return w.notifyUnspentHistory(ns, canonical)
+}
+
+// partitionBlockHistory checks every affected block before any mutation. The
+// canonical records before the first orphan need no rollback or replay.
+func (w *Wallet) partitionBlockHistory(ns walletdb.ReadBucket, height int32) (
+	[]wtxmgr.TxDetails, []wtxmgr.TxDetails, error) {
+
+	client := w.ChainClient()
+
+	_, tipHeight, err := client.GetBestBlock()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var canonical, orphaned []wtxmgr.TxDetails
+
+	err = w.TxStore.RangeTransactions(ns, height, math.MaxInt32,
+		func(details []wtxmgr.TxDetails) (bool, error) {
+			block := details[0].Block
+
+			var hash *chainhash.Hash
+			if block.Height <= tipHeight {
+				var err error
+
+				hash, err = client.GetBlockHash(int64(block.Height))
+				if err != nil {
+					return false, err
+				}
+			}
+
+			if hash == nil || *hash != block.Hash {
+				orphaned = append(orphaned, details...)
+			} else if len(orphaned) != 0 {
+				// Copy the entries: RangeTransactions reuses its slice.
+				canonical = append(canonical, details...)
+			}
+
+			return false, nil
+		})
+
+	return canonical, orphaned, err
+}
+
+// restoreHistoryTx restores a transaction and its recorded credit metadata.
+// The caller supplies a store with replay notifications disabled.
+func restoreHistoryTx(store *wtxmgr.Store, ns walletdb.ReadWriteBucket,
+	detail *wtxmgr.TxDetails, block *wtxmgr.BlockMeta) error {
+
+	err := store.InsertTx(ns, &detail.TxRecord, block)
+	if err != nil {
+		return err
+	}
+
+	for _, credit := range detail.Credits {
+		err := store.AddCredit(
+			ns, &detail.TxRecord, block, credit.Index, credit.Change,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// notifyUnspentHistory queues only real spent-to-unspent transitions among
+// restored credits. Failed updates must not publish any replay notifications.
+func (w *Wallet) notifyUnspentHistory(ns walletdb.ReadWriteBucket,
+	history []wtxmgr.TxDetails) error {
+
+	notify := w.TxStore.NotifyUnspent
+	if notify == nil {
+		return nil
+	}
+
+	for _, before := range history {
+		after, err := w.TxStore.TxDetails(ns, &before.Hash)
+		if err != nil {
+			return err
+		}
+
+		if after == nil {
+			continue
+		}
+
+		spent := make(map[uint32]bool, len(before.Credits))
+		for _, credit := range before.Credits {
+			spent[credit.Index] = credit.Spent
+		}
+
+		for _, credit := range after.Credits {
+			if credit.Spent || !spent[credit.Index] {
+				continue
+			}
+
+			hash, index := after.Hash, credit.Index
+			ns.Tx().OnCommit(func() { notify(&hash, index) })
+		}
+	}
+
+	return nil
+}
+
+// preserveCoinbaseSpends saves transactions that Rollback would remove solely
+// because their canonical coinbase ancestor is temporarily detached. Spends of
+// orphaned coinbases must remain removed, including their descendants.
+func (w *Wallet) preserveCoinbaseSpends(ns walletdb.ReadBucket,
+	canonical, orphaned []wtxmgr.TxDetails) ([]wtxmgr.TxDetails, error) {
+
+	retained := make(map[chainhash.Hash]bool)
+	for _, detail := range canonical {
+		if blockchain.IsCoinBaseTx(&detail.MsgTx) {
+			retained[detail.Hash] = true
+		}
+	}
+
+	if len(retained) == 0 {
+		return nil, nil
+	}
+
+	details := make(map[chainhash.Hash]wtxmgr.TxDetails)
+
+	mined := make(map[chainhash.Hash]bool)
+	for _, detail := range orphaned {
+		if blockchain.IsCoinBaseTx(&detail.MsgTx) {
+			retained[detail.Hash] = false
+		}
+
+		details[detail.Hash] = detail
+	}
+
+	err := w.TxStore.RangeTransactions(ns, -1, -1,
+		func(unmined []wtxmgr.TxDetails) (bool, error) {
+			for _, detail := range unmined {
+				details[detail.Hash] = detail
+			}
+
+			return false, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, detail := range canonical {
+		details[detail.Hash] = detail
+		mined[detail.Hash] = true
+	}
+
+	return retainedCoinbaseDescendants(details, retained, mined), nil
+}
+
+// retainedCoinbaseDescendants follows spends in dependency order. A spend of
+// any orphaned coinbase ancestor remains invalid even if other inputs survive.
+func retainedCoinbaseDescendants(details map[chainhash.Hash]wtxmgr.TxDetails,
+	retained, mined map[chainhash.Hash]bool) []wtxmgr.TxDetails {
+
+	txs := make(map[chainhash.Hash]*wire.MsgTx)
+
+	for hash, detail := range details {
+		txs[hash] = &detail.MsgTx
+	}
+
+	var unmined []wtxmgr.TxDetails
+	for _, tx := range wtxmgr.DependencySort(txs) {
+		if blockchain.IsCoinBaseTx(tx) {
+			continue
+		}
+
+		hash := tx.TxHash()
+		for _, input := range tx.TxIn {
+			keep, affected := retained[input.PreviousOutPoint.Hash]
+			if affected {
+				retained[hash] = keep
+				if !keep {
+					break
+				}
+			}
+		}
+
+		if retained[hash] && !mined[hash] {
+			unmined = append(unmined, details[hash])
+		}
+	}
+
+	return unmined
+}
+
+// disconnectedBlockStamp returns the preceding sync stamp only when the
+// address manager knows the exact disconnected block. Transaction history may
+// be ahead of, or on a different chain from, the manager during a rescan.
+//
+//nolint:nilnil // An unknown block does not require rewinding the manager.
+func (w *Wallet) disconnectedBlockStamp(ns walletdb.ReadBucket,
+	block *wtxmgr.Block) (*waddrmgr.BlockStamp, error) {
+
+	if block.Height > w.Manager.SyncedTo().Height {
+		return nil, nil
+	}
+
+	hash, err := w.Manager.BlockHash(ns, block.Height)
+	if waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if *hash != block.Hash {
+		return nil, nil
+	}
+
+	height := block.Height - 1
+
+	hash, err = w.Manager.BlockHash(ns, height)
+	if err != nil {
+		return nil, err
+	}
+
+	header, err := w.ChainClient().GetBlockHeader(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &waddrmgr.BlockStamp{
+		Height:    height,
+		Hash:      *hash,
+		Timestamp: header.Timestamp,
+	}, nil
 }
 
 func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
