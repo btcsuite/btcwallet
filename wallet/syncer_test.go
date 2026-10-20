@@ -135,6 +135,299 @@ func TestSyncerChainEventWaitsForRewind(t *testing.T) {
 	})
 }
 
+// TestSyncerRollbackPausesScanBatch rejects old-branch facts fetched before
+// the historical sync commit path acknowledges a database-wide rollback.
+func TestSyncerRollbackPausesScanBatch(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Keep an already fetched credit outside Store, then block
+		// a pause sender at the actual worker mailbox before the sync write.
+		store := &walletmock.Store{}
+		s := newTestSyncer(Config{}, nil, nil, nil, store, 7)
+		fixture := newStoreScanBatchFixture(t)
+		state := NewRecoveryState(0, &chainParams, nil)
+		resume := make(chan struct{})
+
+		paused := make(chan struct{})
+		events := make(chan any, 1)
+		s.chainEventChan = events
+
+		events <- chainPauseReq{ready: paused, resume: resume}
+
+		store.On("RollbackToBlock", mock.Anything, uint32(100)).
+			Return(nil).Once()
+		t.Cleanup(func() { store.AssertExpectations(t) })
+
+		// Act: The batch receives the pause before conversion or
+		// persistence. Roll back only after that receipt, then resume.
+		batch := make(chan error, 1)
+		go func() {
+			batch <- s.putSyncBatch(t.Context(), state,
+				[]scanResult{fixture.result})
+		}()
+
+		<-paused
+		require.Empty(t, batch)
+		require.NoError(t, store.RollbackToBlock(t.Context(), 100))
+		close(resume)
+
+		// Assert: No ApplyScanBatch call is permitted by the mock;
+		// neither old credit nor its old checkpoint can reappear.
+		require.ErrorIs(t, <-batch, ErrStateChanged)
+	})
+}
+
+// TestSyncerRollbackTargetedBatch keeps an accepted targeted request alive
+// across rollback by reloading state and refetching its original range.
+func TestSyncerRollbackTargetedBatch(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Hold the old header read inside a real targeted scan.
+		// Empty horizons isolate request continuation from address derivation.
+		store := &walletmock.Store{}
+		backend := &bwmock.Chain{}
+		s := newTestSyncer(Config{
+			Chain: backend, ChainParams: &chainParams,
+		}, nil, nil, nil, store, 7)
+		events := make(chan any, 1)
+		s.chainEventChan = events
+
+		store.On("ListAccounts", mock.Anything, mock.Anything).
+			Return([]db.AccountInfo(nil), nil).Times(4)
+
+		for range 2 {
+			expectImportedScanAddressPage(store, 7,
+				page.Result[db.AddressInfo, uint32]{})
+		}
+
+		store.On("ListOutputsToWatch", mock.Anything, uint32(7)).
+			Return([]db.UtxoInfo(nil), nil).Twice()
+		backend.On("GetBestBlock").
+			Return(&chainhash.Hash{2}, int32(1), nil).Twice()
+
+		read, release := make(chan struct{}), make(chan struct{})
+		for _, hash := range []chainhash.Hash{{1}, {2}} {
+			hashes := []chainhash.Hash{hash}
+			backend.On("GetBlockHashes", int64(1), int64(1)).
+				Return(hashes, nil).Once()
+
+			call := backend.On("GetBlockHeaders", hashes).Return(
+				[]*wire.BlockHeader{{Timestamp: time.Unix(1, 0)}}, nil,
+			).Once()
+			if hash[0] == 1 {
+				call.Run(func(mock.Arguments) {
+					close(read)
+					<-release
+				})
+			}
+		}
+
+		store.On("RollbackToBlock", mock.Anything, uint32(1)).
+			Return(nil).Once()
+		store.On("ApplyScanBatch", mock.Anything, mock.MatchedBy(
+			func(params db.ScanBatchParams) bool {
+				return params.WalletID == 7 &&
+					len(params.Transactions) == 0 &&
+					len(params.SyncedBlocks) == 0
+			},
+		)).Return(nil).Once()
+		t.Cleanup(func() {
+			store.AssertExpectations(t)
+			backend.AssertExpectations(t)
+		})
+
+		result := make(chan error, 1)
+		go func() {
+			result <- s.scanWithTargets(t.Context(), &scanReq{
+				startBlock: waddrmgr.BlockStamp{Height: 1},
+			})
+		}()
+
+		<-read
+
+		// Act: Admit the pause while the old branch is already read, then
+		// let the worker reach its commit boundary before rolling back.
+		resume, paused := make(chan struct{}), make(chan struct{})
+		events <- chainPauseReq{ready: paused, resume: resume}
+
+		close(release)
+		<-paused
+		require.NoError(t, store.RollbackToBlock(t.Context(), 1))
+		close(resume)
+
+		// Assert: A fresh state and replacement header precede the sole
+		// targeted commit; the request completes instead of being dropped.
+		require.NoError(t, <-result)
+		require.Equal(t, syncStateSynced, s.syncState())
+	})
+}
+
+// TestSyncerRollbackRetainedRequestFailure preserves the historical result
+// and the retained event's error when either commit fails.
+func TestSyncerRollbackRetainedRequestFailure(t *testing.T) {
+	t.Parallel()
+
+	// Data varies both durable outcomes while the ordered mock arrangement
+	// stays identical; distinct errors expose accidental loss of either one.
+	eventFailure := errors.New("retained event failed")
+	tests := []struct {
+		name      string
+		commitErr error
+		eventErr  error
+		tipHeight int32
+	}{
+		{
+			name:      "commits succeed",
+			commitErr: nil,
+			eventErr:  nil,
+			tipHeight: 1,
+		},
+		{
+			name:      "commits fail",
+			commitErr: errDBMock,
+			eventErr:  eventFailure,
+			tipHeight: 0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Buffer an ordinary event behind fetched history.
+			// Strict ordering proves it runs after the historical attempt,
+			// including when that attempt fails before advancing the tip.
+			store := &walletmock.Store{}
+			publisher := &mockTxPublisher{}
+			s := newTestSyncer(Config{}, nil, nil, publisher, store, 7)
+			events := make(chan any, 1)
+			s.chainEventChan = events
+			state := NewRecoveryState(0, &chainParams, nil)
+			batchCall := store.On("ApplyScanBatch", mock.Anything,
+				mock.Anything).Return(test.commitErr).Once()
+			publisher.On("filterRelevantTxs", mock.Anything,
+				[]*wtxmgr.TxRecord(nil)).Return(
+				[]*wtxmgr.TxRecord(nil), nil,
+			).Once().NotBefore(batchCall)
+			tipCall := store.On("GetWallet", mock.Anything, "").Return(
+				&db.WalletInfo{SyncedTo: &db.Block{
+					Height: uint32(test.tipHeight),
+				}}, nil,
+			).Once().NotBefore(batchCall)
+			store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+				Return(test.eventErr).Once().NotBefore(tipCall)
+			t.Cleanup(func() {
+				store.AssertExpectations(t)
+				publisher.AssertExpectations(t)
+			})
+
+			events <- chain.FilteredBlockConnected{
+				Block: &wtxmgr.BlockMeta{
+					Block: wtxmgr.Block{Height: test.tipHeight + 1},
+				},
+			}
+
+			// Act: The batch boundary retains the queued value and its
+			// deferred handler must execute on either Store outcome.
+			err := s.putSyncBatch(t.Context(), state, []scanResult{
+				{
+					meta: &wtxmgr.BlockMeta{
+						Block: wtxmgr.Block{Height: 1},
+					},
+				},
+			})
+
+			// Assert: Every non-nil cause survives the same return value;
+			// the success path remains nil when both commits succeed.
+			require.ErrorIs(t, err, test.commitErr)
+			require.ErrorIs(t, err, test.eventErr)
+		})
+	}
+}
+
+// TestSyncerRollbackTargetedEventFailure keeps an accepted account range
+// complete before a retained live error reaches the outer worker retry path.
+func TestSyncerRollbackTargetedEventFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An empty horizon scans two real header batches. Queue live
+	// work during the first fetch so waitForEvent selects only the scan job
+	// initially, then require the second batch after that live handler fails.
+	store := &walletmock.Store{}
+	backend := &bwmock.Chain{}
+	publisher := &mockTxPublisher{}
+	s := newTestSyncer(Config{
+		Chain: backend, ChainParams: &chainParams,
+	}, nil, nil, publisher, store, 7)
+	s.state.Store(uint32(syncStateSynced))
+
+	events := make(chan any, 1)
+	s.chainEventChan = events
+
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo(nil), nil).Twice()
+	expectImportedScanAddressPage(store, 7,
+		page.Result[db.AddressInfo, uint32]{})
+	store.On("ListOutputsToWatch", mock.Anything, uint32(7)).
+		Return([]db.UtxoInfo(nil), nil).Once()
+	backend.On("Notifications").Return((<-chan any)(nil)).Once()
+	backend.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(recoveryBatchSize+1), nil,
+	).Once()
+
+	hashes := make([]chainhash.Hash, recoveryBatchSize)
+	headers := make([]*wire.BlockHeader, recoveryBatchSize)
+
+	for i := range headers {
+		headers[i] = &wire.BlockHeader{Timestamp: time.Unix(1, 0)}
+	}
+
+	backend.On("GetBlockHashes", int64(1), int64(recoveryBatchSize)).
+		Return(hashes, nil).Once()
+	backend.On("GetBlockHeaders", hashes).Run(func(mock.Arguments) {
+		events <- chain.FilteredBlockConnected{Block: &wtxmgr.BlockMeta{}}
+	}).Return(headers, nil).Once()
+	batchCall := store.On("ApplyScanBatch", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	eventFailure := errors.New("retained targeted event failed")
+	failed := publisher.On("filterRelevantTxs", mock.Anything,
+		[]*wtxmgr.TxRecord(nil)).Return(
+		[]*wtxmgr.TxRecord(nil), eventFailure,
+	).Once().NotBefore(batchCall)
+	lastHashes := []chainhash.Hash{{1}}
+	backend.On("GetBlockHashes", int64(recoveryBatchSize+1),
+		int64(recoveryBatchSize+1)).Return(lastHashes, nil).
+		Once().NotBefore(failed)
+	backend.On("GetBlockHeaders", lastHashes).Return(
+		[]*wire.BlockHeader{{Timestamp: time.Unix(2, 0)}}, nil,
+	).Once().NotBefore(failed)
+	store.On("ApplyScanBatch", mock.Anything, mock.Anything).
+		Return(nil).Once().NotBefore(failed)
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		backend.AssertExpectations(t)
+		publisher.AssertExpectations(t)
+	})
+
+	s.scanReqChan <- &scanReq{
+		typ:        scanTypeTargeted,
+		startBlock: waddrmgr.BlockStamp{Height: 1},
+	}
+
+	// Act: Execute the queued job through the actual outer event handler,
+	// including its state-dependent targeted-error recovery policy.
+	err := s.waitForEvent(t.Context())
+
+	// Assert: Ordered Once expectations prove the full remaining range was
+	// fetched and committed, and the outer handler preserves the live error.
+	require.ErrorIs(t, err, eventFailure)
+	require.Equal(t, syncStateSyncing, s.syncState())
+}
+
 // TestSyncerInitialization verifies that a new syncer is created with the
 // correct default state.
 func TestSyncerInitialization(t *testing.T) {
