@@ -45,7 +45,10 @@ ON CONFLICT (utxo_id) DO UPDATE
     WHERE
     utxo_leases.wallet_id = excluded.wallet_id
     AND (
-        utxo_leases.expires_at <= $7::TIMESTAMP
+        (
+            utxo_leases.release_after_spend_confs = 0
+            AND utxo_leases.expires_at <= $7::TIMESTAMP
+        )
         OR utxo_leases.lock_id = excluded.lock_id
     )
 RETURNING expires_at, release_after_spend_confs, spend_disconnected
@@ -80,10 +83,12 @@ type AcquireUtxoLeaseRow struct {
 //
 // Lease semantics:
 //   - If the UTXO has no lease row, insert a new lease.
-//   - If the UTXO has an expired lease, steal it.
+//   - If the UTXO has an expired timed lease, steal it.
 //   - If the UTXO has an active lease with the same lock_id, renew it.
 //   - If the UTXO has an active lease with a different lock_id, return no
 //     rows (caller should treat this as "already leased").
+//   - A confirmation-controlled lease (release_after_spend_confs > 0) never
+//     expires by wall clock, so only its owner can renew it.
 //   - A renewal with zero release_after_spend_confs keeps the stored depth.
 //
 // NOTE: expires_at is stored as a UTC-normalized TIMESTAMP. Callers should pass
@@ -110,6 +115,7 @@ const DeleteExpiredUtxoLeases = `-- name: DeleteExpiredUtxoLeases :execrows
 DELETE FROM utxo_leases
 WHERE
     wallet_id = $1
+    AND release_after_spend_confs = 0
     AND expires_at <= $2::TIMESTAMP
 `
 
@@ -121,8 +127,8 @@ type DeleteExpiredUtxoLeasesParams struct {
 // Deletes all expired lease rows for a wallet.
 //
 // How:
-//   - Removes only rows whose expiration has passed, leaving active leases
-//     untouched.
+//   - Removes only timed rows whose expiration has passed, leaving active and
+//     confirmation-controlled leases untouched.
 //   - Uses the caller-supplied UTC timestamp so lease lifetime semantics do not
 //     depend on database session timezone settings.
 //
@@ -143,7 +149,10 @@ FROM utxo_leases
 WHERE
     wallet_id = $1
     AND utxo_id = $2
-    AND expires_at > $3::TIMESTAMP
+    AND (
+        release_after_spend_confs > 0
+        OR expires_at > $3::TIMESTAMP
+    )
 `
 
 type GetActiveUtxoLeaseLockIDParams struct {
@@ -155,8 +164,9 @@ type GetActiveUtxoLeaseLockIDParams struct {
 // Returns the lock ID for the current active lease on a UTXO ID.
 //
 // How:
-//   - Reads only non-expired lease rows so callers can distinguish an active
-//     lock-ID mismatch from an already-unlocked output.
+//   - Reads only active lease rows so callers can distinguish an active lock-ID
+//     mismatch from an already-unlocked output. A confirmation-controlled lease
+//     stays active until spend maturity or release.
 //
 // Performance:
 // - Targets at most one row through the unique lease key.
@@ -180,7 +190,10 @@ INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id
 WHERE
     l.wallet_id = $1
-    AND l.expires_at > $2::TIMESTAMP
+    AND (
+        l.release_after_spend_confs > 0
+        OR l.expires_at > $2::TIMESTAMP
+    )
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
 ORDER BY l.expires_at
@@ -205,7 +218,8 @@ type ListActiveUtxoLeasesRow struct {
 // How:
 //   - Starts from utxo_leases, then joins utxos and transactions so the result
 //     can be returned as network outpoints.
-//   - Filters out expired rows using the caller-supplied UTC timestamp.
+//   - Filters out expired timed rows using the caller-supplied UTC timestamp.
+//     Confirmation-controlled rows never expire by wall clock.
 //   - Restricts the result to outputs that are still unspent and whose parent
 //     transaction is still in `pending` or `published` status.
 //

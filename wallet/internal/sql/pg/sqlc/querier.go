@@ -29,10 +29,12 @@ type Querier interface {
 	//   and expired-lease takeover all happen atomically.
 	// Lease semantics:
 	// - If the UTXO has no lease row, insert a new lease.
-	// - If the UTXO has an expired lease, steal it.
+	// - If the UTXO has an expired timed lease, steal it.
 	// - If the UTXO has an active lease with the same lock_id, renew it.
 	// - If the UTXO has an active lease with a different lock_id, return no
 	//   rows (caller should treat this as "already leased").
+	// - A confirmation-controlled lease (release_after_spend_confs > 0) never
+	//   expires by wall clock, so only its owner can renew it.
 	// - A renewal with zero release_after_spend_confs keeps the stored depth.
 	//
 	// NOTE: expires_at is stored as a UTC-normalized TIMESTAMP. Callers should pass
@@ -122,8 +124,8 @@ type Querier interface {
 	// Deletes all expired lease rows for a wallet.
 	//
 	// How:
-	// - Removes only rows whose expiration has passed, leaving active leases
-	//   untouched.
+	// - Removes only timed rows whose expiration has passed, leaving active and
+	//   confirmation-controlled leases untouched.
 	// - Uses the caller-supplied UTC timestamp so lease lifetime semantics do not
 	//   depend on database session timezone settings.
 	// Performance:
@@ -186,8 +188,9 @@ type Querier interface {
 	// Returns the lock ID for the current active lease on a UTXO ID.
 	//
 	// How:
-	// - Reads only non-expired lease rows so callers can distinguish an active
-	//   lock-ID mismatch from an already-unlocked output.
+	// - Reads only active lease rows so callers can distinguish an active lock-ID
+	//   mismatch from an already-unlocked output. A confirmation-controlled lease
+	//   stays active until spend maturity or release.
 	// Performance:
 	// - Targets at most one row through the unique lease key.
 	GetActiveUtxoLeaseLockID(ctx context.Context, arg GetActiveUtxoLeaseLockIDParams) ([]byte, error)
@@ -400,7 +403,8 @@ type Querier interface {
 	// How:
 	// - Starts from utxo_leases, then joins utxos and transactions so the result
 	//   can be returned as network outpoints.
-	// - Filters out expired rows using the caller-supplied UTC timestamp.
+	// - Filters out expired timed rows using the caller-supplied UTC timestamp.
+	//   Confirmation-controlled rows never expire by wall clock.
 	// - Restricts the result to outputs that are still unspent and whose parent
 	//   transaction is still in `pending` or `published` status.
 	// Performance:

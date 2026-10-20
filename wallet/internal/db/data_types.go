@@ -1468,7 +1468,8 @@ type UtxoInfo struct {
 	// raw imports without private-key ciphertext.
 	Spendable *bool
 
-	// IsLocked is true when the UTXO has an active (non-expired) lease.
+	// IsLocked is true when the UTXO has an active lease. A
+	// confirmation-controlled lease stays active past its expiration.
 	// Sourced from LEFT JOIN utxo_leases with the lease-expiration
 	// comparison done in SQL against a caller-supplied UTC timestamp; the
 	// API still models leases separately from UTXO existence, but the
@@ -1596,12 +1597,15 @@ type LeaseOutputParams struct {
 	// OutPoint is the outpoint of the UTXO to lock.
 	OutPoint wire.OutPoint
 
-	// Duration is the duration to lock the UTXO for.
+	// Duration is the duration to lock the UTXO for. A
+	// confirmation-controlled lease stores the resulting expiration but
+	// does not apply it.
 	Duration time.Duration
 
-	// ReleaseAfterSpendConfs is the spend depth of a confirmation-controlled
-	// lease. Zero creates a timed lease, or keeps the stored depth when the
-	// owner renews an existing lease.
+	// ReleaseAfterSpendConfs selects a confirmation-controlled lease that
+	// lasts until the output's spend reaches this depth or the owner
+	// releases it. Zero creates a timed lease, or keeps the stored depth when
+	// the owner renews an existing lease.
 	ReleaseAfterSpendConfs uint32
 }
 
@@ -1628,7 +1632,8 @@ type LeasedOutput struct {
 	// LockID is the ID of the lock.
 	LockID LockID
 
-	// Expiration is the time when the lock expires.
+	// Expiration is the time when a timed lock expires. A
+	// confirmation-controlled lock keeps this value but does not apply it.
 	Expiration time.Time
 
 	// ReleaseAfterSpendConfs is the spend depth that releases a

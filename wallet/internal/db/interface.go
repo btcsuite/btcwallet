@@ -587,9 +587,10 @@ type UTXOStore interface {
 	// exists with a different lock ID, the call returns
 	// ErrOutputAlreadyLeased.
 	//
-	// A non-zero ReleaseAfterSpendConfs records the spend depth of a
-	// confirmation-controlled lease. A same-owner renewal with zero depth
-	// keeps the stored depth.
+	// A non-zero ReleaseAfterSpendConfs selects a confirmation-controlled
+	// lease. It ignores its expiration and lasts until the output's spend
+	// reaches that depth or its owner releases it. A same-owner renewal with
+	// zero depth keeps the stored depth.
 	LeaseOutput(ctx context.Context, params LeaseOutputParams) (
 		*LeasedOutput, error)
 
@@ -607,7 +608,8 @@ type UTXOStore interface {
 	ListLeasedOutputs(ctx context.Context, walletID uint32) (
 		[]LeasedOutput, error)
 
-	// DeleteExpiredLeases removes expired UTXO lease records for the wallet.
+	// DeleteExpiredLeases removes expired timed UTXO lease records for the
+	// wallet. Confirmation-controlled leases never expire by wall clock.
 	DeleteExpiredLeases(ctx context.Context, walletID uint32) error
 
 	// ListOutputsToWatch returns UTXOs that recovery scans should watch.

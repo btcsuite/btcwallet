@@ -24,7 +24,10 @@ SELECT
                         WHERE
                             l.wallet_id = t.wallet_id
                             AND l.utxo_id = u.id
-                            AND l.expires_at > ?1
+                            AND (
+                                l.release_after_spend_confs > 0
+                                OR l.expires_at > ?1
+                            )
                     ) THEN u.amount
                     ELSE 0
                 END
@@ -267,14 +270,18 @@ SELECT
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
     asec.encrypted_script IS NOT NULL AS has_script,
-    -- is_locked: TRUE when an active (non-expired) lease exists for this output.
+    -- is_locked: TRUE when an active lease exists for this output. A
+    -- confirmation-controlled lease is active until spend maturity or release.
     -- now_utc is a caller-supplied current UTC timestamp used for the lease
     -- expiry comparison; passed in rather than read from the DB clock so results
     -- are deterministic/testable and consistent with the Balance/lease queries.
     CASE
         WHEN
             l.utxo_id IS NOT NULL
-            AND l.expires_at > ?1 THEN 1
+            AND (
+                l.release_after_spend_confs > 0
+                OR l.expires_at > ?1
+            ) THEN 1
         ELSE 0
     END AS is_locked
 FROM transactions AS t
@@ -709,14 +716,18 @@ SELECT
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
     asec.encrypted_script IS NOT NULL AS has_script,
-    -- is_locked: TRUE when an active (non-expired) lease exists for this output.
+    -- is_locked: TRUE when an active lease exists for this output. A
+    -- confirmation-controlled lease is active until spend maturity or release.
     -- now_utc is a caller-supplied current UTC timestamp used for the lease
     -- expiry comparison; passed in rather than read from the DB clock so results
     -- are deterministic/testable and consistent with the Balance/lease queries.
     CASE
         WHEN
             l.utxo_id IS NOT NULL
-            AND l.expires_at > ?1 THEN 1
+            AND (
+                l.release_after_spend_confs > 0
+                OR l.expires_at > ?1
+            ) THEN 1
         ELSE 0
     END AS is_locked
 FROM transactions AS t
