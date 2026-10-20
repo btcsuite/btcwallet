@@ -23,9 +23,9 @@ env:
   GOBIN: /home/runner/work/go/bin
   GO111MODULE: on
 
-  # If you change this please run `make lint` to see where else it needs to be
-  # updated as well.
-  GO_VERSION: 1.25.11
+  # Go toolchain used by CI. The minimum supported language version is set in
+  # the module files and the linter configuration.
+  GO_VERSION: 1.27.1
 
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'

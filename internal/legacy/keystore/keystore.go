@@ -63,9 +63,9 @@ var fileID = [8]byte{0xba, 'W', 'A', 'L', 'L', 'E', 'T', 0x00}
 type entryHeader byte
 
 const (
-	addrCommentHeader entryHeader = 1 << iota // nolint:varcheck,deadcode
-	txCommentHeader                           // nolint:varcheck,deadcode
-	deletedHeader                             // nolint:varcheck,deadcode
+	addrCommentHeader entryHeader = 1 << iota
+	txCommentHeader
+	deletedHeader
 	scriptHeader
 	addrHeader entryHeader = 0
 )
@@ -76,7 +76,7 @@ const (
 // this value to correctly support the io.ReaderFrom and io.WriterTo
 // interfaces.
 func binaryRead(r io.Reader, order binary.ByteOrder,
-	data interface{}) (int64, error) {
+	data any) (int64, error) {
 
 	var (
 		read int
@@ -91,7 +91,7 @@ func binaryRead(r io.Reader, order binary.ByteOrder,
 
 // See comment for binaryRead().
 func binaryWrite(w io.Writer, order binary.ByteOrder,
-	data interface{}) (int64, error) {
+	data any) (int64, error) {
 
 	buf := bytes.Buffer{}
 
