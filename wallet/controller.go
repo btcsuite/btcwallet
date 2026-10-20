@@ -1154,7 +1154,15 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 		params.PrivateNew = req.req.PrivateNew
 	}
 
-	err = w.keyVault.ChangePassphrase(w.lifetimeCtx, params)
+	// Preserve runtime values without letting caller or runtime cancellation
+	// abort accepted rotation. The one-minute budget is cooperative; stop
+	// still joins this synchronous handler without a hard completion bound.
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(w.lifetimeCtx), time.Minute,
+	)
+	defer cancel()
+
+	err = w.keyVault.ChangePassphrase(ctx, params)
 	if err != nil {
 		req.resp <- err
 		return
