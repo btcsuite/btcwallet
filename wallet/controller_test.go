@@ -132,40 +132,150 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 	})
 }
 
-// TestControllerChangePassphrase_Interrupted_WaitCancelled verifies
-// ChangePassphrase when response wait is interrupted by context cancellation.
-func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
+// TestControllerChangePassphraseOwnsAcceptedBuffers verifies that cancellation
+// releases caller buffers while the accepted handler retains selected inputs.
+func TestControllerChangePassphraseOwnsAcceptedBuffers(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block during response wait and cancel context.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	ctx, cancel := context.WithCancel(t.Context())
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
+	// Each selection carries only its chosen halves to the Vault; ignored
+	// fields and empty public values must retain their existing semantics.
+	tests := []struct {
+		name string
+		req  ChangePassphraseRequest
+		want keyvault.ChangePassphraseParams
+	}{
+		{
+			name: "Private",
+			req: ChangePassphraseRequest{
+				ChangePrivate: true,
+				PrivateOld:    []byte("old-private"),
+				PrivateNew:    []byte("new-private"),
+				PublicOld:     []byte("ignored"),
+				PublicNew:     []byte("ignored"),
+			},
+			want: keyvault.ChangePassphraseParams{
+				PrivateOld: []byte("old-private"),
+				PrivateNew: []byte("new-private"),
+			},
+		},
+		{
+			name: "Public",
+			req: ChangePassphraseRequest{
+				ChangePublic: true,
+				PublicOld:    []byte("old-public"),
+				PublicNew:    []byte("new-public"),
+				PrivateOld:   []byte("ignored"),
+				PrivateNew:   []byte("ignored"),
+			},
+			want: keyvault.ChangePassphraseParams{
+				PublicOld: []byte("old-public"),
+				PublicNew: []byte("new-public"),
+			},
+		},
+		{
+			name: "Both",
+			req: ChangePassphraseRequest{
+				ChangePublic:  true,
+				PublicOld:     []byte("old-public"),
+				PublicNew:     []byte("new-public"),
+				ChangePrivate: true,
+				PrivateOld:    []byte("old-private"),
+				PrivateNew:    []byte("new-private"),
+			},
+			want: keyvault.ChangePassphraseParams{
+				PublicOld:  []byte("old-public"),
+				PublicNew:  []byte("new-public"),
+				PrivateOld: []byte("old-private"),
+				PrivateNew: []byte("new-private"),
+			},
+		},
+		{
+			name: "NilPublic",
+			req: ChangePassphraseRequest{
+				ChangePublic: true,
+			},
+			want: keyvault.ChangePassphraseParams{
+				PublicOld: []byte{},
+			},
+		},
+		{
+			name: "EmptyPublic",
+			req: ChangePassphraseRequest{
+				ChangePublic: true,
+				PublicOld:    []byte{},
+				PublicNew:    []byte{},
+			},
+			want: keyvault.ChangePassphraseParams{
+				PublicOld: []byte{},
+				PublicNew: []byte{},
+			},
+		},
 	}
 
-	// Act: Cancel context.
-	cancel()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Assert: Verify error.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
+			// Arrange: Accept the call through the real unbuffered channel
+			// but hold its handler until the canceled caller has returned.
+			w, deps := createTestWalletWithMocks(t)
+			require.NoError(t, w.state.toStarting())
+			require.NoError(t, w.state.toStarted())
+
+			deps.vault.On("ChangePassphrase", mock.Anything, tc.want).
+				Return(nil).Once()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			errChan := make(chan error, 1)
+			doneChan := make(chan struct{})
+
+			go func() {
+				defer close(doneChan)
+
+				errChan <- w.ChangePassphrase(ctx, tc.req)
+			}()
+
+			t.Cleanup(func() {
+				cancel()
+				<-doneChan
+			})
+
+			var accepted changePassphraseReq
+			select {
+			case raw := <-w.requestChan:
+				var ok bool
+
+				accepted, ok = raw.(changePassphraseReq)
+				require.True(t, ok)
+
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for request")
+			}
+
+			// Act: End only the caller's wait, then clear old credentials
+			// and reuse the new buffers before the handler reads its inputs.
+			cancel()
+
+			select {
+			case err := <-errChan:
+				require.ErrorIs(t, err, context.Canceled)
+
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for cancellation")
+			}
+
+			clear(tc.req.PrivateOld)
+			clear(tc.req.PrivateNew)
+			clear(tc.req.PublicOld)
+			clear(tc.req.PublicNew)
+			copy(tc.req.PrivateNew, "reused")
+			copy(tc.req.PublicNew, "reused")
+
+			// Assert: The mock checks original selected values at call time;
+			// the buffered result lets the abandoned request finish normally.
+			w.handleChangePassphraseReq(accepted)
+			require.NoError(t, <-accepted.resp)
+		})
 	}
 }
 
@@ -333,39 +443,71 @@ func TestMainLoop(t *testing.T) {
 	testWg.Wait()
 }
 
-// TestHandleChangePassphraseReq verifies the change passphrase request handler.
+// TestHandleChangePassphraseReq verifies that handler completion erases owned
+// passphrases on success and Vault failure without changing caller buffers.
 func TestHandleChangePassphraseReq(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet and a dummy change passphrase request.
-	w, deps := createTestWalletWithMocks(t)
-
-	// Transition the wallet to 'Started' so the state check passes.
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	reqStruct := ChangePassphraseRequest{
-		ChangePrivate: true,
-		PrivateOld:    []byte("old"),
-		PrivateNew:    []byte("new"),
-	}
-	req := newChangePassphraseReq(reqStruct)
-
-	// The handler rotates the passphrase through the key vault.
-	deps.vault.On(
-		"ChangePassphrase", mock.Anything,
-		keyvault.ChangePassphraseParams{
-			PrivateOld: []byte("old"),
-			PrivateNew: []byte("new"),
+	// Both dependency outcomes must release all four operation-owned inputs.
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "Success",
 		},
-	).Return(nil).Once()
+		{
+			name: "VaultFailure",
+			err:  errDBMock,
+		},
+	}
 
-	// Act: Call the handler.
-	w.handleChangePassphraseReq(req)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Assert: Verify that the response indicates success.
-	resp := <-req.resp
-	require.NoError(t, resp)
+			// Arrange: Retain both caller and operation slices so erasure
+			// can be checked after the real handler and its defers finish.
+			w, deps := createTestWalletWithMocks(t)
+			require.NoError(t, w.state.toStarting())
+			require.NoError(t, w.state.toStarted())
+
+			caller := ChangePassphraseRequest{
+				ChangePublic:  true,
+				PublicOld:     []byte("old"),
+				PublicNew:     []byte("new"),
+				ChangePrivate: true,
+				PrivateOld:    []byte("old"),
+				PrivateNew:    []byte("new"),
+			}
+			req := newChangePassphraseReq(caller)
+			deps.vault.On(
+				"ChangePassphrase", mock.Anything,
+				keyvault.ChangePassphraseParams{
+					PublicOld:  caller.PublicOld,
+					PublicNew:  caller.PublicNew,
+					PrivateOld: caller.PrivateOld,
+					PrivateNew: caller.PrivateNew,
+				},
+			).Return(tc.err).Once()
+
+			// Act: Complete the selected rotation through the mocked Vault;
+			// its response and deferred cleanup must follow either outcome.
+			w.handleChangePassphraseReq(req)
+
+			// Assert: Only owned secrets are zeroed, and the original
+			// success or failure still reaches the buffered response.
+			require.ErrorIs(t, <-req.resp, tc.err)
+			require.Equal(t, []byte{0, 0, 0}, req.req.PublicOld)
+			require.Equal(t, []byte{0, 0, 0}, req.req.PublicNew)
+			require.Equal(t, []byte{0, 0, 0}, req.req.PrivateOld)
+			require.Equal(t, []byte{0, 0, 0}, req.req.PrivateNew)
+			require.Equal(t, []byte("old"), caller.PublicOld)
+			require.Equal(t, []byte("new"), caller.PublicNew)
+			require.Equal(t, []byte("old"), caller.PrivateOld)
+			require.Equal(t, []byte("new"), caller.PrivateNew)
+		})
+	}
 }
 
 // TestControllerStart verifies that start correctly initializes the
@@ -1267,25 +1409,40 @@ func TestControllerChangePassphrase_Interrupted_SendShutdown(t *testing.T) {
 	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
-// TestHandleChangePassphraseReq_Errors verifies error handling for the
-// internal change passphrase request handler.
+// TestHandleChangePassphraseReq_Errors verifies that state rejection erases
+// owned passphrases without invoking the Vault or altering caller buffers.
 func TestHandleChangePassphraseReq_Errors(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet in the default 'Stopped' state.
+	// Arrange: Keep the wallet stopped so an owned request is rejected before
+	// the Vault can read it; retain caller slices to distinguish their owner.
 	w, _ := createTestWalletWithMocks(t)
 
-	req := changePassphraseReq{
-		req:  ChangePassphraseRequest{},
-		resp: make(chan error, 1),
+	caller := ChangePassphraseRequest{
+		ChangePublic:  true,
+		PublicOld:     []byte("old"),
+		PublicNew:     []byte("new"),
+		ChangePrivate: true,
+		PrivateOld:    []byte("old"),
+		PrivateNew:    []byte("new"),
 	}
+	req := newChangePassphraseReq(caller)
 
-	// Act: Call the internal handler while the wallet is stopped.
+	// Act: Run the handler's state check and deferred cleanup synchronously.
 	w.handleChangePassphraseReq(req)
 
-	// Assert: Verify that the request fails with ErrStateForbidden.
+	// Assert: State rejection releases operation secrets but leaves caller
+	// credentials available, with no Vault expectation or extra mock assertion.
 	err := <-req.resp
 	require.ErrorIs(t, err, ErrStateForbidden)
+	require.Equal(t, []byte{0, 0, 0}, req.req.PublicOld)
+	require.Equal(t, []byte{0, 0, 0}, req.req.PublicNew)
+	require.Equal(t, []byte{0, 0, 0}, req.req.PrivateOld)
+	require.Equal(t, []byte{0, 0, 0}, req.req.PrivateNew)
+	require.Equal(t, []byte("old"), caller.PublicOld)
+	require.Equal(t, []byte("new"), caller.PublicNew)
+	require.Equal(t, []byte("old"), caller.PrivateOld)
+	require.Equal(t, []byte("new"), caller.PrivateNew)
 }
 
 // TestControllerInfoWaitsForAcceptedResult verifies that caller cancellation

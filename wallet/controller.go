@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -139,7 +140,10 @@ type Controller interface {
 	Lock(ctx context.Context) error
 
 	// ChangePassphrase changes the wallet's passphrases according to the
-	// request.
+	// request. Keep input buffers unchanged until return; afterward they may
+	// be cleared or reused, even if cancellation ends the wait early.
+	// Cancellation after acceptance leaves the mutation outcome unknown and
+	// does not prove rollback.
 	ChangePassphrase(ctx context.Context, req ChangePassphraseRequest) error
 
 	// Info returns a comprehensive snapshot of the wallet's static
@@ -452,6 +456,9 @@ func (w *Wallet) Lock(ctx context.Context) error {
 }
 
 // ChangePassphrase changes the wallet's passphrases according to the request.
+// Keep input buffers unchanged until return; afterward they may be cleared or
+// reused. Caller cancellation can end the wait before an accepted change
+// finishes, leaving its outcome unknown; it does not prove rollback.
 //
 // This is part of the Controller interface.
 func (w *Wallet) ChangePassphrase(ctx context.Context,
@@ -467,6 +474,9 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 
 	err = w.sendReq(ctx, r)
 	if err != nil {
+		// Rejected work has no handler to erase its owned secret copies.
+		r.clearPassphrases()
+
 		return err
 	}
 
@@ -967,7 +977,8 @@ type lockReq struct {
 	resp resultChan
 }
 
-// changePassphraseReq requests a change of the wallet's passphrases.
+// changePassphraseReq owns selected passphrase copies until rejection or
+// handler completion, independently of the caller's wait lifetime.
 type changePassphraseReq struct {
 	req  ChangePassphraseRequest
 	resp resultChan
@@ -991,13 +1002,39 @@ func newLockReq() lockReq {
 	}
 }
 
-// newChangePassphraseReq creates a new change passphrase request with a
-// buffered response channel.
+// newChangePassphraseReq owns selected inputs and buffers the handler's result
+// so caller cancellation cannot change its credentials or block completion.
 func newChangePassphraseReq(req ChangePassphraseRequest) changePassphraseReq {
+	// Retain only selected halves. Clone preserves nil versus empty values
+	// while isolating secrets from caller reuse after cancellation.
+	owned := ChangePassphraseRequest{
+		ChangePublic:  req.ChangePublic,
+		ChangePrivate: req.ChangePrivate,
+	}
+	if req.ChangePublic {
+		owned.PublicOld = bytes.Clone(req.PublicOld)
+		owned.PublicNew = bytes.Clone(req.PublicNew)
+	}
+
+	if req.ChangePrivate {
+		owned.PrivateOld = bytes.Clone(req.PrivateOld)
+		owned.PrivateNew = bytes.Clone(req.PrivateNew)
+	}
+
 	return changePassphraseReq{
-		req:  req,
+		req:  owned,
 		resp: make(resultChan, 1),
 	}
+}
+
+// clearPassphrases erases the request's secret copies after its owner finishes.
+func (r changePassphraseReq) clearPassphrases() {
+	// The constructor excludes caller-backed slices, so erasure cannot alter
+	// caller buffers, including any ignored passphrase half.
+	clear(r.req.PublicOld)
+	clear(r.req.PublicNew)
+	clear(r.req.PrivateOld)
+	clear(r.req.PrivateNew)
 }
 
 // handleUnlockReq processes an incoming request to unlock the wallet. It
@@ -1082,6 +1119,10 @@ func (w *Wallet) handleLockReq(req lockReq) {
 //
 //nolint:staticcheck // Bridges the legacy kvdb public-passphrase fields.
 func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
+	// The handler owns erasure after admission, including every error exit
+	// and completion after the caller has stopped waiting.
+	defer req.clearPassphrases()
+
 	// First, validate that the wallet is in a state that allows changing
 	// the passphrase.
 	err := w.state.canChangePassphrase()
