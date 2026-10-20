@@ -251,3 +251,35 @@ func (m *TxStore) RemoveUnminedTx(ns walletdb.ReadWriteBucket,
 	args := m.Called(ns, rec)
 	return args.Error(0)
 }
+
+// BlockHash implements the independent mined-block identity query.
+func (m *TxStore) BlockHash(ns walletdb.ReadBucket,
+	height int32) (*chainhash.Hash, error) {
+
+	args := m.Called(ns, height)
+	hash, _ := args.Get(0).(*chainhash.Hash)
+
+	return hash, args.Error(1)
+}
+
+// PartitionBlockHistory implements the ordered history snapshot query.
+func (m *TxStore) PartitionBlockHistory(ns walletdb.ReadBucket, height int32,
+	isCanonical func(wtxmgr.Block) (bool, error)) (
+	[]wtxmgr.TxDetails, []wtxmgr.TxDetails, error) {
+
+	args := m.Called(ns, height, isCanonical)
+	canonical, _ := args.Get(0).([]wtxmgr.TxDetails)
+	orphaned, _ := args.Get(1).([]wtxmgr.TxDetails)
+
+	return canonical, orphaned, args.Error(2)
+}
+
+// RollbackBlockHistory implements canonical-preserving history persistence.
+func (m *TxStore) RollbackBlockHistory(ns walletdb.ReadWriteBucket,
+	canonical, orphaned []wtxmgr.TxDetails) ([]wtxmgr.TxDetails, error) {
+
+	args := m.Called(ns, canonical, orphaned)
+	unmined, _ := args.Get(0).([]wtxmgr.TxDetails)
+
+	return unmined, args.Error(1)
+}

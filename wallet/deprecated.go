@@ -5580,8 +5580,8 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
-	// Legacy wallets always own a concrete wtxmgr store. Its block
-	// identity query is intentionally outside the modern TxStore interface.
+	// Legacy wallets own a concrete wtxmgr store. Query its mined identity
+	// independently of the address manager, as modern KVDB does too.
 	// A stale sync tip must not override a newer block in the store.
 	storedHash, err := w.txStore.(*wtxmgr.Store).BlockHash(txmgrNs, b.Height)
 	if err != nil {

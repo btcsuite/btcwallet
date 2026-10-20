@@ -138,6 +138,22 @@ type TxStore interface {
 	RangeTransactions(ns walletdb.ReadBucket, begin, end int32,
 		f func([]TxDetails) (bool, error)) error
 
+	// BlockHash returns the mined identity at height, or nil when no
+	// transaction-store block exists independently of manager history.
+	BlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, error)
+
+	// PartitionBlockHistory snapshots the affected mined range in order,
+	// omitting canonical records before the first orphan.
+	PartitionBlockHistory(ns walletdb.ReadBucket, height int32,
+		isCanonical func(Block) (bool, error)) (
+		[]TxDetails, []TxDetails, error)
+
+	// RollbackBlockHistory atomically preserves canonical records and valid
+	// pending descendants from snapshots made in this write transaction.
+	// Returned pre-replay unmined details support final notifications.
+	RollbackBlockHistory(ns walletdb.ReadWriteBucket,
+		canonical, orphaned []TxDetails) ([]TxDetails, error)
+
 	// Rollback removes all blocks at height onwards, moving any transactions
 	// within each block to the unconfirmed pool.
 	Rollback(ns walletdb.ReadWriteBucket, height int32) error
