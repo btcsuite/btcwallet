@@ -294,6 +294,218 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 	require.ErrorIs(t, err, ErrOutputAlreadyLeased)
 }
 
+// TestLeaseOutputsWithOps verifies that the shared LeaseOutputs helper leases
+// every outpoint under one ID anchored to one timestamp, acquires rows in
+// canonical outpoint order so overlapping concurrent sets cannot deadlock, and
+// still returns the leases in request order.
+func TestLeaseOutputsWithOps(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build a request whose order differs from canonical order in
+	// both the hash and the index, and record the outpoint, now, and expiry
+	// each Acquire receives.
+	low := wire.OutPoint{Hash: chainhash.Hash{1}, Index: 9}
+	first := testLeaseOutPoint()
+	second := wire.OutPoint{Hash: first.Hash, Index: first.Index + 1}
+	params := LeaseOutputsParams{
+		WalletID:  5,
+		ID:        LockID{7},
+		OutPoints: []wire.OutPoint{second, low, first},
+		Duration:  time.Minute,
+	}
+	ops := &mockLeaseOutputOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	var (
+		acquired       []wire.OutPoint
+		nows, expiries []time.Time
+	)
+
+	record := func(args mock.Arguments) {
+		single, ok := args.Get(1).(LeaseOutputParams)
+		require.True(t, ok)
+
+		now, ok := args.Get(2).(time.Time)
+		require.True(t, ok)
+
+		expiresAt, ok := args.Get(3).(time.Time)
+		require.True(t, ok)
+
+		acquired = append(acquired, single.OutPoint)
+		nows = append(nows, now)
+		expiries = append(expiries, expiresAt)
+	}
+
+	nowMatcher := mock.AnythingOfType("time.Time")
+	for _, outPoint := range params.OutPoints {
+		single := LeaseOutputParams{
+			WalletID: params.WalletID,
+			ID:       params.ID,
+			OutPoint: outPoint,
+			Duration: params.Duration,
+		}
+		ops.On("Acquire", mock.Anything, single, nowMatcher, nowMatcher).
+			Run(record).Return(time.Unix(333, 0), nil).Once()
+	}
+
+	// Act: Run the shared LeaseOutputs flow.
+	leases, err := LeaseOutputsWithOps(context.Background(), params, ops)
+
+	// Assert: Rows were written in canonical order, the leases come back
+	// in request order under the shared ID, and every write used the same
+	// now and the same expiry.
+	require.NoError(t, err)
+	require.Equal(t, []wire.OutPoint{low, first, second}, acquired)
+	require.Len(t, leases, 3)
+	require.Equal(t, second, leases[0].OutPoint)
+	require.Equal(t, low, leases[1].OutPoint)
+	require.Equal(t, first, leases[2].OutPoint)
+
+	for _, lease := range leases {
+		require.Equal(t, LockID{7}, lease.LockID)
+	}
+
+	require.Equal(t, nows[0], nows[1])
+	require.Equal(t, nows[0], nows[2])
+	require.Equal(t, expiries[0], expiries[2])
+	require.Equal(t, nows[0].Add(time.Minute), expiries[0])
+}
+
+// TestLeaseOutputsWithOpsStopsAtFirstFailure verifies that the shared
+// LeaseOutputs helper classifies the first failing outpoint and attempts no
+// later write, leaving rollback of earlier writes to the caller's transaction.
+func TestLeaseOutputsWithOpsStopsAtFirstFailure(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		hasUtxo   bool
+		expectErr error
+	}{
+		{
+			name:      "conflicting lease",
+			hasUtxo:   true,
+			expectErr: ErrOutputAlreadyLeased,
+		},
+		{
+			name:      "missing utxo",
+			hasUtxo:   false,
+			expectErr: ErrUtxoNotFound,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Lease three outpoints where the first write
+			// succeeds and the second finds no leasable row. The
+			// third outpoint has no expectation, so writing it
+			// would fail the mock.
+			first := testLeaseOutPoint()
+			second := wire.OutPoint{
+				Hash: first.Hash, Index: first.Index + 1,
+			}
+			third := wire.OutPoint{
+				Hash: first.Hash, Index: first.Index + 2,
+			}
+			params := LeaseOutputsParams{
+				WalletID:  5,
+				ID:        LockID{7},
+				OutPoints: []wire.OutPoint{first, second, third},
+				Duration:  time.Minute,
+			}
+			single := func(op wire.OutPoint) LeaseOutputParams {
+				return LeaseOutputParams{
+					WalletID: params.WalletID,
+					ID:       params.ID,
+					OutPoint: op,
+					Duration: params.Duration,
+				}
+			}
+			ops := &mockLeaseOutputOps{}
+			t.Cleanup(func() {
+				ops.AssertExpectations(t)
+			})
+
+			nowMatcher := mock.AnythingOfType("time.Time")
+			ops.On("Acquire", mock.Anything, single(first), nowMatcher,
+				nowMatcher).Return(time.Unix(333, 0), nil).Once()
+			ops.On("Acquire", mock.Anything, single(second),
+				nowMatcher, nowMatcher).Return(
+				time.Time{}, ErrLeaseOutputNoRow).Once()
+			ops.On("HasUtxo", mock.Anything, single(second)).Return(
+				tc.hasUtxo, nil).Once()
+
+			// Act: Run the shared LeaseOutputs flow.
+			leases, err := LeaseOutputsWithOps(
+				context.Background(), params, ops,
+			)
+
+			// Assert: The second outpoint's classification is
+			// returned with no leases, and the third is never
+			// written.
+			require.ErrorIs(t, err, tc.expectErr)
+			require.Nil(t, leases)
+		})
+	}
+}
+
+// TestLeaseOutputsParamsValidate verifies that set requests no backend can
+// honor are rejected before any write.
+func TestLeaseOutputsParamsValidate(t *testing.T) {
+	t.Parallel()
+
+	outPoint := testLeaseOutPoint()
+	testCases := []struct {
+		name   string
+		params LeaseOutputsParams
+	}{
+		{
+			name: "non-positive duration",
+			params: LeaseOutputsParams{
+				OutPoints: []wire.OutPoint{outPoint},
+			},
+		},
+		{
+			name: "empty set",
+			params: LeaseOutputsParams{
+				Duration: time.Minute,
+			},
+		},
+		{
+			name: "duplicate outpoint",
+			params: LeaseOutputsParams{
+				OutPoints: []wire.OutPoint{outPoint, outPoint},
+				Duration:  time.Minute,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Use an adapter with no expectations so any
+			// write attempt fails the mock.
+			ops := &mockLeaseOutputOps{}
+
+			// Act: Validate directly and through the shared flow.
+			validateErr := tc.params.Validate()
+			_, flowErr := LeaseOutputsWithOps(
+				context.Background(), tc.params, ops,
+			)
+
+			// Assert: Both reject the request as an invalid param.
+			require.ErrorIs(t, validateErr, ErrInvalidParam)
+			require.ErrorIs(t, flowErr, ErrInvalidParam)
+			ops.AssertExpectations(t)
+		})
+	}
+}
+
 // TestReleaseOutputWithOps verifies that the shared ReleaseOutput helper
 // returns nil when the backend delete removes the matching lease row.
 func TestReleaseOutputWithOps(t *testing.T) {
