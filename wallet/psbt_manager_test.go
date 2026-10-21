@@ -3210,7 +3210,7 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 			packet.Inputs[0].WitnessUtxo.Value,
 		),
 	)
-	plan, err := w.planTaprootPsbtInput(packet, 0, sigHashes, nil)
+	plan, err := w.planTaprootPsbtInput(packet, 0, sigHashes, KeyTweak{})
 	require.NoError(t, err)
 
 	signed, err := w.signPlannedInput(t.Context(), packet, plan)
@@ -3294,7 +3294,7 @@ func TestSignBip32PsbtInput(t *testing.T) {
 			packet.Inputs[0].WitnessUtxo.Value,
 		),
 	)
-	plan, err := w.planBip32PsbtInput(packet, 0, sigHashes, nil)
+	plan, err := w.planBip32PsbtInput(packet, 0, sigHashes, KeyTweak{})
 	require.NoError(t, err)
 
 	signed, err := w.signPlannedInput(t.Context(), packet, plan)
@@ -4064,7 +4064,7 @@ func TestPlanTaprootPsbtInputErrors(t *testing.T) {
 		Bip32Path: []uint32{1}, // Too short
 	}}
 	packet.Inputs[0].TaprootBip32Derivation = tapDerivation
-	_, err = w.planTaprootPsbtInput(packet, 0, nil, nil)
+	_, err = w.planTaprootPsbtInput(packet, 0, nil, KeyTweak{})
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
 
 	// Case 2: CreateTaprootSpendDetails error (e.g. invalid merkle root).
@@ -4075,7 +4075,7 @@ func TestPlanTaprootPsbtInputErrors(t *testing.T) {
 		0, 0,
 	}
 	packet.Inputs[0].TaprootMerkleRoot = []byte{0x01} // Invalid length
-	_, err = w.planTaprootPsbtInput(packet, 0, nil, nil)
+	_, err = w.planTaprootPsbtInput(packet, 0, nil, KeyTweak{})
 	require.ErrorIs(t, err, ErrInvalidTaprootMerkleRootLength)
 }
 
@@ -4097,7 +4097,7 @@ func TestPlanBip32PsbtInputErrors(t *testing.T) {
 	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
 		Bip32Path: []uint32{1}, // Too short
 	}}
-	_, err = w.planBip32PsbtInput(packet, 0, nil, nil)
+	_, err = w.planBip32PsbtInput(packet, 0, nil, KeyTweak{})
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
 
 	// Case 2: Unknown Purpose.
@@ -4107,7 +4107,7 @@ func TestPlanBip32PsbtInputErrors(t *testing.T) {
 		hdkeychain.HardenedKeyStart + 0,
 		0, 0,
 	}
-	_, err = w.planBip32PsbtInput(packet, 0, nil, nil)
+	_, err = w.planBip32PsbtInput(packet, 0, nil, KeyTweak{})
 	require.ErrorIs(t, err, ErrUnknownBip32Purpose)
 }
 
