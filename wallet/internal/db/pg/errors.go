@@ -10,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// walletNameConstraint selects occupied names without reclassifying other
+// unique violations.
+const walletNameConstraint = "uidx_wallets_name"
+
 // accountNameConstraint is the unique account-name index within a wallet and
 // key scope.
 const accountNameConstraint = "uidx_accounts_wallet_scope_account_name"
@@ -99,6 +103,11 @@ func mapErr(err error) *dberr.SQLError {
 		// selects a domain identity while retaining the driver cause.
 		if pgErr.Code == codeUniqueViolation {
 			switch pgErr.ConstraintName {
+			case walletNameConstraint:
+				// Preserve constraint accounting while exposing the
+				// occupied wallet's Store error identity.
+				err = fmt.Errorf("%w: %w", db.ErrWalletExists, err)
+
 			case accountNameConstraint:
 				// Keep name collisions distinct from occupied
 				// derived numbers.

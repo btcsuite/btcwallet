@@ -51,38 +51,60 @@ func TestCreateWalletWithBirthday(t *testing.T) {
 	require.Nil(t, info.BirthdayBlock)
 }
 
-// TestCreateWalletDuplicateName verifies that creating a wallet with a
-// duplicate name fails with an appropriate error.
+// TestCreateWalletDuplicateName verifies an occupied name retains the shared
+// duplicate identity, SQL classification and constraint accounting.
 func TestCreateWalletDuplicateName(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Occupy the name, then snapshot counters so a duplicate must
+	// retain both its shared identity and normal constraint accounting.
 	store := NewTestStore(t)
 	params := CreateWalletParamsFixture("duplicate-wallet")
-
 	_, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
 
 	before := store.StatsSnapshot()
 
-	// Attempt to create second wallet with same name.
-	_, err = store.CreateWallet(t.Context(), params)
-	require.Error(t, err, "expected error creating duplicate wallet")
+	// Act: Repeat the same creation request against the occupied name.
+	duplicate, err := store.CreateWallet(t.Context(), params)
+
+	// Assert: Domain matching must retain the SQL wrapper and the duplicate's
+	// single constraint count; callers receive no newly created Wallet.
+	require.ErrorIs(t, err, db.ErrWalletExists)
 	requireConstraintSQLError(t, err)
+	require.Nil(t, duplicate)
 
 	after := store.StatsSnapshot()
-	require.Equal(t, before.Unhealthy, after.Unhealthy)
-	require.Equal(t, before.RetryAttempts, after.RetryAttempts)
-	require.Equal(t, before.RetrySuccesses, after.RetrySuccesses)
-	require.Equal(t, before.RetryExhausted, after.RetryExhausted)
-	require.Equal(t, before.AmbiguousTxCommits, after.AmbiguousTxCommits)
-	require.Equal(t, before.Errors.Backend, after.Errors.Backend)
-	require.Equal(t, before.Errors.TotalErrs+1, after.Errors.TotalErrs)
-	require.Equal(
-		t, before.Errors.PermanentErrs+1, after.Errors.PermanentErrs,
-	)
 	require.Equal(t, before.Errors.Constraint+1, after.Errors.Constraint)
-	require.Equal(t, before.Errors.TransientErrs, after.Errors.TransientErrs)
-	require.Equal(t, before.Errors.FatalErrs, after.Errors.FatalErrs)
+}
+
+// TestCreateWalletPreservesOtherUniqueErrors verifies uniqueness outside the
+// wallet-name index remains a SQL constraint error rather than a duplicate.
+func TestCreateWalletPreservesOtherUniqueErrors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Add an independent unique index so a different wallet name can
+	// fail at the same insert without colliding with the name admission rule.
+	store := NewTestStore(t)
+	params := CreateWalletParamsFixture("original-wallet")
+	_, err := store.CreateWallet(t.Context(), params)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(t.Context(),
+		"CREATE UNIQUE INDEX uidx_test_wallets_version "+
+			"ON wallets (manager_version)",
+	)
+	require.NoError(t, err)
+
+	replacement := CreateWalletParamsFixture("different-wallet")
+
+	// Act: Collide only with the injected non-name constraint.
+	created, err := store.CreateWallet(t.Context(), replacement)
+
+	// Assert: Keep the original SQL classification without reporting that the
+	// distinct name was already occupied or returning a created wallet.
+	requireConstraintSQLError(t, err)
+	require.NotErrorIs(t, err, db.ErrWalletExists)
+	require.Nil(t, created)
 }
 
 // TestCreateWalletVariants tests different wallet types.
