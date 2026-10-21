@@ -2520,6 +2520,10 @@ func assertUtxos(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	if len(utxos) != len(exp) {
+		t.Fatalf("expected %d utxos, got %d", len(exp), len(utxos))
+	}
 	for _, expUtxo := range exp {
 		found := false
 		for _, utxo := range utxos {
@@ -2959,5 +2963,295 @@ func TestOutputLocks(t *testing.T) {
 				testCase.run(t, store, ns)
 			})
 		})
+	}
+}
+
+// TestDeserializeLegacyLockedOutput verifies that lock rows written before
+// release-after-spend support remain readable with the legacy lease behavior.
+func TestDeserializeLegacyLockedOutput(t *testing.T) {
+	t.Parallel()
+
+	lockID := LockID{1, 2, 3}
+	expiry := time.Unix(123456789, 0)
+	legacyValue := make([]byte, len(lockID)+8)
+	copy(legacyValue, lockID[:])
+	byteOrder.PutUint64(legacyValue[len(lockID):], uint64(expiry.Unix()))
+
+	gotID, gotExpiry, releaseConfs, spendHeight :=
+		deserializeLockedOutput(legacyValue)
+	if gotID != lockID {
+		t.Fatalf("expected lock ID %x, got %x", lockID, gotID)
+	}
+	if !gotExpiry.Equal(expiry) {
+		t.Fatalf("expected expiry %v, got %v", expiry, gotExpiry)
+	}
+	if releaseConfs != 0 {
+		t.Fatalf("expected legacy release depth 0, got %d", releaseConfs)
+	}
+	if spendHeight != 0 {
+		t.Fatalf("expected legacy spend height 0, got %d", spendHeight)
+	}
+}
+
+// TestDeserializeRetainedLockedOutput verifies that lock rows written by
+// btcwallet master with confirmation-controlled leases keep their policy and
+// disconnected-spend marker.
+func TestDeserializeRetainedLockedOutput(t *testing.T) {
+	t.Parallel()
+
+	lockID := LockID{4, 5, 6}
+	expiry := time.Unix(123456789, 0)
+
+	// Layout: lock ID, expiry, release depth, spend height (-1).
+	value := make([]byte, len(lockID)+16)
+	copy(value, lockID[:])
+	byteOrder.PutUint64(value[len(lockID):], uint64(expiry.Unix()))
+	byteOrder.PutUint32(value[len(lockID)+8:], 6)
+	byteOrder.PutUint32(value[len(lockID)+12:], 0xffffffff)
+
+	gotID, gotExpiry, releaseConfs, spendHeight :=
+		deserializeLockedOutput(value)
+	require.Equal(t, lockID, gotID)
+	require.True(t, gotExpiry.Equal(expiry))
+	require.Equal(t, uint32(6), releaseConfs)
+	require.Equal(t, int32(-1), spendHeight)
+	require.Equal(t, value, serializeLockedOutput(
+		lockID, expiry, releaseConfs, spendHeight,
+	))
+}
+
+// TestOutputLockConfirmationIgnoresWallClock verifies that a
+// confirmation-controlled lock ignores its wall-clock expiry, yet its owner,
+// and only its owner, can still release it.
+func TestOutputLockConfirmationIgnoresWallClock(t *testing.T) {
+	t.Parallel()
+
+	store, db, err := testStore(t)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	testClock := clock.NewTestClock(time.Time{})
+	store.clock = testClock
+
+	creditBlock := &BlockMeta{
+		Block: Block{
+			Hash:   chainhash.Hash{1},
+			Height: 100,
+		},
+		Time: time.Now(),
+	}
+	creditTx := newCoinBase(btcutil.SatoshiPerBitcoin)
+	insertConfirmedCredit(t, store, db, creditTx, 0, creditBlock)
+	op := wire.OutPoint{Hash: creditTx.TxHash(), Index: 0}
+
+	owner := LockID{1}
+	other := LockID{2}
+
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		expiry, err := store.LockOutput(
+			ns, owner, op, 10*time.Minute, WithReleaseAfterSpend(3),
+		)
+		require.NoError(t, err)
+
+		// Past its expiry the lock still holds, and expired cleanup keeps
+		// it.
+		testClock.SetTime(expiry)
+		assertLocked(t, ns, op, testClock.Now(), true)
+		require.NoError(t, store.DeleteExpiredLockedOutputs(ns))
+
+		locks, err := store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.Equal(t, uint32(3), locks[0].ReleaseAfterSpendConfs)
+		require.Zero(t, locks[0].ConfirmedSpendHeight)
+
+		// Another owner can neither take nor release it.
+		_, err = store.LockOutput(ns, other, op, 10*time.Minute)
+		require.ErrorIs(t, err, ErrOutputAlreadyLocked)
+		unlock(t, store, ns, other, op, ErrOutputUnlockNotAllowed)
+
+		// The owner can release it, and a new lock without the option is
+		// timed.
+		unlock(t, store, ns, owner, op, nil)
+		_, err = store.LockOutput(ns, owner, op, 10*time.Minute)
+		require.NoError(t, err)
+
+		locks, err = store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.Zero(t, locks[0].ReleaseAfterSpendConfs)
+	})
+}
+
+// TestOutputLockReleaseAfterSpendAcrossReorg verifies that a lock follows the
+// confirmed spend, resets on rollback, and releases only after the
+// re-confirmed spend reaches its requested depth.
+func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
+	t.Parallel()
+
+	store, db, err := testStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	startTime := time.Now()
+	store.clock = clock.NewTestClock(startTime)
+
+	creditBlock := &BlockMeta{
+		Block: Block{
+			Hash:   chainhash.Hash{1},
+			Height: 100,
+		},
+		Time: time.Now(),
+	}
+	spendBlock := &BlockMeta{
+		Block: Block{
+			Hash:   chainhash.Hash{2},
+			Height: 101,
+		},
+		Time: time.Now().Add(time.Minute),
+	}
+
+	creditTx := newCoinBase(btcutil.SatoshiPerBitcoin)
+	insertConfirmedCredit(t, store, db, creditTx, 0, creditBlock)
+	creditHash := creditTx.TxHash()
+	creditOutpoint := wire.OutPoint{Hash: creditHash, Index: 0}
+	spendTx := spendOutput(&creditHash, 0, btcutil.SatoshiPerBitcoin-1000)
+	spendRec, err := NewTxRecordFromMsgTx(spendTx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lockID := LockID{1}
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(namespaceKey)
+		expiry, err := store.LockOutput(
+			ns, lockID, creditOutpoint, 10*time.Minute,
+			WithReleaseAfterSpend(3),
+		)
+		if err != nil {
+			return err
+		}
+
+		// The first confirmation may arrive after the wall-clock deadline.
+		// Confirmation-controlled leases must still record that spend.
+		store.clock.(*clock.TestClock).SetTime(expiry.Add(time.Second))
+		if err := store.DeleteExpiredLockedOutputs(ns); err != nil {
+			return err
+		}
+
+		locks, err := store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.Equal(t, uint32(3), locks[0].ReleaseAfterSpendConfs)
+		require.Zero(t, locks[0].ConfirmedSpendHeight)
+
+		if err := store.InsertTx(ns, spendRec, spendBlock); err != nil {
+			return err
+		}
+
+		locks, err = store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.Equal(t, uint32(3), locks[0].ReleaseAfterSpendConfs)
+		require.Equal(t, spendBlock.Height, locks[0].ConfirmedSpendHeight)
+
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+		if err := store.DeleteMaturedLockedOutputs(ns, 102); err != nil {
+			return err
+		}
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+
+		if err := store.Rollback(ns, spendBlock.Height); err != nil {
+			return err
+		}
+
+		// Renewing the lease must preserve the disconnected spend state
+		// and its configured release depth.
+		renewedExpiry, err := store.LockOutput(
+			ns, lockID, creditOutpoint, 10*time.Minute,
+		)
+		if err != nil {
+			return err
+		}
+
+		locks, err = store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.Equal(t, uint32(3), locks[0].ReleaseAfterSpendConfs)
+		require.Equal(t, int32(-1), locks[0].ConfirmedSpendHeight)
+
+		// An explicit option replaces the release depth without clearing
+		// the disconnected spend state.
+		_, err = store.LockOutput(
+			ns, lockID, creditOutpoint, 10*time.Minute,
+			WithReleaseAfterSpend(4),
+		)
+		if err != nil {
+			return err
+		}
+
+		locks, err = store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.Equal(t, uint32(4), locks[0].ReleaseAfterSpendConfs)
+		require.Equal(t, int32(-1), locks[0].ConfirmedSpendHeight)
+
+		if err := store.RemoveUnminedTx(ns, spendRec); err != nil {
+			return err
+		}
+
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+		// The funding credit was restored, but the retained lease keeps
+		// it out of the spendable UTXO set.
+		assertUtxos(t, store, ns, nil)
+		if err := store.DeleteMaturedLockedOutputs(ns, 102); err != nil {
+			return err
+		}
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+
+		// A lease that has observed a spend must survive its wall clock
+		// expiry while that spend is disconnected.
+		store.clock.(*clock.TestClock).SetTime(
+			renewedExpiry.Add(time.Second),
+		)
+		if err := store.DeleteExpiredLockedOutputs(ns); err != nil {
+			return err
+		}
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+		assertOutputLocksExist(t, store, ns, creditOutpoint)
+
+		reconfirmedBlock := &BlockMeta{
+			Block: Block{
+				Hash:   chainhash.Hash{3},
+				Height: 103,
+			},
+			Time: time.Now().Add(2 * time.Minute),
+		}
+		if err := store.InsertTx(ns, spendRec, reconfirmedBlock); err != nil {
+			return err
+		}
+		if err := store.DeleteMaturedLockedOutputs(ns, 104); err != nil {
+			return err
+		}
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+
+		if err := store.DeleteMaturedLockedOutputs(ns, 105); err != nil {
+			return err
+		}
+
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), true)
+
+		err = store.DeleteMaturedLockedOutputs(ns, 106)
+		if err != nil {
+			return err
+		}
+
+		assertLocked(t, ns, creditOutpoint, store.clock.Now(), false)
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
