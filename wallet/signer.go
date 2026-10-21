@@ -308,6 +308,28 @@ func (t KeyTweak) apply(key *btcec.PrivateKey) error {
 	return nil
 }
 
+// pubKey returns the public key apply produces from base's private key.
+func (t KeyTweak) pubKey(base *btcec.PublicKey) (*btcec.PublicKey, error) {
+	scalar, err := t.scalar()
+	if err != nil {
+		return nil, err
+	}
+
+	var point, tweakPoint, result btcec.JacobianPoint
+	base.AsJacobian(&point)
+	btcec.ScalarBaseMultNonConst(&scalar, &tweakPoint)
+	btcec.AddNonConst(&point, &tweakPoint, &result)
+
+	if (result.X.IsZero() && result.Y.IsZero()) || result.Z.IsZero() {
+		return nil, fmt.Errorf("%w: tweak cancels the key",
+			ErrInvalidSignParam)
+	}
+
+	result.ToAffine()
+
+	return btcec.NewPublicKey(&result.X, &result.Y), nil
+}
+
 // UnlockingScriptParams provides all the necessary parameters to generate an
 // unlocking script (witness and sigScript) for a transaction input.
 type UnlockingScriptParams struct {
@@ -1519,13 +1541,15 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 func (w *Wallet) handleComputeRawSig(r rawSigReq) {
 	// Reuse raw signing shared with PSBTs and finish key cleanup before
 	// delivery.
-	signature, err := w.computeRawSig(r.ctx, r.params)
+	signature, err := w.computeRawSig(r.ctx, r.params, nil)
 	r.respChan <- rawSigResp{signature: signature, err: err}
 }
 
-// computeRawSig signs and zeroes its key inside the accepted request.
-func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams) (
-	RawSignature, error) {
+// computeRawSig signs and zeroes its key inside the accepted request. A
+// non-nil signer is the key, as a PSBT record names it, that the tweaked key
+// must be before it signs.
+func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
+	signer []byte) (RawSignature, error) {
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
@@ -1536,6 +1560,11 @@ func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams) (
 	err = params.Tweak.apply(privKey)
 	if err != nil {
 		return nil, err
+	}
+
+	if signer != nil && !recordKeyIs(signer, privKey.PubKey()) {
+		return nil, fmt.Errorf("%w: derived key differs",
+			ErrSigningKeyMismatch)
 	}
 
 	// With the private key retrieved and tweaked, we can now delegate the

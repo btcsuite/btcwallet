@@ -555,8 +555,8 @@ func identityDecrypt(b []byte) []byte {
 }
 
 // TestKeyTweakApply tests that a tweak is added to the key modulo the curve
-// order, and that a tweak outside the order or one cancelling the key is
-// refused.
+// order, that a tweak outside the order or one cancelling the key is refused,
+// and that pubKey predicts the public key apply produces.
 func TestKeyTweakApply(t *testing.T) {
 	t.Parallel()
 
@@ -604,11 +604,14 @@ func TestKeyTweakApply(t *testing.T) {
 			key := &btcec.PrivateKey{Key: base.Key}
 
 			err := tc.tweak.apply(key)
+			pubKey, pubErr := tc.tweak.pubKey(base.PubKey())
 
 			require.ErrorIs(t, err, tc.wantErr)
+			require.ErrorIs(t, pubErr, tc.wantErr)
 
 			if tc.wantErr == nil {
 				require.True(t, key.Key.Equals(&tc.want))
+				require.True(t, pubKey.IsEqual(key.PubKey()))
 			}
 		})
 	}
