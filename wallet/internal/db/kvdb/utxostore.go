@@ -250,23 +250,11 @@ func (s *Store) LeaseOutput(_ context.Context,
 			return db.ErrUtxoNotFound
 		}
 
-		expiration, err = s.txStore.LockOutput(
-			ns, wtxmgr.LockID(params.ID), params.OutPoint, params.Duration,
+		expiration, err = s.lockOutput(
+			ns, params.ID, params.OutPoint, params.Duration,
 		)
-		if err != nil {
-			switch {
-			case errors.Is(err, wtxmgr.ErrUtxoNotFound),
-				errors.Is(err, wtxmgr.ErrUnknownOutput):
-				return db.ErrUtxoNotFound
 
-			case errors.Is(err, wtxmgr.ErrOutputAlreadyLocked):
-				return db.ErrOutputAlreadyLeased
-			}
-
-			return fmt.Errorf("lock output: %w", err)
-		}
-
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.LeaseOutput: %w", err)
@@ -277,6 +265,32 @@ func (s *Store) LeaseOutput(_ context.Context,
 		LockID:     db.LockID(params.ID),
 		Expiration: expiration.UTC(),
 	}, nil
+}
+
+// lockOutput writes one wtxmgr lock and translates legacy lock errors onto
+// the shared Store sentinels.
+func (s *Store) lockOutput(ns walletdb.ReadWriteBucket, id [32]byte,
+	outPoint wire.OutPoint, duration time.Duration) (time.Time, error) {
+
+	expiration, err := s.txStore.LockOutput(
+		ns, wtxmgr.LockID(id), outPoint, duration,
+	)
+	if err == nil {
+		return expiration, nil
+	}
+
+	switch {
+	case errors.Is(err, wtxmgr.ErrUtxoNotFound),
+		errors.Is(err, wtxmgr.ErrUnknownOutput):
+		return time.Time{}, fmt.Errorf("utxo %s: %w", outPoint,
+			db.ErrUtxoNotFound)
+
+	case errors.Is(err, wtxmgr.ErrOutputAlreadyLocked):
+		return time.Time{}, fmt.Errorf("utxo %s: %w", outPoint,
+			db.ErrOutputAlreadyLeased)
+	}
+
+	return time.Time{}, fmt.Errorf("lock output: %w", err)
 }
 
 // ReleaseOutput releases a previously leased output, aligning the kvdb
