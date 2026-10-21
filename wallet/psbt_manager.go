@@ -1819,7 +1819,9 @@ func checkTaprootScriptSpendSig(pInput *psbt.PInput,
 	return nil
 }
 
-// addTaprootSigToPInput adds the generated signature to the PSBT input.
+// addTaprootSigToPInput adds the generated signature to the PSBT input. The
+// signature already ends in its sighash byte when the type is not
+// SIGHASH_DEFAULT.
 //
 // NOTE: This method modifies the `pInput` in-place.
 func addTaprootSigToPInput(pInput *psbt.PInput, sig []byte,
@@ -1827,17 +1829,15 @@ func addTaprootSigToPInput(pInput *psbt.PInput, sig []byte,
 	tapDerivation *psbt.TaprootBip32Derivation) {
 
 	if details.SpendPath == KeyPathSpend {
-		if sighashType != txscript.SigHashDefault {
-			sig = append(sig, byte(sighashType))
-		}
-
 		pInput.TaprootKeySpendSig = sig
 	} else {
+		// The record carries the sighash in its own field and
+		// serializes it after the signature.
 		tsSig := &psbt.TaprootScriptSpendSig{
 			XOnlyPubKey: tapDerivation.XOnlyPubKey,
 			LeafHash:    tapDerivation.LeafHashes[0],
-			Signature:   sig,
-			SigHash:     pInput.SighashType,
+			Signature:   sig[:schnorr.SignatureSize],
+			SigHash:     sighashType,
 		}
 		pInput.TaprootScriptSpendSig = append(
 			pInput.TaprootScriptSpendSig, tsSig,
