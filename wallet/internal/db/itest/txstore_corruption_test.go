@@ -554,6 +554,8 @@ func TestLeaseAndReleaseReturnQueryErrorsWhenLeaseTablesMissing(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "acquire lease row")
 
+	// Release resolves the output through its lease row, so the lookup
+	// reports the missing table.
 	err = store.ReleaseOutput(
 		t.Context(),
 		db.ReleaseOutputParams{
@@ -562,7 +564,7 @@ func TestLeaseAndReleaseReturnQueryErrorsWhenLeaseTablesMissing(t *testing.T) {
 			OutPoint: outPoint,
 		},
 	)
-	require.ErrorContains(t, err, "release lease row")
+	require.ErrorContains(t, err, "lookup utxo row")
 }
 
 // TestCreateTxRejectsCorruptedConflictRootHash verifies that confirmed conflict

@@ -476,6 +476,30 @@ var allTestCases = []*testCase{
 		TestFunc: testListLeasedOutputs,
 	},
 	{
+		Name:     "utxomanager lease output ignores expiry",
+		TestFunc: testLeaseOutputIgnoresExpiry,
+	},
+	{
+		Name:     "utxomanager lease output spend depth",
+		TestFunc: testLeaseOutputSpendDepth,
+	},
+	{
+		Name:     "utxomanager lease output spend depth one",
+		TestFunc: testLeaseOutputSpendDepthOne,
+	},
+	{
+		Name:     "utxomanager lease output spend reload",
+		TestFunc: testLeaseOutputSpendReload,
+	},
+	{
+		Name:     "utxomanager release output spent lease",
+		TestFunc: testReleaseOutputSpentLease,
+	},
+	{
+		Name:     "utxomanager lease output spend renewal",
+		TestFunc: testLeaseOutputSpendRenewal,
+	},
+	{
 		Name:     "txcreator select coins",
 		TestFunc: testCreateTransactionSelectCoins,
 	},

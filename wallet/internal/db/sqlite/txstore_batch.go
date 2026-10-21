@@ -55,7 +55,7 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 			}
 		}
 
-		return nil
+		return releaseMaturedLeases(ctx, qtx, params.WalletID)
 	})
 }
 

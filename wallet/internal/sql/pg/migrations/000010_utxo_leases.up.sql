@@ -16,6 +16,20 @@ CREATE TABLE utxo_leases (
     -- UTC-normalized lease expiration timestamp.
     expires_at TIMESTAMP NOT NULL,
 
+    -- Requested spend depth for a confirmation-controlled lease. Zero is a
+    -- timed lease that follows expires_at.
+    release_after_spend_confs BIGINT NOT NULL DEFAULT 0
+    CHECK (release_after_spend_confs BETWEEN 0 AND 4294967295),
+
+    -- Whether the spend of a confirmation-controlled lease lost its block. The
+    -- confirmed spend height is read from the spending transaction, but a
+    -- disconnect leaves no trace there. Timed leases never set it.
+    spend_disconnected BOOLEAN NOT NULL DEFAULT FALSE,
+
+    CONSTRAINT check_utxo_lease_spend_disconnected CHECK (
+        release_after_spend_confs > 0 OR NOT spend_disconnected
+    ),
+
     -- The leased output must exist in the UTXO set. Wallet consistency is
     -- enforced by trigger below.
     CONSTRAINT fkey_utxo_leases_utxo FOREIGN KEY (utxo_id)
@@ -52,3 +66,28 @@ CREATE TRIGGER trg_assert_utxo_lease_wallet_consistency_update
 BEFORE UPDATE OF wallet_id, utxo_id ON utxo_leases
 FOR EACH ROW
 EXECUTE FUNCTION assert_utxo_lease_wallet_consistency();
+
+-- Mark a lease's spend disconnected when its spending transaction loses its
+-- block. A block delete clears block_height through the transactions FK action,
+-- so rollbacks reach this trigger as well as direct updates.
+CREATE FUNCTION mark_utxo_lease_spend_disconnected() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE utxo_leases
+    SET spend_disconnected = TRUE
+    WHERE
+        release_after_spend_confs > 0
+        AND utxo_id IN (
+            SELECT u.id
+            FROM utxos AS u
+            WHERE u.spent_by_tx_id = NEW.id
+        );
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_mark_utxo_lease_spend_disconnected
+AFTER UPDATE OF block_height ON transactions
+FOR EACH ROW
+WHEN (old.block_height IS NOT NULL AND new.block_height IS NULL)
+EXECUTE FUNCTION mark_utxo_lease_spend_disconnected();

@@ -58,6 +58,21 @@ func (o updateWalletOps) UpdateWalletSyncState(ctx context.Context,
 			params.WalletID, db.ErrWalletNotFound)
 	}
 
+	return releaseMaturedLeases(ctx, o.q, params.WalletID)
+}
+
+// releaseMaturedLeases deletes the wallet's confirmation-controlled leases
+// whose spend reached its release depth at the stored sync tip. Writers call it
+// after recording their transactions, so a spend confirmed in the same write
+// counts, as does one recorded below an unchanged tip.
+func releaseMaturedLeases(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32) error {
+
+	_, err := qtx.DeleteMaturedUtxoLeases(ctx, int64(walletID))
+	if err != nil {
+		return fmt.Errorf("delete matured utxo leases: %w", err)
+	}
+
 	return nil
 }
 

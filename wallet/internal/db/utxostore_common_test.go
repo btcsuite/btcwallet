@@ -139,7 +139,7 @@ func TestBuildUtxoInfo_Unconfirmed(t *testing.T) {
 // Action:
 // - Convert the normalized row into a public LeasedOutput value.
 // Assertions:
-// - The outpoint, lock ID, and UTC expiration are preserved.
+// - The outpoint, lock ID, UTC expiration, and spend policy are preserved.
 func TestBuildLeasedOutput(t *testing.T) {
 	t.Parallel()
 
@@ -152,14 +152,60 @@ func TestBuildLeasedOutput(t *testing.T) {
 	// Act: Build the public leased-output view.
 	lease, err := BuildLeasedOutput(
 		hash[:], 9, lockID, time.Unix(333, 0).In(time.FixedZone("X", 3600)),
+		6, 0, true,
 	)
 
-	// Assert: The helper preserves the outpoint, lock ID, and UTC expiration.
+	// Assert: The helper preserves the outpoint, lock ID, UTC expiration,
+	// and spend policy.
 	require.NoError(t, err)
 	require.Equal(t, hash, lease.OutPoint.Hash)
 	require.Equal(t, uint32(9), lease.OutPoint.Index)
 	require.Equal(t, byte(7), lease.LockID[0])
 	require.Equal(t, time.UTC, lease.Expiration.Location())
+	require.Equal(t, uint32(6), lease.ReleaseAfterSpendConfs)
+	require.Equal(t, int32(-1), lease.ConfirmedSpendHeight)
+}
+
+// TestBuildLeasedOutputInvalidSpendPolicy verifies that BuildLeasedOutput
+// rejects stored spend-policy values outside their public ranges instead of
+// truncating them.
+func TestBuildLeasedOutputInvalidSpendPolicy(t *testing.T) {
+	t.Parallel()
+
+	hash := chainhash.Hash{4, 5, 6}
+	lockID := make([]byte, 32)
+
+	tests := []struct {
+		name         string
+		releaseConfs int64
+		spendHeight  int64
+	}{
+		{
+			name:         "negative release depth",
+			releaseConfs: -1,
+		},
+		{
+			name:         "release depth above uint32",
+			releaseConfs: math.MaxUint32 + 1,
+		},
+		{
+			name:         "spend height above int32",
+			releaseConfs: 1,
+			spendHeight:  math.MaxInt32 + 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := BuildLeasedOutput(
+				hash[:], 0, lockID, time.Now(), tc.releaseConfs,
+				tc.spendHeight, false,
+			)
+			require.ErrorIs(t, err, ErrCastingOverflow)
+		})
+	}
 }
 
 // TestBuildLeasedOutput_InvalidLockID verifies that BuildLeasedOutput rejects
@@ -182,25 +228,35 @@ func TestBuildLeasedOutput_InvalidLockID(t *testing.T) {
 	shortLockID := []byte{1, 2, 3}
 
 	// Act: Attempt to build the public leased-output view.
-	_, err := BuildLeasedOutput(hash[:], 0, shortLockID, time.Now())
+	_, err := BuildLeasedOutput(
+		hash[:], 0, shortLockID, time.Now(), 0, 0, false,
+	)
 
 	// Assert: The helper returns the invalid-lock-ID sentinel.
 	require.ErrorIs(t, err, errInvalidLockID)
 }
 
 // TestLeaseOutputWithOps verifies that the shared LeaseOutput helper returns
-// the leased outpoint when the backend Acquire step succeeds.
+// the stored lease when the backend Acquire step succeeds, including a spend
+// policy that differs from the request.
 func TestLeaseOutputWithOps(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Build one valid lease request and one successful stub adapter.
+	// Arrange: Build one zero-depth renewal and an adapter that reports the
+	// depth and progress the store kept.
 	params := LeaseOutputParams{
 		WalletID: 5,
 		OutPoint: testLeaseOutPoint(),
 		ID:       LockID{7},
 		Duration: time.Minute,
 	}
-	acquireExpiration := time.Unix(333, 0).In(time.FixedZone("X", 3600))
+	stored := &LeasedOutput{
+		OutPoint:               params.OutPoint,
+		LockID:                 LockID(params.ID),
+		Expiration:             time.Unix(333, 0).UTC(),
+		ReleaseAfterSpendConfs: 3,
+		ConfirmedSpendHeight:   -1,
+	}
 	ops := &mockLeaseOutputOps{}
 	t.Cleanup(func() {
 		ops.AssertExpectations(t)
@@ -208,16 +264,14 @@ func TestLeaseOutputWithOps(t *testing.T) {
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		acquireExpiration, nil).Once()
+		stored, nil).Once()
 
 	// Act: Run the shared LeaseOutput flow.
 	lease, err := LeaseOutputWithOps(context.Background(), params, ops)
 
-	// Assert: The helper returns the leased outpoint and UTC expiration.
+	// Assert: The helper returns the stored lease unchanged.
 	require.NoError(t, err)
-	require.Equal(t, params.OutPoint, lease.OutPoint)
-	require.Equal(t, LockID(params.ID), lease.LockID)
-	require.Equal(t, time.UTC, lease.Expiration.Location())
+	require.Equal(t, stored, lease)
 }
 
 // TestLeaseOutputWithOpsRejectsNonPositiveDuration verifies that the shared
@@ -260,7 +314,7 @@ func TestLeaseOutputWithOpsMissingUtxo(t *testing.T) {
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		time.Time{}, ErrLeaseOutputNoRow).Once()
+		nil, ErrLeaseOutputNoRow).Once()
 
 	ops.On("HasUtxo", mock.Anything, params).Return(false, nil).Once()
 
@@ -286,7 +340,7 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		time.Time{}, ErrLeaseOutputNoRow).Once()
+		nil, ErrLeaseOutputNoRow).Once()
 
 	ops.On("HasUtxo", mock.Anything, params).Return(true, nil).Once()
 
@@ -413,16 +467,19 @@ var _ LeaseOutputOps = (*mockLeaseOutputOps)(nil)
 // Acquire implements LeaseOutputOps.
 func (m *mockLeaseOutputOps) Acquire(ctx context.Context,
 	params LeaseOutputParams, start time.Time,
-	expiration time.Time) (time.Time, error) {
+	expiration time.Time) (*LeasedOutput, error) {
 
 	args := m.Called(ctx, params, start, expiration)
-
-	leaseExpiration, ok := args.Get(0).(time.Time)
-	if !ok {
-		return time.Time{}, errMockType
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
 	}
 
-	return leaseExpiration, args.Error(1)
+	lease, ok := args.Get(0).(*LeasedOutput)
+	if !ok {
+		return nil, errMockType
+	}
+
+	return lease, args.Error(1)
 }
 
 // HasUtxo implements LeaseOutputOps.
@@ -531,7 +588,9 @@ func TestBuildLeasedOutputInvalidHash(t *testing.T) {
 	t.Parallel()
 
 	lockID := make([]byte, 32)
-	_, err := BuildLeasedOutput([]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0))
+	_, err := BuildLeasedOutput(
+		[]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0), 0, 0, false,
+	)
 
 	require.Error(t, err)
 }

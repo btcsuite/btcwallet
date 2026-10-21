@@ -7,6 +7,7 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -15,50 +16,67 @@ INSERT INTO utxo_leases (
     wallet_id,
     utxo_id,
     lock_id,
-    expires_at
+    expires_at,
+    release_after_spend_confs
 )
 SELECT
     ?1 AS wallet_id,
     u.id AS utxo_id,
     ?2 AS lock_id,
-    ?3 AS expires_at
+    ?3 AS expires_at,
+    ?4 AS release_after_spend_confs
 FROM utxos AS u
 INNER JOIN transactions AS t
     ON u.tx_id = t.id
 WHERE
     t.wallet_id = ?1
-    AND t.tx_hash = ?4
-    AND u.output_index = ?5
+    AND t.tx_hash = ?5
+    AND u.output_index = ?6
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
-    AND ?6 IS NOT NULL
+    AND ?7 IS NOT NULL
 ON CONFLICT (utxo_id) DO UPDATE
 SET
     lock_id = excluded.lock_id,
-    expires_at = excluded.expires_at
+    expires_at = excluded.expires_at,
+    release_after_spend_confs = CASE
+        WHEN excluded.release_after_spend_confs = 0
+            THEN utxo_leases.release_after_spend_confs
+        ELSE excluded.release_after_spend_confs
+    END
 WHERE
 utxo_leases.wallet_id = excluded.wallet_id
 AND (
-    -- ?6 is the generated bind slot for now_utc; sqlc leaves a literal
+    -- ?7 is the generated bind slot for now_utc; sqlc leaves a literal
     -- sqlc.arg('now_utc') here, so this predicate must stay aligned with
     -- the arg ordering above.
-    utxo_leases.expires_at <= ?6
+    (
+        utxo_leases.release_after_spend_confs = 0
+        AND utxo_leases.expires_at <= ?7
+    )
     OR utxo_leases.lock_id = excluded.lock_id
 )
-RETURNING expires_at
+RETURNING expires_at, release_after_spend_confs, spend_disconnected
 `
 
 type AcquireUtxoLeaseParams struct {
-	WalletID    int64
-	LockID      []byte
-	ExpiresAt   time.Time
-	TxHash      []byte
-	OutputIndex int64
-	NowUtc      interface{}
+	WalletID               int64
+	LockID                 []byte
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
+	TxHash                 []byte
+	OutputIndex            int64
+	NowUtc                 interface{}
+}
+
+type AcquireUtxoLeaseRow struct {
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
+	SpendDisconnected      bool
 }
 
 // Acquires or renews a lease for an outpoint and returns the resulting
-// expiration time.
+// expiration time and spend policy.
 //
 // How:
 //   - Resolves the outpoint to a current UTXO row and writes the lease in the
@@ -70,33 +88,40 @@ type AcquireUtxoLeaseParams struct {
 //
 // Lease semantics:
 //   - If the UTXO has no lease row, insert a new lease.
-//   - If the UTXO has an expired lease, steal it.
+//   - If the UTXO has an expired timed lease, steal it.
 //   - If the UTXO has an active lease with the same lock_id, renew it.
 //   - If the UTXO has an active lease with a different lock_id, return no
 //     rows (caller should treat this as "already leased").
+//   - A confirmation-controlled lease (release_after_spend_confs > 0) never
+//     expires by wall clock, so only its owner can renew it.
+//   - A renewal with zero release_after_spend_confs keeps the stored depth.
 //
 // NOTE: expires_at is computed by the caller as time.Now().UTC()+duration, and
 // callers must also pass a UTC-normalized now_utc for lease-expiry checks.
 // Performance:
 //   - SQLite executes the resolution and lease write atomically inside one
 //     statement, which avoids stale-ID races between separate helper calls.
-func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error) {
+func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (AcquireUtxoLeaseRow, error) {
 	row := q.queryRow(ctx, q.acquireUtxoLeaseStmt, AcquireUtxoLease,
 		arg.WalletID,
 		arg.LockID,
 		arg.ExpiresAt,
+		arg.ReleaseAfterSpendConfs,
 		arg.TxHash,
 		arg.OutputIndex,
 		arg.NowUtc,
 	)
-	var expires_at time.Time
-	err := row.Scan(&expires_at)
-	return expires_at, err
+	var i AcquireUtxoLeaseRow
+	err := row.Scan(&i.ExpiresAt, &i.ReleaseAfterSpendConfs, &i.SpendDisconnected)
+	return i, err
 }
 
 const DeleteExpiredUtxoLeases = `-- name: DeleteExpiredUtxoLeases :execrows
 DELETE FROM utxo_leases
-WHERE wallet_id = ?1 AND expires_at <= ?2
+WHERE
+    wallet_id = ?1
+    AND release_after_spend_confs = 0
+    AND expires_at <= ?2
 `
 
 type DeleteExpiredUtxoLeasesParams struct {
@@ -107,8 +132,8 @@ type DeleteExpiredUtxoLeasesParams struct {
 // Deletes all expired lease rows for a wallet.
 //
 // How:
-//   - Removes only rows whose expiration has passed, leaving active leases
-//     untouched.
+//   - Removes only timed rows whose expiration has passed, leaving active and
+//     confirmation-controlled leases untouched.
 //
 // Performance:
 //   - Uses the expiration predicate together with wallet scoping to bound the
@@ -121,13 +146,54 @@ func (q *Queries) DeleteExpiredUtxoLeases(ctx context.Context, arg DeleteExpired
 	return result.RowsAffected()
 }
 
+const DeleteMaturedUtxoLeases = `-- name: DeleteMaturedUtxoLeases :execrows
+DELETE FROM utxo_leases
+WHERE
+    utxo_leases.wallet_id = ?1
+    AND utxo_leases.release_after_spend_confs > 0
+    AND (
+        SELECT s.synced_height
+        FROM wallet_sync_states AS s
+        WHERE s.wallet_id = utxo_leases.wallet_id
+    ) - (
+        SELECT spend.block_height
+        FROM utxos AS u
+        INNER JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
+        WHERE u.id = utxo_leases.utxo_id
+    ) + 1
+    >= utxo_leases.release_after_spend_confs
+`
+
+// Deletes confirmation-controlled leases whose spend reached its release
+// depth at the wallet's stored sync tip.
+//
+// How:
+//   - A spend confirmed at height h has synced_height - h + 1 confirmations,
+//     where h is the block height of the transaction spending the leased output.
+//   - Timed leases are skipped. An unspent output, an unconfirmed spend, or a
+//     wallet without a sync tip makes the comparison NULL, so the row stays.
+//
+// Performance:
+//   - Scans the wallet's leases through the wallet-scoped lease index and looks
+//     up each spender by primary key.
+func (q *Queries) DeleteMaturedUtxoLeases(ctx context.Context, walletID int64) (int64, error) {
+	result, err := q.exec(ctx, q.deleteMaturedUtxoLeasesStmt, DeleteMaturedUtxoLeases, walletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetActiveUtxoLeaseLockID = `-- name: GetActiveUtxoLeaseLockID :one
 SELECT lock_id
 FROM utxo_leases
 WHERE
     wallet_id = ?1
     AND utxo_id = ?2
-    AND expires_at > ?3
+    AND (
+        release_after_spend_confs > 0
+        OR expires_at > ?3
+    )
 `
 
 type GetActiveUtxoLeaseLockIDParams struct {
@@ -139,8 +205,9 @@ type GetActiveUtxoLeaseLockIDParams struct {
 // Returns the lock ID for the current active lease on a UTXO ID.
 //
 // How:
-//   - Reads only non-expired lease rows so callers can distinguish an active
-//     lock-ID mismatch from an already-unlocked output.
+//   - Reads only active lease rows so callers can distinguish an active lock-ID
+//     mismatch from an already-unlocked output. A confirmation-controlled lease
+//     stays active until spend maturity or release.
 //
 // Performance:
 // - Targets at most one row through the unique lease key.
@@ -151,20 +218,73 @@ func (q *Queries) GetActiveUtxoLeaseLockID(ctx context.Context, arg GetActiveUtx
 	return lock_id, err
 }
 
+const GetReleasableUtxoIDByOutpoint = `-- name: GetReleasableUtxoIDByOutpoint :one
+SELECT u.id
+FROM transactions AS t
+INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id
+LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id
+WHERE
+    t.wallet_id = ?1
+    AND a.wallet_id = ?1
+    AND t.tx_hash = ?2
+    AND u.output_index = ?3
+    AND (
+        l.release_after_spend_confs > 0
+        OR (
+            t.tx_status IN (0, 1)
+            AND u.spent_by_tx_id IS NULL
+        )
+    )
+`
+
+type GetReleasableUtxoIDByOutpointParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+}
+
+// Retrieves the database ID of a UTXO whose lease can be released.
+//
+// How:
+//   - Resolves the outpoint like GetUtxoIDByOutpoint.
+//   - Accepts an unspent output whose parent transaction is still in `pending`
+//     or `published` status, or any output held by a confirmation-controlled
+//     lease so its owner can release it after a spend or invalidation.
+//
+// Performance:
+//   - Uses the wallet-scoped transaction hash lookup first, then narrows to the
+//     unique `(tx_id, output_index)` outpoint and its unique lease key.
+func (q *Queries) GetReleasableUtxoIDByOutpoint(ctx context.Context, arg GetReleasableUtxoIDByOutpointParams) (int64, error) {
+	row := q.queryRow(ctx, q.getReleasableUtxoIDByOutpointStmt, GetReleasableUtxoIDByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const ListActiveUtxoLeases = `-- name: ListActiveUtxoLeases :many
 SELECT
     t.tx_hash,
     u.output_index,
     l.lock_id,
-    l.expires_at
+    l.expires_at,
+    l.release_after_spend_confs,
+    l.spend_disconnected,
+    spend.block_height AS spend_height
 FROM utxo_leases AS l
 INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id
+LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
 WHERE
     l.wallet_id = ?1
-    AND l.expires_at > ?2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND (
+        l.release_after_spend_confs > 0
+        OR (
+            l.expires_at > ?2
+            AND u.spent_by_tx_id IS NULL
+            AND t.tx_status IN (0, 1)
+        )
+    )
 ORDER BY l.expires_at
 `
 
@@ -174,10 +294,13 @@ type ListActiveUtxoLeasesParams struct {
 }
 
 type ListActiveUtxoLeasesRow struct {
-	TxHash      []byte
-	OutputIndex int64
-	LockID      []byte
-	ExpiresAt   time.Time
+	TxHash                 []byte
+	OutputIndex            int64
+	LockID                 []byte
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
+	SpendDisconnected      bool
+	SpendHeight            sql.NullInt64
 }
 
 // Lists all currently active leases for a wallet.
@@ -185,9 +308,13 @@ type ListActiveUtxoLeasesRow struct {
 // How:
 //   - Starts from utxo_leases, then joins utxos and transactions so the result
 //     can be returned as network outpoints.
-//   - Filters out expired rows using the caller-supplied UTC timestamp.
-//   - Restricts the result to outputs that are still unspent and whose parent
-//     transaction is still in `pending` or `published` status.
+//   - Timed rows require an unexpired lease (against the caller-supplied UTC
+//     timestamp), an unspent output, and a parent transaction still in
+//     `pending` or `published` status.
+//   - Confirmation-controlled rows stay listed until spend maturity or release,
+//     even after their output is spent or its parent is invalidated.
+//   - LEFT JOINs the spending transaction to report its confirmed height, which
+//     is NULL while the spend is unconfirmed or the output is unspent.
 //
 // Performance:
 //   - Restricts first by wallet and expiration, then joins only the surviving
@@ -206,6 +333,9 @@ func (q *Queries) ListActiveUtxoLeases(ctx context.Context, arg ListActiveUtxoLe
 			&i.OutputIndex,
 			&i.LockID,
 			&i.ExpiresAt,
+			&i.ReleaseAfterSpendConfs,
+			&i.SpendDisconnected,
+			&i.SpendHeight,
 		); err != nil {
 			return nil, err
 		}
