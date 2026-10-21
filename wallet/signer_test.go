@@ -45,9 +45,6 @@ var (
 	// errPrivKeyMock is a mock error for private key retrieval.
 	errPrivKeyMock = errors.New("privkey error")
 
-	// errTweakMock is a mock error for private key tweaking.
-	errTweakMock = errors.New("tweak error")
-
 	// errSignMock is a mock error for signing operations.
 	errSignMock = errors.New("sign error")
 )
@@ -81,75 +78,6 @@ func expectStorePubKey(t *testing.T, mocks *mockWalletDeps,
 	_, pubKey := deriveLeafKeys(t, acct, path.Branch, path.Index)
 
 	return pubKey
-}
-
-// TestSignerKeepsTweakerLifetime verifies that cancellation cannot return a
-// callback-backed signing call while the callback still uses its private key.
-func TestSignerKeepsTweakerLifetime(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Resolve a real fixture key, then pause the caller's tweaker.
-	// Returning its error later avoids unrelated signature-assembly setup.
-	w, deps := createTestWalletWithMocks(t)
-	startLoadedWalletForTest(t, w)
-	w.state.toUnlocked()
-
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	key, _ := expectStoreSignerPrivKey(
-		t, deps, w.id, path.KeyScope, path.DerivationPath,
-	)
-	t.Cleanup(key.Zero)
-	deps.vault.On("Lock").Return().Once()
-
-	enteredChan := make(chan *btcec.PrivateKey, 1)
-	releaseChan := make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(releaseChan) })
-	t.Cleanup(unblock)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-
-	resultChan := make(chan error, 1)
-	go func() {
-		_, err := w.ComputeRawSig(ctx, &RawSigParams{
-			Path:    path,
-			Details: LegacySpendDetails{},
-			Tweaker: func(key *btcec.PrivateKey) (*btcec.PrivateKey, error) {
-				enteredChan <- key
-
-				<-releaseChan
-
-				return nil, errTweakMock
-			},
-		})
-		resultChan <- err
-	}()
-
-	resolvedKey := <-enteredChan
-
-	// Act: Cancel the caller and initiate shutdown while its own callback is
-	// active; both waits must retain the callback's synchronous lifetime.
-	cancel()
-
-	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.stop() }()
-
-	<-w.lifetimeCtx.Done()
-
-	// Assert: Neither waiter returns early. Once released, the callback error
-	// reaches the caller and its temporary key is zeroed before Stop ends.
-	select {
-	case err := <-resultChan:
-		t.Fatalf("signer returned during its tweaker: %v", err)
-	case err := <-stoppedChan:
-		t.Fatalf("Stop returned during a tweaker: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	unblock()
-	require.ErrorIs(t, <-resultChan, errTweakMock)
-	require.NoError(t, <-stoppedChan)
-	require.True(t, resolvedKey.Key.IsZero())
 }
 
 // TestUnsafeSignerDeliversCanceledKey verifies that accepted key derivation
@@ -624,6 +552,66 @@ func identityDecrypt(b []byte) []byte {
 	copy(out, b)
 
 	return out
+}
+
+// TestKeyTweakApply tests that a tweak is added to the key modulo the curve
+// order, and that a tweak outside the order or one cancelling the key is
+// refused.
+func TestKeyTweakApply(t *testing.T) {
+	t.Parallel()
+
+	base, _ := deterministicPrivKey(t)
+
+	// negated is the tweak that cancels the base key.
+	var negated KeyTweak
+
+	negKey := base.Key
+	negKey.Negate()
+	negKey.PutBytes((*[32]byte)(&negated))
+
+	// order is the curve order itself, the smallest out-of-range tweak.
+	var order KeyTweak
+	btcec.S256().N.FillBytes(order[:])
+
+	one := KeyTweak{31: 1}
+	plusOne := base.Key
+	plusOne.Add(new(btcec.ModNScalar).SetInt(1))
+
+	tests := []struct {
+		name    string
+		tweak   KeyTweak
+		want    btcec.ModNScalar
+		wantErr error
+	}{
+		{name: "zero tweak", want: base.Key},
+		{name: "added tweak", tweak: one, want: plusOne},
+		{
+			name:    "curve order",
+			tweak:   order,
+			wantErr: ErrInvalidSignParam,
+		},
+		{
+			name:    "cancelling tweak",
+			tweak:   negated,
+			wantErr: ErrInvalidSignParam,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			key := &btcec.PrivateKey{Key: base.Key}
+
+			err := tc.tweak.apply(key)
+
+			require.ErrorIs(t, err, tc.wantErr)
+
+			if tc.wantErr == nil {
+				require.True(t, key.Key.Equals(&tc.want))
+			}
+		})
+	}
 }
 
 // TestSignDigest tests the signing of a message digest with different signature
@@ -1984,58 +1972,6 @@ func assertScriptForOutput(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 	return info.Script
 }
 
-// TestComputeUnlockingScriptFail_Tweak tests failure when the tweaker fails.
-func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Set up the wallet and mocks. The key is resolved through the
-	// store account secret.
-	w, mocks := createUnlockedWalletWithMocks(t)
-	scope := waddrmgr.KeyScopeBIP0044
-	path := waddrmgr.DerivationPath{
-		InternalAccount: 0,
-		Account:         0,
-		Branch:          0,
-		Index:           0,
-	}
-	_, pubKey := expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
-
-	addr, err := address.NewAddressPubKeyHash(
-		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
-	)
-	require.NoError(t, err)
-	pkScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
-	// Create fresh mutable state.
-	prevOut, tx := createDummyTestTx(pkScript)
-	fetcher := txscript.NewCannedPrevOutputFetcher(
-		prevOut.PkScript, prevOut.Value,
-	)
-	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
-
-	expectSignerAddressInfoWithKeyScope(
-		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey, scope,
-	)
-
-	// Define failing tweaker.
-	params := &UnlockingScriptParams{
-		Tx:        tx,
-		Output:    prevOut,
-		SigHashes: sigHashes,
-		HashType:  txscript.SigHashAll,
-		Tweaker: func(*btcec.PrivateKey) (*btcec.PrivateKey, error) {
-			return nil, errTweakMock
-		},
-	}
-
-	// Act: Attempt to compute the unlocking script.
-	_, err = w.ComputeUnlockingScript(t.Context(), params)
-
-	// Assert: Verify error.
-	require.ErrorContains(t, err, "tweak error")
-}
-
 // TestComputeUnlockingScriptFail_UnsupportedAddr tests failure when the
 // address type is unsupported.
 func TestComputeUnlockingScriptFail_UnsupportedAddr(t *testing.T) {
@@ -2863,15 +2799,17 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.ErrorIs(t, err, ErrWatchOnlyAccount)
 	})
 
-	// This subtest verifies that if the private key tweaking function
-	// returns an error, the raw signature computation correctly propagates
-	// that error.
+	// This subtest verifies that a tweak outside the curve order fails the
+	// raw signature computation.
 	t.Run("Tweak Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
 		expectStoreSignerPrivKey(
 			t, mocks, w.id, path.KeyScope, path.DerivationPath,
 		)
+
+		var tweak KeyTweak
+		copy(tweak[:], bytes.Repeat([]byte{0xff}, len(tweak)))
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2880,15 +2818,11 @@ func TestComputeRawSigFail(t *testing.T) {
 			HashType:  txscript.SigHashAll,
 			Path:      path,
 			Details:   LegacySpendDetails{},
-			Tweaker: func(*btcec.PrivateKey) (
-				*btcec.PrivateKey, error) {
-
-				return nil, errTweakMock
-			},
+			Tweak:     tweak,
 		}
 
 		_, err := w.ComputeRawSig(t.Context(), params)
-		require.ErrorContains(t, err, "tweak error")
+		require.ErrorIs(t, err, ErrInvalidSignParam)
 	})
 
 	// This subtest ensures that if the underlying `Sign` method of the
