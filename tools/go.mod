@@ -1,6 +1,6 @@
 module tools
 
-go 1.25.11
+go 1.27.3
 
 tool (
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
@@ -200,16 +200,16 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/mod v0.27.0 // indirect
-	golang.org/x/sync v0.16.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
-	golang.org/x/tools v0.36.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	honnef.co/go/tools v0.6.1 // indirect
+	honnef.co/go/tools v0.8.1 // indirect
 	mvdan.cc/gofumpt v0.8.0 // indirect
 	mvdan.cc/unparam v0.0.0-20250301125049-0df0534333a4 // indirect
 )
