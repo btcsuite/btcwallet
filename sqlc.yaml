@@ -1,0 +1,26 @@
+# This file configures sqlc generation for the SQLite and PostgreSQL backends.
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "wallet/internal/sql/pg/migrations"
+    queries: "wallet/internal/sql/pg/queries"
+    gen:
+      go:
+        out: "wallet/internal/sql/pg/sqlc"
+        package: "sqlc"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_exported_queries: true
+        emit_prepared_queries: true
+
+  - engine: "sqlite"
+    schema: "wallet/internal/sql/sqlite/migrations"
+    queries: "wallet/internal/sql/sqlite/queries"
+    gen:
+      go:
+        out: "wallet/internal/sql/sqlite/sqlc"
+        package: "sqlc"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_exported_queries: true
+        emit_prepared_queries: true
