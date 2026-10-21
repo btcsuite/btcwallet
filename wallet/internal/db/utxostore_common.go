@@ -286,9 +286,9 @@ func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 // the policy and sequencing while each backend keeps only query details.
 type LeaseOutputOps interface {
 	// Acquire attempts to write or renew the lease and returns the stored
-	// expiration timestamp when the write succeeds.
+	// lease when the write succeeds.
 	Acquire(ctx context.Context, params LeaseOutputParams, nowUTC time.Time,
-		expiresAt time.Time) (time.Time, error)
+		expiresAt time.Time) (*LeasedOutput, error)
 
 	// HasUtxo reports whether the requested outpoint still exists as a current
 	// wallet-owned UTXO.
@@ -312,13 +312,9 @@ func LeaseOutputWithOps(ctx context.Context, params LeaseOutputParams,
 	nowUTC := time.Now().UTC()
 	expiresAt := nowUTC.Add(params.Duration)
 
-	expiration, err := ops.Acquire(ctx, params, nowUTC, expiresAt)
+	lease, err := ops.Acquire(ctx, params, nowUTC, expiresAt)
 	if err == nil {
-		return &LeasedOutput{
-			OutPoint:   params.OutPoint,
-			LockID:     LockID(params.ID),
-			Expiration: expiration.UTC(),
-		}, nil
+		return lease, nil
 	}
 
 	if !errors.Is(err, ErrLeaseOutputNoRow) {

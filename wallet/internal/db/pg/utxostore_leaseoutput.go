@@ -52,11 +52,11 @@ var _ db.LeaseOutputOps = (*leaseOutputOps)(nil)
 // outpoint.
 func (o *leaseOutputOps) Acquire(ctx context.Context,
 	params db.LeaseOutputParams, nowUTC time.Time,
-	expiresAt time.Time) (time.Time, error) {
+	expiresAt time.Time) (*db.LeasedOutput, error) {
 
 	outputIndex, err := db.Uint32ToInt32(params.OutPoint.Index)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("convert output index: %w", err)
+		return nil, fmt.Errorf("convert output index: %w", err)
 	}
 
 	expiration, err := o.qtx.AcquireUtxoLease(
@@ -70,14 +70,17 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 		},
 	)
 	if err == nil {
-		return expiration, nil
+		return db.BuildLeasedOutput(
+			params.OutPoint.Hash[:], params.OutPoint.Index,
+			params.ID[:], expiration,
+		)
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, db.ErrLeaseOutputNoRow
+		return nil, db.ErrLeaseOutputNoRow
 	}
 
-	return time.Time{}, fmt.Errorf("acquire lease row: %w", err)
+	return nil, fmt.Errorf("acquire lease row: %w", err)
 }
 
 // HasUtxo reports whether the requested outpoint still exists as a current

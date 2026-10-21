@@ -189,7 +189,7 @@ func TestBuildLeasedOutput_InvalidLockID(t *testing.T) {
 }
 
 // TestLeaseOutputWithOps verifies that the shared LeaseOutput helper returns
-// the leased outpoint when the backend Acquire step succeeds.
+// the stored lease when the backend Acquire step succeeds.
 func TestLeaseOutputWithOps(t *testing.T) {
 	t.Parallel()
 
@@ -200,7 +200,11 @@ func TestLeaseOutputWithOps(t *testing.T) {
 		ID:       LockID{7},
 		Duration: time.Minute,
 	}
-	acquireExpiration := time.Unix(333, 0).In(time.FixedZone("X", 3600))
+	stored := &LeasedOutput{
+		OutPoint:   params.OutPoint,
+		LockID:     LockID(params.ID),
+		Expiration: time.Unix(333, 0).UTC(),
+	}
 	ops := &mockLeaseOutputOps{}
 	t.Cleanup(func() {
 		ops.AssertExpectations(t)
@@ -208,16 +212,14 @@ func TestLeaseOutputWithOps(t *testing.T) {
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		acquireExpiration, nil).Once()
+		stored, nil).Once()
 
 	// Act: Run the shared LeaseOutput flow.
 	lease, err := LeaseOutputWithOps(context.Background(), params, ops)
 
-	// Assert: The helper returns the leased outpoint and UTC expiration.
+	// Assert: The helper returns the stored lease unchanged.
 	require.NoError(t, err)
-	require.Equal(t, params.OutPoint, lease.OutPoint)
-	require.Equal(t, LockID(params.ID), lease.LockID)
-	require.Equal(t, time.UTC, lease.Expiration.Location())
+	require.Equal(t, stored, lease)
 }
 
 // TestLeaseOutputWithOpsRejectsNonPositiveDuration verifies that the shared
@@ -260,7 +262,7 @@ func TestLeaseOutputWithOpsMissingUtxo(t *testing.T) {
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		time.Time{}, ErrLeaseOutputNoRow).Once()
+		nil, ErrLeaseOutputNoRow).Once()
 
 	ops.On("HasUtxo", mock.Anything, params).Return(false, nil).Once()
 
@@ -286,7 +288,7 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		time.Time{}, ErrLeaseOutputNoRow).Once()
+		nil, ErrLeaseOutputNoRow).Once()
 
 	ops.On("HasUtxo", mock.Anything, params).Return(true, nil).Once()
 
@@ -413,16 +415,19 @@ var _ LeaseOutputOps = (*mockLeaseOutputOps)(nil)
 // Acquire implements LeaseOutputOps.
 func (m *mockLeaseOutputOps) Acquire(ctx context.Context,
 	params LeaseOutputParams, start time.Time,
-	expiration time.Time) (time.Time, error) {
+	expiration time.Time) (*LeasedOutput, error) {
 
 	args := m.Called(ctx, params, start, expiration)
-
-	leaseExpiration, ok := args.Get(0).(time.Time)
-	if !ok {
-		return time.Time{}, errMockType
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
 	}
 
-	return leaseExpiration, args.Error(1)
+	lease, ok := args.Get(0).(*LeasedOutput)
+	if !ok {
+		return nil, errMockType
+	}
+
+	return lease, args.Error(1)
 }
 
 // HasUtxo implements LeaseOutputOps.
