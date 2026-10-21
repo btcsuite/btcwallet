@@ -522,6 +522,198 @@ func TestLeaseOutputRejectsSpentByUnminedTx(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 }
 
+// TestLeaseOutputsLeasesCompleteSet verifies that LeaseOutputs leases every
+// requested outpoint under one ID, and that ReleaseOutput frees one early.
+func TestLeaseOutputsLeasesCompleteSet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store two distinct known credits.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	first := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 2500, 2)
+	second := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 3000, 2)
+
+	// Act: Lease both outpoints in one call, then release the first.
+	leases, err := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{first, second},
+		Duration:  time.Hour,
+	})
+	require.NoError(t, err)
+
+	leasedBefore, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+
+	err = store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
+		ID:       db.LockID{1},
+		OutPoint: first,
+	})
+	require.NoError(t, err)
+
+	leasedAfter, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+
+	// Assert: Both outpoints were leased in request order under the ID
+	// with a future expiry, and the early release left only the second.
+	require.Len(t, leases, 2)
+	require.Equal(t, first, leases[0].OutPoint)
+	require.Equal(t, second, leases[1].OutPoint)
+
+	for _, lease := range leases {
+		require.Equal(t, db.LockID{1}, lease.LockID)
+		require.True(t, lease.Expiration.After(time.Now().UTC()))
+	}
+
+	require.ElementsMatch(t, []wire.OutPoint{first, second},
+		leasedOutPoints(leasedBefore))
+	require.Equal(t, []wire.OutPoint{second}, leasedOutPoints(leasedAfter))
+}
+
+// TestLeaseOutputsConflictAcquiresNoPartialSet verifies that a conflicting
+// lease anywhere in the set leaves no lease from the failed call behind.
+func TestLeaseOutputsConflictAcquiresNoPartialSet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store two known credits and lease the second under another
+	// ID.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	first := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 2500, 2)
+	second := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 3000, 2)
+
+	_, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		ID:       db.LockID{2},
+		OutPoint: second,
+		Duration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	// Act: Lease the set with the first outpoint ahead of the conflicting
+	// one.
+	leases, err := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{first, second},
+		Duration:  time.Hour,
+	})
+
+	// Assert: The call fails with the conflict error and the first
+	// outpoint's lease was rolled back, leaving only the other ID's lease.
+	require.ErrorIs(t, err, db.ErrOutputAlreadyLeased)
+	require.Nil(t, leases)
+
+	leased, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, []wire.OutPoint{second}, leasedOutPoints(leased))
+}
+
+// TestLeaseOutputsMissingUtxoAcquiresNoPartialSet verifies that a missing
+// output anywhere in the set leaves no lease from the failed call behind.
+func TestLeaseOutputsMissingUtxoAcquiresNoPartialSet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store one known credit and pick an unknown outpoint.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	first := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 2500, 2)
+	missing := wire.OutPoint{Hash: [32]byte{9}}
+
+	// Act: Lease the set with the first outpoint ahead of the missing
+	// one.
+	leases, err := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{first, missing},
+		Duration:  time.Hour,
+	})
+
+	// Assert: The call fails with the not-found error and the first
+	// outpoint's lease was rolled back, leaving no leases.
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+	require.Nil(t, leases)
+
+	leased, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+	require.Empty(t, leased)
+}
+
+// TestLeaseOutputsTakesOverExpiredLease verifies that an expired lease held by
+// another ID does not block LeaseOutputs, so the set call takes the output
+// over.
+//
+// wtxmgr reads lease expiry from an unexported clock, so the test writes the
+// holder's lease with an expiry in the past rather than advancing time.
+func TestLeaseOutputsTakesOverExpiredLease(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store two known credits and lease the second under another
+	// ID with an expiry in the past.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	first := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 2500, 2)
+	second := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 3000, 2)
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		_, err := txStore.LockOutput(
+			ns, wtxmgr.LockID{2}, second, -time.Hour,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	// Act: Lease the set under a new ID.
+	leases, err := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{first, second},
+		Duration:  time.Hour,
+	})
+	require.NoError(t, err)
+
+	leased, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+
+	// Assert: The set call owns both outpoints with a future expiry.
+	require.Len(t, leases, 2)
+	require.Equal(t, first, leases[0].OutPoint)
+	require.Equal(t, second, leases[1].OutPoint)
+
+	for _, lease := range leases {
+		require.Equal(t, db.LockID{1}, lease.LockID)
+		require.True(t, lease.Expiration.After(time.Now().UTC()))
+	}
+
+	require.Len(t, leased, 2)
+
+	for _, lease := range leased {
+		require.Equal(t, db.LockID{1}, lease.LockID)
+	}
+
+	require.ElementsMatch(t, []wire.OutPoint{first, second},
+		leasedOutPoints(leased))
+}
+
+// leasedOutPoints returns the outpoints of the given leases.
+func leasedOutPoints(leases []db.LeasedOutput) []wire.OutPoint {
+	outPoints := make([]wire.OutPoint, 0, len(leases))
+	for _, lease := range leases {
+		outPoints = append(outPoints, lease.OutPoint)
+	}
+
+	return outPoints
+}
+
 // TestListLeasedOutputsSuccess verifies that kvdb.Store exposes the active
 // legacy lease set through the db-native shape.
 func TestListLeasedOutputsSuccess(t *testing.T) {
