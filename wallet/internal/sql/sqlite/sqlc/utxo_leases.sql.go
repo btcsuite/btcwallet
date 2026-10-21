@@ -52,7 +52,7 @@ AND (
     utxo_leases.expires_at <= ?7
     OR utxo_leases.lock_id = excluded.lock_id
 )
-RETURNING expires_at, release_after_spend_confs
+RETURNING expires_at, release_after_spend_confs, spend_disconnected
 `
 
 type AcquireUtxoLeaseParams struct {
@@ -68,6 +68,7 @@ type AcquireUtxoLeaseParams struct {
 type AcquireUtxoLeaseRow struct {
 	ExpiresAt              time.Time
 	ReleaseAfterSpendConfs int64
+	SpendDisconnected      bool
 }
 
 // Acquires or renews a lease for an outpoint and returns the resulting
@@ -105,7 +106,7 @@ func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeasePara
 		arg.NowUtc,
 	)
 	var i AcquireUtxoLeaseRow
-	err := row.Scan(&i.ExpiresAt, &i.ReleaseAfterSpendConfs)
+	err := row.Scan(&i.ExpiresAt, &i.ReleaseAfterSpendConfs, &i.SpendDisconnected)
 	return i, err
 }
 
@@ -172,7 +173,8 @@ SELECT
     u.output_index,
     l.lock_id,
     l.expires_at,
-    l.release_after_spend_confs
+    l.release_after_spend_confs,
+    l.spend_disconnected
 FROM utxo_leases AS l
 INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id
@@ -195,6 +197,7 @@ type ListActiveUtxoLeasesRow struct {
 	LockID                 []byte
 	ExpiresAt              time.Time
 	ReleaseAfterSpendConfs int64
+	SpendDisconnected      bool
 }
 
 // Lists all currently active leases for a wallet.
@@ -224,6 +227,7 @@ func (q *Queries) ListActiveUtxoLeases(ctx context.Context, arg ListActiveUtxoLe
 			&i.LockID,
 			&i.ExpiresAt,
 			&i.ReleaseAfterSpendConfs,
+			&i.SpendDisconnected,
 		); err != nil {
 			return nil, err
 		}

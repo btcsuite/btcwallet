@@ -73,9 +73,10 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 		return nil, fmt.Errorf("acquire lease row: %w", err)
 	}
 
+	// The leased output is unspent, so it has no confirmed spend.
 	return db.BuildLeasedOutput(
 		params.OutPoint.Hash[:], params.OutPoint.Index, params.ID[:],
-		row.ExpiresAt, row.ReleaseAfterSpendConfs,
+		row.ExpiresAt, row.ReleaseAfterSpendConfs, 0, row.SpendDisconnected,
 	)
 }
 

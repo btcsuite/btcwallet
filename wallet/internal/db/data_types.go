@@ -1634,6 +1634,12 @@ type LeasedOutput struct {
 	// ReleaseAfterSpendConfs is the spend depth that releases a
 	// confirmation-controlled lock. Zero means the lock is timed.
 	ReleaseAfterSpendConfs uint32
+
+	// ConfirmedSpendHeight is the spend progress of a
+	// confirmation-controlled lock. Zero means no confirmed spend was
+	// observed, -1 means an observed spend was disconnected, and a positive
+	// value is the height of the confirmed spend.
+	ConfirmedSpendHeight int32
 }
 
 // BalanceResult represents one wallet-scoped balance view after applying the

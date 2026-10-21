@@ -59,7 +59,7 @@ ON CONFLICT (utxo_id) DO UPDATE
         utxo_leases.expires_at <= sqlc.arg('now_utc')::TIMESTAMP
         OR utxo_leases.lock_id = excluded.lock_id
     )
-RETURNING expires_at, release_after_spend_confs;
+RETURNING expires_at, release_after_spend_confs, spend_disconnected;
 
 -- name: ReleaseUtxoLease :execrows
 -- Releases a lease for a UTXO ID if the lock_id matches.
@@ -107,7 +107,8 @@ SELECT
     u.output_index,
     l.lock_id,
     l.expires_at,
-    l.release_after_spend_confs
+    l.release_after_spend_confs,
+    l.spend_disconnected
 FROM utxo_leases AS l
 INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id

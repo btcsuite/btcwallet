@@ -98,8 +98,10 @@ func (f *leasePolicyFixture) lease(t *testing.T, id db.LockID,
 }
 
 // requireLease asserts that the fixture output is the only listed lease and
-// carries the expected owner and spend depth.
-func (f *leasePolicyFixture) requireLease(t *testing.T, id db.LockID) {
+// carries the expected owner and spend progress.
+func (f *leasePolicyFixture) requireLease(t *testing.T, id db.LockID,
+	spendHeight int32) {
+
 	t.Helper()
 
 	leases, err := f.store.ListLeasedOutputs(t.Context(), f.walletID)
@@ -109,6 +111,7 @@ func (f *leasePolicyFixture) requireLease(t *testing.T, id db.LockID) {
 	require.Equal(t, id, leases[0].LockID)
 	require.Equal(t, uint32(leaseReleaseDepth),
 		leases[0].ReleaseAfterSpendConfs)
+	require.Equal(t, spendHeight, leases[0].ConfirmedSpendHeight)
 }
 
 // TestConfirmationLeaseRenewalKeepsDepth verifies that a same-owner renewal
@@ -121,8 +124,9 @@ func TestConfirmationLeaseRenewalKeepsDepth(t *testing.T) {
 
 	lease := f.lease(t, owner, leaseReleaseDepth)
 	require.Equal(t, uint32(leaseReleaseDepth), lease.ReleaseAfterSpendConfs)
+	require.Zero(t, lease.ConfirmedSpendHeight)
 
 	lease = f.lease(t, owner, 0)
 	require.Equal(t, uint32(leaseReleaseDepth), lease.ReleaseAfterSpendConfs)
-	f.requireLease(t, owner)
+	f.requireLease(t, owner, 0)
 }

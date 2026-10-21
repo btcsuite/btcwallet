@@ -152,7 +152,7 @@ func TestBuildLeasedOutput(t *testing.T) {
 	// Act: Build the public leased-output view.
 	lease, err := BuildLeasedOutput(
 		hash[:], 9, lockID, time.Unix(333, 0).In(time.FixedZone("X", 3600)),
-		6,
+		6, 0, true,
 	)
 
 	// Assert: The helper preserves the outpoint, lock ID, UTC expiration,
@@ -163,6 +163,7 @@ func TestBuildLeasedOutput(t *testing.T) {
 	require.Equal(t, byte(7), lease.LockID[0])
 	require.Equal(t, time.UTC, lease.Expiration.Location())
 	require.Equal(t, uint32(6), lease.ReleaseAfterSpendConfs)
+	require.Equal(t, int32(-1), lease.ConfirmedSpendHeight)
 }
 
 // TestBuildLeasedOutputInvalidSpendPolicy verifies that BuildLeasedOutput
@@ -177,6 +178,7 @@ func TestBuildLeasedOutputInvalidSpendPolicy(t *testing.T) {
 	tests := []struct {
 		name         string
 		releaseConfs int64
+		spendHeight  int64
 	}{
 		{
 			name:         "negative release depth",
@@ -186,6 +188,11 @@ func TestBuildLeasedOutputInvalidSpendPolicy(t *testing.T) {
 			name:         "release depth above uint32",
 			releaseConfs: math.MaxUint32 + 1,
 		},
+		{
+			name:         "spend height above int32",
+			releaseConfs: 1,
+			spendHeight:  math.MaxInt32 + 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -194,6 +201,7 @@ func TestBuildLeasedOutputInvalidSpendPolicy(t *testing.T) {
 
 			_, err := BuildLeasedOutput(
 				hash[:], 0, lockID, time.Now(), tc.releaseConfs,
+				tc.spendHeight, false,
 			)
 			require.ErrorIs(t, err, ErrCastingOverflow)
 		})
@@ -221,7 +229,7 @@ func TestBuildLeasedOutput_InvalidLockID(t *testing.T) {
 
 	// Act: Attempt to build the public leased-output view.
 	_, err := BuildLeasedOutput(
-		hash[:], 0, shortLockID, time.Now(), 0,
+		hash[:], 0, shortLockID, time.Now(), 0, 0, false,
 	)
 
 	// Assert: The helper returns the invalid-lock-ID sentinel.
@@ -230,12 +238,12 @@ func TestBuildLeasedOutput_InvalidLockID(t *testing.T) {
 
 // TestLeaseOutputWithOps verifies that the shared LeaseOutput helper returns
 // the stored lease when the backend Acquire step succeeds, including a spend
-// depth that differs from the request.
+// policy that differs from the request.
 func TestLeaseOutputWithOps(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Build one zero-depth renewal and an adapter that reports the
-	// depth the store kept.
+	// depth and progress the store kept.
 	params := LeaseOutputParams{
 		WalletID: 5,
 		OutPoint: testLeaseOutPoint(),
@@ -247,6 +255,7 @@ func TestLeaseOutputWithOps(t *testing.T) {
 		LockID:                 LockID(params.ID),
 		Expiration:             time.Unix(333, 0).UTC(),
 		ReleaseAfterSpendConfs: 3,
+		ConfirmedSpendHeight:   -1,
 	}
 	ops := &mockLeaseOutputOps{}
 	t.Cleanup(func() {
@@ -580,7 +589,7 @@ func TestBuildLeasedOutputInvalidHash(t *testing.T) {
 
 	lockID := make([]byte, 32)
 	_, err := BuildLeasedOutput(
-		[]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0), 0,
+		[]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0), 0, 0, false,
 	)
 
 	require.Error(t, err)

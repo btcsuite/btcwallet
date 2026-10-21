@@ -250,9 +250,11 @@ func WatchOutputFromRow(hash []byte, outputIndex int64,
 }
 
 // BuildLeasedOutput converts SQL lease-row fields into the public LeasedOutput
-// type.
+// type. spendHeight is the block height of the output's confirmed spend, or 0
+// when it has none; spendDisconnected then reports progress as -1.
 func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
-	expiration time.Time, releaseAfterSpendConfs int64) (*LeasedOutput, error) {
+	expiration time.Time, releaseAfterSpendConfs int64, spendHeight int64,
+	spendDisconnected bool) (*LeasedOutput, error) {
 
 	outPoint, err := buildOutPoint(hash, outputIndex)
 	if err != nil {
@@ -271,11 +273,21 @@ func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 		return nil, fmt.Errorf("lease release depth: %w", err)
 	}
 
+	progress, err := Int64ToInt32(spendHeight)
+	if err != nil {
+		return nil, fmt.Errorf("lease spend height: %w", err)
+	}
+
+	if progress == 0 && spendDisconnected {
+		progress = -1
+	}
+
 	return &LeasedOutput{
 		OutPoint:               outPoint,
 		LockID:                 id,
 		Expiration:             expiration.UTC(),
 		ReleaseAfterSpendConfs: releaseConfs,
+		ConfirmedSpendHeight:   progress,
 	}, nil
 }
 

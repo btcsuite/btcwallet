@@ -35,9 +35,11 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 				return fmt.Errorf("lease output index: %w", err)
 			}
 
+			// Listed outputs are unspent, so none has a confirmed
+			// spend.
 			lease, err := db.BuildLeasedOutput(
 				row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
-				row.ReleaseAfterSpendConfs,
+				row.ReleaseAfterSpendConfs, 0, row.SpendDisconnected,
 			)
 			if err != nil {
 				return err
