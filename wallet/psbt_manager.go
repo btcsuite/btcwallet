@@ -280,18 +280,17 @@ type SignPsbtParams struct {
 	// Packet is the PSBT to be signed.
 	Packet *psbt.Packet
 
-	// InputTweakers is a map of input indices to a private key tweaker.
-	// This allows the caller to define a specific tweaker for each input
-	// index.
+	// InputTweaks maps input indices to the tweak applied to that input's
+	// derived key before it signs.
 	//
 	// NOTE: The ideal implementation would be to add a new field to
-	// psbt.PInput that holds the tweaker, but that would require a change
+	// psbt.PInput that holds the tweak, but that would require a change
 	// to the core psbt package in btcd. To keep btcwallet generic and avoid
 	// that dependency, we allow the caller (e.g. lnd) to inspect the PSBT
 	// beforehand, determine the necessary tweaks (e.g. based on custom
 	// fields like PsbtKeyTypeInputSignatureTweakSingle), and pass them in
 	// via this map.
-	InputTweakers map[int]PrivKeyTweaker
+	InputTweaks map[int]KeyTweak
 }
 
 // SignPsbtResult encapsulates the result of a PSBT signing operation.
@@ -1374,8 +1373,8 @@ func (w *Wallet) createTxIntent(packet *psbt.Packet,
 // again. The packet is then signed as a copy: the caller's packet is updated
 // only if the call succeeds.
 //
-// Accepted signing finishes before return, including partial signatures and
-// supplied input tweakers, even if the caller cancels after admission.
+// Accepted signing finishes before return, including partial signatures, even
+// if the caller cancels after admission.
 func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	*SignPsbtResult, error) {
 
@@ -1472,7 +1471,7 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// Plan every input before signing any, so a problem with one input is
 	// reported before a private key is looked up for another.
 	plans, err := w.planPsbtInputs(
-		packet, sigHashes, r.params.InputTweakers,
+		packet, sigHashes, r.params.InputTweaks,
 	)
 	if err != nil {
 		r.respChan <- signPsbtResp{err: err}
@@ -1537,11 +1536,11 @@ type psbtSignPlan struct {
 // private key.
 func (w *Wallet) planPsbtInputs(packet *psbt.Packet,
 	sigHashes *txscript.TxSigHashes,
-	tweakers map[int]PrivKeyTweaker) ([]*psbtSignPlan, error) {
+	tweaks map[int]KeyTweak) ([]*psbtSignPlan, error) {
 
 	plans := make([]*psbtSignPlan, 0, len(packet.Inputs))
 	for i := range packet.Inputs {
-		plan, sign, err := w.planPsbtInput(packet, i, sigHashes, tweakers)
+		plan, sign, err := w.planPsbtInput(packet, i, sigHashes, tweaks)
 		if err != nil {
 			return nil, fmt.Errorf("input %d: %w", i, err)
 		}
@@ -1559,7 +1558,7 @@ func (w *Wallet) planPsbtInputs(packet *psbt.Packet,
 // signed or not ours), and an error if the input is invalid.
 func (w *Wallet) planPsbtInput(packet *psbt.Packet, i int,
 	sigHashes *txscript.TxSigHashes,
-	tweakers map[int]PrivKeyTweaker) (*psbtSignPlan, bool, error) {
+	tweaks map[int]KeyTweak) (*psbtSignPlan, bool, error) {
 
 	pInput := &packet.Inputs[i]
 
@@ -1591,11 +1590,11 @@ func (w *Wallet) planPsbtInput(packet *psbt.Packet, i int,
 	var plan *psbtSignPlan
 	if isTaproot {
 		plan, err = w.planTaprootPsbtInput(
-			packet, i, sigHashes, tweakers[i],
+			packet, i, sigHashes, tweaks[i],
 		)
 	} else {
 		plan, err = w.planBip32PsbtInput(
-			packet, i, sigHashes, tweakers[i],
+			packet, i, sigHashes, tweaks[i],
 		)
 	}
 
@@ -2084,7 +2083,7 @@ func bip32SubScript(pInput *psbt.PInput, utxo *wire.TxOut) []byte {
 // Returns an error if the input is invalid or already signed.
 func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 	sigHashes *txscript.TxSigHashes,
-	tweaker PrivKeyTweaker) (*psbtSignPlan, error) {
+	tweak KeyTweak) (*psbtSignPlan, error) {
 
 	// It is safe to access packet.Inputs[idx] directly here because
 	// SignPsbt calls psbt.InputsReadyToSign before this method, which
@@ -2119,7 +2118,7 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 		SigHashes:  sigHashes,
 		HashType:   pInput.SighashType,
 		Path:       path,
-		Tweaker:    tweaker,
+		Tweak:      tweak,
 		Details:    details,
 	}
 
@@ -2148,7 +2147,7 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 // Returns an error if the input is invalid or already signed.
 func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 	sigHashes *txscript.TxSigHashes,
-	tweaker PrivKeyTweaker) (*psbtSignPlan, error) {
+	tweak KeyTweak) (*psbtSignPlan, error) {
 
 	// It is safe to access packet.Inputs[idx] directly here because
 	// SignPsbt calls psbt.InputsReadyToSign before this method, which
@@ -2189,7 +2188,7 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 		SigHashes:  sigHashes,
 		HashType:   pInput.SighashType,
 		Path:       path,
-		Tweaker:    tweaker,
+		Tweak:      tweak,
 		Details:    details,
 	}
 
