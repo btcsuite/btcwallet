@@ -1000,24 +1000,22 @@ func CanPromoteUnminedCreateTxDuplicate(req CreateTxRequest, status TxStatus,
 }
 
 // loadCreateTxExisting resolves any wallet-scoped row already stored for the
-// requested tx hash and reports whether one was found.
+// requested tx hash. A nil target means no stored row exists.
 func loadCreateTxExisting(ctx context.Context, req CreateTxRequest,
-	ops CreateTxOps) (*CreateTxExistingTarget, bool, error) {
+	ops CreateTxOps) (*CreateTxExistingTarget, error) {
 
 	existing, err := ops.LoadExisting(ctx, req)
-	if err != nil && !errors.Is(err, ErrCreateTxExistingNotFound) {
-		return nil, false, fmt.Errorf("load create tx target: %w", err)
-	}
-
+	// Normalize the not-found sentinel into an absent target so callers can
+	// select insertion using the same optional-row result as a nil lookup.
 	if errors.Is(err, ErrCreateTxExistingNotFound) {
-		return nil, false, nil
+		return existing, nil
 	}
 
-	if existing == nil {
-		return nil, false, nil
+	if err != nil {
+		return nil, fmt.Errorf("load create tx target: %w", err)
 	}
 
-	return existing, true, nil
+	return existing, nil
 }
 
 // collectConflictDescendants loads the live unmined graph snapshot and returns
@@ -1310,6 +1308,23 @@ func replayIdempotentCreateTx(ctx context.Context, req CreateTxRequest,
 	return nil
 }
 
+// createTxWithExisting reuses loaded metadata to continue creation or replay.
+// The entry points can resolve label policy without a second database read.
+func createTxWithExisting(ctx context.Context, req CreateTxRequest,
+	existing *CreateTxExistingTarget, ops CreateTxOps) error {
+
+	if existing != nil {
+		return handleExistingCreateTx(ctx, req, *existing, ops)
+	}
+
+	err := ops.PrepareBlock(ctx, req)
+	if err != nil {
+		return fmt.Errorf("prepare create block assignment: %w", err)
+	}
+
+	return insertCreateTx(ctx, req, ops)
+}
+
 // CreateTxWithOps runs the backend-independent CreateTx orchestration once the
 // caller has opened a backend-specific SQL transaction.
 //
@@ -1317,24 +1332,37 @@ func replayIdempotentCreateTx(ctx context.Context, req CreateTxRequest,
 // For confirmed inserts it also reconciles any current direct conflict branch
 // before the new row claims wallet-owned inputs. The helper owns that ordering
 // so the backends only need to supply query wiring and type conversion.
+// Direct creation keeps strict label comparison; scan batches instead use
+// ApplyBatchTxWithOps to preserve labels omitted by chain observations.
 func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
 
-	existing, foundExisting, err := loadCreateTxExisting(ctx, req, ops)
+	existing, err := loadCreateTxExisting(ctx, req, ops)
 	if err != nil {
 		return err
 	}
 
-	if !foundExisting {
-		err = ops.PrepareBlock(ctx, req)
-		if err != nil {
-			return fmt.Errorf("prepare create block assignment: %w", err)
-		}
+	return createTxWithExisting(ctx, req, existing, ops)
+}
 
-		return insertCreateTx(ctx, req, ops)
+// ApplyBatchTxWithOps ingests a transaction using the caller's batch SQL
+// transaction. An absent confirmed label preserves existing user metadata;
+// explicit labels retain the same strict comparison as direct creation.
+func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) error {
+
+	existing, err := loadCreateTxExisting(ctx, req, ops)
+	if err != nil {
+		return err
 	}
 
-	return handleExistingCreateTx(ctx, req, *existing, ops)
+	// Resolve the label from the same metadata replay will validate. Existing
+	// rows never write this label back, so concurrent user edits survive.
+	if existing != nil && req.Params.Block != nil && req.Params.Label == "" {
+		req.Params.Label = existing.Label
+	}
+
+	return createTxWithExisting(ctx, req, existing, ops)
 }
 
 // validateUpdateTxParams checks that UpdateTx received at least one mutable

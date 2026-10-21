@@ -2048,11 +2048,13 @@ func TestCheckIdempotentCreateTx(t *testing.T) {
 	}
 }
 
-// TestLoadCreateTxExisting verifies not-found and wrapped-error handling for
-// the shared existing-row lookup.
+// TestLoadCreateTxExisting verifies absent-target and wrapped-error handling
+// for the shared existing-row lookup.
 func TestLoadCreateTxExisting(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return both absence forms and an unexpected error in call order.
+	// The existing cleanup verifies that each configured lookup occurs once.
 	req := testCreateTxRequest(t)
 	ops := &mockCreateTxOps{}
 	t.Cleanup(func() {
@@ -2061,26 +2063,25 @@ func TestLoadCreateTxExisting(t *testing.T) {
 
 	ops.On("LoadExisting", mock.Anything, req).Return(
 		nil, ErrCreateTxExistingNotFound).Once()
-
-	existing, found, err := loadCreateTxExisting(context.Background(), req, ops)
-	require.NoError(t, err)
-	require.False(t, found)
-	require.Nil(t, existing)
-
 	ops.On("LoadExisting", mock.Anything, req).Return(nil, nil).Once()
-
-	existing, found, err = loadCreateTxExisting(context.Background(), req, ops)
-	require.NoError(t, err)
-	require.False(t, found)
-	require.Nil(t, existing)
-
 	ops.On("LoadExisting", mock.Anything, req).Return(
 		nil, errCreateTxTest,
 	).Once()
 
-	_, _, err = loadCreateTxExisting(context.Background(), req, ops)
-	require.ErrorIs(t, err, errCreateTxTest)
-	require.ErrorContains(t, err, "load create tx target")
+	// Act: Resolve each backend outcome through the shared lookup, exercising
+	// absence normalization and propagation of an unexpected storage failure.
+	missing, missingErr := loadCreateTxExisting(context.Background(), req, ops)
+	empty, emptyErr := loadCreateTxExisting(context.Background(), req, ops)
+	_, loadErr := loadCreateTxExisting(context.Background(), req, ops)
+
+	// Assert: Both absence forms produce a nil target without an error, while
+	// the unexpected failure retains its cause and lookup context.
+	require.NoError(t, missingErr)
+	require.Nil(t, missing)
+	require.NoError(t, emptyErr)
+	require.Nil(t, empty)
+	require.ErrorIs(t, loadErr, errCreateTxTest)
+	require.ErrorContains(t, loadErr, "load create tx target")
 }
 
 // TestHandleRootTxnsClearError verifies that root spend-clearing failures are
