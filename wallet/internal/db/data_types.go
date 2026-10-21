@@ -5,6 +5,7 @@ package db
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -1599,6 +1600,53 @@ type LeaseOutputParams struct {
 
 	// Duration is the duration to lock the UTXO for.
 	Duration time.Duration
+}
+
+// LeaseOutputsParams contains the parameters for leasing a complete set of
+// UTXOs under one lock ID in one atomic operation.
+type LeaseOutputsParams struct {
+	// WalletID is the ID of the wallet containing the UTXOs.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// ID is the lock ID shared by every lease in the set.
+	ID [32]byte
+
+	// OutPoints is the complete, duplicate-free set of UTXOs to lock.
+	OutPoints []wire.OutPoint
+
+	// Duration is the duration to lock every UTXO for.
+	Duration time.Duration
+}
+
+// Validate rejects set requests that no backend can honor before any write is
+// attempted. Duplicates are rejected rather than collapsed because a duplicate
+// means the caller's view of its own set is wrong, and the same-ID renewal
+// path would otherwise hide that silently.
+func (p LeaseOutputsParams) Validate() error {
+	if p.Duration <= 0 {
+		return fmt.Errorf("%w: lease duration must be positive",
+			ErrInvalidParam)
+	}
+
+	if len(p.OutPoints) == 0 {
+		return fmt.Errorf("%w: lease set must not be empty",
+			ErrInvalidParam)
+	}
+
+	seen := make(map[wire.OutPoint]struct{}, len(p.OutPoints))
+	for _, outPoint := range p.OutPoints {
+		if _, ok := seen[outPoint]; ok {
+			return fmt.Errorf("%w: duplicate outpoint %s in lease set",
+				ErrInvalidParam, outPoint)
+		}
+
+		seen[outPoint] = struct{}{}
+	}
+
+	return nil
 }
 
 // ReleaseOutputParams contains the parameters for releasing a UTXO lease.

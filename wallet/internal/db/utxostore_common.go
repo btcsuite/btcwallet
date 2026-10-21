@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -312,6 +313,75 @@ func LeaseOutputWithOps(ctx context.Context, params LeaseOutputParams,
 	nowUTC := time.Now().UTC()
 
 	return leaseOutputAt(ctx, params, ops, nowUTC)
+}
+
+// LeaseOutputsWithOps runs the backend-independent LeaseOutputs workflow once
+// the caller has opened a backend-specific SQL transaction.
+//
+// Every outpoint goes through the same per-output sequencing as
+// LeaseOutputWithOps, anchored to one shared timestamp so the whole set gets
+// the same expiration. The helper stops at the first failure and returns it;
+// the caller's transaction must then roll back, which is what keeps a failed
+// call from leaving any partial set behind.
+//
+// Rows are acquired in canonical outpoint order, not request order, so two
+// concurrent transactions over overlapping sets always lock their shared rows
+// in the same sequence and cannot deadlock on each other. The returned leases
+// still follow the request order.
+func LeaseOutputsWithOps(ctx context.Context, params LeaseOutputsParams,
+	ops LeaseOutputOps) ([]LeasedOutput, error) {
+
+	err := params.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	nowUTC := time.Now().UTC()
+
+	order := make([]int, len(params.OutPoints))
+	for i := range order {
+		order[i] = i
+	}
+
+	slices.SortFunc(order, func(a, b int) int {
+		return compareOutPoints(params.OutPoints[a], params.OutPoints[b])
+	})
+
+	leases := make([]LeasedOutput, len(params.OutPoints))
+	for _, i := range order {
+		lease, err := leaseOutputAt(ctx, LeaseOutputParams{
+			WalletID: params.WalletID,
+			ID:       params.ID,
+			OutPoint: params.OutPoints[i],
+			Duration: params.Duration,
+		}, ops, nowUTC)
+		if err != nil {
+			return nil, err
+		}
+
+		leases[i] = *lease
+	}
+
+	return leases, nil
+}
+
+// compareOutPoints orders outpoints by transaction hash bytes and then by
+// output index, giving every set-lease transaction one shared lock order.
+func compareOutPoints(a, b wire.OutPoint) int {
+	cmp := bytes.Compare(a.Hash[:], b.Hash[:])
+	if cmp != 0 {
+		return cmp
+	}
+
+	switch {
+	case a.Index < b.Index:
+		return -1
+
+	case a.Index > b.Index:
+		return 1
+	}
+
+	return 0
 }
 
 // leaseOutputAt acquires or renews one lease relative to the supplied
