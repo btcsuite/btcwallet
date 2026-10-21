@@ -591,6 +591,15 @@ type UTXOStore interface {
 	LeaseOutput(ctx context.Context, params LeaseOutputParams) (
 		*LeasedOutput, error)
 
+	// LeaseOutputs atomically acquires or renews leases for a complete set
+	// of UTXOs under one lock ID. Either every outpoint ends up leased under
+	// the ID, or the call fails and no lease from this call remains. A
+	// definite conflict on any outpoint returns ErrOutputAlreadyLeased and a
+	// missing outpoint returns ErrUtxoNotFound, both without acquiring any
+	// part of the set. The returned leases follow the request order.
+	LeaseOutputs(ctx context.Context, params LeaseOutputsParams) (
+		[]LeasedOutput, error)
+
 	// ReleaseOutput unlocks a previously leased UTXO, making it available
 	// for coin selection again. Unlocking an already-unlocked or expired lease
 	// is a no-op. If another active lease still exists for the output, the lock

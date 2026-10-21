@@ -388,6 +388,18 @@ func (m *Store) LeaseOutput(ctx context.Context,
 	return args.Get(0).(*db.LeasedOutput), args.Error(1)
 }
 
+// LeaseOutputs implements the db.UTXOStore interface.
+func (m *Store) LeaseOutputs(ctx context.Context,
+	params db.LeaseOutputsParams) ([]db.LeasedOutput, error) {
+
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.LeasedOutput), args.Error(1)
+}
+
 // ReleaseOutput implements the db.UTXOStore interface.
 func (m *Store) ReleaseOutput(ctx context.Context,
 	params db.ReleaseOutputParams) error {
