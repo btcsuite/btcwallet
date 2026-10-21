@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -1757,4 +1758,60 @@ func TestAuthorizeSignRecordsKeySpendBadOutputKey(t *testing.T) {
 
 	// Assert: the record is refused.
 	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+}
+
+// testBip32Path returns the derivation path the store-routed signer resolves
+// for a purpose's account 0, branch 0, index 0.
+func testBip32Path(purpose uint32) []uint32 {
+	return []uint32{
+		hdkeychain.HardenedKeyStart + purpose,
+		hdkeychain.HardenedKeyStart + 1,
+		hdkeychain.HardenedKeyStart + 0,
+		0, 0,
+	}
+}
+
+// testBip86Output returns a BIP-86 output paying an internal key.
+func testBip86Output(t *testing.T, key *btcec.PublicKey) *wire.TxOut {
+	t.Helper()
+
+	pkScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootKeyNoScript(key),
+	)
+	require.NoError(t, err)
+
+	return &wire.TxOut{Value: 1000, PkScript: pkScript}
+}
+
+// testTaprootSignPacket returns a packet spending utxo with the wallet's
+// BIP-86 derivation record for the given leaf, or for the key path when
+// leafScript is nil.
+func testTaprootSignPacket(t *testing.T, utxo *wire.TxOut,
+	leafScript *psbt.TaprootTapLeafScript) *psbt.Packet {
+
+	t.Helper()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	derivation := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey: schnorr.SerializePubKey(walletPub),
+		Bip32Path:   testBip32Path(86),
+	}
+
+	packet, _, _ := testAuthPacket(t, utxo, txscript.SigHashDefault)
+	if leafScript != nil {
+		leaf := txscript.TapLeaf{
+			LeafVersion: leafScript.LeafVersion,
+			Script:      leafScript.Script,
+		}
+		leafHash := leaf.TapHash()
+
+		derivation.LeafHashes = [][]byte{leafHash[:]}
+		packet.Inputs[0].TaprootLeafScript =
+			[]*psbt.TaprootTapLeafScript{leafScript}
+	}
+
+	packet.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{derivation}
+
+	return packet
 }
