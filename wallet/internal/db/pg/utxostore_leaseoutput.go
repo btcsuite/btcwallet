@@ -59,20 +59,21 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 		return nil, fmt.Errorf("convert output index: %w", err)
 	}
 
-	expiration, err := o.qtx.AcquireUtxoLease(
+	row, err := o.qtx.AcquireUtxoLease(
 		ctx, sqlc.AcquireUtxoLeaseParams{
-			WalletID:    int64(params.WalletID),
-			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
-			TxHash:      params.OutPoint.Hash[:],
-			OutputIndex: outputIndex,
-			NowUtc:      nowUTC,
+			WalletID:               int64(params.WalletID),
+			LockID:                 params.ID[:],
+			ExpiresAt:              expiresAt,
+			ReleaseAfterSpendConfs: int64(params.ReleaseAfterSpendConfs),
+			TxHash:                 params.OutPoint.Hash[:],
+			OutputIndex:            outputIndex,
+			NowUtc:                 nowUTC,
 		},
 	)
 	if err == nil {
 		return db.BuildLeasedOutput(
 			params.OutPoint.Hash[:], params.OutPoint.Index,
-			params.ID[:], expiration,
+			params.ID[:], row.ExpiresAt, row.ReleaseAfterSpendConfs,
 		)
 	}
 

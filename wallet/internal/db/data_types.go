@@ -1598,6 +1598,11 @@ type LeaseOutputParams struct {
 
 	// Duration is the duration to lock the UTXO for.
 	Duration time.Duration
+
+	// ReleaseAfterSpendConfs is the spend depth of a confirmation-controlled
+	// lease. Zero creates a timed lease, or keeps the stored depth when the
+	// owner renews an existing lease.
+	ReleaseAfterSpendConfs uint32
 }
 
 // ReleaseOutputParams contains the parameters for releasing a UTXO lease.
@@ -1625,6 +1630,10 @@ type LeasedOutput struct {
 
 	// Expiration is the time when the lock expires.
 	Expiration time.Time
+
+	// ReleaseAfterSpendConfs is the spend depth that releases a
+	// confirmation-controlled lock. Zero means the lock is timed.
+	ReleaseAfterSpendConfs uint32
 }
 
 // BalanceResult represents one wallet-scoped balance view after applying the

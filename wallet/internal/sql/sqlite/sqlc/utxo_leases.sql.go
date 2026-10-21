@@ -15,50 +15,63 @@ INSERT INTO utxo_leases (
     wallet_id,
     utxo_id,
     lock_id,
-    expires_at
+    expires_at,
+    release_after_spend_confs
 )
 SELECT
     ?1 AS wallet_id,
     u.id AS utxo_id,
     ?2 AS lock_id,
-    ?3 AS expires_at
+    ?3 AS expires_at,
+    ?4 AS release_after_spend_confs
 FROM utxos AS u
 INNER JOIN transactions AS t
     ON u.tx_id = t.id
 WHERE
     t.wallet_id = ?1
-    AND t.tx_hash = ?4
-    AND u.output_index = ?5
+    AND t.tx_hash = ?5
+    AND u.output_index = ?6
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
-    AND ?6 IS NOT NULL
+    AND ?7 IS NOT NULL
 ON CONFLICT (utxo_id) DO UPDATE
 SET
     lock_id = excluded.lock_id,
-    expires_at = excluded.expires_at
+    expires_at = excluded.expires_at,
+    release_after_spend_confs = CASE
+        WHEN excluded.release_after_spend_confs = 0
+            THEN utxo_leases.release_after_spend_confs
+        ELSE excluded.release_after_spend_confs
+    END
 WHERE
 utxo_leases.wallet_id = excluded.wallet_id
 AND (
-    -- ?6 is the generated bind slot for now_utc; sqlc leaves a literal
+    -- ?7 is the generated bind slot for now_utc; sqlc leaves a literal
     -- sqlc.arg('now_utc') here, so this predicate must stay aligned with
     -- the arg ordering above.
-    utxo_leases.expires_at <= ?6
+    utxo_leases.expires_at <= ?7
     OR utxo_leases.lock_id = excluded.lock_id
 )
-RETURNING expires_at
+RETURNING expires_at, release_after_spend_confs
 `
 
 type AcquireUtxoLeaseParams struct {
-	WalletID    int64
-	LockID      []byte
-	ExpiresAt   time.Time
-	TxHash      []byte
-	OutputIndex int64
-	NowUtc      interface{}
+	WalletID               int64
+	LockID                 []byte
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
+	TxHash                 []byte
+	OutputIndex            int64
+	NowUtc                 interface{}
+}
+
+type AcquireUtxoLeaseRow struct {
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
 }
 
 // Acquires or renews a lease for an outpoint and returns the resulting
-// expiration time.
+// expiration time and spend policy.
 //
 // How:
 //   - Resolves the outpoint to a current UTXO row and writes the lease in the
@@ -74,24 +87,26 @@ type AcquireUtxoLeaseParams struct {
 //   - If the UTXO has an active lease with the same lock_id, renew it.
 //   - If the UTXO has an active lease with a different lock_id, return no
 //     rows (caller should treat this as "already leased").
+//   - A renewal with zero release_after_spend_confs keeps the stored depth.
 //
 // NOTE: expires_at is computed by the caller as time.Now().UTC()+duration, and
 // callers must also pass a UTC-normalized now_utc for lease-expiry checks.
 // Performance:
 //   - SQLite executes the resolution and lease write atomically inside one
 //     statement, which avoids stale-ID races between separate helper calls.
-func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error) {
+func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (AcquireUtxoLeaseRow, error) {
 	row := q.queryRow(ctx, q.acquireUtxoLeaseStmt, AcquireUtxoLease,
 		arg.WalletID,
 		arg.LockID,
 		arg.ExpiresAt,
+		arg.ReleaseAfterSpendConfs,
 		arg.TxHash,
 		arg.OutputIndex,
 		arg.NowUtc,
 	)
-	var expires_at time.Time
-	err := row.Scan(&expires_at)
-	return expires_at, err
+	var i AcquireUtxoLeaseRow
+	err := row.Scan(&i.ExpiresAt, &i.ReleaseAfterSpendConfs)
+	return i, err
 }
 
 const DeleteExpiredUtxoLeases = `-- name: DeleteExpiredUtxoLeases :execrows
@@ -156,7 +171,8 @@ SELECT
     t.tx_hash,
     u.output_index,
     l.lock_id,
-    l.expires_at
+    l.expires_at,
+    l.release_after_spend_confs
 FROM utxo_leases AS l
 INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id
@@ -174,10 +190,11 @@ type ListActiveUtxoLeasesParams struct {
 }
 
 type ListActiveUtxoLeasesRow struct {
-	TxHash      []byte
-	OutputIndex int64
-	LockID      []byte
-	ExpiresAt   time.Time
+	TxHash                 []byte
+	OutputIndex            int64
+	LockID                 []byte
+	ExpiresAt              time.Time
+	ReleaseAfterSpendConfs int64
 }
 
 // Lists all currently active leases for a wallet.
@@ -206,6 +223,7 @@ func (q *Queries) ListActiveUtxoLeases(ctx context.Context, arg ListActiveUtxoLe
 			&i.OutputIndex,
 			&i.LockID,
 			&i.ExpiresAt,
+			&i.ReleaseAfterSpendConfs,
 		); err != nil {
 			return nil, err
 		}

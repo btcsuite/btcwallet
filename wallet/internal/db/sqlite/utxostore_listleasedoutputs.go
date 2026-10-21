@@ -37,6 +37,7 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 
 			lease, err := db.BuildLeasedOutput(
 				row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
+				row.ReleaseAfterSpendConfs,
 			)
 			if err != nil {
 				return err

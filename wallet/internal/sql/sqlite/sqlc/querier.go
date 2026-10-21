@@ -7,7 +7,6 @@ package sqlc
 import (
 	"context"
 	"database/sql"
-	"time"
 )
 
 type Querier interface {
@@ -19,7 +18,7 @@ type Querier interface {
 	// account_id.
 	AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error)
 	// Acquires or renews a lease for an outpoint and returns the resulting
-	// expiration time.
+	// expiration time and spend policy.
 	//
 	// How:
 	// - Resolves the outpoint to a current UTXO row and writes the lease in the
@@ -34,13 +33,14 @@ type Querier interface {
 	// - If the UTXO has an active lease with the same lock_id, renew it.
 	// - If the UTXO has an active lease with a different lock_id, return no
 	//   rows (caller should treat this as "already leased").
+	// - A renewal with zero release_after_spend_confs keeps the stored depth.
 	//
 	// NOTE: expires_at is computed by the caller as time.Now().UTC()+duration, and
 	// callers must also pass a UTC-normalized now_utc for lease-expiry checks.
 	// Performance:
 	// - SQLite executes the resolution and lease write atomically inside one
 	//   statement, which avoids stale-ID races between separate helper calls.
-	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (AcquireUtxoLeaseRow, error)
 	// Reserves the cursor past an exact account without consuming lower holes.
 	// The existing immediate transaction keeps this update and the account/key
 	// inserts atomic, including when the cursor already exceeds the minimum.

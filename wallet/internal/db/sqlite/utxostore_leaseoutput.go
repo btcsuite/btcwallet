@@ -54,14 +54,15 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 	params db.LeaseOutputParams, nowUTC time.Time,
 	expiresAt time.Time) (*db.LeasedOutput, error) {
 
-	expiration, err := o.qtx.AcquireUtxoLease(
+	row, err := o.qtx.AcquireUtxoLease(
 		ctx, sqlc.AcquireUtxoLeaseParams{
-			WalletID:    int64(params.WalletID),
-			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
-			TxHash:      params.OutPoint.Hash[:],
-			OutputIndex: int64(params.OutPoint.Index),
-			NowUtc:      nowUTC,
+			WalletID:               int64(params.WalletID),
+			LockID:                 params.ID[:],
+			ExpiresAt:              expiresAt,
+			ReleaseAfterSpendConfs: int64(params.ReleaseAfterSpendConfs),
+			TxHash:                 params.OutPoint.Hash[:],
+			OutputIndex:            int64(params.OutPoint.Index),
+			NowUtc:                 nowUTC,
 		},
 	)
 	if err != nil {
@@ -74,7 +75,7 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 
 	return db.BuildLeasedOutput(
 		params.OutPoint.Hash[:], params.OutPoint.Index, params.ID[:],
-		expiration,
+		row.ExpiresAt, row.ReleaseAfterSpendConfs,
 	)
 }
 

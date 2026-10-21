@@ -252,7 +252,7 @@ func WatchOutputFromRow(hash []byte, outputIndex int64,
 // BuildLeasedOutput converts SQL lease-row fields into the public LeasedOutput
 // type.
 func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
-	expiration time.Time) (*LeasedOutput, error) {
+	expiration time.Time, releaseAfterSpendConfs int64) (*LeasedOutput, error) {
 
 	outPoint, err := buildOutPoint(hash, outputIndex)
 	if err != nil {
@@ -266,10 +266,16 @@ func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 	var id LockID
 	copy(id[:], lockID)
 
+	releaseConfs, err := Int64ToUint32(releaseAfterSpendConfs)
+	if err != nil {
+		return nil, fmt.Errorf("lease release depth: %w", err)
+	}
+
 	return &LeasedOutput{
-		OutPoint:   outPoint,
-		LockID:     id,
-		Expiration: expiration.UTC(),
+		OutPoint:               outPoint,
+		LockID:                 id,
+		Expiration:             expiration.UTC(),
+		ReleaseAfterSpendConfs: releaseConfs,
 	}, nil
 }
 
@@ -286,7 +292,7 @@ func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 // the policy and sequencing while each backend keeps only query details.
 type LeaseOutputOps interface {
 	// Acquire attempts to write or renew the lease and returns the stored
-	// lease when the write succeeds.
+	// lease, including its effective spend policy, when the write succeeds.
 	Acquire(ctx context.Context, params LeaseOutputParams, nowUTC time.Time,
 		expiresAt time.Time) (*LeasedOutput, error)
 

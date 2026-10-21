@@ -139,7 +139,7 @@ func TestBuildUtxoInfo_Unconfirmed(t *testing.T) {
 // Action:
 // - Convert the normalized row into a public LeasedOutput value.
 // Assertions:
-// - The outpoint, lock ID, and UTC expiration are preserved.
+// - The outpoint, lock ID, UTC expiration, and spend policy are preserved.
 func TestBuildLeasedOutput(t *testing.T) {
 	t.Parallel()
 
@@ -152,14 +152,52 @@ func TestBuildLeasedOutput(t *testing.T) {
 	// Act: Build the public leased-output view.
 	lease, err := BuildLeasedOutput(
 		hash[:], 9, lockID, time.Unix(333, 0).In(time.FixedZone("X", 3600)),
+		6,
 	)
 
-	// Assert: The helper preserves the outpoint, lock ID, and UTC expiration.
+	// Assert: The helper preserves the outpoint, lock ID, UTC expiration,
+	// and spend policy.
 	require.NoError(t, err)
 	require.Equal(t, hash, lease.OutPoint.Hash)
 	require.Equal(t, uint32(9), lease.OutPoint.Index)
 	require.Equal(t, byte(7), lease.LockID[0])
 	require.Equal(t, time.UTC, lease.Expiration.Location())
+	require.Equal(t, uint32(6), lease.ReleaseAfterSpendConfs)
+}
+
+// TestBuildLeasedOutputInvalidSpendPolicy verifies that BuildLeasedOutput
+// rejects stored spend-policy values outside their public ranges instead of
+// truncating them.
+func TestBuildLeasedOutputInvalidSpendPolicy(t *testing.T) {
+	t.Parallel()
+
+	hash := chainhash.Hash{4, 5, 6}
+	lockID := make([]byte, 32)
+
+	tests := []struct {
+		name         string
+		releaseConfs int64
+	}{
+		{
+			name:         "negative release depth",
+			releaseConfs: -1,
+		},
+		{
+			name:         "release depth above uint32",
+			releaseConfs: math.MaxUint32 + 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := BuildLeasedOutput(
+				hash[:], 0, lockID, time.Now(), tc.releaseConfs,
+			)
+			require.ErrorIs(t, err, ErrCastingOverflow)
+		})
+	}
 }
 
 // TestBuildLeasedOutput_InvalidLockID verifies that BuildLeasedOutput rejects
@@ -182,18 +220,22 @@ func TestBuildLeasedOutput_InvalidLockID(t *testing.T) {
 	shortLockID := []byte{1, 2, 3}
 
 	// Act: Attempt to build the public leased-output view.
-	_, err := BuildLeasedOutput(hash[:], 0, shortLockID, time.Now())
+	_, err := BuildLeasedOutput(
+		hash[:], 0, shortLockID, time.Now(), 0,
+	)
 
 	// Assert: The helper returns the invalid-lock-ID sentinel.
 	require.ErrorIs(t, err, errInvalidLockID)
 }
 
 // TestLeaseOutputWithOps verifies that the shared LeaseOutput helper returns
-// the stored lease when the backend Acquire step succeeds.
+// the stored lease when the backend Acquire step succeeds, including a spend
+// depth that differs from the request.
 func TestLeaseOutputWithOps(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Build one valid lease request and one successful stub adapter.
+	// Arrange: Build one zero-depth renewal and an adapter that reports the
+	// depth the store kept.
 	params := LeaseOutputParams{
 		WalletID: 5,
 		OutPoint: testLeaseOutPoint(),
@@ -201,9 +243,10 @@ func TestLeaseOutputWithOps(t *testing.T) {
 		Duration: time.Minute,
 	}
 	stored := &LeasedOutput{
-		OutPoint:   params.OutPoint,
-		LockID:     LockID(params.ID),
-		Expiration: time.Unix(333, 0).UTC(),
+		OutPoint:               params.OutPoint,
+		LockID:                 LockID(params.ID),
+		Expiration:             time.Unix(333, 0).UTC(),
+		ReleaseAfterSpendConfs: 3,
 	}
 	ops := &mockLeaseOutputOps{}
 	t.Cleanup(func() {
@@ -536,7 +579,9 @@ func TestBuildLeasedOutputInvalidHash(t *testing.T) {
 	t.Parallel()
 
 	lockID := make([]byte, 32)
-	_, err := BuildLeasedOutput([]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0))
+	_, err := BuildLeasedOutput(
+		[]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0), 0,
+	)
 
 	require.Error(t, err)
 }

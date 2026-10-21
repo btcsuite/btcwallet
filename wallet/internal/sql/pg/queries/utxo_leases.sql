@@ -1,6 +1,6 @@
 -- name: AcquireUtxoLease :one
 -- Acquires or renews a lease for an outpoint and returns the resulting
--- expiration time.
+-- expiration time and spend policy.
 --
 -- How:
 -- - Resolves the outpoint to a current UTXO row and writes the lease in the
@@ -15,6 +15,7 @@
 -- - If the UTXO has an active lease with the same lock_id, renew it.
 -- - If the UTXO has an active lease with a different lock_id, return no
 --   rows (caller should treat this as "already leased").
+-- - A renewal with zero release_after_spend_confs keeps the stored depth.
 --
 -- NOTE: expires_at is stored as a UTC-normalized TIMESTAMP. Callers should pass
 -- UTC values for both expires_at and now_utc.
@@ -25,13 +26,15 @@ INSERT INTO utxo_leases (
     wallet_id,
     utxo_id,
     lock_id,
-    expires_at
+    expires_at,
+    release_after_spend_confs
 )
 SELECT
     sqlc.arg('wallet_id') AS wallet_id,
     u.id AS utxo_id,
     sqlc.arg('lock_id') AS lock_id,
-    sqlc.arg('expires_at')::TIMESTAMP AS expires_at
+    sqlc.arg('expires_at')::TIMESTAMP AS expires_at,
+    sqlc.arg('release_after_spend_confs')::BIGINT AS release_after_spend_confs
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 WHERE
@@ -44,14 +47,19 @@ FOR UPDATE OF u
 ON CONFLICT (utxo_id) DO UPDATE
     SET
         lock_id = excluded.lock_id,
-        expires_at = excluded.expires_at
+        expires_at = excluded.expires_at,
+        release_after_spend_confs = CASE
+            WHEN excluded.release_after_spend_confs = 0
+                THEN utxo_leases.release_after_spend_confs
+            ELSE excluded.release_after_spend_confs
+        END
     WHERE
     utxo_leases.wallet_id = excluded.wallet_id
     AND (
         utxo_leases.expires_at <= sqlc.arg('now_utc')::TIMESTAMP
         OR utxo_leases.lock_id = excluded.lock_id
     )
-RETURNING expires_at;
+RETURNING expires_at, release_after_spend_confs;
 
 -- name: ReleaseUtxoLease :execrows
 -- Releases a lease for a UTXO ID if the lock_id matches.
@@ -98,7 +106,8 @@ SELECT
     t.tx_hash,
     u.output_index,
     l.lock_id,
-    l.expires_at
+    l.expires_at,
+    l.release_after_spend_confs
 FROM utxo_leases AS l
 INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id

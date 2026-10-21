@@ -583,8 +583,13 @@ type UTXOStore interface {
 	// it from being used in coin selection. This is useful for reserving
 	// UTXOs for a specific purpose, such as a pending transaction. The
 	// method returns the full lease information, including its expiration
-	// time. If another active lease already exists with a different lock ID,
-	// the call returns ErrOutputAlreadyLeased.
+	// time and effective spend policy. If another active lease already
+	// exists with a different lock ID, the call returns
+	// ErrOutputAlreadyLeased.
+	//
+	// A non-zero ReleaseAfterSpendConfs records the spend depth of a
+	// confirmation-controlled lease. A same-owner renewal with zero depth
+	// keeps the stored depth.
 	LeaseOutput(ctx context.Context, params LeaseOutputParams) (
 		*LeasedOutput, error)
 
@@ -598,7 +603,7 @@ type UTXOStore interface {
 	// ListLeasedOutputs returns a slice of all currently leased UTXOs whose
 	// parent transaction is still `pending` or `published`.
 	// This can be used to inspect which still-unspent outputs are currently
-	// locked and when their leases expire.
+	// locked, when their leases expire, and their spend policy.
 	ListLeasedOutputs(ctx context.Context, walletID uint32) (
 		[]LeasedOutput, error)
 
