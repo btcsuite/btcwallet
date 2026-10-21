@@ -14,7 +14,8 @@ var _ db.WalletStore = (*Store)(nil)
 
 // CreateWallet creates a new wallet in the database with the provided
 // parameters. It returns the created wallet info or an error if the
-// creation fails.
+// creation fails. An occupied name returns db.ErrWalletExists without changing
+// the existing wallet; other failures retain their original classification.
 func (s *Store) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (*db.WalletInfo, error) {
 

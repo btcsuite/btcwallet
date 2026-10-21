@@ -14,6 +14,10 @@ var (
 	// database.
 	ErrWalletNotFound = errors.New("wallet not found")
 
+	// ErrWalletExists reports an occupied wallet name without changing its
+	// existing rows or credentials.
+	ErrWalletExists = errors.New("wallet already exists")
+
 	// ErrAddressTypeNotFound is returned when an address type is not found.
 	ErrAddressTypeNotFound = errors.New("address type not found")
 
@@ -187,9 +191,8 @@ type Store interface {
 
 // WalletStore defines the methods for wallet-level operations.
 type WalletStore interface {
-	// CreateWallet creates a new wallet in the database with the provided
-	// parameters. It returns the ID of the newly created wallet or an error
-	// if the creation fails.
+	// CreateWallet creates a wallet and returns its information. An occupied
+	// name returns ErrWalletExists without modifying the existing wallet.
 	CreateWallet(ctx context.Context, params CreateWalletParams) (
 		*WalletInfo, error)
 

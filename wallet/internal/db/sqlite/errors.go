@@ -60,9 +60,24 @@ func mapErr(err error) *dberr.SQLError {
 		reason = dberr.ReasonUnknown
 	}
 
+	// Only unique-key failures can carry domain-conflict identities; leave
+	// every other reason on the normal SQL error path.
+	if code != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
+	}
+
+	// Match the wallet-name column so unrelated uniqueness failures retain
+	// their identity and duplicates still enter SQL constraint accounting.
+	if strings.Contains(
+		sqliteErr.Error(), "UNIQUE constraint failed: wallets.wallet_name",
+	) {
+
+		err = fmt.Errorf("%w: %w", db.ErrWalletExists, err)
+	}
+
 	// SQLite reports columns rather than index names; match the account-name
 	// key while preserving other unique failures as ordinary SQL errors.
-	if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE && strings.Contains(
+	if strings.Contains(
 		err.Error(), "UNIQUE constraint failed: accounts.wallet_id, "+
 			"accounts.scope_id, accounts.account_name",
 	) {
@@ -72,7 +87,7 @@ func mapErr(err error) *dberr.SQLError {
 
 	// Number collisions use the migrated column tuple; other unique
 	// violations must not masquerade as an occupied exact account.
-	if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE && strings.Contains(
+	if strings.Contains(
 		sqliteErr.Error(), "UNIQUE constraint failed: accounts.scope_id, "+
 			"accounts.account_number",
 	) {
@@ -82,7 +97,7 @@ func mapErr(err error) *dberr.SQLError {
 
 	// Raw imports reuse only the wallet/script unique rejection. Match the
 	// column tuple while retaining its cause and SQL classification.
-	if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE && strings.Contains(
+	if strings.Contains(
 		sqliteErr.Error(), "UNIQUE constraint failed: "+
 			"addresses.wallet_id, addresses.script_pub_key",
 	) {
