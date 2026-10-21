@@ -310,6 +310,16 @@ func LeaseOutputWithOps(ctx context.Context, params LeaseOutputParams,
 	}
 
 	nowUTC := time.Now().UTC()
+
+	return leaseOutputAt(ctx, params, ops, nowUTC)
+}
+
+// leaseOutputAt acquires or renews one lease relative to the supplied
+// timestamp. Sharing it between the single and set workflows keeps their
+// write-then-classify ordering identical.
+func leaseOutputAt(ctx context.Context, params LeaseOutputParams,
+	ops LeaseOutputOps, nowUTC time.Time) (*LeasedOutput, error) {
+
 	expiresAt := nowUTC.Add(params.Duration)
 
 	expiration, err := ops.Acquire(ctx, params, nowUTC, expiresAt)
