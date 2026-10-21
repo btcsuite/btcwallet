@@ -77,7 +77,7 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 
 	if b.store != nil {
 		return nil, fmt.Errorf("%w: kvdb serves one wallet per "+
-			"database; %q is already loaded", ErrInvalidParam,
+			"database; %q is already loaded", db.ErrWalletExists,
 			b.walletName)
 	}
 
