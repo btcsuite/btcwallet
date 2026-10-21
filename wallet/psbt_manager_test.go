@@ -2690,78 +2690,61 @@ func TestCheckTaprootScriptSpendSig(t *testing.T) {
 
 // TestAddTaprootSigToPInput tests that addTaprootSigToPInput correctly adds a
 // generated Taproot signature to the PSBT input, handling both Key Spend and
-// Script Spend paths.
+// Script Spend paths. A signature made with a non-default sighash already ends
+// in its sighash byte, so the byte must not be added a second time.
 func TestAddTaprootSigToPInput(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Define dummy signature, public key, and leaf hash.
-	sig := []byte{0x01, 0x02}
+	// Arrange: Define dummy signatures, public key, and leaf hash.
+	sig := bytes.Repeat([]byte{0x01}, schnorr.SignatureSize)
+	sigWithHash := append(slices.Clone(sig), byte(txscript.SigHashAll))
 	xOnlyPubKey := bytes.Repeat([]byte{0x03}, 32)
 	leafHash := bytes.Repeat([]byte{0x04}, 32)
-
-	// Helper to create signature with appended sighash
-	sigWithHash := append(slices.Clone(sig), byte(txscript.SigHashAll))
+	tapDerivation := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey: xOnlyPubKey,
+		LeafHashes:  [][]byte{leafHash},
+	}
 
 	// Arrange: Define test cases for adding Taproot signatures.
 	tests := []struct {
 		name           string
-		initialPInput  *psbt.PInput
+		sig            []byte
 		sighashType    txscript.SigHashType
 		details        TaprootSpendDetails
 		tapDerivation  *psbt.TaprootBip32Derivation
 		expectedPInput *psbt.PInput
 	}{
 		{
-			name: "key path spend default sighash",
-			// Arrange: Initial empty PSBT input.
-			initialPInput: &psbt.PInput{},
-			sighashType:   txscript.SigHashDefault,
-			// Arrange: Key path spend details.
+			name:        "key path spend default sighash",
+			sig:         sig,
+			sighashType: txscript.SigHashDefault,
 			details: TaprootSpendDetails{
 				SpendPath: KeyPathSpend,
 			},
-			tapDerivation: nil, // Not used for key path spend
-			// Assert: Expect TaprootKeySpendSig to be set.
 			expectedPInput: &psbt.PInput{
 				TaprootKeySpendSig: sig,
 			},
 		},
 		{
-			name: "key path spend non-default sighash",
-			// Arrange: Initial empty PSBT input.
-			initialPInput: &psbt.PInput{},
-			sighashType:   txscript.SigHashAll,
-			// Arrange: Key path spend details.
+			name:        "key path spend non-default sighash",
+			sig:         sigWithHash,
+			sighashType: txscript.SigHashAll,
 			details: TaprootSpendDetails{
 				SpendPath: KeyPathSpend,
 			},
-			tapDerivation: nil,
-			// Assert: Expect TaprootKeySpendSig with appended
-			// sighash.
 			expectedPInput: &psbt.PInput{
 				TaprootKeySpendSig: sigWithHash,
 			},
 		},
 		{
-			name: "script path spend",
-			// Arrange: Initial PSBT input with default SighashType.
-			initialPInput: &psbt.PInput{
-				SighashType: txscript.SigHashDefault,
-			},
+			name:        "script path spend default sighash",
+			sig:         sig,
 			sighashType: txscript.SigHashDefault,
-			// Arrange: Script path spend details.
 			details: TaprootSpendDetails{
 				SpendPath: ScriptPathSpend,
 			},
-			// Arrange: Taproot BIP32 derivation with XOnlyPubKey
-			// and LeafHashes.
-			tapDerivation: &psbt.TaprootBip32Derivation{
-				XOnlyPubKey: xOnlyPubKey,
-				LeafHashes:  [][]byte{leafHash},
-			},
-			// Assert: Expect TaprootScriptSpendSig to be appended.
+			tapDerivation: tapDerivation,
 			expectedPInput: &psbt.PInput{
-				SighashType: txscript.SigHashDefault,
 				TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
 					XOnlyPubKey: xOnlyPubKey,
 					LeafHash:    leafHash,
@@ -2770,25 +2753,37 @@ func TestAddTaprootSigToPInput(t *testing.T) {
 				}},
 			},
 		},
+		{
+			name:        "script path spend non-default sighash",
+			sig:         sigWithHash,
+			sighashType: txscript.SigHashAll,
+			details: TaprootSpendDetails{
+				SpendPath: ScriptPathSpend,
+			},
+			tapDerivation: tapDerivation,
+			expectedPInput: &psbt.PInput{
+				TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
+					XOnlyPubKey: xOnlyPubKey,
+					LeafHash:    leafHash,
+					Signature:   sig,
+					SigHash:     txscript.SigHashAll,
+				}},
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			// Arrange: Create a copy of the initial input to ensure
-			// test isolation and avoid side effects.
-			pInput := *tc.initialPInput
 
-			// Act: Call addTaprootSigToPInput to add the signature
-			// to the PSBT input.
+			pInput := &psbt.PInput{}
+
 			addTaprootSigToPInput(
-				&pInput, sig, tc.sighashType, tc.details,
+				pInput, tc.sig, tc.sighashType, tc.details,
 				tc.tapDerivation,
 			)
 
-			// Assert: Verify that the resulting PSBT input matches
-			// the expected state.
-			require.Equal(t, tc.expectedPInput, &pInput)
+			require.Equal(t, tc.expectedPInput, pInput)
 		})
 	}
 }
@@ -3804,56 +3799,140 @@ func TestSignPsbtSkipsWalletRecord(t *testing.T) {
 }
 
 // TestSignPsbtSkipsWalletKeySpendRecord tests that a second signing pass keeps
-// the wallet's own Taproot key-path signature and looks up no key.
+// the wallet's own Taproot key-path signature and looks up no key. With a
+// non-default sighash, the first pass must write the sighash byte once, or the
+// second pass refuses its own record.
 func TestSignPsbtSkipsWalletKeySpendRecord(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a BIP-86 input for the key the wallet derives, signed once.
-	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
-	pkScript, err := txscript.PayToTaprootScript(
-		txscript.ComputeTaprootKeyNoScript(walletPub),
-	)
-	require.NoError(t, err)
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+		sigLen  int
+	}{{
+		name:    "default sighash",
+		sigHash: txscript.SigHashDefault,
+		sigLen:  schnorr.SignatureSize,
+	}, {
+		name:    "non-default sighash",
+		sigHash: txscript.SigHashAll,
+		sigLen:  schnorr.SignatureSize + 1,
+	}}
 
-	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
-	packet, _, _ := testAuthPacket(t, utxo, txscript.SigHashDefault)
-	packet.Inputs[0].TaprootBip32Derivation =
-		[]*psbt.TaprootBip32Derivation{{
-			XOnlyPubKey: schnorr.SerializePubKey(walletPub),
-			Bip32Path: []uint32{
-				hdkeychain.HardenedKeyStart + 86,
-				hdkeychain.HardenedKeyStart + 1,
-				hdkeychain.HardenedKeyStart + 0,
-				0, 0,
-			},
-		}}
-	derivations := clonePacket(packet).Inputs[0].TaprootBip32Derivation
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	w, mocks := createUnlockedWalletWithMocks(t)
-	_, _ = expectStoreSignerPrivKey(
-		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
-		waddrmgr.DerivationPath{InternalAccount: 0},
-	)
+			// Arrange: a BIP-86 input for the key the wallet
+			// derives, signed once.
+			_, walletPub := deriveLeafKeys(
+				t, testAccountXPrv(t), 0, 0,
+			)
+			packet := testTaprootSignPacket(
+				t, testBip86Output(t, walletPub), nil,
+			)
+			packet.Inputs[0].SighashType = tc.sigHash
+			derivations := clonePacket(packet).Inputs[0].
+				TaprootBip32Derivation
 
-	_, err = w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
-	require.NoError(t, err)
-	require.Len(t, packet.Inputs[0].TaprootKeySpendSig, 64)
+			w, mocks := createUnlockedWalletWithMocks(t)
+			_, _ = expectStoreSignerPrivKey(
+				t, mocks, w.id,
+				waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+				waddrmgr.DerivationPath{InternalAccount: 0},
+			)
 
-	signed := clonePacket(packet)
+			_, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+			require.NoError(t, err)
+			require.Len(
+				t, packet.Inputs[0].TaprootKeySpendSig,
+				tc.sigLen,
+			)
 
-	// Act: sign the packet again.
-	result, err := w.SignPsbt(
-		t.Context(), &SignPsbtParams{Packet: packet},
-	)
+			signed := clonePacket(packet)
 
-	// Assert: nothing was signed or changed, and the derivation is
-	// byte-for-byte what it was before either pass.
-	require.NoError(t, err)
-	require.Empty(t, result.SignedInputs)
-	require.Equal(t, signed, packet)
-	require.Equal(
-		t, derivations, packet.Inputs[0].TaprootBip32Derivation,
-	)
+			// Act: sign the packet again.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: nothing was signed or changed, and the
+			// derivation is byte-for-byte what it was before
+			// either pass.
+			require.NoError(t, err)
+			require.Empty(t, result.SignedInputs)
+			require.Equal(t, signed, packet)
+			require.Equal(
+				t, derivations,
+				packet.Inputs[0].TaprootBip32Derivation,
+			)
+		})
+	}
+}
+
+// TestSignPsbtSkipsWalletScriptSpendRecord tests that a second signing pass
+// keeps the wallet's own Taproot script-path signature and adds no duplicate.
+// With a non-default sighash, the first pass must write the sighash byte once,
+// or the second pass refuses its own record.
+func TestSignPsbtSkipsWalletScriptSpendRecord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+	}{{
+		name:    "default sighash",
+		sigHash: txscript.SigHashDefault,
+	}, {
+		name:    "non-default sighash",
+		sigHash: txscript.SigHashAll,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a leaf `<wallet key> OP_CHECKSIG`, signed
+			// once.
+			walletKey, _ := deriveLeafKeys(
+				t, testAccountXPrv(t), 0, 0,
+			)
+			utxo, _, leafScript := testTapscriptFixture(
+				t, [2]*btcec.PrivateKey{
+					walletKey, testAuthKeys()[1],
+				},
+			)
+			packet := testTaprootSignPacket(t, utxo, leafScript)
+			packet.Inputs[0].SighashType = tc.sigHash
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			_, _ = expectStoreSignerPrivKey(
+				t, mocks, w.id,
+				waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+				waddrmgr.DerivationPath{InternalAccount: 0},
+			)
+
+			_, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+			require.NoError(t, err)
+			require.Len(t, packet.Inputs[0].TaprootScriptSpendSig, 1)
+
+			signed := clonePacket(packet)
+
+			// Act: sign the packet again.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: nothing was signed or changed.
+			require.NoError(t, err)
+			require.Empty(t, result.SignedInputs)
+			require.Equal(t, signed, packet)
+		})
+	}
 }
 
 // TestSignPsbtRejectsLeafVersionMismatchBeforeKeyLookup tests that a script
