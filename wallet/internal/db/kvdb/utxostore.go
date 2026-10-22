@@ -250,23 +250,11 @@ func (s *Store) LeaseOutput(_ context.Context,
 			return db.ErrUtxoNotFound
 		}
 
-		expiration, err = s.txStore.LockOutput(
-			ns, wtxmgr.LockID(params.ID), params.OutPoint, params.Duration,
+		expiration, err = s.lockOutput(
+			ns, params.ID, params.OutPoint, params.Duration,
 		)
-		if err != nil {
-			switch {
-			case errors.Is(err, wtxmgr.ErrUtxoNotFound),
-				errors.Is(err, wtxmgr.ErrUnknownOutput):
-				return db.ErrUtxoNotFound
 
-			case errors.Is(err, wtxmgr.ErrOutputAlreadyLocked):
-				return db.ErrOutputAlreadyLeased
-			}
-
-			return fmt.Errorf("lock output: %w", err)
-		}
-
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.LeaseOutput: %w", err)
@@ -277,6 +265,91 @@ func (s *Store) LeaseOutput(_ context.Context,
 		LockID:     db.LockID(params.ID),
 		Expiration: expiration.UTC(),
 	}, nil
+}
+
+// LeaseOutputs locks a complete set of known wallet UTXOs under one lock ID
+// through the legacy wtxmgr lease path.
+//
+// All locks are written in one walletdb update. Returning an error from the
+// update rolls it back, so a conflict or missing output on any outpoint leaves
+// no lease from this call behind.
+func (s *Store) LeaseOutputs(_ context.Context,
+	params db.LeaseOutputsParams) ([]db.LeasedOutput, error) {
+
+	err := params.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	var leases []db.LeasedOutput
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		current, err := s.currentUTXOSet(ns)
+		if err != nil {
+			return err
+		}
+
+		acquired := make([]db.LeasedOutput, 0, len(params.OutPoints))
+		for _, outPoint := range params.OutPoints {
+			if _, ok := current[outPoint]; !ok {
+				return fmt.Errorf("utxo %s: %w", outPoint,
+					db.ErrUtxoNotFound)
+			}
+
+			expiration, err := s.lockOutput(
+				ns, params.ID, outPoint, params.Duration,
+			)
+			if err != nil {
+				return err
+			}
+
+			acquired = append(acquired, db.LeasedOutput{
+				OutPoint:   outPoint,
+				LockID:     db.LockID(params.ID),
+				Expiration: expiration.UTC(),
+			})
+		}
+
+		leases = acquired
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.LeaseOutputs: %w", err)
+	}
+
+	return leases, nil
+}
+
+// lockOutput writes one wtxmgr lock and translates legacy lock errors onto
+// the shared Store sentinels.
+func (s *Store) lockOutput(ns walletdb.ReadWriteBucket, id [32]byte,
+	outPoint wire.OutPoint, duration time.Duration) (time.Time, error) {
+
+	expiration, err := s.txStore.LockOutput(
+		ns, wtxmgr.LockID(id), outPoint, duration,
+	)
+	if err == nil {
+		return expiration, nil
+	}
+
+	switch {
+	case errors.Is(err, wtxmgr.ErrUtxoNotFound),
+		errors.Is(err, wtxmgr.ErrUnknownOutput):
+		return time.Time{}, fmt.Errorf("utxo %s: %w", outPoint,
+			db.ErrUtxoNotFound)
+
+	case errors.Is(err, wtxmgr.ErrOutputAlreadyLocked):
+		return time.Time{}, fmt.Errorf("utxo %s: %w", outPoint,
+			db.ErrOutputAlreadyLeased)
+	}
+
+	return time.Time{}, fmt.Errorf("lock output: %w", err)
 }
 
 // ReleaseOutput releases a previously leased output, aligning the kvdb
