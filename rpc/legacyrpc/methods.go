@@ -1590,9 +1590,19 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		return nil, err
 	}
 	var tx wire.MsgTx
-	err = tx.Deserialize(bytes.NewBuffer(serializedTx))
+	txReader := bytes.NewReader(serializedTx)
+	err = tx.Deserialize(txReader)
 	if err != nil {
 		e := errors.New("TX decode failed")
+		return nil, DeserializationError{e}
+	}
+
+	// The transaction must consume the entire input. Any remaining bytes
+	// mean the serialized transaction is malformed (extra trailing data),
+	// which Bitcoin Core also rejects with "TX decode failed" rather than
+	// silently ignoring the excess.
+	if txReader.Len() != 0 {
+		e := errors.New("TX decode failed: unexpected trailing bytes")
 		return nil, DeserializationError{e}
 	}
 
