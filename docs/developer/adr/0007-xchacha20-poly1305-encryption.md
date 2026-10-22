@@ -2,31 +2,32 @@
 
 ## 1. Context
 
-As part of the broader effort to simplify wallet encryption to a single
-passphrase model, we are revisiting the cryptographic primitives used to
-protect sensitive data. Today, `btcwallet` relies on NaCl secretbox, based on
+A broader effort simplifies wallet encryption to a single passphrase model.
+As part of that effort, we review the cryptographic primitives that protect
+sensitive data. Today, `btcwallet` uses NaCl secretbox, based on
 XSalsa20-Poly1305, to encrypt private key material.
 
-While XSalsa20-Poly1305 remains secure, XChaCha20-Poly1305 is now the
-preferred successor in modern systems. It preserves the large nonce model
-while offering better library support and alignment with current AEAD
+XSalsa20-Poly1305 is still secure. But modern systems now prefer
+XChaCha20-Poly1305 as its successor. XChaCha20-Poly1305 keeps the large nonce
+model. It also has better library support and aligns with current AEAD
 standards.
 
-Key motivations for this change include:
+The key motivations for this change are:
 
 * Broad adoption of XChaCha20-Poly1305 in modern cryptographic systems
 * Strong performance on systems without AES-NI, including mobile and embedded
   environments
-* Simpler and more uniform AEAD construction, reducing implementation risk
-* Easier auditing due to reduced complexity
+* Simpler and more uniform AEAD construction, which reduces implementation
+  risk
+* Easier audits because of reduced complexity
 * Production-proven usage in the Lightning Network's encrypted transport
   protocol ([BOLT
   8](https://github.com/lightning/bolts/blob/master/08-transport.md)),
   demonstrating its suitability for Bitcoin-related projects
 
-Like XSalsa20, XChaCha20-Poly1305 uses a 192-bit nonce, which allows random
-nonce generation without practical collision risk and matches our existing
-nonce strategy.
+Like XSalsa20, XChaCha20-Poly1305 uses a 192-bit nonce. This nonce size
+allows random nonce generation without practical collision risk. It also
+matches our existing nonce strategy.
 
 ```mermaid
 flowchart TD
@@ -52,11 +53,11 @@ XSalsa20-Poly1305, to **XChaCha20-Poly1305**.
    and per-use encryption keys.
 
 3. **Data separation**
-   Continue storing public data in plaintext while encrypting private or
-   sensitive material only.
+   Continue to store public data in plaintext, and encrypt only private or
+   sensitive material.
 
 4. **Migration path**
-   Encrypted data will be re-encrypted during the SQL migration process.
+   The SQL migration process will re-encrypt encrypted data.
 
 ## 3. Consequences
 
@@ -64,17 +65,17 @@ XSalsa20-Poly1305, to **XChaCha20-Poly1305**.
 
 * **Performance**
    Strong performance in pure software environments, especially where AES-NI
-   is unavailable.
+   is not available.
 
 * **Modern AEAD**
   Aligns the codebase with current best practice for authenticated encryption.
 
 * **Lower implementation risk**
-  Fewer edge cases compared to AES-GCM or custom constructions.
+  Fewer edge cases than AES-GCM or custom constructions.
 
 * **Auditability**
-  Smaller and clearer code paths improve reviewability and long-term
-  maintenance.
+  Smaller and clearer code paths are easier to review and to maintain over
+  the long term.
 
 * **Nonce safety**
    The 192-bit nonce space allows safe random nonce generation and preserves
@@ -92,7 +93,7 @@ XSalsa20-Poly1305, to **XChaCha20-Poly1305**.
   Both encryption paths require validation during the transition period.
 
 * **Passphrase dependency**
-  Re-encryption is only possible when the user passphrase is available.
+  Re-encryption is possible only when the user passphrase is available.
 
 ## 4. Status
 
