@@ -274,6 +274,62 @@ type UnlockingScript struct {
 // tweaking a private key before it's used to sign an input.
 type PrivKeyTweaker func(*btcec.PrivateKey) (*btcec.PrivateKey, error)
 
+// KeyTweak is a big-endian scalar added to a signing key before it signs. The
+// zero value leaves the key unchanged.
+type KeyTweak [32]byte
+
+// scalar returns the tweak as a curve scalar. A tweak at or above the curve
+// order is refused.
+func (t KeyTweak) scalar() (btcec.ModNScalar, error) {
+	var scalar btcec.ModNScalar
+	if scalar.SetBytes((*[32]byte)(&t)) != 0 {
+		return scalar, fmt.Errorf("%w: tweak exceeds the curve order",
+			ErrInvalidSignParam)
+	}
+
+	return scalar, nil
+}
+
+// apply adds the tweak to a key the caller owns. A tweak that cancels the key
+// is refused.
+func (t KeyTweak) apply(key *btcec.PrivateKey) error {
+	scalar, err := t.scalar()
+	if err != nil {
+		return err
+	}
+
+	key.Key.Add(&scalar)
+
+	if key.Key.IsZero() {
+		return fmt.Errorf("%w: tweak cancels the key",
+			ErrInvalidSignParam)
+	}
+
+	return nil
+}
+
+// pubKey returns the public key apply produces from base's private key.
+func (t KeyTweak) pubKey(base *btcec.PublicKey) (*btcec.PublicKey, error) {
+	scalar, err := t.scalar()
+	if err != nil {
+		return nil, err
+	}
+
+	var point, tweakPoint, result btcec.JacobianPoint
+	base.AsJacobian(&point)
+	btcec.ScalarBaseMultNonConst(&scalar, &tweakPoint)
+	btcec.AddNonConst(&point, &tweakPoint, &result)
+
+	if (result.X.IsZero() && result.Y.IsZero()) || result.Z.IsZero() {
+		return nil, fmt.Errorf("%w: tweak cancels the key",
+			ErrInvalidSignParam)
+	}
+
+	result.ToAffine()
+
+	return btcec.NewPublicKey(&result.X, &result.Y), nil
+}
+
 // UnlockingScriptParams provides all the necessary parameters to generate an
 // unlocking script (witness and sigScript) for a transaction input.
 type UnlockingScriptParams struct {
@@ -291,10 +347,6 @@ type UnlockingScriptParams struct {
 
 	// HashType is the signature hash type to use.
 	HashType txscript.SigHashType
-
-	// Tweaker is an optional function that can be used to tweak the
-	// private key before signing.
-	Tweaker PrivKeyTweaker
 }
 
 // RawSigParams provides all the necessary parameters to generate a raw
@@ -320,9 +372,9 @@ type RawSigParams struct {
 	// signing.
 	Path BIP32Path
 
-	// Tweaker is an optional function that can be used to tweak the
-	// private key before signing.
-	Tweaker PrivKeyTweaker
+	// Tweak is added to the derived key before it signs. The zero value
+	// signs with the derived key.
+	Tweak KeyTweak
 
 	// Details specifies the version-specific information for signing.
 	// This field MUST be set to either LegacySpendDetails,
@@ -890,7 +942,7 @@ func signDigestECDSA(privKey *btcec.PrivateKey,
 }
 
 // ComputeUnlockingScript generates the full sigScript and witness required to
-// spend a UTXO. A supplied tweaker finishes before return even if the caller
+// spend a UTXO. Accepted signing finishes before return even if the caller
 // cancels after admission.
 func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	params *UnlockingScriptParams) (*UnlockingScript, error) {
@@ -960,17 +1012,8 @@ func (w *Wallet) computeUnlockingScript(ctx context.Context,
 	}
 	defer privKey.Zero()
 
-	// If a tweaker is provided, we'll use it to tweak the private key.
-	if params.Tweaker != nil {
-		privKey, err = params.Tweaker(privKey)
-		if err != nil {
-			return nil, fmt.Errorf("error tweaking private key: %w",
-				err)
-		}
-	}
-
-	// With the private key retrieved and tweaked, we can now generate the
-	// unlocking script.
+	// With the private key retrieved, we can now generate the unlocking
+	// script.
 	return signAndAssembleScript(params, privKey, &scriptInfo)
 }
 
@@ -1449,7 +1492,7 @@ func redeemSigScript(redeemScript []byte) ([]byte, error) {
 }
 
 // ComputeRawSig generates a raw signature for a single transaction input. The
-// caller is responsible for assembling the final witness. A supplied tweaker
+// caller is responsible for assembling the final witness. Accepted signing
 // finishes before return even if the caller cancels after admission.
 func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	RawSignature, error) {
@@ -1498,13 +1541,15 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 func (w *Wallet) handleComputeRawSig(r rawSigReq) {
 	// Reuse raw signing shared with PSBTs and finish key cleanup before
 	// delivery.
-	signature, err := w.computeRawSig(r.ctx, r.params)
+	signature, err := w.computeRawSig(r.ctx, r.params, nil)
 	r.respChan <- rawSigResp{signature: signature, err: err}
 }
 
-// computeRawSig signs and zeroes its key inside the accepted request.
-func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams) (
-	RawSignature, error) {
+// computeRawSig signs and zeroes its key inside the accepted request. A
+// non-nil signer is the key, as a PSBT record names it, that the tweaked key
+// must be before it signs.
+func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
+	signer []byte) (RawSignature, error) {
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
@@ -1512,13 +1557,14 @@ func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams) (
 	}
 	defer privKey.Zero()
 
-	// If a tweaker is provided, we'll use it to tweak the private key.
-	if params.Tweaker != nil {
-		privKey, err = params.Tweaker(privKey)
-		if err != nil {
-			return nil, fmt.Errorf("error tweaking private key: %w",
-				err)
-		}
+	err = params.Tweak.apply(privKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if signer != nil && !recordKeyIs(signer, privKey.PubKey()) {
+		return nil, fmt.Errorf("%w: derived key differs",
+			ErrSigningKeyMismatch)
 	}
 
 	// With the private key retrieved and tweaked, we can now delegate the

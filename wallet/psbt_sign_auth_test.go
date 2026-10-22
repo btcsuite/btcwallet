@@ -14,9 +14,12 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1757,4 +1760,1187 @@ func TestAuthorizeSignRecordsKeySpendBadOutputKey(t *testing.T) {
 
 	// Assert: the record is refused.
 	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
+}
+
+// testScript assembles a script from pushes and opcodes, where a []byte is a
+// push and an int, as an untyped opcode constant becomes, is an opcode.
+func testScript(t *testing.T, parts ...any) []byte {
+	t.Helper()
+
+	builder := txscript.NewScriptBuilder()
+	for _, part := range parts {
+		switch p := part.(type) {
+		case []byte:
+			builder.AddData(p)
+		case int:
+			builder.AddOp(byte(p))
+		default:
+			t.Fatalf("unknown script part %T", part)
+		}
+	}
+
+	script, err := builder.Script()
+	require.NoError(t, err)
+
+	return script
+}
+
+// testP2SHScript returns the P2SH output script paying a redeem script.
+func testP2SHScript(t *testing.T, redeem []byte) []byte {
+	t.Helper()
+
+	return testScript(
+		t, txscript.OP_HASH160, address.Hash160(redeem),
+		txscript.OP_EQUAL,
+	)
+}
+
+// testP2WSHScript returns the P2WSH output script paying a witness script.
+func testP2WSHScript(t *testing.T, witnessScript []byte) []byte {
+	t.Helper()
+
+	hash := sha256.Sum256(witnessScript)
+
+	return testScript(t, txscript.OP_0, hash[:])
+}
+
+// testBip32Path returns the derivation path the store-routed signer resolves
+// for a purpose's account 0, branch 0, index 0.
+func testBip32Path(purpose uint32) []uint32 {
+	return []uint32{
+		hdkeychain.HardenedKeyStart + purpose,
+		hdkeychain.HardenedKeyStart + 1,
+		hdkeychain.HardenedKeyStart + 0,
+		0, 0,
+	}
+}
+
+// requireInputSpends runs the script engine on input 0 of the packet's
+// transaction, unlocked by the given signature script and witness.
+func requireInputSpends(t *testing.T, packet *psbt.Packet, sigScript []byte,
+	witness wire.TxWitness) {
+
+	t.Helper()
+
+	requireInputIdxSpends(t, packet, 0, sigScript, witness)
+}
+
+// requireInputIdxSpends runs the script engine on one input of the packet's
+// transaction, unlocked by the given signature script and witness.
+func requireInputIdxSpends(t *testing.T, packet *psbt.Packet, idx int,
+	sigScript []byte, witness wire.TxWitness) {
+
+	t.Helper()
+
+	tx := packet.UnsignedTx.Copy()
+	tx.TxIn[idx].SignatureScript = sigScript
+	tx.TxIn[idx].Witness = witness
+
+	prevOuts, err := PsbtPrevOutputFetcher(packet)
+	require.NoError(t, err)
+
+	utxo := packet.Inputs[idx].WitnessUtxo
+	vm, err := txscript.NewEngine(
+		utxo.PkScript, tx, idx, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, prevOuts), utxo.Value, prevOuts,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+}
+
+// TestSignPsbtEcdsaEffectiveKey tests that SignPsbt signs ECDSA inputs with
+// the derived key plus any input tweak, emits the record under that key, and
+// keeps the base derivation. Each emitted signature must spend its input under
+// the script engine, and a second pass must add nothing.
+func TestSignPsbtEcdsaEffectiveKey(t *testing.T) {
+	t.Parallel()
+
+	_, basePub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	tweak := KeyTweak{31: 7}
+	tweakedPub, err := tweak.pubKey(basePub)
+	require.NoError(t, err)
+
+	// spend describes an input paying key and how a signature by it
+	// unlocks that input.
+	type spend struct {
+		pkScript      []byte
+		redeemScript  []byte
+		witnessScript []byte
+		unlock        func(sig []byte) ([]byte, wire.TxWitness)
+	}
+
+	forms := []struct {
+		name    string
+		purpose uint32
+		spend   func(t *testing.T, key []byte) spend
+	}{{
+		name:    "p2wpkh",
+		purpose: 84,
+		spend: func(t *testing.T, key []byte) spend {
+			t.Helper()
+
+			return spend{
+				pkScript: testScript(
+					t, txscript.OP_0, address.Hash160(key),
+				),
+				unlock: func(sig []byte) ([]byte, wire.TxWitness) {
+					return nil, wire.TxWitness{sig, key}
+				},
+			}
+		},
+	}, {
+		name:    "custom scope p2wpkh",
+		purpose: 1017,
+		spend: func(t *testing.T, key []byte) spend {
+			t.Helper()
+
+			return spend{
+				pkScript: testScript(
+					t, txscript.OP_0, address.Hash160(key),
+				),
+				unlock: func(sig []byte) ([]byte, wire.TxWitness) {
+					return nil, wire.TxWitness{sig, key}
+				},
+			}
+		},
+	}, {
+		name:    "np2wpkh",
+		purpose: 49,
+		spend: func(t *testing.T, key []byte) spend {
+			t.Helper()
+
+			redeem := testScript(
+				t, txscript.OP_0, address.Hash160(key),
+			)
+
+			return spend{
+				pkScript:     testP2SHScript(t, redeem),
+				redeemScript: redeem,
+				unlock: func(sig []byte) ([]byte, wire.TxWitness) {
+					return testScript(t, redeem),
+						wire.TxWitness{sig, key}
+				},
+			}
+		},
+	}, {
+		name:    "p2pkh",
+		purpose: 44,
+		spend: func(t *testing.T, key []byte) spend {
+			t.Helper()
+
+			return spend{
+				pkScript: testScript(
+					t, txscript.OP_DUP, txscript.OP_HASH160,
+					address.Hash160(key),
+					txscript.OP_EQUALVERIFY,
+					txscript.OP_CHECKSIG,
+				),
+				unlock: func(sig []byte) ([]byte, wire.TxWitness) {
+					return testScript(t, sig, key), nil
+				},
+			}
+		},
+	}, {
+		name:    "p2wsh",
+		purpose: 84,
+		spend: func(t *testing.T, key []byte) spend {
+			t.Helper()
+
+			script := testScript(t, key, txscript.OP_CHECKSIG)
+
+			return spend{
+				pkScript:      testP2WSHScript(t, script),
+				witnessScript: script,
+				unlock: func(sig []byte) ([]byte, wire.TxWitness) {
+					return nil, wire.TxWitness{sig, script}
+				},
+			}
+		},
+	}, {
+		name:    "p2sh-p2wsh",
+		purpose: 84,
+		spend: func(t *testing.T, key []byte) spend {
+			t.Helper()
+
+			script := testScript(t, key, txscript.OP_CHECKSIG)
+			redeem := testP2WSHScript(t, script)
+
+			return spend{
+				pkScript:      testP2SHScript(t, redeem),
+				redeemScript:  redeem,
+				witnessScript: script,
+				unlock: func(sig []byte) ([]byte, wire.TxWitness) {
+					return testScript(t, redeem),
+						wire.TxWitness{sig, script}
+				},
+			}
+		},
+	}}
+
+	for _, form := range forms {
+		for _, tweaked := range []bool{false, true} {
+			name := form.name
+			if tweaked {
+				name += " tweaked"
+			}
+
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				// Arrange: an input paying the derived key,
+				// or the derived key plus the tweak.
+				key := basePub.SerializeCompressed()
+
+				var tweaks map[int]KeyTweak
+				if tweaked {
+					key = tweakedPub.SerializeCompressed()
+					tweaks = map[int]KeyTweak{0: tweak}
+				}
+
+				s := form.spend(t, key)
+				utxo := &wire.TxOut{
+					Value: 1000, PkScript: s.pkScript,
+				}
+				packet, _, _ := testAuthPacket(
+					t, utxo, txscript.SigHashAll,
+				)
+				packet.Inputs[0].RedeemScript = s.redeemScript
+				packet.Inputs[0].WitnessScript = s.witnessScript
+				packet.Inputs[0].Bip32Derivation =
+					[]*psbt.Bip32Derivation{{
+						PubKey: basePub.
+							SerializeCompressed(),
+						Bip32Path: testBip32Path(
+							form.purpose,
+						),
+					}}
+				derivations := clonePacket(packet).Inputs[0].
+					Bip32Derivation
+
+				w, mocks := createUnlockedWalletWithMocks(t)
+				_, _ = expectStoreSignerPrivKey(
+					t, mocks, w.id, waddrmgr.KeyScope{
+						Purpose: form.purpose, Coin: 1,
+					},
+					waddrmgr.DerivationPath{},
+				)
+				params := &SignPsbtParams{
+					Packet: packet, InputTweaks: tweaks,
+				}
+
+				// Act: sign the packet twice.
+				first, err := w.SignPsbt(t.Context(), params)
+				require.NoError(t, err)
+
+				signed := clonePacket(packet)
+
+				second, err := w.SignPsbt(t.Context(), params)
+				require.NoError(t, err)
+
+				// Assert: the first pass signed under the
+				// effective key, the signature spends the
+				// input, the base derivation is untouched, and
+				// the second pass changed nothing.
+				require.Equal(t, []uint32{0}, first.SignedInputs)
+
+				records := packet.Inputs[0].PartialSigs
+				require.Len(t, records, 1)
+				require.Equal(t, key, records[0].PubKey)
+
+				sigScript, witness := s.unlock(
+					records[0].Signature,
+				)
+				requireInputSpends(t, packet, sigScript, witness)
+
+				require.Equal(
+					t, derivations,
+					packet.Inputs[0].Bip32Derivation,
+				)
+				require.Empty(t, second.SignedInputs)
+				require.Equal(t, signed, packet)
+			})
+		}
+	}
+}
+
+// TestAuthorizeTaprootSignerRejectsOffCurveKey tests that a key-path
+// derivation key that is not a curve point is refused rather than used.
+// SignPsbt's packet validation refuses such a key first, so the check is
+// reached only directly.
+func TestAuthorizeTaprootSignerRejectsOffCurveKey(t *testing.T) {
+	t.Parallel()
+
+	pkScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootKeyNoScript(testAuthKeys()[0].PubKey()),
+	)
+	require.NoError(t, err)
+
+	err = authorizeTaprootSigner(
+		&psbt.PInput{}, &wire.TxOut{PkScript: pkScript},
+		&psbt.TaprootBip32Derivation{
+			XOnlyPubKey: bytes.Repeat([]byte{0xff}, 32),
+		},
+	)
+
+	require.ErrorIs(t, err, ErrSigningKeyMismatch)
+}
+
+// TestSignPsbtUncompressedLegacyKey tests that an untweaked legacy input whose
+// derivation record names the derived key uncompressed is signed under those
+// record bytes, which its output commits to.
+func TestSignPsbtUncompressedLegacyKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a P2PKH output paying the uncompressed derived key.
+	_, pubKey := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	key := pubKey.SerializeUncompressed()
+
+	pkScript := testScript(
+		t, txscript.OP_DUP, txscript.OP_HASH160, address.Hash160(key),
+		txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG,
+	)
+	packet, _, _ := testAuthPacket(
+		t, &wire.TxOut{Value: 1000, PkScript: pkScript},
+		txscript.SigHashAll,
+	)
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:    key,
+		Bip32Path: testBip32Path(44),
+	}}
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 44, Coin: 1},
+		waddrmgr.DerivationPath{},
+	)
+
+	// Act: sign the packet.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the record names the uncompressed key and its signature
+	// spends the input.
+	require.NoError(t, err)
+
+	records := packet.Inputs[0].PartialSigs
+	require.Len(t, records, 1)
+	require.Equal(t, key, records[0].PubKey)
+	requireInputSpends(
+		t, packet, testScript(t, records[0].Signature, key), nil,
+	)
+}
+
+// TestSignPsbtTaprootEffectiveKey tests that SignPsbt signs Taproot key-path
+// and script-path inputs whose spend uses the derived key, and that each
+// emitted signature spends its input under the script engine.
+func TestSignPsbtTaprootEffectiveKey(t *testing.T) {
+	t.Parallel()
+
+	walletKey, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	keys := testAuthKeys()
+
+	tests := []struct {
+		name string
+
+		// merkleRoot is the script root a key-path output commits
+		// to, if any.
+		merkleRoot []byte
+
+		// scriptPath spends the leaf `<wallet key> OP_CHECKSIG`.
+		scriptPath bool
+	}{
+		{name: "key path"},
+		{
+			name:       "key path with merkle root",
+			merkleRoot: bytes.Repeat([]byte{0x05}, 32),
+		},
+		{name: "script path", scriptPath: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input the wallet's key spends.
+			derivation := &psbt.TaprootBip32Derivation{
+				XOnlyPubKey: schnorr.SerializePubKey(walletPub),
+				Bip32Path:   testBip32Path(86),
+			}
+
+			var leafScript *psbt.TaprootTapLeafScript
+
+			utxo := &wire.TxOut{Value: 1000}
+			if tc.scriptPath {
+				var leaf txscript.TapLeaf
+
+				utxo, leaf, leafScript = testTapscriptFixture(
+					t, [2]*btcec.PrivateKey{
+						walletKey, keys[1],
+					},
+				)
+				leafHash := leaf.TapHash()
+				derivation.LeafHashes = [][]byte{leafHash[:]}
+			} else {
+				pkScript, err := txscript.PayToTaprootScript(
+					txscript.ComputeTaprootOutputKey(
+						walletPub, tc.merkleRoot,
+					),
+				)
+				require.NoError(t, err)
+
+				utxo.PkScript = pkScript
+			}
+
+			packet, _, _ := testAuthPacket(
+				t, utxo, txscript.SigHashDefault,
+			)
+
+			packet.Inputs[0].TaprootMerkleRoot = tc.merkleRoot
+			if leafScript != nil {
+				packet.Inputs[0].TaprootLeafScript =
+					[]*psbt.TaprootTapLeafScript{leafScript}
+			}
+
+			packet.Inputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{derivation}
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			_, _ = expectStoreSignerPrivKey(
+				t, mocks, w.id,
+				waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+				waddrmgr.DerivationPath{},
+			)
+
+			// Act: sign the packet.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: the input was signed and the signature
+			// spends it.
+			require.NoError(t, err)
+			require.Equal(t, []uint32{0}, result.SignedInputs)
+
+			pIn := packet.Inputs[0]
+
+			witness := wire.TxWitness{pIn.TaprootKeySpendSig}
+			if tc.scriptPath {
+				require.Len(t, pIn.TaprootScriptSpendSig, 1)
+				witness = wire.TxWitness{
+					pIn.TaprootScriptSpendSig[0].Signature,
+					leafScript.Script, leafScript.ControlBlock,
+				}
+			}
+
+			requireInputSpends(t, packet, nil, witness)
+		})
+	}
+}
+
+// testEcdsaSignPacket returns a packet spending pkScript with the wallet's
+// BIP-84 derivation record.
+func testEcdsaSignPacket(t *testing.T, pkScript,
+	witnessScript []byte) *psbt.Packet {
+
+	t.Helper()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+
+	packet, _, _ := testAuthPacket(
+		t, &wire.TxOut{Value: 1000, PkScript: pkScript},
+		txscript.SigHashAll,
+	)
+	packet.Inputs[0].WitnessScript = witnessScript
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:    walletPub.SerializeCompressed(),
+		Bip32Path: testBip32Path(84),
+	}}
+
+	return packet
+}
+
+// testTaprootSignPacket returns a packet spending utxo with the wallet's
+// BIP-86 derivation record for the given leaf, or for the key path when
+// leafScript is nil.
+func testTaprootSignPacket(t *testing.T, utxo *wire.TxOut,
+	leafScript *psbt.TaprootTapLeafScript) *psbt.Packet {
+
+	t.Helper()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	derivation := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey: schnorr.SerializePubKey(walletPub),
+		Bip32Path:   testBip32Path(86),
+	}
+
+	packet, _, _ := testAuthPacket(t, utxo, txscript.SigHashDefault)
+	if leafScript != nil {
+		leaf := txscript.TapLeaf{
+			LeafVersion: leafScript.LeafVersion,
+			Script:      leafScript.Script,
+		}
+		leafHash := leaf.TapHash()
+
+		derivation.LeafHashes = [][]byte{leafHash[:]}
+		packet.Inputs[0].TaprootLeafScript =
+			[]*psbt.TaprootTapLeafScript{leafScript}
+	}
+
+	packet.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{derivation}
+
+	return packet
+}
+
+// testBip86Output returns a BIP-86 output paying an internal key.
+func testBip86Output(t *testing.T, key *btcec.PublicKey) *wire.TxOut {
+	t.Helper()
+
+	pkScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootKeyNoScript(key),
+	)
+	require.NoError(t, err)
+
+	return &wire.TxOut{Value: 1000, PkScript: pkScript}
+}
+
+// testVersionedLeafOutput returns an output with one leaf of the given
+// version and script under internal key 1, with the leaf script record
+// proving it into the output.
+func testVersionedLeafOutput(t *testing.T,
+	version txscript.TapscriptLeafVersion,
+	script []byte) (*wire.TxOut, *psbt.TaprootTapLeafScript) {
+
+	t.Helper()
+
+	internalKey := testAuthKeys()[1].PubKey()
+	tree := txscript.AssembleTaprootScriptTree(
+		txscript.NewTapLeaf(version, script),
+	)
+	root := tree.RootNode.TapHash()
+
+	pkScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootOutputKey(internalKey, root[:]),
+	)
+	require.NoError(t, err)
+
+	controlBlock := tree.LeafMerkleProofs[0].ToControlBlock(internalKey)
+	controlBytes, err := controlBlock.ToBytes()
+	require.NoError(t, err)
+
+	return &wire.TxOut{Value: 1000, PkScript: pkScript},
+		&psbt.TaprootTapLeafScript{
+			ControlBlock: controlBytes,
+			Script:       script,
+			LeafVersion:  version,
+		}
+}
+
+// requireRefusedBeforeKeyLookup signs a packet and checks that the call fails
+// with wantErr, looks up no key, and leaves the caller's packet unchanged.
+func requireRefusedBeforeKeyLookup(t *testing.T, packet *psbt.Packet,
+	tweaks map[int]KeyTweak, wantErr error) {
+
+	t.Helper()
+
+	before := clonePacket(packet)
+	w, mocks := createUnlockedWalletWithMocks(t)
+
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{
+		Packet: packet, InputTweaks: tweaks,
+	})
+
+	require.ErrorIs(t, err, wantErr)
+	mocks.store.AssertNotCalled(
+		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	)
+	require.Equal(t, before, clonePacket(packet))
+}
+
+// TestSignPsbtRejectsEcdsaSignerBeforeKeyLookup tests that an ECDSA input
+// whose script does not check the key SignPsbt would sign with, or whose
+// tweak cannot be applied, fails the call before any key is looked up and
+// leaves the caller's packet unchanged.
+func TestSignPsbtRejectsEcdsaSignerBeforeKeyLookup(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	walletKey := walletPub.SerializeCompressed()
+	foreign := testAuthKeys()[0].PubKey()
+
+	var order KeyTweak
+	btcec.S256().N.FillBytes(order[:])
+
+	tests := []struct {
+		name    string
+		packet  func(t *testing.T) *psbt.Packet
+		tweaks  map[int]KeyTweak
+		wantErr error
+	}{{
+		name: "output pays another key",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testEcdsaSignPacket(
+				t, testP2WPKHScript(t, foreign), nil,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "tweak the output does not pay",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testEcdsaSignPacket(
+				t, testP2WPKHScript(t, walletPub), nil,
+			)
+		},
+		tweaks:  map[int]KeyTweak{0: {31: 7}},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "tweak outside the curve order",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testEcdsaSignPacket(
+				t, testP2WPKHScript(t, walletPub), nil,
+			)
+		},
+		tweaks:  map[int]KeyTweak{0: order},
+		wantErr: ErrInvalidSignParam,
+	}, {
+		name: "tweak for a missing input",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testEcdsaSignPacket(
+				t, testP2WPKHScript(t, walletPub), nil,
+			)
+		},
+		tweaks:  map[int]KeyTweak{1: {31: 7}},
+		wantErr: ErrInvalidSignParam,
+	}, {
+		name: "uncompressed segwit key",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			uncompressed := walletPub.SerializeUncompressed()
+			packet := testEcdsaSignPacket(
+				t, testScript(
+					t, txscript.OP_0,
+					address.Hash160(uncompressed),
+				), nil,
+			)
+			packet.Inputs[0].Bip32Derivation[0].PubKey =
+				uncompressed
+
+			return packet
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "witness script the output does not commit to",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			script := testScript(t, walletKey, txscript.OP_CHECKSIG)
+			other := testScript(t, txscript.OP_TRUE)
+
+			return testEcdsaSignPacket(
+				t, testP2WSHScript(t, other), script,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "key checked after a code separator",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			script := testScript(
+				t, txscript.OP_CODESEPARATOR, walletKey,
+				txscript.OP_CHECKSIG,
+			)
+
+			return testEcdsaSignPacket(
+				t, testP2WSHScript(t, script), script,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "key checked by a tapscript opcode",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			script := testScript(
+				t, walletKey, txscript.OP_CHECKSIGADD,
+			)
+
+			return testEcdsaSignPacket(
+				t, testP2WSHScript(t, script), script,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			requireRefusedBeforeKeyLookup(
+				t, tc.packet(t), tc.tweaks, tc.wantErr,
+			)
+		})
+	}
+}
+
+// TestSignPsbtRejectsTaprootSignerBeforeKeyLookup tests that a Taproot input
+// whose spend does not use the derivation's key, or that carries a tweak,
+// fails the call before any key is looked up and leaves the caller's packet
+// unchanged.
+func TestSignPsbtRejectsTaprootSignerBeforeKeyLookup(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	walletX := schnorr.SerializePubKey(walletPub)
+	foreign := testAuthKeys()[0].PubKey()
+	foreignX := schnorr.SerializePubKey(foreign)
+	checkSig := func(t *testing.T, key []byte) []byte {
+		t.Helper()
+
+		return testScript(t, key, txscript.OP_CHECKSIG)
+	}
+
+	tests := []struct {
+		name    string
+		packet  func(t *testing.T) *psbt.Packet
+		tweaks  map[int]KeyTweak
+		wantErr error
+	}{{
+		name: "tweak on a taproot input",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testTaprootSignPacket(
+				t, testBip86Output(t, walletPub), nil,
+			)
+		},
+		tweaks:  map[int]KeyTweak{0: {31: 7}},
+		wantErr: ErrInvalidSignParam,
+	}, {
+		name: "internal key is another key",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			packet := testTaprootSignPacket(
+				t, testBip86Output(t, walletPub), nil,
+			)
+			packet.Inputs[0].TaprootInternalKey = foreignX
+
+			return packet
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "output pays another key",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testTaprootSignPacket(
+				t, testBip86Output(t, foreign), nil,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "non-taproot output",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			return testTaprootSignPacket(t, &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, walletPub),
+			}, nil)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "leaf the output does not commit to",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			_, leafScript := testVersionedLeafOutput(
+				t, txscript.BaseLeafVersion,
+				checkSig(t, walletX),
+			)
+
+			return testTaprootSignPacket(
+				t, testBip86Output(t, walletPub), leafScript,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "leaf does not check the key",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			utxo, leafScript := testVersionedLeafOutput(
+				t, txscript.BaseLeafVersion,
+				checkSig(t, foreignX),
+			)
+
+			return testTaprootSignPacket(t, utxo, leafScript)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "key checked after a code separator",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			utxo, leafScript := testVersionedLeafOutput(
+				t, txscript.BaseLeafVersion, testScript(
+					t, txscript.OP_CODESEPARATOR, walletX,
+					txscript.OP_CHECKSIG,
+				),
+			)
+
+			return testTaprootSignPacket(t, utxo, leafScript)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "key checked by a multisig opcode",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			utxo, leafScript := testVersionedLeafOutput(
+				t, txscript.BaseLeafVersion, testScript(
+					t, txscript.OP_1, walletX, txscript.OP_1,
+					txscript.OP_CHECKMULTISIG,
+				),
+			)
+
+			return testTaprootSignPacket(t, utxo, leafScript)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "leaf version other than tapscript",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			utxo, leafScript := testVersionedLeafOutput(
+				t, 0xc2, checkSig(t, walletX),
+			)
+
+			return testTaprootSignPacket(t, utxo, leafScript)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			requireRefusedBeforeKeyLookup(
+				t, tc.packet(t), tc.tweaks, tc.wantErr,
+			)
+		})
+	}
+}
+
+// TestSignPsbtRejectsDerivedKeyMismatch tests that an input whose record names
+// a key other than the one the wallet derives at its path fails before it is
+// signed, and leaves the caller's packet unchanged.
+func TestSignPsbtRejectsDerivedKeyMismatch(t *testing.T) {
+	t.Parallel()
+
+	foreign := testAuthKeys()[0].PubKey()
+
+	tests := []struct {
+		name    string
+		purpose uint32
+		arrange func(t *testing.T) *psbt.Packet
+	}{{
+		name:    "ecdsa",
+		purpose: 84,
+		arrange: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			packet, _, _ := testAuthPacket(t, &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, foreign),
+			}, txscript.SigHashAll)
+			packet.Inputs[0].Bip32Derivation =
+				[]*psbt.Bip32Derivation{{
+					PubKey:    foreign.SerializeCompressed(),
+					Bip32Path: testBip32Path(84),
+				}}
+
+			return packet
+		},
+	}, {
+		name:    "taproot",
+		purpose: 86,
+		arrange: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			pkScript, err := txscript.PayToTaprootScript(
+				txscript.ComputeTaprootKeyNoScript(foreign),
+			)
+			require.NoError(t, err)
+
+			packet, _, _ := testAuthPacket(t, &wire.TxOut{
+				Value: 1000, PkScript: pkScript,
+			}, txscript.SigHashDefault)
+			packet.Inputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{{
+					XOnlyPubKey: schnorr.SerializePubKey(
+						foreign,
+					),
+					Bip32Path: testBip32Path(86),
+				}}
+
+			return packet
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input naming a foreign key at a path
+			// where the wallet derives its own.
+			packet := tc.arrange(t)
+			before := clonePacket(packet)
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			_, _ = expectStoreSignerPrivKey(
+				t, mocks, w.id, waddrmgr.KeyScope{
+					Purpose: tc.purpose, Coin: 1,
+				},
+				waddrmgr.DerivationPath{},
+			)
+
+			// Act: sign the packet.
+			_, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: the mismatch is refused and the caller's
+			// packet is unchanged.
+			require.ErrorIs(t, err, ErrSigningKeyMismatch)
+			require.Equal(t, before, clonePacket(packet))
+		})
+	}
+}
+
+// testSingleWithoutOutputPacket returns a packet with two inputs and one
+// output. Input 1 spends utxo under SIGHASH_SINGLE, so it has no output at its
+// index; input 0 is not the wallet's.
+func testSingleWithoutOutputPacket(t *testing.T, utxo *wire.TxOut,
+	hashType txscript.SigHashType) *psbt.Packet {
+
+	t.Helper()
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: 1}})
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: 2}})
+	tx.AddTxOut(&wire.TxOut{Value: 500, PkScript: []byte{txscript.OP_TRUE}})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+		Value: 700, PkScript: []byte{txscript.OP_TRUE},
+	}
+	packet.Inputs[1].WitnessUtxo = utxo
+	packet.Inputs[1].SighashType = hashType
+
+	return packet
+}
+
+// TestSignPsbtRejectsSingleWithoutOutput tests that a legacy or Taproot input
+// requesting SIGHASH_SINGLE with no output at its index fails before any key
+// is looked up. A legacy signature there would sign the constant digest 1,
+// and BIP 341 defines no digest for it.
+func TestSignPsbtRejectsSingleWithoutOutput(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	walletKey := walletPub.SerializeCompressed()
+	p2pkh := testScript(
+		t, txscript.OP_DUP, txscript.OP_HASH160,
+		address.Hash160(walletKey), txscript.OP_EQUALVERIFY,
+		txscript.OP_CHECKSIG,
+	)
+
+	tests := []struct {
+		name     string
+		hashType txscript.SigHashType
+		taproot  bool
+	}{
+		{name: "legacy single", hashType: txscript.SigHashSingle},
+		{
+			name: "legacy single anyonecanpay",
+			hashType: txscript.SigHashSingle |
+				txscript.SigHashAnyOneCanPay,
+		},
+		{
+			name:     "taproot single",
+			hashType: txscript.SigHashSingle,
+			taproot:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var packet *psbt.Packet
+			if tc.taproot {
+				packet = testSingleWithoutOutputPacket(
+					t, testBip86Output(t, walletPub),
+					tc.hashType,
+				)
+				packet.Inputs[1].TaprootBip32Derivation =
+					[]*psbt.TaprootBip32Derivation{{
+						XOnlyPubKey: schnorr.SerializePubKey(
+							walletPub,
+						),
+						Bip32Path: testBip32Path(86),
+					}}
+			} else {
+				packet = testSingleWithoutOutputPacket(
+					t, &wire.TxOut{
+						Value: 1000, PkScript: p2pkh,
+					}, tc.hashType,
+				)
+				packet.Inputs[1].Bip32Derivation =
+					[]*psbt.Bip32Derivation{{
+						PubKey:    walletKey,
+						Bip32Path: testBip32Path(44),
+					}}
+			}
+
+			requireRefusedBeforeKeyLookup(
+				t, packet, nil, ErrUnsafeSighash,
+			)
+		})
+	}
+}
+
+// TestSignPsbtSegwitSingleWithoutOutput tests that a segwit v0 input
+// requesting SIGHASH_SINGLE with no output at its index is still signed: BIP
+// 143 defines that digest, and the signature spends the input.
+func TestSignPsbtSegwitSingleWithoutOutput(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a P2WPKH input at index 1 of a one-output transaction.
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	walletKey := walletPub.SerializeCompressed()
+
+	packet := testSingleWithoutOutputPacket(
+		t, &wire.TxOut{
+			Value: 1000, PkScript: testP2WPKHScript(t, walletPub),
+		}, txscript.SigHashSingle,
+	)
+	packet.Inputs[1].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:    walletKey,
+		Bip32Path: testBip32Path(84),
+	}}
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+		waddrmgr.DerivationPath{},
+	)
+
+	// Act: sign the packet.
+	result, err := w.SignPsbt(
+		t.Context(), &SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: the input is signed and the signature spends it.
+	require.NoError(t, err)
+	require.Equal(t, []uint32{1}, result.SignedInputs)
+
+	records := packet.Inputs[1].PartialSigs
+	require.Len(t, records, 1)
+	requireInputIdxSpends(
+		t, packet, 1, nil,
+		wire.TxWitness{records[0].Signature, walletKey},
+	)
+}
+
+// TestSignPsbtSignsVersionedSigOps tests that a key checked by a signature
+// opcode that runs under its script version is signed, and the signature
+// spends the input: OP_CHECKSIGADD in tapscript and OP_CHECKMULTISIG in a
+// segwit v0 script.
+func TestSignPsbtSignsVersionedSigOps(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	walletKey := walletPub.SerializeCompressed()
+	walletX := schnorr.SerializePubKey(walletPub)
+
+	t.Run("tapscript checksigadd", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a leaf `0 <wallet key> OP_CHECKSIGADD 1
+		// OP_NUMEQUAL`.
+		script := testScript(
+			t, txscript.OP_0, walletX, txscript.OP_CHECKSIGADD,
+			txscript.OP_1, txscript.OP_NUMEQUAL,
+		)
+		utxo, leafScript := testVersionedLeafOutput(
+			t, txscript.BaseLeafVersion, script,
+		)
+		packet := testTaprootSignPacket(t, utxo, leafScript)
+
+		w, mocks := createUnlockedWalletWithMocks(t)
+		_, _ = expectStoreSignerPrivKey(
+			t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+			waddrmgr.DerivationPath{},
+		)
+
+		// Act: sign the packet.
+		_, err := w.SignPsbt(
+			t.Context(), &SignPsbtParams{Packet: packet},
+		)
+
+		// Assert: the signature spends the input.
+		require.NoError(t, err)
+
+		records := packet.Inputs[0].TaprootScriptSpendSig
+		require.Len(t, records, 1)
+		requireInputSpends(t, packet, nil, wire.TxWitness{
+			records[0].Signature, script, leafScript.ControlBlock,
+		})
+	})
+
+	t.Run("segwit v0 checkmultisig", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a 1-of-1 multisig witness script.
+		script := testScript(
+			t, txscript.OP_1, walletKey, txscript.OP_1,
+			txscript.OP_CHECKMULTISIG,
+		)
+		packet := testEcdsaSignPacket(
+			t, testP2WSHScript(t, script), script,
+		)
+
+		w, mocks := createUnlockedWalletWithMocks(t)
+		_, _ = expectStoreSignerPrivKey(
+			t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+			waddrmgr.DerivationPath{},
+		)
+
+		// Act: sign the packet.
+		_, err := w.SignPsbt(
+			t.Context(), &SignPsbtParams{Packet: packet},
+		)
+
+		// Assert: the signature spends the input.
+		require.NoError(t, err)
+
+		records := packet.Inputs[0].PartialSigs
+		require.Len(t, records, 1)
+		requireInputSpends(t, packet, nil, wire.TxWitness{
+			nil, records[0].Signature, script,
+		})
+	})
 }
