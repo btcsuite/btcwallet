@@ -1684,6 +1684,13 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 			ErrInvalidSignParam)
 	}
 
+	// BIP 341 defines no digest for this, so signing would fail only
+	// after the key is looked up.
+	err := refuseSingleWithoutOutput(packet, idx)
+	if err != nil {
+		return nil, err
+	}
+
 	// It is safe to access packet.Inputs[idx] directly here because
 	// SignPsbt calls psbt.InputsReadyToSign before this method, which
 	// ensures that the Inputs slice corresponds to the UnsignedTx inputs.
@@ -1738,6 +1745,20 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 	}, nil
 }
 
+// refuseSingleWithoutOutput returns ErrUnsafeSighash if an input requests
+// SIGHASH_SINGLE and the transaction has no output at its index.
+func refuseSingleWithoutOutput(packet *psbt.Packet, idx int) error {
+	hashType := packet.Inputs[idx].SighashType
+	if hashType&sighashBaseMask != txscript.SigHashSingle ||
+		idx < len(packet.UnsignedTx.TxOut) {
+
+		return nil
+	}
+
+	return fmt.Errorf("%w: input %d requests SIGHASH_SINGLE with no "+
+		"output at its index", ErrUnsafeSighash, idx)
+}
+
 // planBip32PsbtInput plans the signature for a single non-Taproot
 // (Legacy/SegWit) input of a PSBT, without looking up a key.
 //
@@ -1781,6 +1802,15 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 	scriptCtx, err := ecdsaSignerScript(pInput, utxo, signer)
 	if err != nil {
 		return nil, err
+	}
+
+	// A legacy signature here would sign the constant digest 1, which
+	// any transaction can reuse. Segwit v0 signs a defined digest.
+	if !scriptCtx.witness {
+		err = refuseSingleWithoutOutput(packet, idx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Construct SpendDetails for Legacy/SegWit input.
