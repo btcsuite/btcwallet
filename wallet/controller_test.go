@@ -219,6 +219,133 @@ func TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown(
 	}
 }
 
+// TestControllerChangePassphraseDrainsDuringManagerStop verifies that accepted
+// rotation survives caller and runtime cancellation and drains before teardown.
+func TestControllerChangePassphraseDrainsDuringManagerStop(t *testing.T) {
+	t.Parallel()
+
+	// Both observation modes share the same accepted work and shutdown path.
+	for _, tc := range []struct {
+		name         string
+		cancelCaller bool
+	}{
+		{
+			name:         "Caller canceled",
+			cancelCaller: true,
+		},
+		{
+			name: "Caller waiting",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				t.Helper()
+
+				// Arrange: Run the real request loop under a Manager whose
+				// strict backend mock verifies closure follows Vault lock.
+				// Existing fixtures join workers and verify all mocks.
+				w, deps := createTestWalletWithMocks(t)
+				startLoadedWalletForTest(t, w)
+
+				backend := &managerBackendMock{}
+				manager := newManagerLifecycleTest(t, backend)
+				manager.wallets[w.cfg.Name] = w
+
+				entered := make(chan context.Context, 1)
+				release := make(chan struct{})
+				returned := make(chan struct{})
+				locked := make(chan struct{})
+				unblock := sync.OnceFunc(func() { close(release) })
+				t.Cleanup(unblock)
+
+				// Hold the accepted call without honoring cancellation so
+				// the test controls completion independently of its context.
+				deps.vault.On(
+					"ChangePassphrase", mock.Anything,
+					keyvault.ChangePassphraseParams{},
+				).Run(func(args mock.Arguments) {
+					ctx, _ := args.Get(0).(context.Context)
+					entered <- ctx
+					<-release
+					close(returned)
+				}).Return(errDBMock).Once()
+				vaultLock := deps.vault.On("Lock").Run(
+					func(mock.Arguments) {
+						// Lock must wait for the held operation to finish.
+						select {
+						case <-returned:
+						default:
+							t.Error("Vault locked during rotation")
+						}
+						close(locked)
+					},
+				).Return().Once()
+				backend.On("close").Return(nil).Once().
+					NotBefore(vaultLock)
+
+				ctx, cancel := context.WithCancel(t.Context())
+				t.Cleanup(cancel)
+
+				result := make(chan error, 1)
+				stopped := make(chan error, 1)
+
+				// Act: Wait for actual Vault entry before canceling the
+				// observer, then let Manager Stop cancel the Wallet runtime.
+				// Buffered results let either caller finish without a waiter.
+				go func() {
+					result <- w.ChangePassphrase(
+						ctx, ChangePassphraseRequest{},
+					)
+				}()
+
+				operationCtx := <-entered
+				require.NotNil(t, operationCtx)
+
+				if tc.cancelCaller {
+					// Caller cancellation must return before Vault release.
+					cancel()
+					require.ErrorIs(t, <-result, context.Canceled)
+				}
+
+				go func() { stopped <- manager.Stop() }()
+
+				<-w.lifetimeCtx.Done()
+				synctest.Wait()
+
+				// Assert: With fake time frozen and Stop durably blocked,
+				// the operation still has a usable cooperative deadline.
+				// Neither teardown nor a live observer may finish early.
+				require.NoError(t, operationCtx.Err())
+				deadline, ok := operationCtx.Deadline()
+				require.True(t, ok, "rotation needs its own deadline")
+				require.True(t, deadline.After(time.Now()))
+
+				select {
+				case <-locked:
+					t.Fatal("Vault locked before rotation completed")
+				case err := <-stopped:
+					t.Fatalf("Stop returned during rotation: %v", err)
+				case err := <-result:
+					t.Fatalf("caller returned during rotation: %v", err)
+				default:
+				}
+
+				// Completion releases the join and permits teardown. A live
+				// observer still receives the Vault's exact result.
+				unblock()
+
+				if !tc.cancelCaller {
+					require.ErrorIs(t, <-result, errDBMock)
+				}
+
+				require.NoError(t, <-stopped)
+			})
+		})
+	}
+}
+
 // TestControllerChangePassphrase_Interrupted_WaitTimeout verifies
 // ChangePassphrase when response wait times out.
 func TestControllerChangePassphrase_Interrupted_WaitTimeout(t *testing.T) {

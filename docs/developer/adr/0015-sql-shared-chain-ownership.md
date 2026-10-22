@@ -76,6 +76,11 @@ An admitted call keeps its ordinary result and drains before Store closure. A
 later call returns `ErrWalletStopped` without Store access. Admission does not
 serialize operation bodies.
 
+Admission transfers ownership of work, not an obligation for the caller to
+keep waiting. For `ChangePassphrase`, caller cancellation ends response waiting
+without canceling the accepted rotation. A caller that keeps waiting receives
+the Vault's result.
+
 Manager admission is separate and returns `ErrManagerStopped` after Stopping
 begins. Manager passes no lifecycle capability into Wallet. The final surface
 removes public Wallet and Controller Start/Stop plus Manager StartWallet,
@@ -138,6 +143,12 @@ Create, freezes the Wallet set, closes source admission, joins the source,
 privately stops Wallets and drains their calls and workers, joins accepted
 delivery and the coordinator, and closes Store last and once. Wallet never
 closes Store.
+
+Accepted passphrase rotation runs with its own cooperatively bounded context,
+independent of caller and Wallet runtime cancellation. Private Wallet teardown
+joins the serialized handler before locking the Vault; Store closure follows.
+An operation deadline only requests cancellation. It cannot force a backend
+to finish, so neither rotation completion nor shutdown has a hard time bound.
 
 Stop work is independent of caller contexts. Cancellation ends only that
 wait; later callers join or receive the cached result. Teardown continues
