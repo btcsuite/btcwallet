@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -1858,11 +1859,10 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	case chain.BlockConnected:
 		return nil
 
-	// A block was disconnected. We use checkRollback to safely verify our
-	// chain state against the backend and rewind if necessary. This
-	// handles both single block disconnects and deeper reorgs robustly.
+	// KVDB may hold mined records beyond its manager tip. Reconcile those
+	// identities through its optional isolated-wallet Store capability.
 	case chain.BlockDisconnected:
-		return s.checkRollback(ctx)
+		return s.disconnectStoredBlock(ctx, wtxmgr.BlockMeta(n))
 
 	// We only expect individual transaction notifications for unconfirmed
 	// transactions as they enter the mempool. Confirmed transactions are
@@ -1877,6 +1877,149 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	}
 
 	return nil
+}
+
+// disconnectStoredBlock resolves chain identities outside the write, keeping
+// SQL's existing tip rollback path and KVDB's persistence boundary intact.
+func (s *syncer) disconnectStoredBlock(ctx context.Context,
+	block wtxmgr.BlockMeta) error {
+
+	store, ok := s.store.(db.BlockDisconnectStore)
+	if !ok {
+		return s.checkRollback(ctx)
+	}
+
+	notification, err := storeBlockFromBlockMeta(block)
+	if err != nil {
+		return err
+	}
+
+	synced, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, sourceHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("disconnect source tip: %w", err)
+	}
+
+	fork, err := s.canonicalDisconnectFork(
+		ctx, min(synced.Height, block.Height-1, sourceHeight), synced,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Classify every mined record after the retained fork. With no known
+	// common ancestor, the affected range begins at genesis.
+	start := max(0, fork.Height+1)
+
+	canonical, err := s.canonicalDisconnectHistory(ctx, start, sourceHeight)
+	if err != nil {
+		return err
+	}
+
+	return store.DisconnectBlock(
+		ctx, *notification, db.OptionalBlockFromBlockStamp(fork), canonical,
+	)
+}
+
+// canonicalDisconnectFork skips pruned manager hashes and fetches headers only
+// after proving canonical membership; Neutrino may already delete old headers.
+func (s *syncer) canonicalDisconnectFork(ctx context.Context, height int32,
+	synced waddrmgr.BlockStamp) (waddrmgr.BlockStamp, error) {
+
+	for ; height >= 0; height-- {
+		hashes, err := s.syncedBlockHashes(ctx, height, height)
+		if err != nil {
+			if errors.Is(err, db.ErrBlockNotFound) {
+				continue
+			}
+
+			var managerErr waddrmgr.ManagerError
+			if errors.As(err, &managerErr) &&
+				managerErr.ErrorCode == waddrmgr.ErrBlockNotFound {
+
+				continue
+			}
+
+			return waddrmgr.BlockStamp{}, err
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(height))
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork hash: %w", err,
+			)
+		}
+
+		if *hash != *hashes[0] {
+			continue
+		}
+
+		if height == synced.Height {
+			return synced, nil
+		}
+
+		header, err := s.cfg.Chain.GetBlockHeader(hash)
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork header: %w", err,
+			)
+		}
+
+		return waddrmgr.BlockStamp{
+			Height: height, Hash: *hash, Timestamp: header.Timestamp,
+		}, nil
+	}
+
+	return waddrmgr.BlockStamp{Height: -1}, nil
+}
+
+// canonicalDisconnectHistory snapshots each affected mined height once before
+// the Store write. Explicit nil entries classify heights beyond the source tip.
+func (s *syncer) canonicalDisconnectHistory(ctx context.Context,
+	height, sourceHeight int32) (map[uint32]*chainhash.Hash, error) {
+
+	start, err := db.Int64ToUint32(int64(height))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history start: %w", err)
+	}
+
+	tip, err := db.Int64ToUint32(int64(sourceHeight))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history tip: %w", err)
+	}
+
+	history, err := s.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID: s.walletID, StartHeight: start, EndHeight: math.MaxInt32,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history: %w", err)
+	}
+
+	canonical := make(map[uint32]*chainhash.Hash)
+	for _, info := range history {
+		h := info.Block.Height
+		if _, known := canonical[h]; known {
+			continue
+		}
+
+		if h > tip {
+			canonical[h] = nil
+			continue
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(h))
+		if err != nil {
+			return nil, fmt.Errorf("disconnect history hash: %w", err)
+		}
+
+		canonical[h] = hash
+	}
+
+	return canonical, nil
 }
 
 // prepareTxMatches extracts address entries from a batch of transactions and
