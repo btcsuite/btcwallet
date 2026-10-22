@@ -2562,6 +2562,7 @@ func TestSignPsbtRejectsEcdsaSignerBeforeKeyLookup(t *testing.T) {
 	separated := testScript(
 		t, txscript.OP_CODESEPARATOR, walletKey, txscript.OP_CHECKSIG,
 	)
+	checkSigAdd := testScript(t, walletKey, txscript.OP_CHECKSIGADD)
 
 	tests := []struct {
 		name          string
@@ -2605,6 +2606,11 @@ func TestSignPsbtRejectsEcdsaSignerBeforeKeyLookup(t *testing.T) {
 		name:          "key checked after a code separator",
 		pkScript:      testP2WSHScript(t, separated),
 		witnessScript: separated,
+		wantErr:       ErrSigningKeyMismatch,
+	}, {
+		name:          "key checked by a tapscript opcode",
+		pkScript:      testP2WSHScript(t, checkSigAdd),
+		witnessScript: checkSigAdd,
 		wantErr:       ErrSigningKeyMismatch,
 	}}
 
@@ -2674,6 +2680,12 @@ func TestSignPsbtRejectsTaprootSignerBeforeKeyLookup(t *testing.T) {
 	versionOutput, _, versionLeaf := testOneLeafOutput(
 		t, keys, 0xc2, testScript(t, walletX, txscript.OP_CHECKSIG),
 	)
+	multisigOutput, _, multisigLeaf := testOneLeafOutput(
+		t, keys, txscript.BaseLeafVersion, testScript(
+			t, txscript.OP_1, walletX, txscript.OP_1,
+			txscript.OP_CHECKMULTISIG,
+		),
+	)
 
 	tests := []struct {
 		name        string
@@ -2721,6 +2733,11 @@ func TestSignPsbtRejectsTaprootSignerBeforeKeyLookup(t *testing.T) {
 		name:       "leaf version other than tapscript",
 		utxo:       versionOutput,
 		leafScript: versionLeaf,
+		wantErr:    ErrSigningKeyMismatch,
+	}, {
+		name:       "key checked by a multisig opcode",
+		utxo:       multisigOutput,
+		leafScript: multisigLeaf,
 		wantErr:    ErrSigningKeyMismatch,
 	}}
 
@@ -2988,4 +3005,76 @@ func TestSignPsbtSegwitSingleWithoutOutput(t *testing.T) {
 		t, packet, 1, nil,
 		wire.TxWitness{records[0].Signature, walletKey},
 	)
+}
+
+// TestSignPsbtSignsTapscriptChecksigadd tests that a tapscript leaf checking
+// the wallet's key with OP_CHECKSIGADD, which only tapscript runs, is signed
+// and the signature spends the input.
+func TestSignPsbtSignsTapscriptChecksigadd(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a leaf `0 <wallet key> OP_CHECKSIGADD 1 OP_NUMEQUAL`.
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	script := testScript(
+		t, txscript.OP_0, schnorr.SerializePubKey(walletPub),
+		txscript.OP_CHECKSIGADD, txscript.OP_1, txscript.OP_NUMEQUAL,
+	)
+	utxo, _, leafScript := testOneLeafOutput(
+		t, testAuthKeys(), txscript.BaseLeafVersion, script,
+	)
+	packet := testTaprootSignPacket(t, utxo, leafScript)
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+		waddrmgr.DerivationPath{},
+	)
+
+	// Act: sign the packet.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the signature spends the input.
+	require.NoError(t, err)
+
+	records := packet.Inputs[0].TaprootScriptSpendSig
+	require.Len(t, records, 1)
+	requireInputSpends(t, packet, 0, nil, wire.TxWitness{
+		records[0].Signature, script, leafScript.ControlBlock,
+	})
+}
+
+// TestSignPsbtSignsWitnessMultisig tests that a segwit v0 witness script
+// checking the wallet's key with OP_CHECKMULTISIG, which tapscript does not
+// run, is signed and the signature spends the input.
+func TestSignPsbtSignsWitnessMultisig(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a 1-of-1 multisig witness script.
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	script := testScript(
+		t, txscript.OP_1, walletPub.SerializeCompressed(), txscript.OP_1,
+		txscript.OP_CHECKMULTISIG,
+	)
+	packet := testEcdsaSignPacket(
+		t, testP2WSHScript(t, script), nil, script, 84,
+	)
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+		waddrmgr.DerivationPath{},
+	)
+
+	// Act: sign the packet.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the signature spends the input, after the dummy element
+	// OP_CHECKMULTISIG pops.
+	require.NoError(t, err)
+
+	records := packet.Inputs[0].PartialSigs
+	require.Len(t, records, 1)
+	requireInputSpends(t, packet, 0, nil, wire.TxWitness{
+		nil, records[0].Signature, script,
+	})
 }
