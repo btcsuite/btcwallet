@@ -44,6 +44,25 @@ func TestTxGraphAdmissionPostgres(t *testing.T) {
 	})
 }
 
+// TestTxGraphAdmissionSQLite preserves both ordered graph results using the
+// existing immediate writer transaction, without PostgreSQL row-lock machinery.
+func TestTxGraphAdmissionSQLite(t *testing.T) {
+	t.Parallel()
+
+	// Arrange, Act, and Assert use the shared scenario below; SQLite's writer
+	// exclusion makes the two admitted SQL writes execute in order.
+	t.Run("child admission first", func(t *testing.T) {
+		t.Parallel()
+
+		testTxGraphAdmission(t, DBBackendSQLite, true)
+	})
+	t.Run("terminal transition first", func(t *testing.T) {
+		t.Parallel()
+
+		testTxGraphAdmission(t, DBBackendSQLite, false)
+	})
+}
+
 // txGraphFixture keeps wire transactions as the authoritative outpoint source;
 // the reader assertions derive hashes from these same immutable records.
 type txGraphFixture struct {
@@ -465,4 +484,59 @@ func testTxGraphAdmission(t *testing.T, backend DBBackend, childFirst bool) {
 	require.NoError(t, err)
 	_, err = f.wallet.GetUtxo(ctx, wire.OutPoint{Hash: f.funding.Hash})
 	require.ErrorIs(t, err, ErrUnknownOutput)
+}
+
+// TestTxGraphRollbackPostgres proves the new multi-Wallet lock ordering joins
+// admitted child work before rollback without retaining invalid spend effects.
+func TestTxGraphRollbackPostgres(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A confirmed coinbase root and another registered Wallet make
+	// rollback span two Wallet rows while B claims independent input Q.
+	m := newTxGraphManager(t, DBBackendPostgres)
+	f := newTxGraphFixture(t, m, true)
+	newTxGraphWallet(t, m, "other")
+	expectTxGraphBroadcast(t, m, f, true)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	store, ok := f.wallet.store.(*pg.Store)
+	require.True(t, ok)
+
+	raw := store.RawDB()
+	barrier := lockTxGraphOutput(
+		t, ctx, raw, f.wallet.id,
+		wire.OutPoint{Hash: f.funding.Hash, Index: 1},
+	)
+
+	// Act: Pause B inside SQL, start database rollback, then release Q and
+	// join both operations. Cancel and join each goroutine on failure too.
+	child := startTxGraphCall(t, cancel, func() error {
+		return f.wallet.Broadcast(ctx, &f.child.MsgTx, "")
+	})
+	waitTxGraphCall(t, ctx, raw, child, 1)
+	rollback := startTxGraphCall(t, cancel, func() error {
+		return f.wallet.store.RollbackToBlock(ctx, 1)
+	})
+	waitTxGraphCall(t, ctx, raw, rollback, 2)
+	require.NoError(t, barrier.Rollback())
+	require.NoError(t, <-child)
+	require.NoError(t, <-rollback)
+
+	// Assert: Public readers see only the settled orphaned branch, with Q
+	// available again; existing Store tests cover atomic tip/hash effects.
+	root, err := f.wallet.GetTx(ctx, f.root.Hash)
+	require.NoError(t, err)
+	require.Equal(t, TxStatusOrphaned, root.Status)
+
+	dependent, err := f.wallet.GetTx(ctx, f.child.Hash)
+	require.NoError(t, err)
+	require.Equal(t, TxStatusFailed, dependent.Status)
+
+	_, err = f.wallet.GetUtxo(ctx, wire.OutPoint{Hash: f.child.Hash})
+	require.ErrorIs(t, err, ErrUnknownOutput)
+	_, err = f.wallet.GetUtxo(
+		ctx, wire.OutPoint{Hash: f.funding.Hash, Index: 1},
+	)
+	require.NoError(t, err)
 }

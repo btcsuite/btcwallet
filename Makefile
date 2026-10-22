@@ -34,8 +34,16 @@ workers ?= 4
 LINT_WORKERS = --concurrency=$(workers)
 
 GOLANGCI_LINT = golangci-lint run -v --config .golangci.yml $(LINT_WORKERS)
-LINT_DB_SQLITE_PKGS = ./wallet/internal/db/sqlite ./wallet/internal/db/itest
-LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg ./wallet/internal/db/itest
+LINT_DB_SQLITE_PKGS = ./wallet/internal/db/sqlite ./wallet/internal/db/itest ./wallet
+LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg ./wallet/internal/db/itest ./wallet
+
+# Keep Wallet graph regressions in database CI with the selected backend;
+# include rollback from the outset, independently of the DB-package case filter.
+ifeq ($(IT_DB_TYPE),postgres)
+TX_GRAPH_CASE = ^TestTxGraph(Admission|Rollback)Postgres$$
+else
+TX_GRAPH_CASE = ^TestTxGraphAdmissionSQLite$$
+endif
 
 define lint_targets
 	@$(call print, "Linting source.")
@@ -150,6 +158,9 @@ itest-db:
 	fi
 	@$(call print, "Running $(IT_DB_LABEL) integration tests.")
 	$(ITEST_DB)
+	$(GOTEST) -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" \
+		$(filter-out -test.run=%,$(TEST_FLAGS)) ./wallet \
+		-run='$(TX_GRAPH_CASE)'
 	@if [ -n "$(ITEST_DB_COVERPROFILE)" ]; then \
 		echo  "Filtering coverage report."; \
 		./scripts/filter_coverage.sh $(IT_DB_TYPE); \
@@ -163,6 +174,10 @@ itest-db-race:
 	fi
 	@$(call print, "Running $(IT_DB_LABEL) integration tests (race).")
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(ITEST_DB_RACE)
+	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" \
+		$(GOTEST) -race -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" \
+		$(filter-out -test.run=%,$(TEST_FLAGS)) ./wallet \
+		-run='$(TX_GRAPH_CASE)'
 
 #? itest: Run integration tests
 #? itest (vars): chain=btcd|bitcoind|neutrino backend=btcd|bitcoind|neutrino db=kvdb|sqlite|postgres
