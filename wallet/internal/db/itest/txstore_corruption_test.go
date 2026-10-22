@@ -490,21 +490,22 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 }
 
 // TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing verifies that the
-// rollback sync-state rewind surfaces database errors when the block table is
-// gone.
+// rollback surfaces database errors when the block table is gone, whether it
+// first reads that table for Wallet enumeration or sync-state rewind.
 func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Remove shared block history so rollback must reject the broken
+	// schema before it can claim a successful rewind.
 	store := NewTestStore(t)
 	dropTableForCorruption(t, store, "blocks")
 
+	// Act: Ask the existing atomic rollback to disconnect from height one.
 	err := store.RollbackToBlock(t.Context(), 1)
-	require.Error(t, err)
 
-	// Rollback rewinds sync-state references by querying the greatest stored
-	// block below the rollback boundary, so both SQL backends now touch the
-	// blocks table before the delete step.
-	require.ErrorContains(t, err, "rewind wallet sync state heights")
+	// Assert: Both backends identify the missing table even though PostgreSQL
+	// now reads Wallets before the shared rewind algorithm starts.
+	require.ErrorContains(t, err, "blocks")
 }
 
 // TestLeaseAndReleaseReturnQueryErrorsWhenLeaseTablesMissing verifies that the

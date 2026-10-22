@@ -34,6 +34,13 @@ func (s *Store) CreateTx(ctx context.Context,
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Admission and conflict discovery must see the same ordered graph;
+		// neither may commit a child outside an invalidation's snapshot.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		return db.CreateTxWithOps(ctx, req, &createTxOps{
 			invalidateUnminedTxOps: invalidateUnminedTxOps{
 				qtx: qtx,
