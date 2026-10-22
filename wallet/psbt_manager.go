@@ -205,6 +205,11 @@ type SignPsbtParams struct {
 	// InputTweaks maps input indices to the tweak added to that input's
 	// derived key before it signs.
 	//
+	// Only ECDSA inputs accept a tweak. A Taproot input's derivation
+	// record names an x-only key, and adding a tweak to it needs a key
+	// parity convention this wallet does not define, so a tweak on one is
+	// refused with ErrInvalidSignParam.
+	//
 	// NOTE: The ideal implementation would be to add a new field to
 	// psbt.PInput that holds the tweak, but that would require a change
 	// to the core psbt package in btcd. To keep btcwallet generic and avoid
