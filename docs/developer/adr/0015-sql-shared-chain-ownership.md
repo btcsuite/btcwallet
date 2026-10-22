@@ -17,8 +17,8 @@
 ## 1. Problem
 
 ADR 0002 gives each Wallet public lifecycle and chain-synchronization
-authority. Maintained Managers need aggregate lifecycle authority, while SQL
-Wallets also share one Store, canonical chain, rollback boundary, and chain
+authority. Maintained Managers need aggregate lifecycle authority. SQL Wallets
+also share one Store, one canonical chain, one rollback boundary, and one chain
 source. Wallet resources and historical recovery remain wallet-scoped.
 
 ## 2. Context
@@ -45,83 +45,116 @@ Initialized Manager with terminal states:
 
 `Initialized -> Starting -> Running -> Stopping -> Stopped`.
 
-`Manager.Start(ctx)` fixes an ordered pointer set internally. Zero-Wallet
-startup succeeds with an empty set; otherwise it is the complete active set in
-stable Wallet-ID order. Each successful caller receives a separate
-caller-owned slice copy. Running has no dormant, unloaded, restartable, or
-independently stoppable Wallet.
+`Manager.Start(ctx)` fixes an ordered pointer set internally. If there are zero
+Wallets, startup succeeds with an empty set. Otherwise, the set is the complete
+active set in stable Wallet-ID order. Each successful caller receives a
+separate caller-owned slice copy. In the Running state, no Wallet is dormant,
+unloaded, restartable, or independently stoppable.
 
 One Start outcome is fixed before publication. The first accepted terminal
-cause wins: publication returns the stable set; owner cancellation returns its
-context error; assembly or private-start failure returns its exact primary
-error; and Stop entering Stopping first returns `ErrManagerStopped`. Failed
-Start returns a nil slice. Concurrent callers share the outcome, but waiter
-cancellation ends only that wait.
+cause wins:
 
-Terminal Start failure records cleanup ownership before releasing admission,
-transitions through Stopping, and reaches Stopped after cleanup. Waiters then
-receive its result. Assembly reports its primary error separately from cleanup
-outcomes; Manager records the latter for Stop and never cleans those resources
-twice. After successful handoff, Manager owns the full candidate set. Start on
-Stopping or Stopped returns a nil slice and `ErrManagerStopped`; reopening
-creates a fresh Manager.
+- Publication returns the stable set.
+- Owner cancellation returns its context error.
+- Assembly or private-start failure returns its exact primary error.
+- If Stop enters Stopping first, Start returns `ErrManagerStopped`.
+
+A failed Start returns a nil slice. Concurrent callers share the outcome. A
+waiter's cancellation ends only that waiter's wait.
+
+After a terminal Start failure, Manager records cleanup ownership before it
+releases admission. Manager then enters Stopping and reaches Stopped after
+cleanup. Waiters then receive the Start result. Assembly reports its
+primary error separately from cleanup outcomes. Manager records the cleanup
+outcomes for Stop and never cleans those resources twice.
+
+After a successful handoff, Manager owns the full candidate set. If the Manager
+is Stopping or Stopped, Start returns a nil slice and `ErrManagerStopped`. A
+reopen creates a fresh Manager.
 
 ### 3.2 Private Wallet lifecycle and call admission
 
-Manager alone calls each Wallet's private one-shot `start(ctx)` and `stop()`.
-Wallet owns admission and draining for its public calls, workers, cancellation,
-Vault, and components.
+Only Manager calls the private one-shot `start(ctx)` and `stop()` of each
+Wallet. Wallet owns admission and drain for its public calls, workers,
+cancellation, Vault, and components.
 
 An admitted call keeps its ordinary result and drains before Store closure. A
 later call returns `ErrWalletStopped` without Store access. Admission does not
 serialize operation bodies.
 
-Manager admission is separate and returns `ErrManagerStopped` after Stopping
-begins. Manager passes no lifecycle capability into Wallet. The final surface
-removes public Wallet and Controller Start/Stop plus Manager StartWallet,
-StopWallet, Load, Unload, and Close, without aliases or a replacement lookup.
+Manager admission is separate. After Stopping begins, Manager admission returns
+`ErrManagerStopped`. Manager passes no lifecycle capability into Wallet.
+
+The final surface removes these methods, without aliases or a replacement
+lookup:
+
+- Public Wallet and Controller Start/Stop.
+- Manager StartWallet, StopWallet, Load, Unload, and Close.
+
 A retained Wallet pointer is inert after Manager Stop.
 
 ### 3.3 Create and publication
 
 `Manager.Create(ctx, ...)` is accepted only after Create serialization and a
-Running recheck. It durably creates, assembles, privately starts, and then
-publishes the exact fully started pointer. An incomplete candidate is never
-visible in the active set. The Wallet-set lock protects only publication and
-set mutation; durable creation, assembly, and private startup run without it.
+Running recheck. Create then does these steps:
+
+1. Durably create the Wallet.
+2. Assemble the Wallet.
+3. Privately start the Wallet.
+4. Publish the exact fully started pointer.
+
+An incomplete candidate is never visible in the active set. The Wallet-set
+lock protects only publication and set mutation. Durable creation, assembly,
+and private startup run without the lock.
 
 After a proven commit and start failure, Create joins the candidate. One
-bounded reconciliation is allowed only when an exact durable reread matches
-the accepted Create, all Store and worker results are determinate, and one
-fresh candidate fully starts. Success publishes that pointer.
+bounded reconciliation is allowed only when all of these conditions are true:
 
-Mismatch, indeterminate state, or fresh-start failure fixes that exact error
-and enters or observes Stopping. Create stops and joins all unpublished
-candidates and attempt resources before releasing serialization and admission;
-cleanup errors belong to Stop. The caller then waits outside admission and
-returns its fixed error after shutdown, independently of Stop's result.
+- An exact durable reread matches the accepted Create.
+- All Store and worker results are determinate.
+- One fresh candidate fully starts.
+
+If the reconciliation succeeds, Create publishes that pointer.
+
+A mismatch, an indeterminate state, or a fresh-start failure fixes that exact
+error and enters or observes Stopping. Before Create releases serialization
+and admission, Create stops and joins all unpublished candidates and attempt
+resources. Cleanup errors belong to Stop. The caller then waits outside
+admission. After shutdown, the caller returns its fixed error, independently
+of the Stop result.
 
 ### 3.4 Live synchronization and historical recovery
 
-Manager owns Store lifetime, the Wallet registry, one SQL chain source,
-canonical frontier and reorg decisions, live ordering and backpressure,
-database-wide mutation coordination, and aggregate failure policy. One
-coordinator delivers admitted events to the complete active-Wallet snapshot;
-Wallet processors retain matching and wallet-scoped persistence.
+Manager owns these items:
+
+- The Store lifetime.
+- The Wallet registry.
+- One SQL chain source.
+- Canonical frontier and reorg decisions.
+- Live ordering and backpressure.
+- Database-wide mutation coordination.
+- The aggregate failure policy.
+
+One coordinator delivers admitted events to the complete active-Wallet
+snapshot. Wallet processors retain matching and wallet-scoped persistence.
 
 Canonical source/frontier state, Wallet live readiness/tip, and Wallet
 historical-rescan state are independent. Historical blocks do not establish
 canonical membership. Historical recovery cannot move the frontier, roll back
 the database, or change another Wallet.
 
-Account import does not rescan. Address or script import registers a live-watch
-obligation at the live tip. Explicit historical recovery is Wallet-scoped and
-uses verified history, not the shared live stream.
+Account import does not rescan. Address or script import registers a
+live-watch obligation at the live tip. Explicit historical recovery is
+Wallet-scoped and uses verified history, not the shared live stream.
 
 Accepted live events are bounded, ordered, and never dropped for a target.
-Reorg handling stops forward admission, quiesces affected Wallets in stable
-Wallet-ID order, performs one database-wide rollback, reconciles it, and
-resumes only from proven state.
+Reorg handling does these steps:
+
+1. Stop forward admission.
+2. Quiesce the affected Wallets in stable Wallet-ID order.
+3. Do one database-wide rollback.
+4. Reconcile the rollback.
+5. Resume only from proven state.
 
 ### 3.5 Failure and shutdown ownership
 
@@ -133,62 +166,80 @@ resumes only from proven state.
   unsafe shared state stop Manager unless isolation preserves the complete
   active-set invariant.
 
-`Manager.Stop(ctx)` rejects new Manager work, settles accepted Start and
-Create, freezes the Wallet set, closes source admission, joins the source,
-privately stops Wallets and drains their calls and workers, joins accepted
-delivery and the coordinator, and closes Store last and once. Wallet never
-closes Store.
+`Manager.Stop(ctx)` does these steps:
 
-Stop work is independent of caller contexts. Cancellation ends only that
-wait; later callers join or receive the cached result. Teardown continues
-after errors.
+1. Reject new Manager work.
+2. Settle accepted Start and Create.
+3. Freeze the Wallet set.
+4. Close source admission.
+5. Join the source.
+6. Privately stop Wallets and drain their calls and workers.
+7. Join accepted delivery and the coordinator.
+8. Close Store last and once.
+
+Wallet never closes Store.
+
+Stop work is independent of caller contexts. A caller's cancellation ends only
+that caller's wait. Later callers join the Stop work or receive the cached
+result. Teardown continues after errors.
 
 The cached aggregate orders every cleanup failure by published Wallet ID,
 unpublished attempt and fixed Wallet-resource order, then source, coordinator,
-and Store. Completion timing cannot change it. Cleanup never replaces a fixed
-Start or Create error, and repeated Stop returns the same aggregate.
+and Store. Completion timing cannot change this order. Cleanup never replaces
+a fixed Start or Create error. A repeated Stop returns the same aggregate.
 
 ### 3.6 Lease and scope
 
 At most one Manager may be Starting or Running for a canonical database target
-within one process. Its process-local lease lasts through all joins and Store
-closure. This is not a global singleton or cross-process fence.
+within one process. The process-local lease of that Manager lasts through all
+joins and Store closure. This lease is not a global singleton or a
+cross-process fence.
 
 The lifecycle, admission, Create, failure, and shutdown contract applies to
 every maintained Manager. Shared-chain coordination applies only to SQL.
-Modern-kvdb follows the aggregate lifecycle but temporarily keeps its isolated
-single-Wallet source path until retirement and does not join the SQL
-coordinator.
+Modern-kvdb follows the aggregate lifecycle, but modern-kvdb temporarily keeps
+its isolated single-Wallet source path until retirement. Modern-kvdb does not
+join the SQL coordinator.
 
-Implementation machinery, durable rescan jobs, generic write locks, replay
-state machines, create manifests, idle-Wallet eviction, and cross-process
-coordination are out of scope.
+These items are out of scope:
+
+- Implementation machinery.
+- Durable rescan jobs.
+- Generic write locks.
+- Replay state machines.
+- Create manifests.
+- Idle-Wallet eviction.
+- Cross-process coordination.
 
 ## 4. Rationale
 
 Only Manager spans every Wallet, the shared source and state, and Store.
 Wallet-owned admission keeps call safety beside Wallet resources without
-leaking Manager capability. Separating live synchronization from historical
-recovery prevents one Wallet's scan from changing database-wide truth.
+leaking Manager capability. The separation of live synchronization from
+historical recovery prevents the scan of one Wallet from changing
+database-wide truth.
 
 ## 5. Alternatives Considered
 
 ### Public per-Wallet lifecycle
 
-It permits partial active sets and races aggregate Store and source ownership.
+A public per-Wallet lifecycle permits partial active sets and races aggregate
+Store and source ownership.
 
 ### Manager-owned Wallet call admission
 
-It couples Wallet safety to Manager internals and cannot prove Wallet resources
-have drained.
+Manager-owned call admission couples Wallet safety to Manager internals. This
+model also cannot prove that Wallet resources are drained.
 
 ### Combined live-sync and rescan state
 
-It lets Wallet history work affect canonical state and aggregate failure.
+A combined state lets Wallet history work affect canonical state and aggregate
+failure.
 
 ### Cross-process fencing
 
-It requires a durable lease protocol beyond this process-local contract.
+Cross-process fencing requires a durable lease protocol beyond this
+process-local contract.
 
 ## 6. Consequences
 
@@ -208,11 +259,16 @@ It requires a durable lease protocol beyond this process-local contract.
 
 ## 7. Implementation Overview
 
-Roadmap ownership is: Task 331, terminal Manager lifecycle; Tasks 458 and 368,
-Wallet drain/private mechanics and public-surface removal; Tasks 456 and 459,
-runtime configuration and startup assembly; Task 457, the process-local lease;
-Tasks 370, 371, 372, and 423, shared delivery, frontier, rollback, and source
-cutover; and Task 353, modern-kvdb retirement.
+Roadmap ownership is as follows:
+
+- Task 331: terminal Manager lifecycle.
+- Tasks 458 and 368: Wallet drain/private mechanics and public-surface
+  removal.
+- Tasks 456 and 459: runtime configuration and startup assembly.
+- Task 457: the process-local lease.
+- Tasks 370, 371, 372, and 423: shared delivery, frontier, rollback, and
+  source cutover.
+- Task 353: modern-kvdb retirement.
 
 ## 8. References
 

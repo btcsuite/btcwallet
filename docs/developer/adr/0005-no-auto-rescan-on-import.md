@@ -15,51 +15,66 @@
 
 ## 1. Context
 
-When importing new keys, addresses, or accounts into a wallet, the wallet needs
-to scan the blockchain history to discover any existing funds associated with
-these new credentials.
+When a wallet imports new keys, addresses, or accounts, the wallet needs to
+scan the blockchain history. The scan discovers any existing funds that are
+associated with these new credentials.
 
-A common pattern in some wallet implementations is to automatically trigger a rescan immediately upon import. However, this approach introduces several issues:
+Some wallet implementations use a common pattern: they automatically trigger a
+rescan immediately on import. However, this approach causes several issues:
 
-*   **Performance Storms:** If a user or application imports a batch of 100 keys sequentially, an automatic trigger would launch 100 overlapping, redundant rescan jobs.
-*   **Blocking Behavior:** If the import method waits for the scan, a simple database insertion becomes a potentially hour-long operation.
-*   **API Ambiguity:** It blurs the line between importing wallet state and
-    explicitly requesting historical recovery.
+*   **Performance Storms:** A user or application can import a batch of 100
+    keys sequentially. In that case, an automatic trigger would start 100
+    overlapping, redundant rescan jobs.
+*   **Blocking Behavior:** If the import method waits for the scan, a simple
+    database insertion becomes an operation that can take an hour.
+*   **API Ambiguity:** The automatic trigger blurs the line between the import
+    of wallet state and an explicit request for historical recovery.
 
 ## 2. Decision
 
-`btcwallet` will **not** automatically trigger a blockchain rescan when keys, addresses, or accounts are imported.
+`btcwallet` will **not** automatically trigger a blockchain rescan when keys,
+addresses, or accounts are imported.
 
 *   **Imports Do Not Start Historical Recovery:** Maintained controller import
-    methods persist wallet data and, for watchable addresses, synchronously
-    request live notifications from the chain backend. Live registration does
-    not scan historical blocks.
-*   **Historical Rescans Must Be Explicit:** The caller is responsible for
-    explicitly requesting a rescan (via `Rescan(...)`) after the import is
+    methods persist wallet data. For watchable addresses, these methods also
+    synchronously request live notifications from the chain backend. Live
+    registration does not scan historical blocks.
+*   **Historical Rescans Must Be Explicit:** The caller is responsible for an
+    explicit rescan request (through `Rescan(...)`) after the import is
     complete.
 
 ## 3. Rationale
 
 ### 3.1 Batch Efficiency
-This design allows downstream applications (like `lnd` or custom scripts) to batch imports efficiently. An application can import 1,000 keys in a loop and then trigger a **single** targeted rescan for the aggregate birthday of those keys. This is orders of magnitude more efficient than 1,000 individual scans.
+With this design, downstream applications (like `lnd` or custom scripts) can
+batch imports efficiently. An application can import 1,000 keys in a loop. The
+application can then trigger a **single** targeted rescan for the aggregate
+birthday of those keys. This single scan is orders of magnitude more efficient
+than 1,000 individual scans.
 
 ### 3.2 API Clarity
-Separating live registration from historical recovery makes the API
+The separation of live registration from historical recovery makes the API
 predictable.
 
 *   `ImportXXX`: "I want to save this key and watch new activity."
 *   `Rescan`: "I want to search historical blocks."
 
 ### 3.3 User Control
-The user (or calling software) retains control over system resources. They may choose to import keys now but defer the heavy scanning operation until a maintenance window or when bandwidth is available.
+The user (or the calling software) keeps control over system resources. The
+user may choose to import keys now. The user may then defer the heavy scan
+operation until a maintenance window or until bandwidth is available.
 
 ## 4. Consequences
 
 ### Pros
-*   **Performance:** Eliminates redundant scanning during bulk imports.
-*   **Responsiveness:** Import RPCs remain consistently fast.
-*   **Flexibility:** Allows advanced import workflows (e.g., offline imports).
+*   **Performance:** The design eliminates redundant scans during bulk imports.
+*   **Responsiveness:** Import RPCs stay consistently fast.
+*   **Flexibility:** The design permits advanced import workflows (e.g.,
+    offline imports).
 
 ### Cons
-*   **Usability Pitfall:** A naive user might import a key and be confused why their balance shows `0`. Documentation and RPC output must clearly indicate that a rescan is required to see funds.
-*   **Client Burden:** Clients must implement the "Import -> Rescan" logic themselves.
+*   **Usability Pitfall:** A naive user might import a key and then not
+    understand why the balance shows `0`. Documentation and RPC output must
+    clearly indicate that a rescan is necessary to see funds.
+*   **Client Burden:** Clients must implement the "Import -> Rescan" logic
+    themselves.
