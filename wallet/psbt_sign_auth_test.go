@@ -2464,6 +2464,20 @@ func TestSignPsbtRejectsEcdsaSignerBeforeKeyLookup(t *testing.T) {
 			)
 		},
 		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "key checked by a tapscript opcode",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			script := testScript(
+				t, walletKey, txscript.OP_CHECKSIGADD,
+			)
+
+			return testEcdsaSignPacket(
+				t, testP2WSHScript(t, script), script,
+			)
+		},
+		wantErr: ErrSigningKeyMismatch,
 	}}
 
 	for _, tc := range tests {
@@ -2581,6 +2595,21 @@ func TestSignPsbtRejectsTaprootSignerBeforeKeyLookup(t *testing.T) {
 				t, txscript.BaseLeafVersion, testScript(
 					t, txscript.OP_CODESEPARATOR, walletX,
 					txscript.OP_CHECKSIG,
+				),
+			)
+
+			return testTaprootSignPacket(t, utxo, leafScript)
+		},
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name: "key checked by a multisig opcode",
+		packet: func(t *testing.T) *psbt.Packet {
+			t.Helper()
+
+			utxo, leafScript := testVersionedLeafOutput(
+				t, txscript.BaseLeafVersion, testScript(
+					t, txscript.OP_1, walletX, txscript.OP_1,
+					txscript.OP_CHECKMULTISIG,
 				),
 			)
 
@@ -2834,4 +2863,84 @@ func TestSignPsbtSegwitSingleWithoutOutput(t *testing.T) {
 		t, packet, 1, nil,
 		wire.TxWitness{records[0].Signature, walletKey},
 	)
+}
+
+// TestSignPsbtSignsVersionedSigOps tests that a key checked by a signature
+// opcode that runs under its script version is signed, and the signature
+// spends the input: OP_CHECKSIGADD in tapscript and OP_CHECKMULTISIG in a
+// segwit v0 script.
+func TestSignPsbtSignsVersionedSigOps(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	walletKey := walletPub.SerializeCompressed()
+	walletX := schnorr.SerializePubKey(walletPub)
+
+	t.Run("tapscript checksigadd", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a leaf `0 <wallet key> OP_CHECKSIGADD 1
+		// OP_NUMEQUAL`.
+		script := testScript(
+			t, txscript.OP_0, walletX, txscript.OP_CHECKSIGADD,
+			txscript.OP_1, txscript.OP_NUMEQUAL,
+		)
+		utxo, leafScript := testVersionedLeafOutput(
+			t, txscript.BaseLeafVersion, script,
+		)
+		packet := testTaprootSignPacket(t, utxo, leafScript)
+
+		w, mocks := createUnlockedWalletWithMocks(t)
+		_, _ = expectStoreSignerPrivKey(
+			t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+			waddrmgr.DerivationPath{},
+		)
+
+		// Act: sign the packet.
+		_, err := w.SignPsbt(
+			t.Context(), &SignPsbtParams{Packet: packet},
+		)
+
+		// Assert: the signature spends the input.
+		require.NoError(t, err)
+
+		records := packet.Inputs[0].TaprootScriptSpendSig
+		require.Len(t, records, 1)
+		requireInputSpends(t, packet, nil, wire.TxWitness{
+			records[0].Signature, script, leafScript.ControlBlock,
+		})
+	})
+
+	t.Run("segwit v0 checkmultisig", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a 1-of-1 multisig witness script.
+		script := testScript(
+			t, txscript.OP_1, walletKey, txscript.OP_1,
+			txscript.OP_CHECKMULTISIG,
+		)
+		packet := testEcdsaSignPacket(
+			t, testP2WSHScript(t, script), script,
+		)
+
+		w, mocks := createUnlockedWalletWithMocks(t)
+		_, _ = expectStoreSignerPrivKey(
+			t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+			waddrmgr.DerivationPath{},
+		)
+
+		// Act: sign the packet.
+		_, err := w.SignPsbt(
+			t.Context(), &SignPsbtParams{Packet: packet},
+		)
+
+		// Assert: the signature spends the input.
+		require.NoError(t, err)
+
+		records := packet.Inputs[0].PartialSigs
+		require.Len(t, records, 1)
+		requireInputSpends(t, packet, nil, wire.TxWitness{
+			nil, records[0].Signature, script,
+		})
+	})
 }

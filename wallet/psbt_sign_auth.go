@@ -526,6 +526,9 @@ type sigCheck struct {
 	// ambiguous is set when that separator sits inside a branch, so it
 	// may not have run before the check.
 	ambiguous bool
+
+	// opcode is the signature opcode that runs the check.
+	opcode byte
 }
 
 // uses reports whether the check is shown to use a key.
@@ -598,6 +601,7 @@ func scriptSigChecks(script []byte) []sigCheck {
 
 			check := context
 			check.keys, check.keyHash = checkKeys(stackOps, op.opcode)
+			check.opcode = op.opcode
 			checks = append(checks, check)
 		}
 
@@ -757,17 +761,53 @@ func ecdsaSignerScript(pIn *psbt.PInput, utxo *wire.TxOut,
 			"segwit key", ErrSigningKeyMismatch)
 	}
 
-	checksKey := slices.ContainsFunc(
-		scriptCtx.scriptCodes(key), func(code []byte) bool {
-			return bytes.Equal(code, scriptCtx.script)
-		},
-	)
-	if !checksKey {
+	if !scriptCtx.signsWholeScript(key) {
 		return ecdsaScriptContext{}, fmt.Errorf("%w: script does not "+
 			"check the key", ErrSigningKeyMismatch)
 	}
 
 	return scriptCtx, nil
+}
+
+// signsWholeScript reports whether a signature by key over the whole script
+// passes one of its checks under segwit v0 or legacy rules.
+func (c ecdsaScriptContext) signsWholeScript(key []byte) bool {
+	if c.keyHash != nil {
+		return bytes.Equal(address.Hash160(key), c.keyHash)
+	}
+
+	return slices.ContainsFunc(
+		keySigChecks(c.script, key), func(check sigCheck) bool {
+			return check.codeOffset == 0 &&
+				sigOpRuns(check.opcode, false)
+		},
+	)
+}
+
+// tapscriptSignsKey reports whether a tapscript signature by key, made with no
+// code separator position, passes one of the leaf's checks.
+func tapscriptSignsKey(script, key []byte) bool {
+	return slices.ContainsFunc(
+		keySigChecks(script, key), func(check sigCheck) bool {
+			return check.codeSepPos == math.MaxUint32 &&
+				sigOpRuns(check.opcode, true)
+		},
+	)
+}
+
+// sigOpRuns reports whether a signature opcode can succeed under a script
+// version: OP_CHECKSIGADD only in tapscript, the multisig opcodes only outside
+// it.
+func sigOpRuns(opcode byte, tapscript bool) bool {
+	switch opcode {
+	case txscript.OP_CHECKSIGADD:
+		return tapscript
+
+	case txscript.OP_CHECKMULTISIG, txscript.OP_CHECKMULTISIGVERIFY:
+		return !tapscript
+	}
+
+	return true
 }
 
 // authorizeTaprootSigner checks that the key a Taproot derivation names is
@@ -822,12 +862,7 @@ func authorizeTaprootSigner(pIn *psbt.PInput, utxo *wire.TxOut,
 			ErrSigningKeyMismatch, uint8(leaf.LeafVersion))
 	}
 
-	checksKey := slices.ContainsFunc(
-		keySigChecks(leaf.Script, key), func(check sigCheck) bool {
-			return check.codeSepPos == math.MaxUint32
-		},
-	)
-	if !checksKey {
+	if !tapscriptSignsKey(leaf.Script, key) {
 		return fmt.Errorf("%w: leaf does not check the key",
 			ErrSigningKeyMismatch)
 	}
