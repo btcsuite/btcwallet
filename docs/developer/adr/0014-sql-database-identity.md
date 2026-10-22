@@ -15,17 +15,20 @@
 ## 1. Problem
 
 Migration version alone does not prove that a SQL namespace belongs to the
-btcwallet role wallet or the requested Bitcoin network. Store startup rejects
-populated unmarked storage or mismatched identity before wallet access.
+btcwallet role wallet or to the requested Bitcoin network. Before wallet
+access, Store startup rejects populated unmarked storage or a mismatched
+identity.
 
 SQLite owns a complete database file. PostgreSQL owns the fixed `btcwallet`
-schema within a database that may also contain lnd or other application data.
+schema within a database. That database may also contain lnd or other
+application data.
 
 ## 2. Context
 
-The current SQLite path enables WAL before constructing a migration driver,
-which may create its default migration table. The PostgreSQL path creates its
-default migration table and wallet objects through the ambient `search_path`.
+The current SQLite path enables WAL before it constructs a migration driver.
+That migration driver may create its default migration table. The PostgreSQL
+path creates its default migration table and wallet objects through the
+ambient `search_path`.
 Neither path validates durable ownership before mutation.
 
 ### Constraints
@@ -34,8 +37,8 @@ Neither path validates durable ownership before mutation.
   migrations, sqlc queries, or wallet access can mutate the namespace.
 - Only an empty unmarked SQLite file or an absent PostgreSQL `btcwallet` schema
   is adoptable. Other unmarked storage requires a separate conversion.
-- One Manager owns a database. Store startup checks identity once; ordinary
-  wallet queries do not.
+- One Manager owns a database. Store startup checks identity once. Ordinary
+  wallet queries do not check identity.
 - Identity is independent of ordinary migration progress and runtime wallet
   parameters.
 - Existing golang-migrate paths run only after identity succeeds.
@@ -53,34 +56,42 @@ Every role-wallet SQL namespace contains exactly one immutable identity row:
 | `signet_challenge_digest` | Trusted 32-byte signet digest; NULL otherwise |
 
 Genesis bytes use `chainhash.Hash` array order, not the reversed display order
-from `Hash.String()`. PostgreSQL stores network magic in `BIGINT`, preserving
+from `Hash.String()`. PostgreSQL stores network magic in `BIGINT` to preserve
 the full unsigned uint32 value. Comparisons are exact and byte-for-byte.
 
-The identity excludes `Params.Name`, coinbase maturity, address and WIF
-prefixes, Bech32 HRP, HD private and public versions, and BIP44 coin type. Those
-values affect presentation, policy, import/export, or per-wallet and per-scope
-behavior; their existing subsystems remain responsible for them.
+The identity excludes these values:
+
+- `Params.Name`
+- coinbase maturity
+- address and WIF prefixes
+- Bech32 HRP
+- HD private and public versions
+- BIP44 coin type
+
+Those values affect presentation, policy, import/export, or per-wallet and
+per-scope behavior. Their existing subsystems remain responsible for them.
 
 ### Signet identity
 
-All signets share one genesis block, and network magic contains only four bytes
-of the challenge digest. The full identity input is:
+All signets share one genesis block. Network magic contains only four bytes of
+the challenge digest. The full identity input is:
 
 ```text
 DoubleSHA256(byte(len(challenge)) || challenge)
 ```
 
-This is the one-byte-length-prefixed serialization used by
-`chaincfg.CustomSignetParams`. Manager configuration must carry the trusted
-32-byte result in returned array order, derived from the same challenge used to
-construct those params. Before database access, the little-endian uint32 from
-its first four bytes must equal `uint32(Params.Net)`.
+This formula is the one-byte-length-prefixed serialization that
+`chaincfg.CustomSignetParams` uses. Manager configuration must carry the
+trusted 32-byte result in returned array order. The result must come from the
+same challenge that was used to construct those params. Before database
+access, the little-endian uint32 from the first four bytes of the result must
+equal `uint32(Params.Net)`.
 
-A network with the fixed signet genesis is signet regardless of `Params.Name`
-and requires the digest. A non-signet requires NULL. Missing or internally
-inconsistent input is rejected before database access. An
-equal-magic/different-challenge stored identity is rejected during startup
-before mutation.
+A network with the fixed signet genesis is signet regardless of `Params.Name`.
+A signet network requires the digest. A non-signet network requires NULL.
+Missing or internally inconsistent input is rejected before database access.
+A stored identity with equal magic and a different challenge is rejected
+during startup before mutation.
 
 ### Metadata ownership
 
@@ -96,43 +107,48 @@ namespace. Their identity tables are:
 The columns are `id`, `genesis_hash`, `network_magic`, and
 `signet_challenge_digest`. `id` is the primary key, constrained to 1. Integer
 and byte fields enforce their ranges and lengths. PostgreSQL uses `BIGINT` for
-magic so every unsigned 32-bit value is preserved.
+magic, so PostgreSQL preserves every unsigned 32-bit value.
 
-Startup validates the readable column shape and current singleton values, not
-the exact catalog definition of every bootstrap constraint.
+Startup validates the readable column shape and the current singleton values.
+Startup does not validate the exact catalog definition of every bootstrap
+constraint.
 
-Startup requires exactly one readable row selected by `id = 1` whose identity
-values match. Zero or multiple rows, unreadable columns, and mismatched values
-are rejected.
+Startup requires exactly one readable row, selected by `id = 1`, with matching
+identity values. Startup rejects zero or multiple rows, unreadable columns, and
+mismatched values.
 
-Ordinary migration state remains separate and owned by golang-migrate. Identity
-commits before migrations run and is not changed by migration progress.
+Ordinary migration state remains separate, and golang-migrate owns it. Identity
+commits before migrations run. Migration progress does not change identity.
 
 ### Startup gate
 
-Store startup validates requested identity before connection setup. After open,
-one short transaction initializes empty storage or compares its singleton.
-Populated unmarked storage and every mismatch reject startup without returning
-a Store.
+Store startup validates the requested identity before connection setup. After
+open, one short transaction initializes empty storage or compares its
+singleton. Populated unmarked storage and every mismatch make startup fail.
+Startup then returns no Store.
 
-After identity commits, SQLite enables WAL and each backend runs existing
-migrations. Store construction and wallet access begin only after migrations;
-ordinary wallet operations do not recheck identity.
+After identity commits, SQLite enables WAL, and each backend runs the existing
+migrations. Store construction and wallet access begin only after migrations.
+Ordinary wallet operations do not recheck identity.
 
 ## 4. Rationale
 
 The fixed table name and genesis establish application and chain ownership.
-Network magic provides the native protocol discriminator, while the full
-signet digest closes its 32-bit collision gap. Separate migration state keeps
-schema progress independent from identity.
+Network magic provides the native protocol discriminator. The full signet
+digest closes the 32-bit collision gap of network magic. Separate migration
+state keeps schema progress independent from identity.
 
-Bitcoin Core similarly combines chain-specific paths with an in-wallet network
-marker, keeps wallet schema version separate, and validates at wallet open
-rather than on each query. btcwallet retains those principles but needs the
-stronger tuple for PostgreSQL and custom signet.
+Bitcoin Core uses similar principles:
+
+- Bitcoin Core combines chain-specific paths with an in-wallet network marker.
+- Bitcoin Core keeps the wallet schema version separate.
+- Bitcoin Core validates at wallet open, not on each query.
+
+btcwallet keeps those principles but needs the stronger tuple for PostgreSQL
+and custom signet.
 
 The startup transaction initializes or compares identity before normal
-database work. Checking only at Store open avoids ongoing wallet-query cost.
+database work. A check only at Store open avoids ongoing wallet-query cost.
 
 ## 5. Alternatives Considered
 
@@ -145,14 +161,15 @@ magic cannot distinguish custom signets whose digest prefixes collide. SQLite
 ### Digest runtime behavior parameters
 
 Network name, address encodings, maturity, HD versions, and coin type do not
-identify the owning schema or chain. Binding them would strand valid persisted
-data after runtime configuration changes, so no behavior digest is persisted.
+identify the owning schema or chain. If identity binds these values, valid
+persisted data becomes stranded after runtime configuration changes. Therefore,
+no behavior digest is persisted.
 
 ### Couple identity to migration state or opaque records
 
-Migration version describes schema progress, not ownership. Storing identity in
+Migration version describes schema progress, not ownership. Identity stored in
 that row couples different lifecycles. Per-field key/value rows permit partial
-identities, while one opaque blob weakens constraints and diagnostics.
+identities. One opaque blob weakens constraints and diagnostics.
 
 ### Per-query checks or simultaneous Managers
 
@@ -162,7 +179,7 @@ Running simultaneous Managers against one database is unsupported.
 ### Use manifests, recovery states, or automatic adoption
 
 Manifests and recovery states add a second persistence protocol. Similar object
-names do not prove a populated unmarked namespace is safe to adopt.
+names do not prove that a populated unmarked namespace is safe to adopt.
 
 ## 6. Consequences
 
@@ -183,7 +200,7 @@ names do not prove a populated unmarked namespace is safe to adopt.
 
 Manager constructs one identity for the selected SQL Store. Checked SQL defines
 metadata and generated row operations. Each backend gates startup before its
-existing migrations; backend tests cover initialization, matching reopen,
+existing migrations. Backend tests cover initialization, matching reopen,
 mismatches, and populated unmarked storage.
 
 ## 8. References
