@@ -54,6 +54,11 @@ func CheckOutput(output *wire.TxOut, relayFeePerKb btcutil.Amount) error {
 
 // FeeForSerializeSize calculates the required fee for a transaction of some
 // arbitrary size given a mempool's relay fee policy.
+//
+// This rounds the same way txauthor.CheckedFeeForSerializeSize does, but
+// accepts a non-positive rate and clamps an unrepresentable result to
+// MaxSatoshi rather than reporting either. Transaction construction uses the
+// checked variant; keep the two rounding rules in step.
 func FeeForSerializeSize(relayFeePerKb btcutil.Amount, txSerializeSize int) btcutil.Amount {
 	fee := relayFeePerKb * btcutil.Amount(txSerializeSize) / 1000
 
