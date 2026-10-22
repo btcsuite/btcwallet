@@ -17,11 +17,32 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
+
+// TestTxGraphAdmissionPostgres exercises both concurrent admission orderings
+// against the public graph result, including the reproduced MVCC interleaving.
+func TestTxGraphAdmissionPostgres(t *testing.T) {
+	t.Parallel()
+
+	// Arrange, Act, and Assert live in the shared scenario so both backends
+	// check the same public outcomes with their native writer boundaries.
+	t.Run("child admission first", func(t *testing.T) {
+		t.Parallel()
+
+		testTxGraphAdmission(t, DBBackendPostgres, true)
+	})
+	t.Run("terminal transition first", func(t *testing.T) {
+		t.Parallel()
+
+		testTxGraphAdmission(t, DBBackendPostgres, false)
+	})
+}
 
 // txGraphFixture keeps wire transactions as the authoritative outpoint source;
 // the reader assertions derive hashes from these same immutable records.
@@ -343,4 +364,105 @@ func waitTxGraphCall(t *testing.T, ctx context.Context, raw *sql.DB,
 
 		return err == nil && count >= waiting
 	}, 10*time.Second, 10*time.Millisecond)
+}
+
+// testTxGraphAdmission isolates the demonstrated contract: the winner either
+// invalidates an admitted child or precedes and rejects the entire child write.
+func testTxGraphAdmission(t *testing.T, backend DBBackend, childFirst bool) {
+	t.Helper()
+
+	// Arrange: F belongs to A's branch and Q is an independent owned input.
+	// Real Wallet ownership and required Chain calls drive Broadcast.
+	m := newTxGraphManager(t, backend)
+	f := newTxGraphFixture(t, m, false)
+	expectTxGraphBroadcast(t, m, f, childFirst)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	childCall := func() error {
+		return f.wallet.Broadcast(ctx, &f.child.MsgTx, "")
+	}
+	winnerCall := func() error {
+		return txGraphConfirm(ctx, f.syncer, f.winner)
+	}
+	firstCall, secondCall := winnerCall, childCall
+
+	blockedOutput := wire.OutPoint{Hash: f.funding.Hash}
+	if childFirst {
+		firstCall, secondCall = childCall, winnerCall
+		blockedOutput.Index = 1
+	}
+
+	// Act: PostgreSQL pauses the first write inside SQL, then admits the
+	// second; SQLite retains its existing serialized writer order.
+	var firstErr, secondErr error
+	if backend == DBBackendPostgres {
+		store, ok := f.wallet.store.(*pg.Store)
+		require.True(t, ok)
+
+		raw := store.RawDB()
+		barrier := lockTxGraphOutput(
+			t, ctx, raw, f.wallet.id, blockedOutput,
+		)
+		first := startTxGraphCall(t, cancel, firstCall)
+		waitTxGraphCall(t, ctx, raw, first, 1)
+
+		if childFirst {
+			// Wallet-scoped locks let unrelated ingestion commit while
+			// this Wallet's child is held.
+			other, addr := newTxGraphWallet(t, m, "other")
+			rec := txGraphRecord(
+				t, addr, []wire.OutPoint{
+					{Hash: chainhash.Hash{10}},
+				}, 1000,
+			)
+			otherSyncer, ok := other.sync.(*syncer)
+			require.True(t, ok)
+			require.NoError(
+				t, otherSyncer.processChainUpdate(
+					ctx, chain.RelevantTx{TxRecord: rec},
+				),
+			)
+		}
+
+		second := startTxGraphCall(t, cancel, secondCall)
+		waitTxGraphCall(t, ctx, raw, second, 2)
+		require.NoError(t, barrier.Rollback())
+
+		firstErr, secondErr = <-first, <-second
+	} else {
+		firstErr, secondErr = firstCall(), secondCall()
+	}
+
+	// Assert: Read only public outcomes after both writes settle. No active
+	// child credit or independent Q spend may survive the terminal parent.
+	childErr, winnerErr := secondErr, firstErr
+	if childFirst {
+		childErr, winnerErr = firstErr, secondErr
+	}
+
+	require.NoError(t, winnerErr)
+
+	root, err := f.wallet.GetTx(ctx, f.root.Hash)
+	require.NoError(t, err)
+	require.Equal(t, TxStatusReplaced, root.Status)
+
+	child, err := f.wallet.GetTx(ctx, f.child.Hash)
+	if childFirst {
+		require.NoError(t, childErr)
+		require.NoError(t, err)
+		require.Equal(t, TxStatusFailed, child.Status)
+	} else {
+		require.ErrorIs(t, childErr, db.ErrTxInputInvalidParent)
+		require.ErrorIs(t, err, ErrTxNotFound)
+	}
+
+	_, err = f.wallet.GetUtxo(ctx, wire.OutPoint{Hash: f.child.Hash})
+	require.ErrorIs(t, err, ErrUnknownOutput)
+	_, err = f.wallet.GetUtxo(
+		ctx, wire.OutPoint{Hash: f.funding.Hash, Index: 1},
+	)
+	require.NoError(t, err)
+	_, err = f.wallet.GetUtxo(ctx, wire.OutPoint{Hash: f.funding.Hash})
+	require.ErrorIs(t, err, ErrUnknownOutput)
 }
