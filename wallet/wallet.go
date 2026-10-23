@@ -4410,7 +4410,22 @@ func CreateWithCallback(db walletdb.DB, pubPass, privPass []byte,
 	birthday time.Time, cb func(walletdb.ReadWriteTx) error) error {
 
 	return create(
-		db, pubPass, privPass, rootKey, params, birthday, false, cb,
+		db, pubPass, privPass, rootKey, params, nil, nil, birthday,
+		false, cb,
+	)
+}
+
+// CreateWithCallbackAndScryptOptions creates a wallet with independent scrypt
+// parameters for its public and private master keys.
+func CreateWithCallbackAndScryptOptions(db walletdb.DB, pubPass,
+	privPass []byte, rootKey *hdkeychain.ExtendedKey,
+	params *chaincfg.Params, publicConfig,
+	privateConfig *waddrmgr.ScryptOptions, birthday time.Time,
+	cb func(walletdb.ReadWriteTx) error) error {
+
+	return create(
+		db, pubPass, privPass, rootKey, params, publicConfig,
+		privateConfig, birthday, false, cb,
 	)
 }
 
@@ -4422,7 +4437,7 @@ func CreateWatchingOnlyWithCallback(db walletdb.DB, pubPass []byte,
 	cb func(walletdb.ReadWriteTx) error) error {
 
 	return create(
-		db, pubPass, nil, nil, params, birthday, true, cb,
+		db, pubPass, nil, nil, params, nil, nil, birthday, true, cb,
 	)
 }
 
@@ -4434,7 +4449,8 @@ func Create(db walletdb.DB, pubPass, privPass []byte,
 	birthday time.Time) error {
 
 	return create(
-		db, pubPass, privPass, rootKey, params, birthday, false, nil,
+		db, pubPass, privPass, rootKey, params, nil, nil, birthday,
+		false, nil,
 	)
 }
 
@@ -4446,12 +4462,13 @@ func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
 	params *chaincfg.Params, birthday time.Time) error {
 
 	return create(
-		db, pubPass, nil, nil, params, birthday, true, nil,
+		db, pubPass, nil, nil, params, nil, nil, birthday, true, nil,
 	)
 }
 
 func create(db walletdb.DB, pubPass, privPass []byte,
 	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
+	publicConfig, privateConfig *waddrmgr.ScryptOptions,
 	birthday time.Time, isWatchingOnly bool,
 	cb func(walletdb.ReadWriteTx) error) error {
 
@@ -4490,9 +4507,9 @@ func create(db walletdb.DB, pubPass, privPass []byte,
 			return err
 		}
 
-		err = waddrmgr.Create(
-			addrmgrNs, rootKey, pubPass, privPass, params, nil,
-			birthday,
+		err = waddrmgr.CreateWithScryptOptions(
+			addrmgrNs, rootKey, pubPass, privPass, params,
+			publicConfig, privateConfig, birthday,
 		)
 		if err != nil {
 			return err

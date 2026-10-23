@@ -99,6 +99,48 @@ type expectedAddr struct {
 	scriptNotSecret bool
 }
 
+func TestCreateWithScryptOptions(t *testing.T) {
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	passphrase := []byte("same-passphrase")
+	publicConfig := &ScryptOptions{N: 16, R: 8, P: 1}
+	privateConfig := &ScryptOptions{N: 64, R: 8, P: 1}
+	var manager *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		namespace, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		err = CreateWithScryptOptions(
+			namespace, rootKey, passphrase, passphrase,
+			&chaincfg.MainNetParams, publicConfig, privateConfig,
+			time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+
+		manager, err = Open(
+			namespace, passphrase, &chaincfg.MainNetParams,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+
+	require.Equal(t, publicConfig.N, manager.masterKeyPub.Parameters.N)
+	require.Equal(t, privateConfig.N, manager.masterKeyPriv.Parameters.N)
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		namespace := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		return manager.Unlock(namespace, passphrase)
+	})
+	require.NoError(t, err)
+}
+
 // testNamePrefix is a helper to return a prefix to show for test errors based
 // on the state of the test context.
 func testNamePrefix(tc *testContext) string {
