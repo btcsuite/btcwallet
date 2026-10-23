@@ -169,6 +169,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerQueryGetWatchOnly,
 	},
 	{
+		Name:     "account manager query no chain sync imported",
+		TestFunc: testAccountManagerQueryNoChainSyncImported,
+	},
+	{
 		Name:     "account manager query list empty",
 		TestFunc: testAccountManagerQueryListEmpty,
 	},
