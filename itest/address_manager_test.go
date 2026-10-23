@@ -1121,6 +1121,132 @@ func testAddressManagerRotateUsedAddress(h *bwtest.HarnessTest) {
 	require.Equal(h, withoutFingerprint(want[1]), withoutFingerprint(info))
 }
 
+// testAddressManagerOldestUnusedAddress verifies SQL receiving calls reuse the
+// oldest persisted unused child without advancing either branch, then select
+// the next oldest child once the first has received a confirmed payment.
+func testAddressManagerOldestUnusedAddress(h *bwtest.HarnessTest) {
+	// Kvdb deliberately force-allocates; its receiving contract is separate.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("oldest-unused receiving requires SQL")
+	}
+
+	// Arrange: a public batch leaves several children unused. Derive the
+	// oracle independently, then reopen so selection must use persisted state.
+	const accountName = "oldest unused account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, accountName)
+	want := createTestAddressInfos(h, account, false, 3)
+	selector := wallet.NewAccountSelectorByName(scope, accountName)
+	_, err := w.NewBulkAddresses(ctx, selector, false, uint32(len(want)))
+	require.NoError(h, err)
+	before, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	w = h.ReloadWallet(w)
+
+	for range 2 {
+		// Act: request a receiving address without using any prepared child.
+		info, err := w.NewAddress(ctx, selector, false)
+
+		// Assert: repeated completed calls select the oldest persisted
+		// child, rather than the newest child or a fresh allocation.
+		require.NoError(h, err)
+		require.Equal(h, want[0], info)
+	}
+
+	// Unchanged public counters prove reuse did not silently derive children.
+	after, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, before.ExternalKeyCount, after.ExternalKeyCount)
+	require.Equal(h, before.InternalKeyCount, after.InternalKeyCount)
+
+	// Arrange: pay the selected child, rather than allocating a fresh funding
+	// address. Mining waits for the Wallet to record the confirming block.
+	pkScript, err := txscript.PayToAddrScript(want[0].Addr)
+	require.NoError(h, err)
+
+	outputs := []*wire.TxOut{
+		wire.NewTxOut(int64(oneBTC), pkScript),
+	}
+	payment := h.SendOutputs(outputs, bwtest.MinerFeeRate)
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+
+	// Act: receive again only after the first child is durably used.
+	info, err := w.NewAddress(ctx, selector, false)
+
+	// Assert: the next oldest unused child wins over a new allocation, with
+	// no further derivation on either branch after the funding boundary.
+	require.NoError(h, err)
+	require.Equal(h, want[1], info)
+
+	after, err = w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, before.ExternalKeyCount, after.ExternalKeyCount)
+	require.Equal(h, before.InternalKeyCount, after.InternalKeyCount)
+}
+
+// testAddressManagerForceNextAddress verifies modern kvdb receiving calls
+// consume fresh children even while earlier ones remain unused, and continue
+// past those children after reopening the wallet.
+func testAddressManagerForceNextAddress(h *bwtest.HarnessTest) {
+	// SQL deliberately reuses unused children; only kvdb force-allocates.
+	if *dbBackend == string(wallet.DBBackendSQLite) ||
+		*dbBackend == string(wallet.DBBackendPostgres) {
+
+		h.Skip("force-next receiving requires kvdb")
+	}
+
+	// Arrange: keep a fresh account unfunded so use tracking cannot explain
+	// cursor progress. The XPub provides an independent child-order oracle.
+	const accountName = "force next account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, accountName)
+	want := createTestAddressInfos(h, account, false, 3)
+	selector := wallet.NewAccountSelectorByName(scope, accountName)
+
+	for _, expected := range want[:2] {
+		// Act: request a fresh receiving result while earlier children
+		// remain unused, making reuse distinguishable from force-next.
+		info, err := w.NewAddress(ctx, selector, false)
+
+		// Assert: every call advances to the next independently derived
+		// child, preserving kvdb's documented fingerprint convention.
+		require.NoError(h, err)
+		require.Equal(
+			h, withoutFingerprint(expected), withoutFingerprint(info),
+		)
+	}
+
+	// Public counters witness branch progress before crossing the lifecycle
+	// boundary; no unrelated internal child may have been allocated.
+	before, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, uint32(2), before.ExternalKeyCount)
+	require.Zero(h, before.InternalKeyCount)
+
+	// Act: discard the live Wallet and request another child from its durable
+	// account, so an in-memory-only cursor cannot satisfy the next result.
+	w = h.ReloadWallet(w)
+	info, err := w.NewAddress(ctx, selector, false)
+
+	// Assert: the next child follows both unused predecessors after reopen,
+	// and the branch counter records all three successful receiving calls.
+	require.NoError(h, err)
+	require.Equal(h, withoutFingerprint(want[2]), withoutFingerprint(info))
+
+	after, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, uint32(3), after.ExternalKeyCount)
+	require.Zero(h, after.InternalKeyCount)
+}
+
 // testAddressManagerListAddresses proves the account listing reports every
 // allocated address with its balance, before and after reopening the wallet.
 func testAddressManagerListAddresses(h *bwtest.HarnessTest) {

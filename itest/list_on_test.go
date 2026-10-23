@@ -70,6 +70,16 @@ var allTestCases = []*testCase{
 		Name:     "address manager rotate used address",
 		TestFunc: testAddressManagerRotateUsedAddress,
 	},
+	// SQL reuses persisted unused children until a confirmed payment uses one.
+	{
+		Name:     "address manager oldest unused address",
+		TestFunc: testAddressManagerOldestUnusedAddress,
+	},
+	// Modern kvdb preserves force-next progress even when children are unused.
+	{
+		Name:     "address manager force next address",
+		TestFunc: testAddressManagerForceNextAddress,
+	},
 	{
 		Name:     "address manager list addresses",
 		TestFunc: testAddressManagerListAddresses,
