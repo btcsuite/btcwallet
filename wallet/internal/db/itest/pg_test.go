@@ -388,6 +388,174 @@ func newDatabaseIdentityFixture(t *testing.T) databaseIdentityFixture {
 	return postgresDatabaseIdentityFixture(t, newPostgresIdentityDSN(t))
 }
 
+// TestPostgresWriteIsolation proves explicit write isolation overrides session
+// defaults while conflicting Stores retain atomic account admission.
+func TestPostgresWriteIsolation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Give two independent pools the same isolated database and a
+	// serializable session default, exposing any inherited write isolation.
+	dsn := newPostgresIdentityDSN(t) +
+		"&default_transaction_isolation=serializable"
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
+
+	stores := make([]*pg.Store, 2)
+	for i := range stores {
+		store, err := pg.NewStore(t.Context(), pg.Config{
+			Dsn:      dsn,
+			Identity: identity,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+		stores[i] = store
+
+		var defaultIsolation string
+
+		err = store.RawDB().QueryRowContext(
+			t.Context(), "SHOW default_transaction_isolation",
+		).Scan(&defaultIsolation)
+		require.NoError(t, err)
+		require.Equal(t, "serializable", defaultIsolation)
+	}
+
+	// Check isolation inside the actual write, rather than on an unrelated
+	// pooled connection. Both Wallet and account inserts use this same oracle.
+	_, err = stores[0].RawDB().ExecContext(t.Context(), `
+		CREATE FUNCTION require_write_isolation() RETURNS TRIGGER AS $$
+		BEGIN
+			IF current_setting('transaction_isolation') <> 'read committed' THEN
+				RAISE EXCEPTION 'unexpected write isolation';
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql`)
+	require.NoError(t, err)
+
+	for _, table := range []string{"wallets", "accounts"} {
+		_, err = stores[0].RawDB().ExecContext(
+			t.Context(), fmt.Sprintf(
+				"CREATE TRIGGER require_write_isolation BEFORE INSERT ON %s "+
+					"FOR EACH ROW EXECUTE FUNCTION require_write_isolation()",
+				table,
+			),
+		)
+		require.NoError(t, err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	derive := SpendableDeriveFn()
+
+	// Each call writes its own account result. Receive the helper's error
+	// before reading that result or its callback count in the test goroutine.
+	var (
+		calls      [2]int
+		firstInfo  *db.AccountInfo
+		secondInfo *db.AccountInfo
+	)
+
+	// Act: Create through the normal Store, then hold account creation after
+	// allocation while the other Store attempts the same account identity.
+	wallet, err := stores[0].CreateWallet(
+		ctx, CreateWalletParamsFixture("explicit-isolation"),
+	)
+	require.NoError(t, err)
+
+	params := db.CreateDerivedAccountParams{
+		WalletID: wallet.ID,
+		Scope:    db.KeyScopeBIP0084,
+		Name:     "conflicting",
+	}
+	first := startTxGraphCall(t, cancel, func() error {
+		var err error
+
+		firstInfo, err = stores[0].CreateDerivedAccount(
+			ctx, params,
+			func(ctx context.Context, scope db.KeyScope, number uint32,
+				watchOnly bool) (*db.DerivedAccountData, error) {
+
+				// Pause inside the transaction so the peer must acquire
+				// its admission lock before observing the committed winner.
+				calls[0]++
+
+				close(entered)
+
+				select {
+				case <-release:
+					return derive(ctx, scope, number, watchOnly)
+
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			},
+		)
+
+		return err
+	})
+
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("first account callback did not begin", ctx.Err())
+	}
+
+	second := startTxGraphCall(t, cancel, func() error {
+		var err error
+
+		secondInfo, err = stores[1].CreateDerivedAccount(
+			ctx, params,
+			func(ctx context.Context, scope db.KeyScope, number uint32,
+				watchOnly bool) (*db.DerivedAccountData, error) {
+
+				// Count callback entries so an implicit replay cannot hide
+				// behind the eventual account-name conflict result.
+				calls[1]++
+
+				return derive(ctx, scope, number, watchOnly)
+			},
+		)
+
+		return err
+	})
+
+	// Observe only placement of the interleaving here; public Store results
+	// decide correctness after allowing the first transaction to commit.
+	waitTxGraphCall(t, ctx, stores[0].RawDB(), second, 1)
+	close(release)
+
+	// Assert: Receive both errors before reading account data or call counts.
+	// These receives synchronize results with the test goroutine.
+	require.NoError(t, <-first)
+	require.ErrorIs(t, <-second, db.ErrAccountNameConflict)
+	require.NotNil(t, firstInfo)
+	require.Equal(
+		t, uint32(0), accountNumberNotNil(t, firstInfo.AccountNumber),
+	)
+	require.Nil(t, secondInfo)
+	require.Equal(t, [2]int{1, 1}, calls)
+
+	// Only the winner persists; the account_secrets foreign key also excludes
+	// secret rows for a losing account that does not exist.
+	accounts, err := stores[1].ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID: wallet.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+
+	// Reuse the losing Store to prove its failed allocation rolled back the
+	// account-number counter, so the next successful account has no gap.
+	params.Name = "after-conflict"
+	next, err := stores[1].CreateDerivedAccount(ctx, params, derive)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), accountNumberNotNil(t, next.AccountNumber))
+}
+
 // TestPostgresDatabaseIdentityRejectsPopulatedSchema proves startup does not
 // add any relation beside foreign state in an unmarked wallet namespace.
 func TestPostgresDatabaseIdentityRejectsPopulatedSchema(t *testing.T) {
