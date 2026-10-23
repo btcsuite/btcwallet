@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
 )
 
@@ -595,6 +596,70 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]address.Address {
 	}
 
 	return txOutAddrs
+}
+
+// filterRelevantTxs preserves source order while selecting Wallet history.
+// Like addTxToWallet, relevance means crediting an owned address or spending
+// an owned output. Inputs may spend earlier records in this payload or
+// persisted Wallet outputs; earlier payload records are not yet committed.
+// Store credit resolution alone does not exclude unrelated transaction rows.
+//
+// TODO(yy): Consider shared parsing and batched cross-Wallet ownership lookup
+// if larger Wallet sets justify it. The first version accepts repeat iteration
+// to reuse existing per-Wallet matching for expected small sets.
+func (w *Wallet) filterRelevantTxs(ctx context.Context,
+	recs []*wtxmgr.TxRecord) ([]*wtxmgr.TxRecord, error) {
+
+	matches := make([]*wtxmgr.TxRecord, 0, len(recs))
+
+	ownedOutputs := make(map[wire.OutPoint]struct{})
+	for _, rec := range recs {
+		// Reuse publication's ownership decision, including individual
+		// multisig members, before retaining a Wallet transaction row.
+		owned, err := w.filterOwnedAddresses(
+			ctx, w.extractTxAddrs(&rec.MsgTx),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("match chain outputs: %w", err)
+		}
+
+		// Retain owned credits until this entire block commits, so an
+		// outgoing child in the same payload can see its uncommitted parent.
+		for _, info := range owned {
+			for _, index := range info.outputIndices {
+				ownedOutputs[wire.OutPoint{
+					Hash: rec.Hash, Index: index,
+				}] = struct{}{}
+			}
+		}
+
+		// A debit-only child has no owned output of its own. Its parent's
+		// credits are visible here before Store can resolve those inputs.
+		relevant := len(owned) != 0
+		for _, input := range rec.MsgTx.TxIn {
+			if _, ok := ownedOutputs[input.PreviousOutPoint]; ok {
+				relevant = true
+				break
+			}
+		}
+
+		// Reuse persistent ownership as well: spent parents remain relevant
+		// for no-change confirmations and replacements, not just live UTXOs.
+		if !relevant {
+			relevant, err = w.spendsWalletOutput(ctx, &rec.MsgTx)
+			if err != nil {
+				return nil, fmt.Errorf("match chain inputs: %w", err)
+			}
+		}
+
+		// Preserve record references and order so the next Wallet receives
+		// the same source data for its independent matching pass.
+		if relevant {
+			matches = append(matches, rec)
+		}
+	}
+
+	return matches, nil
 }
 
 // filterOwnedAddresses takes a map of output indexes to addresses and returns a

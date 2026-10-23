@@ -37,22 +37,11 @@ import (
 // that need a recovery horizon beyond the addresses already on record.
 const testScanRecoveryWindow = 20
 
-// newTestSyncer composes the existing publisher with real Wallet notification
-// behavior. An unsubscribed Wallet needs no Store reads, so persistence tests
-// retain their existing mock expectations without mocking delivery internals.
+// newTestSyncer passes the test's strict dependency directly to the syncer.
+// Source-only tests leave the shared event mailbox disabled.
 func newTestSyncer(cfg Config, addrStore waddrmgr.AddrStore,
-	txStore wtxmgr.TxStore, publisher TxPublisher, store db.Store,
+	txStore wtxmgr.TxStore, manager txManager, store db.Store,
 	walletID uint32) *syncer {
-
-	// Keep the existing mock publisher and use a real, empty registry for
-	// observations outside these persistence tests' subscription contract.
-	manager := struct {
-		TxPublisher
-		txNotifier
-	}{
-		TxPublisher: publisher,
-		txNotifier:  &Wallet{},
-	}
 
 	return newSyncer(
 		cfg, addrStore, txStore, manager, store, walletID,
@@ -995,6 +984,8 @@ func TestHandleChainUpdate(t *testing.T) {
 		WalletID: walletID,
 		Txid:     rec.Hash,
 	}).Return(nil, db.ErrTxNotFound).Once()
+	// Arrange the exact post-commit observation on the strict dependency.
+	mockPublisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything, mock.Anything).Return(
 		nil).Once()
 
@@ -1003,6 +994,7 @@ func TestHandleChainUpdate(t *testing.T) {
 	err = s.handleChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	mockPublisher.AssertExpectations(t)
 }
 
 // newBareMultisigCreditScript returns one member address, that member's own
@@ -1203,6 +1195,8 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 		Txid:     rec.Hash,
 	}).Return(nil, db.ErrTxNotFound).Once()
 
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchUnminedTxBatch(walletID, tx, addr, received),
 	).Return(nil).Once()
@@ -1213,6 +1207,7 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 	// Assert: The notification was written through the store batch API.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestProcessRelevantTxPreservesUnminedMetadata verifies that a mempool echo of
@@ -1224,8 +1219,9 @@ func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
 	const walletID uint32 = 9
 
 	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
 	s := newTestSyncer(
-		Config{ChainParams: &chainParams}, nil, nil, nil, store,
+		Config{ChainParams: &chainParams}, nil, nil, publisher, store,
 		walletID,
 	)
 
@@ -1255,16 +1251,21 @@ func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
 		Label:  label,
 	}, nil).Once()
 
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchUnminedTxBatchState(
 			walletID, tx, addr, received, db.TxStatusPublished, label,
 		),
 	).Return(nil).Once()
 
+	// Act: Apply the source observation through the existing handler.
 	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
 
+	// Assert: Persistence and its post-commit observation both settle.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestProcessRelevantTxUsesBareMultisigMember verifies store-backed relevant
@@ -1276,8 +1277,9 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 	const walletID uint32 = 8
 
 	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
 	s := newTestSyncer(
-		Config{ChainParams: &chainParams}, nil, nil, nil,
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
 		store, walletID,
 	)
 
@@ -1297,13 +1299,18 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 		Txid:     rec.Hash,
 	}).Return(nil, db.ErrTxNotFound).Once()
 
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchUnminedTxBatch(walletID, tx, memberAddr, received),
 	).Return(nil).Once()
 
+	// Act: Apply the source observation through the existing handler.
 	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	// Assert: Persistence and its post-commit observation both settle.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // matchConfirmedTxBatchNoSyncTip returns a matcher asserting a confirmed
@@ -1378,6 +1385,8 @@ func TestProcessRelevantTxUsesStoreConfirmedBlock(t *testing.T) {
 		Time: time.Unix(789, 0).UTC(),
 	}
 
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchConfirmedTxBatchNoSyncTip(
 			walletID, tx, addr, received, block,
@@ -1394,6 +1403,7 @@ func TestProcessRelevantTxUsesStoreConfirmedBlock(t *testing.T) {
 	// lookups), so any sync-tip write would fail AssertExpectations.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // matchStoreBlockFields reports whether a store block matches the wtxmgr block
@@ -1558,6 +1568,8 @@ func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
 	}
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 101})
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchMultisigCandidateBatch(walletID, tx, members, block),
 	).Return(nil).Once()
@@ -1572,6 +1584,7 @@ func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
 	// API instead of being dropped.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // matchCandidateTxShape reports whether the batch carries exactly the one
@@ -1685,6 +1698,8 @@ func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
 		0: firstAddr,
 		1: secondAddr,
 	}
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchCandidateBatch(walletID, tx, wantCandidates, block),
 	).Return(nil).Once()
@@ -1699,6 +1714,7 @@ func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
 	// unresolved for the Store batch.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestProcessFilteredBlockUsesStore verifies that filtered block notifications
@@ -1742,6 +1758,8 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	}
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	// Arrange the exact post-commit observation on the strict dependency.
+	publisher.On("notifyTx", t.Context(), rec.Hash).Return().Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchBlockTxBatch(walletID, tx, addr, received, block),
 	).Return(nil).Once()
@@ -1755,6 +1773,7 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	// Assert: The block transaction and sync tip were written together.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestProcessFilteredBlockOrder verifies that stale, duplicate, and
@@ -1972,14 +1991,17 @@ func TestPutSyncBatchStore(t *testing.T) {
 	const walletID uint32 = 11
 
 	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
 	s := newTestSyncer(
-		Config{Chain: createTestChain(t)}, nil, nil, &mockTxPublisher{},
+		Config{Chain: createTestChain(t)}, nil, nil, publisher,
 		store, walletID,
 	)
 	fixture := newStoreScanBatchFixture(t)
 	scanState := NewRecoveryState(0, &chainParams, nil)
 	seedScanStateAccountID(scanState, fixture)
 
+	// Require the committed fixture's observation even if watch refresh fails.
+	publisher.On("notifyTx", t.Context(), fixture.tx.TxHash()).Return().Once()
 	store.On(
 		"ApplyScanBatch", mock.Anything,
 		matchStoreScanBatch(walletID, fixture, true),
@@ -2006,6 +2028,7 @@ func TestPutSyncBatchStore(t *testing.T) {
 	// Assert: The store saw transactions, horizons, and synced blocks.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestPutTargetedBatchStore verifies targeted scan writes use the store batch
@@ -2017,14 +2040,17 @@ func TestPutTargetedBatchStore(t *testing.T) {
 	const walletID uint32 = 12
 
 	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
 	s := newTestSyncer(
-		Config{Chain: createTestChain(t)}, nil, nil, &mockTxPublisher{},
+		Config{Chain: createTestChain(t)}, nil, nil, publisher,
 		store, walletID,
 	)
 	fixture := newStoreScanBatchFixture(t)
 	scanState := NewRecoveryState(0, &chainParams, nil)
 	seedScanStateAccountID(scanState, fixture)
 
+	// Require the committed fixture's observation even if watch refresh fails.
+	publisher.On("notifyTx", t.Context(), fixture.tx.TxHash()).Return().Once()
 	store.On(
 		"ApplyScanBatch", mock.Anything,
 		matchStoreScanBatch(walletID, fixture, false),
@@ -2051,6 +2077,7 @@ func TestPutTargetedBatchStore(t *testing.T) {
 	// Assert: The store saw transactions and horizons, but no synced blocks.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestScanHorizonParamsStampsAccountIdentity verifies that scanHorizonParams
@@ -5655,9 +5682,10 @@ func TestProcessChainUpdate(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		update interface{}
-		setup  func(*walletmock.Store, *bwmock.Chain)
+		name          string
+		update        interface{}
+		notifications []chainhash.Hash
+		setup         func(*walletmock.Store, *bwmock.Chain)
 	}{
 		{
 			name: "BlockConnected",
@@ -5668,6 +5696,9 @@ func TestProcessChainUpdate(t *testing.T) {
 		},
 		{
 			name: "RelevantTx",
+			notifications: []chainhash.Hash{
+				wire.NewMsgTx(1).TxHash(),
+			},
 			update: chain.RelevantTx{
 				TxRecord: &wtxmgr.TxRecord{MsgTx: *wire.NewMsgTx(1)},
 			},
@@ -5715,26 +5746,33 @@ func TestProcessChainUpdate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange
+			// Arrange: Reuse each source event's Store expectations and
+			// declare only the post-commit hashes that event produces.
 			store := &walletmock.Store{}
 			mockChain := &bwmock.Chain{}
+			publisher := &mockTxPublisher{}
 			s := newTestSyncer(
 				Config{
 					Chain:       mockChain,
 					ChainParams: &chainParams,
 				},
-				nil, nil, nil,
+				nil, nil, publisher,
 				store, uint32(0),
 			)
 
+			for _, hash := range tc.notifications {
+				publisher.On("notifyTx", t.Context(), hash).Return().Once()
+			}
+
 			tc.setup(store, mockChain)
 
-			// Act
+			// Act: Process the selected source representation once.
 			err := s.processChainUpdate(t.Context(), tc.update)
 
-			// Assert
+			// Assert: The Store effect and exact observation expectations hold.
 			require.NoError(t, err)
 			store.AssertExpectations(t)
+			publisher.AssertExpectations(t)
 		})
 	}
 }
@@ -7118,13 +7156,16 @@ func TestLiveWatchSyncBatchCancellation(t *testing.T) {
 
 	store := &walletmock.Store{}
 	client := &bwmock.Chain{}
+	publisher := &mockTxPublisher{}
 	s := newTestSyncer(
-		Config{Chain: client}, nil, nil, nil, store, 0,
+		Config{Chain: client}, nil, nil, publisher, store, 0,
 	)
 	fixture := newStoreScanBatchFixture(t)
 	scanState := NewRecoveryState(0, &chainParams, nil)
 	seedScanStateAccountID(scanState, fixture)
 
+	// Require the committed fixture's observation even if watch refresh fails.
+	publisher.On("notifyTx", ctx, fixture.tx.TxHash()).Return().Once()
 	store.On("ApplyScanBatch", ctx, mock.Anything).
 		Run(func(mock.Arguments) {
 			cancel()
@@ -7158,6 +7199,7 @@ func TestLiveWatchSyncBatchCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	store.AssertExpectations(t)
 	client.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestLiveWatchTargetedBatchCancellation verifies readiness is revoked at the
@@ -7172,7 +7214,8 @@ func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
 
 	w, deps := createTestWalletWithMocks(t)
 	store, client := deps.store, deps.chain
-	s := newTestSyncer(w.cfg, nil, nil, nil, store, w.id)
+	publisher := &mockTxPublisher{}
+	s := newTestSyncer(w.cfg, nil, nil, publisher, store, w.id)
 	w.sync = s
 	w.state = newWalletState(s)
 	s.state.Store(uint32(syncStateRescanning))
@@ -7193,6 +7236,8 @@ func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
 	seedScanStateAccountID(scanState, fixture)
 
 	var committing *Info
+	// Require the committed fixture's observation even if watch refresh fails.
+	publisher.On("notifyTx", ctx, fixture.tx.TxHash()).Return().Once()
 	store.On("ApplyScanBatch", ctx, mock.Anything).
 		Run(func(mock.Arguments) {
 			var err error
@@ -7228,6 +7273,7 @@ func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
 	// registration, and shared mock cleanup rejects outpoint registration.
 	require.False(t, committing.Synced)
 	require.ErrorIs(t, err, context.Canceled)
+	publisher.AssertExpectations(t)
 }
 
 // TestLiveWatchTargetedCommitUncertainty keeps readiness revoked when the
@@ -7382,6 +7428,8 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	// optional call local to the existing publisher mock, without writing
 	// the spend through the Wallet's publish API before the assertion.
 	publisher := &mockTxPublisher{}
+	publisher.On("notifyTx", mock.Anything, funding.TxHash()).Return().Once()
+	publisher.On("notifyTx", mock.Anything, record.Hash).Return().Once()
 	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
 		func(tx *wire.MsgTx) bool {
 			return tx.TxHash() == record.Hash
@@ -7393,15 +7441,9 @@ func TestLiveWatchScanRetry(t *testing.T) {
 
 	s.cfg.SyncMethod = SyncMethodFullBlocks
 
-	// Preserve real Wallet notification while replacing only rebroadcast
-	// for this retry scenario's existing publication mock.
-	s.txManager = struct {
-		TxPublisher
-		txNotifier
-	}{
-		TxPublisher: publisher,
-		txNotifier:  w,
-	}
+	// Keep notification expectations on the strict dependency; this retry
+	// scenario verifies persisted transactions rather than subscribers.
+	s.txManager = publisher
 
 	// Declare both readiness calls before releasing the worker; the retry
 	// uses the same already-open gate and the existing backoff path.
