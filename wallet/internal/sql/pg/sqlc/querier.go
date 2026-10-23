@@ -7,7 +7,6 @@ package sqlc
 import (
 	"context"
 	"database/sql"
-	"time"
 )
 
 type Querier interface {
@@ -31,16 +30,18 @@ type Querier interface {
 	// Lease semantics:
 	// - If the UTXO has no lease row, insert a new lease.
 	// - If the UTXO has an expired lease, steal it.
-	// - If the UTXO has an active lease with the same lock_id, renew it.
+	// - If the UTXO has an active lease with the same lock_id, renew it. A lease
+	//   without expiry stays without expiry.
 	// - If the UTXO has an active lease with a different lock_id, return no
 	//   rows (caller should treat this as "already leased").
 	//
-	// NOTE: expires_at is stored as a UTC-normalized TIMESTAMP. Callers should pass
-	// UTC values for both expires_at and now_utc.
+	// NOTE: expires_at is stored as a UTC-normalized TIMESTAMP, or NULL for a
+	// lease without expiry. Callers should pass UTC values for both expires_at and
+	// now_utc.
 	// Performance:
 	// - Locks the target utxo row during resolution so concurrent spend updates on
 	//   that row serialize with lease acquisition.
-	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (sql.NullTime, error)
 	// Reserves the cursor past an exact account without consuming lower holes.
 	// Updating this row serializes exact and sequential allocation in the caller's
 	// account transaction, including when the cursor already exceeds the minimum.
@@ -400,7 +401,8 @@ type Querier interface {
 	// How:
 	// - Starts from utxo_leases, then joins utxos and transactions so the result
 	//   can be returned as network outpoints.
-	// - Filters out expired rows using the caller-supplied UTC timestamp.
+	// - Filters out expired rows using the caller-supplied UTC timestamp. A NULL
+	//   expiration never expires.
 	// - Restricts the result to outputs that are still unspent and whose parent
 	//   transaction is still in `pending` or `published` status.
 	// Performance:
