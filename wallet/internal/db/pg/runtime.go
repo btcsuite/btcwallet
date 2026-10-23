@@ -50,12 +50,15 @@ func (s *Store) execRead(ctx context.Context,
 }
 
 // execWrite executes one PostgreSQL write operation through the shared runtime
-// helper.
+// helper at read committed, independent of session defaults.
 func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
+	// Constraints, atomic updates, and acquired row locks protect writes.
+	// In particular, graph reads follow lockTxGraph and need fresh statement
+	// snapshots after acquiring the Wallet lock, not a fixed transaction view.
 	_, err := dbruntime.Write(
-		ctx, s,
+		ctx, s, &sql.TxOptions{Isolation: sql.LevelReadCommitted},
 		func(tx *sql.Tx) *sqlc.Queries {
 			return s.queries.WithTx(tx)
 		},
