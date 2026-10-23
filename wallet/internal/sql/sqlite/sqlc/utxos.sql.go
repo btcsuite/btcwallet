@@ -24,7 +24,10 @@ SELECT
                         WHERE
                             l.wallet_id = t.wallet_id
                             AND l.utxo_id = u.id
-                            AND l.expires_at > ?1
+                            AND (
+                                l.expires_at IS NULL
+                                OR l.expires_at > ?1
+                            )
                     ) THEN u.amount
                     ELSE 0
                 END
@@ -115,7 +118,7 @@ WHERE
 `
 
 type BalanceParams struct {
-	NowUtc           time.Time
+	NowUtc           sql.NullTime
 	WalletID         int64
 	Purpose          sql.NullInt64
 	CoinType         sql.NullInt64
@@ -274,7 +277,10 @@ SELECT
     CASE
         WHEN
             l.utxo_id IS NOT NULL
-            AND l.expires_at > ?1 THEN 1
+            AND (
+                l.expires_at IS NULL
+                OR l.expires_at > ?1
+            ) THEN 1
         ELSE 0
     END AS is_locked
 FROM transactions AS t
@@ -295,7 +301,7 @@ WHERE
 `
 
 type GetUtxoByOutpointParams struct {
-	NowUtc      time.Time
+	NowUtc      sql.NullTime
 	WalletID    int64
 	TxHash      []byte
 	OutputIndex int64
@@ -716,7 +722,10 @@ SELECT
     CASE
         WHEN
             l.utxo_id IS NOT NULL
-            AND l.expires_at > ?1 THEN 1
+            AND (
+                l.expires_at IS NULL
+                OR l.expires_at > ?1
+            ) THEN 1
         ELSE 0
     END AS is_locked
 FROM transactions AS t
@@ -780,7 +789,7 @@ ORDER BY u.amount, t.tx_hash, u.output_index
 `
 
 type ListUtxosParams struct {
-	NowUtc        time.Time
+	NowUtc        sql.NullTime
 	WalletID      int64
 	Purpose       sql.NullInt64
 	CoinType      sql.NullInt64

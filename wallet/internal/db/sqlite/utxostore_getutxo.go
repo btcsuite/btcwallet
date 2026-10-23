@@ -23,7 +23,7 @@ func (s *Store) GetUtxo(ctx context.Context,
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
 		row, err := q.GetUtxoByOutpoint(
 			ctx, sqlc.GetUtxoByOutpointParams{
-				NowUtc:      time.Now().UTC(),
+				NowUtc:      leaseNow(time.Now().UTC()),
 				WalletID:    int64(query.WalletID),
 				TxHash:      query.OutPoint.Hash[:],
 				OutputIndex: int64(query.OutPoint.Index),

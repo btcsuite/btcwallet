@@ -22,7 +22,10 @@ SELECT
                 WHERE
                     l.wallet_id = t.wallet_id
                     AND l.utxo_id = u.id
-                    AND l.expires_at > $1::TIMESTAMP
+                    AND (
+                        l.expires_at IS NULL
+                        OR l.expires_at > $1::TIMESTAMP
+                    )
             )
         ),
         0
@@ -266,7 +269,10 @@ SELECT
     -- are deterministic/testable and consistent with the Balance/lease queries.
     coalesce(
         l.utxo_id IS NOT NULL
-        AND l.expires_at > $1::TIMESTAMP, FALSE
+        AND (
+            l.expires_at IS NULL
+            OR l.expires_at > $1::TIMESTAMP
+        ), FALSE
     )::BOOLEAN AS is_locked
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
@@ -705,7 +711,10 @@ SELECT
     -- are deterministic/testable and consistent with the Balance/lease queries.
     coalesce(
         l.utxo_id IS NOT NULL
-        AND l.expires_at > $1::TIMESTAMP, FALSE
+        AND (
+            l.expires_at IS NULL
+            OR l.expires_at > $1::TIMESTAMP
+        ), FALSE
     )::BOOLEAN AS is_locked
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership

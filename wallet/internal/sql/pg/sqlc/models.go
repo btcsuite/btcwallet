@@ -124,7 +124,7 @@ type UtxoLease struct {
 	WalletID  int64
 	UtxoID    int64
 	LockID    []byte
-	ExpiresAt time.Time
+	ExpiresAt sql.NullTime
 }
 
 type Wallet struct {

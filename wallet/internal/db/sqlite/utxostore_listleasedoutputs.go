@@ -21,7 +21,7 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 		rows, err := q.ListActiveUtxoLeases(
 			ctx, sqlc.ListActiveUtxoLeasesParams{
 				WalletID: int64(walletID),
-				NowUtc:   nowUTC,
+				NowUtc:   leaseNow(nowUTC),
 			},
 		)
 		if err != nil {
@@ -35,8 +35,10 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 				return fmt.Errorf("lease output index: %w", err)
 			}
 
+			// A NULL expiration scans as the zero time.
 			lease, err := db.BuildLeasedOutput(
-				row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
+				row.TxHash, outputIndex, row.LockID,
+				row.ExpiresAt.Time,
 			)
 			if err != nil {
 				return err
@@ -64,7 +66,7 @@ func (s *Store) DeleteExpiredLeases(ctx context.Context,
 		_, err := qtx.DeleteExpiredUtxoLeases(
 			ctx, sqlc.DeleteExpiredUtxoLeasesParams{
 				WalletID: int64(walletID),
-				NowUtc:   nowUTC,
+				NowUtc:   leaseNow(nowUTC),
 			},
 		)
 		if err != nil {

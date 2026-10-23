@@ -85,7 +85,7 @@ func (o *releaseOutputOps) ActiveLockID(ctx context.Context,
 		ctx, sqlc.GetActiveUtxoLeaseLockIDParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
-			NowUtc:   nowUTC,
+			NowUtc:   leaseNow(nowUTC),
 		},
 	)
 	if err != nil {

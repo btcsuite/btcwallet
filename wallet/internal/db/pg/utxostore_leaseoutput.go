@@ -61,16 +61,20 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 
 	expiration, err := o.qtx.AcquireUtxoLease(
 		ctx, sqlc.AcquireUtxoLeaseParams{
-			WalletID:    int64(params.WalletID),
-			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
+			WalletID: int64(params.WalletID),
+			LockID:   params.ID[:],
+			ExpiresAt: sql.NullTime{
+				Time:  expiresAt,
+				Valid: !expiresAt.IsZero(),
+			},
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: outputIndex,
 			NowUtc:      nowUTC,
 		},
 	)
 	if err == nil {
-		return expiration, nil
+		// A NULL expiration scans as the zero time.
+		return expiration.Time, nil
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
