@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -44,8 +45,94 @@ func newTestSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	walletID uint32) *syncer {
 
 	return newSyncer(
-		cfg, addrStore, txStore, manager, store, walletID,
+		cfg, addrStore, txStore, manager, store, walletID, nil,
 	)
+}
+
+// TestSyncerChainEventWaitsForRewind prevents a connected event from reading
+// the old tip and then restoring it over an accepted historical rewind.
+func TestSyncerChainEventWaitsForRewind(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Hold an accepted rewind on the actual syncer worker.
+		// Its next tip read must observe the rewind, not the old height.
+		store := &walletmock.Store{}
+		backend := &bwmock.Chain{}
+		manager := &mockTxPublisher{}
+		s := newTestSyncer(
+			Config{Chain: backend}, nil, nil, manager, store, 0,
+		)
+		events := make(chan any, 1)
+		s.chainEventChan = events
+		s.state.Store(uint32(syncStateSynced))
+
+		fork := waddrmgr.BlockStamp{
+			Height:    5,
+			Hash:      chainhash.Hash{5},
+			Timestamp: time.Unix(5, 0),
+		}
+		store.On("GetWallet", mock.Anything, "").Return(
+			&db.WalletInfo{SyncedTo: &db.Block{Height: 10}}, nil,
+		).Once()
+		store.On("GetWallet", mock.Anything, "").Return(
+			&db.WalletInfo{SyncedTo: &db.Block{
+				Height:    5,
+				Hash:      fork.Hash,
+				Timestamp: fork.Timestamp,
+			}}, nil,
+		).Once()
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		store.On("RewindWallet", mock.Anything,
+			matchRewindWalletParams(0, fork),
+		).Run(func(mock.Arguments) {
+			close(entered)
+			<-release
+		}).Return(nil).Once()
+		manager.On("filterRelevantTxs", t.Context(),
+			[]*wtxmgr.TxRecord(nil),
+		).Return([]*wtxmgr.TxRecord(nil), nil).Once()
+		backend.On("Notifications").Return((<-chan any)(nil)).Twice()
+		t.Cleanup(func() {
+			store.AssertExpectations(t)
+			backend.AssertExpectations(t)
+			manager.AssertExpectations(t)
+		})
+		require.NoError(t, s.requestScan(t.Context(), &scanReq{
+			typ:        scanTypeRewind,
+			startBlock: fork,
+		}))
+
+		workerResult := make(chan error, 2)
+		go func() {
+			workerResult <- s.waitForEvent(t.Context())
+
+			workerResult <- s.waitForEvent(t.Context())
+		}()
+
+		<-entered
+
+		// Act: Queue the old tip's next block while the rewind owns
+		// processing, then allow that historical mutation to finish.
+		events <- chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 11},
+			},
+		}
+
+		synctest.Wait()
+		require.Empty(t, workerResult)
+		close(release)
+
+		// Assert: Both operations settle, and no ApplyTxBatch is expected:
+		// height 11 cannot advance the rewound height 5.
+		require.NoError(t, <-workerResult)
+		require.NoError(t, <-workerResult)
+	})
 }
 
 // TestSyncerInitialization verifies that a new syncer is created with the
@@ -3011,7 +3098,7 @@ func TestResolveScanTargetsDoesNotUseSQLAccountID(t *testing.T) {
 			number := uint32(7)
 			scope := waddrmgr.KeyScopeBIP0084
 			store := &walletmock.Store{}
-			s := newSyncer(Config{}, nil, nil, nil, store, 3)
+			s := newSyncer(Config{}, nil, nil, nil, store, 3, nil)
 			store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
 				WalletID:      3,
 				SkipBalance:   true,
@@ -3055,7 +3142,7 @@ func TestResolveScanTargetsSuppliedPath(t *testing.T) {
 	number := uint32(7)
 	scope := waddrmgr.KeyScopeBIP0084
 	store := &walletmock.Store{}
-	s := newSyncer(Config{}, nil, nil, nil, store, 3)
+	s := newSyncer(Config{}, nil, nil, nil, store, 3, nil)
 	store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
 		WalletID:      3,
 		SkipBalance:   true,
@@ -3814,29 +3901,38 @@ func TestHandleScanReq(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestWaitForEvent verifies event loop idling and dispatch.
+// TestWaitForEvent verifies routing and returned results for source, scan and
+// shared chain events through the existing event-loop entry.
 func TestWaitForEvent(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a store-backed syncer for testing the event loop.
+	// Arrange: Reuse one strict fixture for each input route, so the mailbox
+	// result is checked without duplicating the source and Store dependencies.
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 	store := &walletmock.Store{}
 
 	s := newTestSyncer(
-		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		Config{Chain: mockChain, ChainParams: &chainParams},
+		nil, nil, mockPublisher,
 		store, uint32(0),
 	)
+	t.Cleanup(func() {
+		mockChain.AssertExpectations(t)
+		mockPublisher.AssertExpectations(t)
+		store.AssertExpectations(t)
+	})
 
-	// Mock chain notifications channel.
+	// The source channel is evaluated once for each of the three selects.
 	notificationChan := make(chan any, 1)
-	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
+	mockChain.On("Notifications").
+		Return((<-chan any)(notificationChan)).Times(3)
 
 	// Case 1: Test event handling when a chain notification arrives.
 	notificationChan <- chain.BlockConnected{}
 
-	// Act & Assert: Call waitForEvent and verify it correctly processes
-	// the arriving notification.
+	// Act & Assert: Source headers remain a no-op on the maintained path,
+	// so this route succeeds without a Store write.
 	err := s.waitForEvent(t.Context())
 	require.NoError(t, err)
 
@@ -3847,10 +3943,40 @@ func TestWaitForEvent(t *testing.T) {
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{})
 
-	// Act & Assert: Call waitForEvent and verify it correctly processes
-	// the arriving scan request.
+	// Act & Assert: The no-op scan result returns to the same loop caller.
 	err = s.waitForEvent(t.Context())
 	require.NoError(t, err)
+
+	// Case 3 Arrange: A shared event selects one record whose Store batch
+	// fails. No successful post-commit observation is allowed on this route.
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{
+		Value:    1000,
+		PkScript: []byte{txscript.OP_TRUE},
+	})
+	record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Unix(1, 0))
+	require.NoError(t, err)
+
+	records := []*wtxmgr.TxRecord{record}
+	mockPublisher.On("filterRelevantTxs", t.Context(), records).
+		Return(records, nil).Once()
+	store.On("GetTx", t.Context(), db.GetTxQuery{
+		Txid: record.Hash,
+	}).Return(nil, db.ErrTxNotFound).Once()
+	store.On("ApplyTxBatch", t.Context(), mock.Anything).
+		Return(errDBMockSync).Once()
+
+	events := make(chan any, 1)
+
+	s.chainEventChan = events
+	events <- chain.RelevantTx{TxRecord: record}
+
+	// Act: Consume the accepted event through the shared mailbox case.
+	err = s.waitForEvent(t.Context())
+
+	// Assert: The exact Store cause reaches the owner of the retry loop;
+	// strict publisher expectations also forbid a successful notification.
+	require.ErrorIs(t, err, errDBMockSync)
 }
 
 // TestWaitForEventTargetedScanResults verifies successful mailbox scans and
@@ -7780,7 +7906,7 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 			w, deps := createStartedWalletWithMocks(t)
 			s := newSyncer(
 				w.cfg, w.addrStore, w.txStore, w,
-				deps.store, w.id,
+				deps.store, w.id, nil,
 			)
 			events, _, err := w.SubscribeTxns(t.Context())
 			require.NoError(t, err)
@@ -7843,7 +7969,7 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	w, deps := createStartedWalletWithMocks(t)
 	s := newSyncer(
 		w.cfg, w.addrStore, w.txStore, w,
-		deps.store, w.id,
+		deps.store, w.id, nil,
 	)
 	events, _, err := w.SubscribeTxns(t.Context())
 	require.NoError(t, err)

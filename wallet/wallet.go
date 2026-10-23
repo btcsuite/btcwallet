@@ -375,6 +375,10 @@ type Wallet struct {
 	// chain loop, scanning, and reorganization handling.
 	sync chainSyncer
 
+	// chainEventChan sends shared observations directly to the existing
+	// syncer worker; Manager does not relay through the controller loop.
+	chainEventChan chan<- any
+
 	// state maintains the wallet's atomic, three-dimensional status:
 	// Lifecycle (System), Synchronization (Chain), and Authentication
 	// (Security).
