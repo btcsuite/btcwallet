@@ -349,9 +349,10 @@ func TestLeaseOutputErr(t *testing.T) {
 	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
 
 	tests := []struct {
-		name        string
-		storeErr    error
-		expectedErr error
+		name          string
+		storeErr      error
+		expectedErr   error
+		indeterminate bool
 	}{
 		{
 			name:        "missing output",
@@ -362,6 +363,12 @@ func TestLeaseOutputErr(t *testing.T) {
 			name:        "already leased",
 			storeErr:    db.ErrOutputAlreadyLeased,
 			expectedErr: ErrOutputAlreadyLocked,
+		},
+		{
+			name:          "ambiguous commit",
+			storeErr:      db.ErrIndeterminateCommit,
+			expectedErr:   ErrIndeterminateCommit,
+			indeterminate: true,
 		},
 	}
 
@@ -387,6 +394,14 @@ func TestLeaseOutputErr(t *testing.T) {
 			)
 			require.ErrorIs(t, err, tc.expectedErr)
 			require.True(t, expiration.IsZero())
+
+			// An ambiguous commit surfaces only the wallet-owned
+			// identity, never the Store sentinel.
+			if tc.indeterminate {
+				require.NotErrorIs(
+					t, err, db.ErrIndeterminateCommit,
+				)
+			}
 		})
 	}
 }

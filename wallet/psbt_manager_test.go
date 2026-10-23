@@ -28,6 +28,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +37,52 @@ var (
 	errDb           = errors.New("db error")
 	errAddrNotFound = errors.New("addr not found")
 )
+
+// expectFundingLease registers the single atomic set lease a FundPsbt attempt
+// makes for its complete input set under a non-zero, wallet-generated lease ID
+// and the fixed funding duration. A nil result returns one lease per outpoint.
+// The returned pointer receives the lease ID the attempt reserved under, so a
+// test can check the FundResult reports that same ID.
+func expectFundingLease(w *Wallet, mocks *mockWalletDeps,
+	outPoints []wire.OutPoint, result error) *wtxmgr.LockID {
+
+	leaseID := new(wtxmgr.LockID)
+	matches := func(params db.LeaseOutputsParams) bool {
+		return params.WalletID == w.id &&
+			params.ID != (db.LockID{}) &&
+			slices.Equal(params.OutPoints, outPoints) &&
+			params.Duration == fundLeaseDuration
+	}
+
+	leases := make([]db.LeasedOutput, 0, len(outPoints))
+	for _, outPoint := range outPoints {
+		leases = append(leases, db.LeasedOutput{OutPoint: outPoint})
+	}
+
+	call := mocks.store.On(
+		"LeaseOutputs", mock.Anything, mock.MatchedBy(matches),
+	).Run(func(args mock.Arguments) {
+		params, ok := args.Get(1).(db.LeaseOutputsParams)
+		if !ok {
+			return
+		}
+
+		*leaseID = wtxmgr.LockID(params.ID)
+		for i := range leases {
+			leases[i].LockID = params.ID
+		}
+	}).Once()
+
+	if result != nil {
+		call.Return(nil, result)
+
+		return leaseID
+	}
+
+	call.Return(leases, nil)
+
+	return leaseID
+}
 
 // TestDecorateInputsPartialError preserves the first input's enrichment when
 // a later input fails, including nested lookups during graceful shutdown.
@@ -1166,6 +1213,8 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			packet, err := psbt.NewFromUnsignedTx(tx)
 			require.NoError(t, err)
 
+			expectFundingLease(w, deps, []wire.OutPoint{validUTXO}, nil)
+
 			// Act: Fund the selected input through the public API and
 			// direct its remaining value to the numberless account.
 			result, err := w.FundPsbt(t.Context(),
@@ -1246,6 +1295,10 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 		fixture.inputKey.PubKey(),
 	)
 
+	leaseID := expectFundingLease(
+		w, mocks, []wire.OutPoint{fixture.utxo.OutPoint}, nil,
+	)
+
 	// Act: Fund the packet through FundPsbt with an explicit automatic
 	// selection policy and the fixture's fee rate.
 	result, err := w.FundPsbt(t.Context(), &FundIntent{
@@ -1257,8 +1310,10 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 	// Assert: FundPsbt must return a funded packet of its own and leave
 	// the caller's alone, select exactly the fixture UTXO, preserve the
 	// 99,700-sat payment, decorate the input with that UTXO, and report
-	// -1 because no change survived.
+	// -1 because no change survived. The result names the
+	// wallet-generated lease ID the input was reserved under.
 	require.NoError(t, err)
+	require.Equal(t, *leaseID, result.LeaseID)
 
 	funded, changeIndex := result.Packet, result.ChangeIndex
 
@@ -5636,6 +5691,7 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
 	expectManualFundingSources(t, w, mocks, outPoint)
+	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	// Arrange: a packet that names its own input, and that carries a
 	// deliberate choice in every field funding could otherwise reset.
@@ -5759,6 +5815,7 @@ func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
 	expectManualFundingSources(t, w, mocks, outPoint)
+	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
@@ -5792,12 +5849,14 @@ func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 }
 
 // TestFundPsbtChangeWatchFailure verifies that a failed change registration
-// returns no packet and leaves the caller's packet untouched.
+// returns no packet, leaves the caller's packet untouched, and reserves no
+// input, since reservation only runs after registration succeeds.
 func TestFundPsbtChangeWatchFailure(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Fund a packet that leaves change, replacing the fixture's
-	// optional registration with a failure.
+	// optional registration with a failure. No LeaseOutputs expectation is
+	// registered, so any reservation would fail the mock.
 	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
@@ -5826,10 +5885,13 @@ func TestFundPsbtChangeWatchFailure(t *testing.T) {
 		FeeRate: defaultFeeRate,
 	})
 
-	// Assert: No packet is returned and the caller's packet is unchanged.
+	// Assert: No packet is returned, the caller's packet is unchanged, and
+	// no input was reserved.
 	require.ErrorIs(t, err, errChainMock)
 	require.Nil(t, result)
 	require.Equal(t, before, packetSnapshot(t, packet))
+	mocks.store.AssertNotCalled(t, "LeaseOutputs", mock.Anything,
+		mock.Anything)
 }
 
 // TestFundPsbtRejectsContradictedUtxo verifies that a caller that tells the
@@ -5887,6 +5949,7 @@ func TestFundPsbtDuplicateOutputs(t *testing.T) {
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
 	expectManualFundingSources(t, w, mocks, outPoint)
+	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
@@ -6079,6 +6142,7 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 		t, w, mocks, outPoint, inputAddr, db.TaprootPubKey,
 		inputKey.PubKey(),
 	)
+	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
@@ -6125,4 +6189,170 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	// copy of anything the wallet wrote.
 	require.Len(t, fundedInput.TaprootBip32Derivation, 1)
 	mocks.store.AssertExpectations(t)
+}
+
+// TestFundPsbtInputLeasedBeforeDecoration verifies that a caller-selected
+// input leased by another attempt after authoring accepted it, but before
+// decoration read it, is reported with the documented unavailable-input error
+// rather than the decoration-only ErrUtxoLocked.
+func TestFundPsbtInputLeasedBeforeDecoration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet funding one caller-selected input.
+	// The first UTXO read, made by authoring, sees the input free, and the
+	// second, made by decoration, sees it leased. Both ordered Once
+	// expectations are registered ahead of the helper's repeatable read so
+	// they take precedence, and are filled in once the helper has built
+	// the input script. No lease expectation is registered, so a
+	// reservation would fail the mock.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{8}, Index: 0}
+	query := db.GetUtxoQuery{WalletID: w.id, OutPoint: outPoint}
+	freeUtxo := &db.UtxoInfo{}
+	leasedUtxo := &db.UtxoInfo{}
+
+	mocks.store.On("GetUtxo", mock.Anything, query).
+		Return(freeUtxo, nil).Once()
+	mocks.store.On("GetUtxo", mock.Anything, query).
+		Return(leasedUtxo, nil).Once()
+
+	utxo := expectManualFundingSources(t, w, mocks, outPoint)
+	*freeUtxo = db.UtxoInfo{
+		OutPoint: outPoint,
+		Amount:   btcutil.Amount(utxo.Value),
+		PkScript: utxo.PkScript,
+		Height:   1,
+	}
+	*leasedUtxo = *freeUtxo
+	leasedUtxo.IsLocked = true
+
+	// Decoration stops at the leased read, so the parent transaction and
+	// input address lookups the helper registers for it never happen.
+	for _, call := range mocks.store.ExpectedCalls {
+		if call.Method == "GetTxDetail" || call.Method == "GetAddress" {
+			call.Maybe()
+		}
+	}
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	tx.AddTxOut(&wire.TxOut{
+		Value:    300_000,
+		PkScript: validOutput.PkScript,
+	})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	// Act: Fund the packet through the public API.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The attempt reports the reservation's conflict identity, not
+	// the decoration sentinel, and returns no packet.
+	require.ErrorIs(t, err, ErrOutputAlreadyLocked)
+	require.NotErrorIs(t, err, ErrUtxoLocked)
+	require.Nil(t, result)
+	mocks.store.AssertNotCalled(t, "LeaseOutputs", mock.Anything,
+		mock.Anything)
+}
+
+// TestFundPsbtReservationFailure verifies that a funding attempt whose input
+// reservation fails returns no packet and maps each Store result onto the
+// wallet-owned error identity, without retrying or reading back an ambiguous
+// commit.
+func TestFundPsbtReservationFailure(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		storeErr      error
+		expectErr     error
+		indeterminate bool
+	}{
+		{
+			name:      "conflicting lease",
+			storeErr:  db.ErrOutputAlreadyLeased,
+			expectErr: ErrOutputAlreadyLocked,
+		},
+		{
+			name:      "missing utxo",
+			storeErr:  db.ErrUtxoNotFound,
+			expectErr: ErrUnknownOutput,
+		},
+		{
+			name:          "ambiguous commit",
+			storeErr:      db.ErrIndeterminateCommit,
+			expectErr:     ErrIndeterminateCommit,
+			indeterminate: true,
+		},
+		{
+			name:      "other store failure",
+			storeErr:  errDb,
+			expectErr: errDb,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Prepare a synced wallet funding one
+			// caller-selected input, and make its lease call fail
+			// with the case's Store error. The Once expectation
+			// means a retry would fail the mock, and no read is
+			// registered after the failing call, so a readback
+			// would fail it too.
+			w, mocks := createStartedSQLWalletWithMocks(t)
+			mocks.syncer.On("syncState").
+				Return(syncStateSynced).Once()
+
+			outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
+			expectManualFundingSources(t, w, mocks, outPoint)
+			leaseID := expectFundingLease(
+				w, mocks, []wire.OutPoint{outPoint}, tc.storeErr,
+			)
+
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+			tx.AddTxOut(&wire.TxOut{
+				Value:    300_000,
+				PkScript: validOutput.PkScript,
+			})
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			// Act: Fund the packet through the public API.
+			result, err := w.FundPsbt(
+				t.Context(), &FundIntent{
+					Packet:  packet,
+					FeeRate: defaultFeeRate,
+				},
+			)
+
+			// Assert: The attempt returns the mapped error and no
+			// result. An ambiguous commit surfaces only the
+			// wallet-owned identity, never the Store sentinel, as a
+			// FundReservationError that reports the lease ID and
+			// inputs it may have leased so the caller can release
+			// them.
+			require.ErrorIs(t, err, tc.expectErr)
+			require.Nil(t, result)
+
+			var resErr *FundReservationError
+			if !tc.indeterminate {
+				require.NotErrorAs(t, err, &resErr)
+
+				return
+			}
+
+			require.NotErrorIs(t, err, db.ErrIndeterminateCommit)
+			require.ErrorAs(t, err, &resErr)
+			require.Equal(t, *leaseID, resErr.LeaseID)
+			require.Equal(t, []wire.OutPoint{outPoint}, resErr.Inputs)
+		})
+	}
 }
