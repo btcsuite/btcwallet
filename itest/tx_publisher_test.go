@@ -3,6 +3,10 @@
 package itest
 
 import (
+	"bytes"
+
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -194,85 +198,228 @@ func testCheckMempoolAcceptanceRejected(h *bwtest.HarnessTest) {
 	require.True(h, utxo.Spendable, "coin is no longer spendable")
 }
 
-// testBroadcastTransaction verifies that a published transaction reaches the
-// network and becomes visible through the wallet's own coin view, both while it
-// waits in the mempool and once it is mined.
+// testBroadcastTransaction verifies that an automatically authored spend and
+// its change reach the network, confirm, and survive a fresh Manager loading
+// the same database through the public transaction and UTXO views.
 func testBroadcastTransaction(h *bwtest.HarnessTest) {
+	// Arrange: Two distinct coins make largest-first selection deterministic
+	// while retaining an untouched control. Funding already crosses the
+	// harness's exact block synchronization boundary.
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txPublisherFundingType,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
 		Unlocked: true,
 	})
 
-	// The second coin is never named by the transaction. It stays behind as
-	// the control that tells "this coin was spent" apart from "the wallet
-	// lost sight of its coins".
-	spent, untouched := funding.WalletOutpoints[0], funding.WalletOutpoints[1]
+	untouched, spent := funding.WalletOutpoints[0], funding.WalletOutpoints[1]
+	prevOut := funding.Tx.TxOut[spent.Index]
 
-	addr := h.NewWalletAddressOfType(w, txPublisherFundingType)
+	// Preserve the untouched coin before publication so whole-list checks
+	// detect unrelated changes as well as replacement of the selected input.
+	control, err := w.GetUtxo(h.Context(), untouched)
+	require.NoError(h, err, "failed to read control coin")
+
+	// Derive one funded scope for both coin selection and change, keeping
+	// the signing and change handoffs tied to this Wallet fixture.
+	scope, err := txPublisherFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	// A fixed foreign witness program keeps the recipient separate from
+	// wallet change without introducing another Wallet or signing fixture.
+	const witnessProgramSize = 20
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, witnessProgramSize), h.NetParams(),
+	)
+	require.NoError(h, err, "failed to create recipient address")
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(h, err, "failed to create payment pkscript")
 
-	tx := h.SignSpend(w, bwtest.SpendFixture{
-		Inputs: []wire.OutPoint{spent},
+	// Act: Ask the public author to select the funded input and allocate
+	// change for this payment through the normal account policy.
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
 		Outputs: []wire.TxOut{{
-			Value:    oneBTC - spendFee,
+			Value:    halfBTC,
 			PkScript: pkScript,
 		}},
+		Inputs: &wallet.InputsPolicy{
+			Strategy: wallet.CoinSelectionLargest,
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
 	})
+	require.NoError(h, err, "failed to author spend")
 
+	tx := authored.Tx
+
+	// Assert: The funding transaction is an independent oracle for the
+	// selected coin and signing metadata; the recipient and change must
+	// conserve that input with a positive fee.
+	require.Len(h, tx.TxIn, 1, "unexpected input count")
+	require.Equal(h, spent, tx.TxIn[0].PreviousOutPoint)
+	require.Equal(h, btcutil.Amount(prevOut.Value), authored.TotalInput)
+	require.Equal(h, [][]byte{prevOut.PkScript}, authored.PrevScripts)
+	require.Equal(
+		h, []btcutil.Amount{btcutil.Amount(prevOut.Value)},
+		authored.PrevInputValues,
+	)
+	require.Len(h, tx.TxOut, 2, "expected recipient and change")
+	require.GreaterOrEqual(h, authored.ChangeIndex, 0, "no change output")
+	require.Less(h, authored.ChangeIndex, len(tx.TxOut))
+	paid := tx.TxOut[1-authored.ChangeIndex]
+	require.Equal(h, int64(halfBTC), paid.Value)
+	require.Equal(h, pkScript, paid.PkScript)
+
+	change := tx.TxOut[authored.ChangeIndex]
+	fee := btcutil.Amount(prevOut.Value - paid.Value - change.Value)
+	require.Positive(h, fee, "authored spend pays no fee")
+
+	// Act: Sign the authored input using its returned metadata and attach
+	// the public signer's stacks to that same transaction.
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	unlocking, err := w.ComputeUnlockingScript(
+		h.Context(), &wallet.UnlockingScriptParams{
+			Tx: tx,
+			Output: wire.NewTxOut(
+				int64(authored.PrevInputValues[0]),
+				authored.PrevScripts[0],
+			),
+			SigHashes: hashes,
+			HashType:  txscript.SigHashAll,
+		},
+	)
+	require.NoError(h, err, "failed to sign authored spend")
+
+	tx.TxIn[0].Witness = unlocking.Witness
+	tx.TxIn[0].SignatureScript = unlocking.SigScript
+
+	// Assert: Verify sanity and execute the input against the mined funding
+	// output so incorrect authoring or unlocking data cannot validate itself.
+	require.NoError(h, blockchain.CheckTransactionSanity(btcutil.NewTx(tx)))
+	engine, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err, "failed to construct input verifier")
+	require.NoError(h, engine.Execute(), "authored input script is invalid")
+
+	// Capture the signed bytes independently of the reader so subsequent
+	// public views must return the exact transaction sent to the network.
+	var rawTx bytes.Buffer
+	require.NoError(h, tx.Serialize(&rawTx), "failed to serialize spend")
+
+	// Act: Publish the signed authored spend. Only relay to the external
+	// miner is asynchronous; Broadcast already commits the Wallet views.
 	err = w.Broadcast(h.Context(), tx, "")
 	require.NoError(h, err, "failed to broadcast transaction")
 
 	txid := tx.TxHash()
-
-	// The transaction reached the network.
 	h.AssertTxInMempool(txid)
 
-	// Before it is mined the wallet already reflects it: the coin it spends
-	// is gone from the spendable set.
+	// Assert: The unmined reader describes this exact signed spend, and owns
+	// its change rather than the foreign payment.
+	unmined, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to read published spend")
+	require.Equal(h, txid, unmined.Hash)
+	require.Equal(h, rawTx.Bytes(), unmined.RawTx)
+	require.Nil(h, unmined.Block)
+	require.Zero(h, unmined.Confirmations)
+	require.Equal(h, fee, unmined.Fee)
+	require.Equal(h, -btcutil.Amount(halfBTC)-fee, unmined.Value)
+	require.Len(h, unmined.PrevOuts, 1)
+	require.Equal(h, spent, unmined.PrevOuts[0].OutPoint)
+	require.True(h, unmined.PrevOuts[0].IsOurs)
+	require.Len(h, unmined.Outputs, len(tx.TxOut))
+	changeDetail := unmined.Outputs[authored.ChangeIndex]
+	require.True(h, changeDetail.IsOurs, "reader disowns authored change")
+	require.False(h, unmined.Outputs[1-authored.ChangeIndex].IsOurs)
+	require.Equal(h, change.PkScript, changeDetail.PkScript)
+	require.Equal(h, btcutil.Amount(change.Value), changeDetail.Amount)
+
+	// The complete coin view replaces only the selected input with change;
+	// the control proves publication did not simply lose the funding coins.
 	_, err = w.GetUtxo(h.Context(), spent)
 	require.ErrorIs(
 		h, err, wallet.ErrUnknownOutput,
 		"broadcast left the spent coin in the wallet",
 	)
 
-	// The output it creates is a wallet coin, and reports no confirmations
-	// while it waits.
-	created := wire.OutPoint{Hash: txid, Index: 0}
+	created := wire.OutPoint{Hash: txid, Index: uint32(authored.ChangeIndex)}
 
 	unconfirmed, err := w.GetUtxo(h.Context(), created)
-	require.NoError(
-		h, err, "broadcast output did not become a wallet coin",
-	)
-	require.Equal(
-		h, btcutil.Amount(oneBTC-spendFee), unconfirmed.Amount,
-		"unexpected output amount",
-	)
-	require.Zero(
-		h, unconfirmed.Confirmations,
-		"unmined output reports confirmations",
-	)
+	require.NoError(h, err, "authored change did not become a wallet coin")
+	require.Equal(h, changeDetail.Amount, unconfirmed.Amount)
+	require.Equal(h, changeDetail.PkScript, unconfirmed.PkScript)
+	require.Zero(h, unconfirmed.Confirmations)
 
-	// The wallet tracks the transaction it published.
-	_, err = w.GetTx(h.Context(), txid)
-	require.NoError(h, err, "broadcast transaction is not tracked")
+	query := wallet.UtxoQuery{MinConfs: 0, MaxConfs: maxConfsLimit}
+	coins, err := w.ListUnspent(h.Context(), query)
+	require.NoError(h, err, "failed to list published spend's coins")
+	require.ElementsMatch(h, []*wallet.Utxo{control, unconfirmed}, coins)
 
-	// The coin the transaction never named is untouched.
-	_, err = w.GetUtxo(h.Context(), untouched)
-	require.NoError(h, err, "broadcast consumed an unrelated coin")
+	// Act: Mine the spend through the harness's exact hash/height boundary.
+	// Reads below must succeed directly once that boundary returns.
+	block := h.MineBlockWithTx(tx)
+	_, height := h.GetBestBlock()
 
-	h.MineBlockWithTx(tx)
+	// Assert: The reader and coin view agree on confirmed, spendable change.
+	mined, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to read confirmed spend")
+	require.Equal(h, rawTx.Bytes(), mined.RawTx)
+	require.Equal(h, &wallet.BlockDetails{
+		Hash:      block.BlockHash(),
+		Height:    height,
+		Timestamp: block.Header.Timestamp.Unix(),
+	}, mined.Block)
+	require.Equal(h, int32(1), mined.Confirmations)
+	require.Equal(h, changeDetail, mined.Outputs[authored.ChangeIndex])
 
-	// Confirmation is visible through the same coin view.
 	confirmed, err := w.GetUtxo(h.Context(), created)
-	require.NoError(h, err, "mined output is no longer a wallet coin")
+	require.NoError(h, err, "confirmed change is missing")
+	require.Equal(h, changeDetail.Amount, confirmed.Amount)
+	require.Equal(h, changeDetail.PkScript, confirmed.PkScript)
+	require.Equal(h, int32(1), confirmed.Confirmations)
+	require.True(h, confirmed.Spendable, "confirmed change is not spendable")
+
+	// Only one block passed, so the untouched funding coin gains exactly one
+	// confirmation. Compare the full list to exclude resurrected spent coins.
+	control.Confirmations++
+	coins, err = w.ListUnspent(h.Context(), query)
+	require.NoError(h, err, "failed to list confirmed spend's coins")
+	require.ElementsMatch(h, []*wallet.Utxo{control, confirmed}, coins)
+
+	// Act: ReloadWallet stops and joins the old Manager and starts a fresh
+	// one over this database, transferring harness cleanup to its Wallet.
+	w = h.ReloadWallet(w)
+
+	// Reload returns a locked Wallet. Restore the fixture's unlock state
+	// because kvdb's public Spendable result also reflects that runtime state.
+	h.UnlockWallet(w)
+
+	// Assert: Compare whole public results immediately. No block was mined
+	// across reload, so polling would conceal lost durable transaction data.
+	reloaded, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to read spend after reload")
+	require.Equal(h, mined, reloaded, "reload changed the transaction view")
+	changeAfter, err := w.GetUtxo(h.Context(), created)
+	require.NoError(h, err, "failed to read change after reload")
+	require.Equal(h, confirmed, changeAfter, "reload changed the change coin")
+	coinsAfter, err := w.ListUnspent(h.Context(), query)
+	require.NoError(h, err, "failed to list coins after reload")
 	require.Equal(
-		h, int32(1), confirmed.Confirmations,
-		"mined output reports unexpected confirmations",
+		h, coins, coinsAfter, "reload changed the complete coin view",
 	)
-	require.True(h, confirmed.Spendable, "mined output is not spendable")
 }
 
 // testBroadcastAlreadyKnown verifies that publishing a transaction the network
