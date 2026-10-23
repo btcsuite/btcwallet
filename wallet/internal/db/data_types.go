@@ -1598,8 +1598,20 @@ type LeaseOutputParams struct {
 	// OutPoint is the outpoint of the UTXO to lock.
 	OutPoint wire.OutPoint
 
-	// Duration is the duration to lock the UTXO for.
+	// Duration is the duration to lock the UTXO for. It must be zero when
+	// NoExpiry is set. A same-ID renewal of a lease without expiry ignores
+	// it and keeps the lease without expiry.
 	Duration time.Duration
+
+	// NoExpiry requests a lease without expiration. It lasts until its owner
+	// releases it or a confirmed transaction spends the output.
+	NoExpiry bool
+}
+
+// Validate rejects a lease request whose lifetime is not exactly one of a
+// positive duration or NoExpiry.
+func (p LeaseOutputParams) Validate() error {
+	return validateLeaseLifetime(p.Duration, p.NoExpiry)
 }
 
 // LeaseOutputsParams contains the parameters for leasing a complete set of
@@ -1617,8 +1629,14 @@ type LeaseOutputsParams struct {
 	// OutPoints is the complete, duplicate-free set of UTXOs to lock.
 	OutPoints []wire.OutPoint
 
-	// Duration is the duration to lock every UTXO for.
+	// Duration is the duration to lock every UTXO for. It must be zero when
+	// NoExpiry is set. A same-ID renewal of a lease without expiry ignores
+	// it and keeps the lease without expiry.
 	Duration time.Duration
+
+	// NoExpiry requests leases without expiration. Each lasts until its owner
+	// releases it or a confirmed transaction spends the output.
+	NoExpiry bool
 }
 
 // Validate rejects set requests that no backend can honor before any write is
@@ -1626,9 +1644,9 @@ type LeaseOutputsParams struct {
 // means the caller's view of its own set is wrong, and the same-ID renewal
 // path would otherwise hide that silently.
 func (p LeaseOutputsParams) Validate() error {
-	if p.Duration <= 0 {
-		return fmt.Errorf("%w: lease duration must be positive",
-			ErrInvalidParam)
+	err := validateLeaseLifetime(p.Duration, p.NoExpiry)
+	if err != nil {
+		return err
 	}
 
 	if len(p.OutPoints) == 0 {
@@ -1644,6 +1662,26 @@ func (p LeaseOutputsParams) Validate() error {
 		}
 
 		seen[outPoint] = struct{}{}
+	}
+
+	return nil
+}
+
+// validateLeaseLifetime requires a positive duration for a timed lease and no
+// duration for a lease without expiry.
+func validateLeaseLifetime(duration time.Duration, noExpiry bool) error {
+	if noExpiry {
+		if duration != 0 {
+			return fmt.Errorf("%w: lease without expiry cannot have "+
+				"a duration", ErrInvalidParam)
+		}
+
+		return nil
+	}
+
+	if duration <= 0 {
+		return fmt.Errorf("%w: lease duration must be positive",
+			ErrInvalidParam)
 	}
 
 	return nil
@@ -1672,8 +1710,13 @@ type LeasedOutput struct {
 	// LockID is the ID of the lock.
 	LockID LockID
 
-	// Expiration is the time when the lock expires.
+	// Expiration is the time when the lock expires. It is zero when NoExpiry
+	// is set.
 	Expiration time.Time
+
+	// NoExpiry reports that the lease has no expiration. It lasts until its
+	// owner releases it or a confirmed transaction spends the output.
+	NoExpiry bool
 }
 
 // BalanceResult represents one wallet-scoped balance view after applying the
