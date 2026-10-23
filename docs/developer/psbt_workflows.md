@@ -57,7 +57,11 @@ flowchart LR
     		FeeRate: btcunit.NewSatPerKVByte(1000), // e.g., 1 sat/vb
     	}
     
-    	fundedPacket, _, err := aliceWallet.FundPsbt(ctx, fundIntent)
+    	result, err := aliceWallet.FundPsbt(ctx, fundIntent)
+    	if err != nil {
+    		return err
+    	}
+    	fundedPacket := result.Packet
     
     ```
     

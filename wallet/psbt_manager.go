@@ -204,6 +204,16 @@ type FundIntent struct {
 	Label string
 }
 
+// FundResult is the outcome of a successful FundPsbt attempt.
+type FundResult struct {
+	// Packet is the funded PSBT, ready for signing.
+	Packet *psbt.Packet
+
+	// ChangeIndex is the index of the change output in
+	// `Packet.UnsignedTx.TxOut`, or -1 if no change output was added.
+	ChangeIndex int32
+}
+
 // SignPsbtParams encapsulates the arguments for signing a PSBT.
 type SignPsbtParams struct {
 	// Packet is the PSBT to be signed.
@@ -268,12 +278,14 @@ type SignPsbtResult struct {
 //	    },
 //	    FeeRate: btcunit.NewSatPerKVByte(250),
 //	}
-//	fundedPacket, changeIndex, err := psbtManager.FundPsbt(
-//		ctx, fundIntent,
-//	)
+//	result, err := psbtManager.FundPsbt(ctx, fundIntent)
+//	if err != nil {
+//		return err
+//	}
+//	fundedPacket := result.Packet
 //
 // The `fundedPacket` now contains the necessary inputs (fully decorated)
-// and a change output. The `changeIndex` indicates the index of the
+// and a change output. The `result.ChangeIndex` indicates the index of the
 // change output in the `fundedPacket.UnsignedTx.TxOut` slice, or -1 if
 // no change output was added.
 //
@@ -322,11 +334,10 @@ type PsbtManager interface {
 	// perform automatic coin selection (if no inputs are present) or to
 	// validate and fund a specific set of manual inputs.
 	//
-	// The returned PSBT is a fully funded transaction template, ready for
-	// signing. The change output index is also returned (-1 if no change
-	// was added).
-	FundPsbt(ctx context.Context, intent *FundIntent) (*psbt.Packet,
-		int32, error)
+	// The returned FundResult carries a fully funded transaction
+	// template, ready for signing, and the change output index (-1 if no
+	// change was added).
+	FundPsbt(ctx context.Context, intent *FundIntent) (*FundResult, error)
 
 	// SignPsbt adds partial signatures to the PSBT for all inputs
 	// controlled by the wallet.
@@ -395,9 +406,8 @@ type fundPsbtReq struct {
 
 // fundPsbtResp delivers funding results only after packet mutation ends.
 type fundPsbtResp struct {
-	packet      *psbt.Packet
-	changeIndex int32
-	err         error
+	result *FundResult
+	err    error
 }
 
 // signPsbtReq borrows signing metadata until signing and callbacks complete.
@@ -682,7 +692,7 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 // Accepted funding finishes before return, including packet updates and any
 // supplied coin selector, even if the caller cancels after admission.
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
-	*psbt.Packet, int32, error) {
+	*FundResult, error) {
 
 	// Judge the packet before anything is consulted on its behalf. The
 	// check reads the intent and nothing else, so a caller handed a
@@ -690,12 +700,12 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	// the syncer where it is.
 	err := w.validateFundIntent(intent)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	err = w.state.validateSynced()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
@@ -707,13 +717,13 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 
 	err = w.sendReq(ctx, r)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	// Once admitted, wait for the result even if cancellation arrives.
-	result := <-r.respChan
+	resp := <-r.respChan
 
-	return result.packet, result.changeIndex, result.err
+	return resp.result, resp.err
 }
 
 // handleFundPsbt completes its accepted operation with the caller's packet.
@@ -765,7 +775,10 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 		return
 	}
 
-	r.respChan <- fundPsbtResp{packet: packet, changeIndex: changeIndex}
+	r.respChan <- fundPsbtResp{result: &FundResult{
+		Packet:      packet,
+		ChangeIndex: changeIndex,
+	}}
 }
 
 // populatePsbtPacket updates the PSBT packet with the new transaction details,

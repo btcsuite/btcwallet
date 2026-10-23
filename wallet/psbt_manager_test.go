@@ -164,7 +164,7 @@ func TestFundPsbtPopulationError(t *testing.T) {
 
 	resultChan := make(chan error, 1)
 	go func() {
-		_, _, err := w.FundPsbt(t.Context(), &FundIntent{
+		_, err := w.FundPsbt(t.Context(), &FundIntent{
 			Packet:  packet,
 			Policy:  &InputsPolicy{},
 			FeeRate: defaultFeeRate,
@@ -1168,7 +1168,7 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 
 			// Act: Fund the selected input through the public API and
 			// direct its remaining value to the numberless account.
-			funded, changeIndex, err := w.FundPsbt(t.Context(),
+			result, err := w.FundPsbt(t.Context(),
 				&FundIntent{
 					Packet:  packet,
 					FeeRate: defaultFeeRate,
@@ -1186,6 +1186,9 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			// retains its known UTXO/origin; shared fixture cleanup verifies
 			// each mock consumes only the required funding calls.
 			require.NoError(t, err)
+
+			funded, changeIndex := result.Packet, result.ChangeIndex
+
 			require.GreaterOrEqual(t, changeIndex, int32(0))
 			change := funded.UnsignedTx.TxOut[changeIndex]
 			require.Equal(t, changeScript, change.PkScript)
@@ -1245,7 +1248,7 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 
 	// Act: Fund the packet through FundPsbt with an explicit automatic
 	// selection policy and the fixture's fee rate.
-	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		Policy:  &InputsPolicy{},
 		FeeRate: defaultFeeRate,
@@ -1256,6 +1259,9 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 	// 99,700-sat payment, decorate the input with that UTXO, and report
 	// -1 because no change survived.
 	require.NoError(t, err)
+
+	funded, changeIndex := result.Packet, result.ChangeIndex
+
 	require.NotSame(t, packet, funded)
 	require.Equal(t, int32(-1), changeIndex)
 	require.Len(t, funded.UnsignedTx.TxIn, 1)
@@ -1290,7 +1296,7 @@ func TestFundPsbtInvalidTxIntent(t *testing.T) {
 	originalTx := packet.UnsignedTx
 
 	// Act: Attempt to fund the packet with the invalid zero fee rate.
-	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet: packet, Policy: &InputsPolicy{},
 		FeeRate: btcunit.ZeroSatPerKVByte,
 	})
@@ -1299,8 +1305,7 @@ func TestFundPsbtInvalidTxIntent(t *testing.T) {
 	// the error-path change index. The original transaction object and its
 	// sole 10,000-sat output must remain untouched.
 	require.ErrorIs(t, err, ErrMissingFeeRate)
-	require.Nil(t, funded)
-	require.Zero(t, changeIndex)
+	require.Nil(t, result)
 	require.Same(t, originalTx, packet.UnsignedTx)
 	require.Equal(t, int64(10_000), packet.UnsignedTx.TxOut[0].Value)
 }
@@ -1359,7 +1364,7 @@ func TestFundPsbtTranslatesAmountError(t *testing.T) {
 	}).Return([]db.UtxoInfo{}, nil).Once()
 
 	// Act: Fund the packet with an otherwise valid intent.
-	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		Policy:  &InputsPolicy{},
 		FeeRate: defaultFeeRate,
@@ -1370,8 +1375,7 @@ func TestFundPsbtTranslatesAmountError(t *testing.T) {
 	// is left as it arrived.
 	require.ErrorIs(t, err, ErrOutputTotalExceedsMax)
 	require.ErrorIs(t, err, txauthor.ErrOutputTotalExceedsMax)
-	require.Nil(t, funded)
-	require.Zero(t, changeIndex)
+	require.Nil(t, result)
 	require.Same(t, originalTx, packet.UnsignedTx)
 	require.Len(t, packet.UnsignedTx.TxOut, 2)
 }
@@ -5424,15 +5428,14 @@ func TestFundPsbtRejectsCorruptInputAmounts(t *testing.T) {
 				fundIntent.Policy = &InputsPolicy{}
 			}
 
-			funded, changeIndex, err := w.FundPsbt(
+			result, err := w.FundPsbt(
 				t.Context(), fundIntent,
 			)
 
 			// The refusal must leave the caller's packet as it was
 			// found: the same transaction object, the inputs it
 			// arrived with, and its sole payment output.
-			require.Nil(t, funded)
-			require.Zero(t, changeIndex)
+			require.Nil(t, result)
 			require.Same(t, originalTx, packet.UnsignedTx)
 			require.Len(t, packet.UnsignedTx.TxIn, originalInputs)
 			require.Len(t, packet.UnsignedTx.TxOut, 1)
@@ -5674,11 +5677,13 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
-	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
 	require.NoError(t, err)
+
+	funded, changeIndex := result.Packet, result.ChangeIndex
 
 	// Assert: the caller's own packet was never the thing rewritten.
 	require.NotSame(t, packet, funded)
@@ -5767,11 +5772,13 @@ func TestFundPsbtDoesNotShareScriptMemory(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
-	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
 	require.NoError(t, err)
+
+	funded := result.Packet
 
 	// Act: scribble over every script the funded packet came back with.
 	for _, txOut := range funded.UnsignedTx.TxOut {
@@ -5814,14 +5821,14 @@ func TestFundPsbtChangeWatchFailure(t *testing.T) {
 	before := packetSnapshot(t, packet)
 
 	// Act: Fund the packet through the public wrapper.
-	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
 
 	// Assert: No packet is returned and the caller's packet is unchanged.
 	require.ErrorIs(t, err, errChainMock)
-	require.Nil(t, funded)
+	require.Nil(t, result)
 	require.Equal(t, before, packetSnapshot(t, packet))
 }
 
@@ -5855,13 +5862,13 @@ func TestFundPsbtRejectsContradictedUtxo(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
-	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
 
 	require.ErrorIs(t, err, ErrConflictingInputMetadata)
-	require.Nil(t, funded)
+	require.Nil(t, result)
 	require.Equal(t, before, packetSnapshot(t, packet))
 }
 
@@ -5898,11 +5905,14 @@ func TestFundPsbtDuplicateOutputs(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
-	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
 	require.NoError(t, err)
+
+	funded, changeIndex := result.Packet, result.ChangeIndex
+
 	require.Equal(t, before, packetSnapshot(t, packet))
 
 	// Both records survive, each still its own, and neither has been
@@ -6012,7 +6022,7 @@ func TestFundPsbtRejectsMalformedPacket(t *testing.T) {
 			packet := testMalformedPacket(outPoint, tc.mutation)
 			before := packetSnapshot(t, packet)
 
-			funded, changeIndex, err := w.FundPsbt(
+			result, err := w.FundPsbt(
 				t.Context(), &FundIntent{
 					Packet:  packet,
 					FeeRate: defaultFeeRate,
@@ -6020,8 +6030,7 @@ func TestFundPsbtRejectsMalformedPacket(t *testing.T) {
 			)
 
 			require.ErrorIs(t, err, tc.wantErr)
-			require.Nil(t, funded)
-			require.Zero(t, changeIndex)
+			require.Nil(t, result)
 			require.Equal(t, before, packetSnapshot(t, packet))
 			mocks.store.AssertExpectations(t)
 		})
@@ -6086,7 +6095,7 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
-	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
 	})
@@ -6094,6 +6103,9 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	// Assert: the caller's packet is untouched, and its parent survived
 	// onto the funded one.
 	require.NoError(t, err)
+
+	funded := result.Packet
+
 	require.Equal(t, before, packetSnapshot(t, packet))
 
 	inputIdx := -1

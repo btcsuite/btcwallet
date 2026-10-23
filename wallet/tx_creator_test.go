@@ -114,7 +114,7 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 			go func() {
 				var err error
 				if fundPsbt {
-					_, _, err = w.FundPsbt(ctx, &FundIntent{
+					_, err = w.FundPsbt(ctx, &FundIntent{
 						Packet: packet, Policy: policy,
 						FeeRate: defaultFeeRate,
 					})
