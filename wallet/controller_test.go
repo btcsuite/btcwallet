@@ -1719,7 +1719,7 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 		// Arrange: Use the real worker with the existing Wallet fixture.
 		w, deps := createTestWalletWithMocks(t)
 		w.sync = newSyncer(
-			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id, nil,
 		)
 		w.state = newWalletState(w.sync)
 
@@ -1809,7 +1809,7 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		// the batch commit only for the queued historical scan.
 		w, deps := createTestWalletWithMocks(t)
 		s := newSyncer(
-			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id, nil,
 		)
 		w.sync = s
 		w.state = newWalletState(s)
