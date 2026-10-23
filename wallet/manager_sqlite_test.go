@@ -1,6 +1,8 @@
 package wallet
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -8,14 +10,329 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// rollbackStoreMock injects only the rollback outcome while delegating every
+// other operation to the real SQL Store shared by Manager and its Wallets.
+type rollbackStoreMock struct {
+	mock.Mock
+	db.Store
+}
+
+// rollbackStoreMock retains the complete real Store contract by embedding it.
+var _ db.Store = (*rollbackStoreMock)(nil)
+
+// RollbackToBlock reports the arranged outcome; a Run hook may commit through
+// the embedded Store first to model an ambiguous successful transaction.
+func (s *rollbackStoreMock) RollbackToBlock(ctx context.Context,
+	height uint32) error {
+
+	args := s.Called(ctx, height)
+	return args.Error(0)
+}
+
+// TestManagerRollbackSQLite exercises coordinated durable state and terminal
+// rollback outcomes on SQLite without requiring the Docker-only test tag.
+func TestManagerRollbackSQLite(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Supply a fresh SQLite database for each outcome, using the
+	// shared scenario's real Wallet workers and strict rollback-only mock.
+	// Act: The scenario submits each disconnect through prepared admission.
+	// Assert: It checks affected/lower checkpoints, effects, continuation, and
+	// terminal errors against durable state and the running Wallet handles.
+	testManagerRollbackStore(t, DBBackendSQLite, func(t *testing.T) string {
+		t.Helper()
+
+		return filepath.Join(t.TempDir(), "rollback.sqlite")
+	})
+}
+
+// testManagerRollbackStore applies the same explicit success and terminal
+// failure scenarios to both SQL backends, reusing existing Store proofs.
+func testManagerRollbackStore(t *testing.T, backend DBBackend,
+	dataSource func(*testing.T) string) {
+
+	t.Helper()
+
+	// Success has additional continuation calls, so it owns a separate
+	// scenario rather than changing the error table's mock arrangement.
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		testManagerRollbackSuccess(t, backend, dataSource(t))
+	})
+
+	// Both errors use identical mock calls; only the reported commit outcome
+	// differs. The ambiguous scenario commits its real Store before returning.
+	tests := []struct {
+		name    string
+		failure error
+	}{
+		{
+			name:    "definite failure",
+			failure: errDBMock,
+		},
+		{
+			name: "committed but ambiguous",
+			failure: &dbruntime.AmbiguousTxCommitError{
+				Err: errDBMock,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			testManagerRollbackFailure(t, backend, dataSource(t), test.failure)
+		})
+	}
+}
+
+// seedManagerRollback creates the same three real Wallets and seeds the
+// affected pair after worker readiness. Outcome-specific mocks and assertions
+// stay in each scenario; both SQL backends reuse this deterministic work.
+func seedManagerRollback(t *testing.T, m *Manager, store db.Store,
+	ready <-chan struct{}) ([]*Wallet, db.Block, db.Block, *wire.MsgTx) {
+
+	t.Helper()
+
+	// Start all three real workers before seeding persistence. The third Wallet
+	// stays below the fork while the first two share the removed block.
+	_, err := m.Start(t.Context())
+	require.NoError(t, err)
+
+	wallets := make([]*Wallet, 0, 3)
+	for _, name := range []string{"first", "second", "below"} {
+		w, createErr := m.Create(managerLifecycleCreateParams(name))
+		require.NoError(t, createErr)
+
+		wallets = append(wallets, w)
+	}
+
+	// Each receipt marks one worker reaching its initial notification wait,
+	// so all three can service the subsequent prepared pause.
+	<-ready
+	<-ready
+	<-ready
+
+	// Height 1 is the retained fork; height 2 holds a confirmed payment in
+	// each affected Wallet. The third Wallet retains its genesis checkpoint.
+	fork := db.Block{
+		Height: 1, Hash: chainhash.Hash{1}, Timestamp: time.Unix(1, 0),
+	}
+	old := db.Block{
+		Height: 2, Hash: chainhash.Hash{2}, Timestamp: time.Unix(2, 0),
+	}
+
+	tx := subscriptionTx([]byte{txscript.OP_TRUE}, 2)
+	for _, w := range wallets[:2] {
+		require.NoError(t, store.ApplyScanBatch(t.Context(),
+			db.ScanBatchParams{
+				WalletID: w.ID(), SyncedBlocks: []db.Block{fork, old},
+				Transactions: []db.CreateTxParams{
+					{
+						WalletID: w.ID(), Tx: tx, Block: &old,
+						Received: old.Timestamp,
+						Status:   db.TxStatusPublished,
+					},
+				},
+			}))
+	}
+
+	return wallets, fork, old, tx
+}
+
+// testManagerRollbackSuccess rewinds affected durable checkpoints and effects,
+// preserves a lower Wallet, and verifies subsequent prepared delivery resumes.
+func testManagerRollbackSuccess(t *testing.T, backend DBBackend,
+	dataSource string) {
+
+	t.Helper()
+
+	// Arrange: A fresh current Chain has no inherited non-current
+	// expectation. Each real worker signals its notification wait.
+	source := &bwmock.Chain{}
+	t.Cleanup(func() { source.AssertExpectations(t) })
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend: backend, DataSource: dataSource,
+		ChainParams: chainParams, ChainSource: source,
+	})
+	require.NoError(t, err)
+
+	storage, ok := m.backend.(*sqlManagerBackend)
+	require.True(t, ok)
+
+	store := &rollbackStoreMock{Store: storage.store}
+	t.Cleanup(func() { store.AssertExpectations(t) })
+	t.Cleanup(func() { require.NoError(t, m.Stop()) })
+
+	storage.store = store
+
+	// Three readiness receipts are required for startup, three after rollback,
+	// and three after replacement delivery. Already-known unmined payments
+	// need no maintenance write when each affected worker resumes twice.
+	source.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrTxAlreadyInMempool).Times(4)
+
+	ready := make(chan struct{}, 9)
+	expectChainEventSource(source, 3, 9, ready, nil)
+	// Birthday verification precedes each worker's normal tip read.
+	source.On("GetBestBlock").
+		Return(chainParams.GenesisHash, int32(0), nil).Times(3)
+	source.On("GetBlockHash", int64(0)).
+		Return(chainParams.GenesisHash, nil).Times(3)
+	source.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&chainParams.GenesisBlock.Header, nil).Times(3)
+
+	store.On("RollbackToBlock", mock.Anything, uint32(2)).
+		Run(func(args mock.Arguments) {
+			// Fault injection delegates the one accepted rollback to real
+			// persistence; only its completion allows worker continuation.
+			ctx, valid := args.Get(0).(context.Context)
+			require.True(t, valid)
+			require.NoError(t, store.Store.RollbackToBlock(ctx, 2))
+		}).Return(nil).Once()
+
+	wallets, fork, old, tx := seedManagerRollback(t, m, store, ready)
+
+	// Capture the unaffected Wallet's exact checkpoint before rollback,
+	// rather than assuming every active Wallet shares the affected height.
+	below, err := store.GetWallet(t.Context(), "below")
+	require.NoError(t, err)
+
+	// Act: Submit one disconnect through Manager; the SQL Store receives it
+	// only after the complete published Wallet set acknowledges its pause.
+	err = m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 2, Hash: old.Hash},
+	})
+
+	// Assert: Wait for all three resumed workers to reach notification receipt
+	// before reading rewound tips and the payment's unmined status.
+	require.NoError(t, err)
+	<-ready
+	<-ready
+	<-ready
+
+	for _, w := range wallets[:2] {
+		info, readErr := store.GetWallet(t.Context(), w.cfg.Name)
+		require.NoError(t, readErr)
+		require.Equal(t, fork, *info.SyncedTo)
+		stored, readErr := store.GetTx(t.Context(), db.GetTxQuery{
+			WalletID: w.ID(), Txid: tx.TxHash(),
+		})
+		require.NoError(t, readErr)
+		require.Nil(t, stored.Block)
+	}
+
+	lower, err := store.GetWallet(t.Context(), "below")
+	require.NoError(t, err)
+	require.Equal(t, below.SyncedTo, lower.SyncedTo)
+
+	// Act: Deliver a replacement at the removed height after all workers have
+	// resumed; this proves prepared admission continues after rollback.
+	next := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 2, Hash: chainhash.Hash{3}},
+		Time:  time.Unix(3, 0),
+	}
+	require.NoError(t, m.dispatchChainEvent(t.Context(),
+		chain.BlockConnected(next)))
+
+	// Assert: Each receipt follows the replacement delivery. Check the two
+	// rewound Wallets now expose the replacement hash through durable state.
+	<-ready
+	<-ready
+	<-ready
+
+	for _, w := range wallets[:2] {
+		info, readErr := store.GetWallet(t.Context(), w.cfg.Name)
+		require.NoError(t, readErr)
+		require.Equal(t, next.Hash, info.SyncedTo.Hash)
+	}
+}
+
+// testManagerRollbackFailure terminates every real Wallet for either error
+// outcome without retrying or automatically reading back the rollback result.
+func testManagerRollbackFailure(t *testing.T, backend DBBackend,
+	dataSource string, failure error) {
+
+	t.Helper()
+
+	// Arrange: A fresh current Chain has no inherited non-current
+	// expectation. Each real worker signals its notification wait.
+	source := &bwmock.Chain{}
+	t.Cleanup(func() { source.AssertExpectations(t) })
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend: backend, DataSource: dataSource,
+		ChainParams: chainParams, ChainSource: source,
+	})
+	require.NoError(t, err)
+
+	storage, ok := m.backend.(*sqlManagerBackend)
+	require.True(t, ok)
+
+	store := &rollbackStoreMock{Store: storage.store}
+	t.Cleanup(func() { store.AssertExpectations(t) })
+	t.Cleanup(func() { require.NoError(t, m.Stop()) })
+
+	storage.store = store
+
+	// Only startup reaches notification receipt: an error must cancel and
+	// join workers instead of allowing the successful continuation calls.
+	ready := make(chan struct{}, 3)
+	expectChainEventSource(source, 3, 3, ready, nil)
+	// Birthday verification precedes each worker's normal tip read.
+	source.On("GetBestBlock").
+		Return(chainParams.GenesisHash, int32(0), nil).Times(3)
+	source.On("GetBlockHash", int64(0)).
+		Return(chainParams.GenesisHash, nil).Times(3)
+	source.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&chainParams.GenesisBlock.Header, nil).Times(3)
+
+	store.On("RollbackToBlock", mock.Anything, uint32(2)).
+		Run(func(args mock.Arguments) {
+			// Keep the same mock expectation for both errors. Commit only
+			// the ambiguous fault's real transaction before reporting it.
+			if errors.Is(failure, dbruntime.ErrAmbiguousTxCommit) {
+				ctx, valid := args.Get(0).(context.Context)
+				require.True(t, valid)
+				require.NoError(t, store.Store.RollbackToBlock(ctx, 2))
+			}
+		}).Return(failure).Once()
+
+	wallets, _, old, _ := seedManagerRollback(t, m, store, ready)
+
+	// Act: Report the arranged failure from the one coordinated disconnect,
+	// including a transaction that really committed before ambiguity arose.
+	err = m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 2, Hash: old.Hash},
+	})
+
+	// Assert: The exact error survives terminal cleanup, every retained Wallet
+	// is inert, and later prepared work performs no retry or Store readback.
+	require.ErrorIs(t, err, failure)
+
+	for _, w := range wallets {
+		_, infoErr := w.Info(t.Context())
+		require.ErrorIs(t, infoErr, ErrWalletStopped)
+	}
+
+	require.ErrorIs(t, m.dispatchChainEvent(t.Context(),
+		chain.BlockDisconnected{}), ErrStateForbidden)
+}
 
 // TestChangeAllocationSQLiteNoChainSync verifies fresh change remains available
 // on excluded accounts without registering their scripts for live tracking.

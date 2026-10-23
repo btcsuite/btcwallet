@@ -224,6 +224,13 @@ type scanResult struct {
 	parentHash chainhash.Hash
 }
 
+// chainPauseReq fences the existing worker across one Manager rollback. The
+// worker closes ready before waiting; Manager alone owns resuming its writes.
+type chainPauseReq struct {
+	ready  chan struct{}
+	resume <-chan struct{}
+}
+
 // chainSyncer is a private interface that abstracts the chain synchronization
 // logic, allowing it to be mocked for testing the wallet and controller.
 type chainSyncer interface {
@@ -242,13 +249,18 @@ type chainSyncer interface {
 }
 
 // txManager combines the Wallet capabilities used by the syncer for
-// publication and notification after successful commits.
+// publication, Wallet ownership selection and post-commit notification.
 type txManager interface {
 	TxPublisher
 	txNotifier
+
+	// filterRelevantTxs selects this Wallet's records from a shared event
+	// without changing source data observed by other Wallets.
+	filterRelevantTxs(ctx context.Context, records []*wtxmgr.TxRecord) (
+		[]*wtxmgr.TxRecord, error)
 }
 
-// Wallet supplies both capabilities through the same private dependency.
+// Wallet supplies these capabilities through the same private dependency.
 var _ txManager = (*Wallet)(nil)
 
 // syncer is a stateless blocking worker responsible for synchronizing the
@@ -277,6 +289,10 @@ type syncer struct {
 	// from the controller. It is buffered to ensure that submitting a
 	// request does not unnecessarily block the calling goroutine.
 	scanReqChan chan *scanReq
+
+	// chainEventChan shares the existing worker with historical scans. Manager
+	// owns sends; Wallet cancellation joins processing without closing it.
+	chainEventChan <-chan any
 
 	// txManager rebroadcasts unmined transactions and announces committed
 	// observations while Wallet retains subscriber state and lifecycle.
@@ -322,19 +338,21 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
 // mandatory: every migrated runtime path reads and writes through the Store,
 // so there is no nil-store fallback. The notifier observes successful commits
-// without owning persistence or scan lifecycle.
+// without owning persistence or scan lifecycle. Managed Wallets supply their
+// mailbox; chainEventChan is nil for callers using only the maintained source.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
-	walletID uint32) *syncer {
+	walletID uint32, chainEventChan <-chan any) *syncer {
 
 	return &syncer{
-		cfg:         cfg,
-		addrStore:   addrStore,
-		txStore:     txStore,
-		scanReqChan: make(chan *scanReq, 1),
-		txManager:   txManager,
-		store:       store,
-		walletID:    walletID,
+		cfg:            cfg,
+		addrStore:      addrStore,
+		txStore:        txStore,
+		scanReqChan:    make(chan *scanReq, 1),
+		chainEventChan: chainEventChan,
+		txManager:      txManager,
+		store:          store,
+		walletID:       walletID,
 	}
 }
 
@@ -996,7 +1014,22 @@ func (s *syncer) txNotificationState(ctx context.Context,
 // putSyncBatch records recovery scan results and synced blocks through the
 // store.
 func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
-	results []scanResult) error {
+	results []scanResult) (resultErr error) {
+
+	// Rollback invalidates fetched facts before persistence. Ordinary work
+	// stays behind this attempt, including conversion or Store failures.
+	pending, err := s.chainWriteBoundary(ctx)
+	if err != nil {
+		return err
+	}
+
+	if pending != nil {
+		defer func() {
+			resultErr = errors.Join(
+				resultErr, s.handleChainEvent(ctx, pending),
+			)
+		}()
+	}
 
 	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
@@ -1969,10 +2002,92 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	return s.scanWithRewind(ctx, req)
 }
 
+// handleChainEvent selects Wallet transactions from a shared observation
+// before using the existing persistence handler. Source-channel observations
+// retain their backend filtering semantics.
+func (s *syncer) handleChainEvent(ctx context.Context, event any) error {
+	switch n := event.(type) {
+	case chain.RelevantTx:
+		records, err := s.txManager.filterRelevantTxs(
+			ctx, []*wtxmgr.TxRecord{n.TxRecord},
+		)
+		if err != nil {
+			return err
+		}
+
+		// An unrelated singleton is a successful no-op with no Store batch.
+		if len(records) == 0 {
+			return nil
+		}
+
+	case chain.FilteredBlockConnected:
+		// Copy only the value and selected slice; shared source records
+		// stay immutable, and empty matches still carry block progress.
+		records, err := s.txManager.filterRelevantTxs(ctx, n.RelevantTxs)
+		if err != nil {
+			return err
+		}
+
+		n.RelevantTxs = records
+		event = n
+	}
+
+	return s.handleChainUpdate(ctx, event)
+}
+
+// handleChainRequest acknowledges a pause before waiting on its continuation.
+// Ordinary events keep the existing worker processing and error policy.
+func (s *syncer) handleChainRequest(ctx context.Context, event any) error {
+	if pause, ok := event.(chainPauseReq); ok {
+		close(pause.ready)
+
+		select {
+		case <-pause.resume:
+			return nil
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return s.handleChainEvent(ctx, event)
+}
+
+// chainWriteBoundary services a pending pause before a historical commit.
+// The caller keeps an ordinary value until its current batch attempt finishes.
+func (s *syncer) chainWriteBoundary(ctx context.Context) (any, error) {
+	select {
+	case event := <-s.chainEventChan:
+		if _, ok := event.(chainPauseReq); !ok {
+			return event, nil
+		}
+
+		err := s.handleChainRequest(ctx, event)
+		if err != nil {
+			return nil, err
+		}
+
+		// Re-read branch state instead of writing facts fetched before
+		// the database-wide rollback replaced their underlying history.
+		return nil, ErrStateChanged
+
+	default:
+		// An empty poll has no retained ordinary work for the caller.
+		var pending any
+
+		return pending, nil
+	}
+}
+
 // waitForEvent blocks until a notification, rescan job, or context
 // cancellation occurs, processing the event accordingly.
 func (s *syncer) waitForEvent(ctx context.Context) error {
 	select {
+	// Shared events use the historical worker and its ordinary error path,
+	// so the Wallet's existing sync loop owns logging and retry.
+	case event := <-s.chainEventChan:
+		return s.handleChainRequest(ctx, event)
+
 	// Process asynchronous notifications from the chain backend, such as
 	// new blocks or transactions.
 	case n, ok := <-s.cfg.Chain.Notifications():
@@ -1986,20 +2101,18 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 	// controller.
 	case job := <-s.scanReqChan:
 		err := s.handleScanReq(ctx, job)
-		if err == nil {
-			return nil
-		}
-
-		if errors.Is(err, context.Canceled) ||
-			errors.Is(err, ErrWalletShuttingDown) {
+		// Success and shutdown need no scan-specific recovery. Group
+		// their common return before handling operational scan failures.
+		switch {
+		case err == nil, errors.Is(err, context.Canceled),
+			errors.Is(err, ErrWalletShuttingDown):
 
 			return err
-		}
 
 		// A committed scan can leave live watches unregistered. Let that
 		// failure restart initialization instead of bypassing its retry.
-		if job.typ == scanTypeTargeted &&
-			s.syncState() != syncStateSyncing {
+		case job.typ == scanTypeTargeted &&
+			s.syncState() != syncStateSyncing:
 
 			// Rescan returns once the request is queued, so this
 			// execution failure cannot reach its caller. For now,
@@ -2051,26 +2164,53 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	return nil
 }
 
-// scanWithTargets performs a targeted rescan for specific accounts without
-// rewinding the global sync state.
-func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
-	scanState, err := s.loadTargetedScanState(ctx, req.targets)
+// loadTargetedScanTip rebuilds the requested horizons and reads their scan
+// bound on initial entry and after rollback, using the same readiness policy.
+func (s *syncer) loadTargetedScanTip(ctx context.Context,
+	targets []waddrmgr.AccountScope) (*RecoveryState, int32, error) {
+
+	state, err := s.loadTargetedScanState(ctx, targets)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 
 	s.state.Store(uint32(syncStateRescanning))
+
+	_, height, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return nil, 0, fmt.Errorf("get best block: %w", err)
+	}
+
+	return state, height, nil
+}
+
+// scanWithTargets performs a targeted rescan for specific accounts without
+// rewinding the global sync state.
+func (s *syncer) scanWithTargets(ctx context.Context,
+	req *scanReq) (resultErr error) {
+
+	// A retained live-event failure must reach the ordinary worker retry
+	// policy, but only after this accepted account range has finished.
+	var eventErr error
+	defer func() {
+		if eventErr != nil {
+			s.state.Store(uint32(syncStateSyncing))
+
+			resultErr = errors.Join(resultErr, eventErr)
+		}
+	}()
+
 	// Failed registration keeps readiness revoked until initialization retries.
 	defer s.state.CompareAndSwap(
 		uint32(syncStateRescanning), uint32(syncStateSynced),
 	)
 
-	startHeight := req.startBlock.Height
-
-	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	scanState, bestHeight, err := s.loadTargetedScanTip(ctx, req.targets)
 	if err != nil {
-		return fmt.Errorf("get best block: %w", err)
+		return err
 	}
+
+	startHeight := req.startBlock.Height
 
 	log.Infof("Starting targeted rescan from height %d to %d for %d "+
 		"accounts", startHeight, bestHeight, len(req.targets))
@@ -2099,8 +2239,30 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 				"0 results", ErrScanBatchEmpty)
 		}
 
-		// Persist the scan while rescanning still blocks transaction creation.
-		err = s.putTargetedBatch(ctx, scanState, results)
+		// Keep the range's own result separate from retained live work:
+		// a failed observation must not discard the remaining account scan.
+		pending, err := s.chainWriteBoundary(ctx)
+		if err == nil {
+			err = s.putTargetedBatch(ctx, scanState, results)
+		}
+
+		// With no retained value the existing handler is a no-op. Keep
+		// all ordinary outcomes local until the requested range finishes.
+		eventErr = errors.Join(eventErr, s.handleChainEvent(ctx, pending))
+
+		if errors.Is(err, ErrStateChanged) {
+			// A rollback discards this attempt, not the accepted request.
+			// Reload horizons and refetch its original range on the new tip.
+			scanState, bestHeight, err = s.loadTargetedScanTip(ctx, req.targets)
+			if err != nil {
+				return err
+			}
+
+			startHeight = req.startBlock.Height
+
+			continue
+		}
+
 		if err != nil {
 			return err
 		}

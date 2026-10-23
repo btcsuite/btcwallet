@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -393,6 +396,172 @@ func (m *Manager) Stop() error {
 	m.started.Store(true)
 
 	return m.stopWallets(nil)
+}
+
+// chainRecipients fixes admission and membership against Start, Create and
+// Stop. It copies pointers while locked; delivery happens after unlock so a
+// full mailbox cannot prevent shutdown or publication.
+func (m *Manager) chainRecipients(ctx context.Context) ([]*Wallet, error) {
+	m.RLock()
+	defer m.RUnlock()
+
+	// Inactive state wins over caller cancellation, including after Stop has
+	// cleared the registry. KVDB retains its independent source consumer.
+	if !m.started.Load() || m.config.Backend == DBBackendKVDB {
+		return nil, ErrStateForbidden
+	}
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	wallets := make([]*Wallet, 0, len(m.wallets))
+	for _, wallet := range m.wallets {
+		wallets = append(wallets, wallet)
+	}
+
+	return wallets, nil
+}
+
+// dispatchChainEvent accepts an immutable chain event for every published
+// SQL Wallet. One caller supplies source order; each Wallet processes FIFO.
+// Connected success means acceptance; disconnects wait for rollback. Wallet
+// lifetime governs accepted work; caller cancellation prevents admission.
+func (m *Manager) dispatchChainEvent(ctx context.Context, event any) error {
+	// The existing handler ignores header-only BlockConnected events. Use
+	// its filtered-block path to commit even an empty block's checkpoint.
+	switch update := event.(type) {
+	case chain.BlockConnected:
+		block := wtxmgr.BlockMeta(update)
+		event = chain.FilteredBlockConnected{Block: &block}
+
+	case chain.BlockDisconnected:
+		return m.rollbackChainEvent(ctx, update)
+
+	case chain.FilteredBlockConnected, chain.RelevantTx:
+
+	default:
+		return fmt.Errorf("unsupported chain event %T: %w",
+			event, db.ErrInvalidParam)
+	}
+
+	wallets, err := m.chainRecipients(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Bounded mailboxes apply backpressure without a processing barrier.
+	// Stop cancels blocked handoffs and joins accepted work before Store close.
+	for _, wallet := range wallets {
+		select {
+		case wallet.chainEventChan <- event:
+		case <-wallet.lifetimeCtx.Done():
+			return ErrManagerStopped
+		}
+	}
+
+	return nil
+}
+
+// pauseChainWallets waits for each existing worker to fence its writes. The
+// Manager registry stays unlocked so Stop can cancel a busy or absent consumer.
+func pauseChainWallets(wallets []*Wallet, resume <-chan struct{}) error {
+	for _, wallet := range wallets {
+		pause := chainPauseReq{ready: make(chan struct{}), resume: resume}
+
+		select {
+		case wallet.chainEventChan <- pause:
+		case <-wallet.lifetimeCtx.Done():
+			return ErrManagerStopped
+		}
+
+		select {
+		case <-pause.ready:
+		case <-wallet.lifetimeCtx.Done():
+			return ErrManagerStopped
+		}
+	}
+
+	return nil
+}
+
+// rollbackChainEvent fences published SQL writers around exactly one Store
+// rollback. Its sequential source caller owns ordering; the registry lock
+// excludes Create only while fixing membership and during persistence.
+func (m *Manager) rollbackChainEvent(ctx context.Context,
+	event chain.BlockDisconnected) error {
+
+	height, err := db.Int64ToUint32(int64(event.Height))
+	if err != nil {
+		return fmt.Errorf("disconnect height: %w", err)
+	}
+
+	m.Lock()
+
+	backend, ok := m.backend.(*sqlManagerBackend)
+	if !m.started.Load() || !ok {
+		m.Unlock()
+
+		return ErrStateForbidden
+	}
+
+	err = ctx.Err()
+	if err != nil {
+		m.Unlock()
+
+		return err
+	}
+
+	// Caller cancellation cannot abandon accepted persistence. Only this
+	// operation resumes writers, after success or terminal cleanup joins them.
+	ctx = context.WithoutCancel(ctx)
+
+	resume := make(chan struct{})
+	defer close(resume)
+
+	var paused []*Wallet
+	for {
+		if !m.started.Load() {
+			m.Unlock()
+
+			return ErrManagerStopped
+		}
+
+		// Create may publish while a pause is in flight. Recheck the same
+		// registry until every published writer has acknowledged its fence.
+		pending := slices.DeleteFunc(slices.Collect(maps.Values(m.wallets)),
+			func(wallet *Wallet) bool {
+				return slices.Contains(paused, wallet)
+			})
+		if len(pending) == 0 {
+			break
+		}
+
+		m.Unlock()
+
+		err = pauseChainWallets(pending, resume)
+		if err != nil {
+			return errors.Join(fmt.Errorf("pause rollback writers: %w", err),
+				m.Stop())
+		}
+
+		paused = append(paused, pending...)
+
+		m.Lock()
+	}
+
+	// Store selects affected tips from the first removed height. Retaining
+	// the lock excludes new writers through persistence and fatal cleanup.
+	err = backend.store.RollbackToBlock(ctx, height)
+	if err != nil {
+		err = errors.Join(fmt.Errorf("rollback chain: %w", err),
+			m.stopWallets(nil))
+	}
+
+	m.Unlock()
+
+	return err
 }
 
 // String returns a summary of the active wallets managed by the Manager.

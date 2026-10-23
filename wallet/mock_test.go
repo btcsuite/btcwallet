@@ -9,8 +9,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -167,4 +169,26 @@ func (m *mockTxPublisher) Broadcast(ctx context.Context, tx *wire.MsgTx,
 
 	args := m.Called(ctx, tx, label)
 	return args.Error(0)
+}
+
+// The existing publisher mock also supplies strict syncer notification and
+// ownership expectations, without a partial real-Wallet implementation.
+var _ txManager = (*mockTxPublisher)(nil)
+
+// notifyTx records each post-commit observation expected by the current test.
+func (m *mockTxPublisher) notifyTx(ctx context.Context, hash chainhash.Hash) {
+	m.Called(ctx, hash)
+}
+
+// filterRelevantTxs returns the Wallet selection arranged by a syncer unit
+// test; real ownership behavior is covered with actual Wallet processors.
+func (m *mockTxPublisher) filterRelevantTxs(ctx context.Context,
+	records []*wtxmgr.TxRecord) ([]*wtxmgr.TxRecord, error) {
+
+	args := m.Called(ctx, records)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]*wtxmgr.TxRecord), args.Error(1)
 }
