@@ -108,7 +108,10 @@ SELECT
     CASE
         WHEN
             l.utxo_id IS NOT NULL
-            AND l.expires_at > sqlc.arg('now_utc') THEN 1
+            AND (
+                l.expires_at IS NULL
+                OR l.expires_at > sqlc.arg('now_utc')
+            ) THEN 1
         ELSE 0
     END AS is_locked
 FROM transactions AS t
@@ -182,7 +185,10 @@ SELECT
     CASE
         WHEN
             l.utxo_id IS NOT NULL
-            AND l.expires_at > sqlc.arg('now_utc') THEN 1
+            AND (
+                l.expires_at IS NULL
+                OR l.expires_at > sqlc.arg('now_utc')
+            ) THEN 1
         ELSE 0
     END AS is_locked
 FROM transactions AS t
@@ -277,7 +283,10 @@ SELECT
                         WHERE
                             l.wallet_id = t.wallet_id
                             AND l.utxo_id = u.id
-                            AND l.expires_at > sqlc.arg('now_utc')
+                            AND (
+                                l.expires_at IS NULL
+                                OR l.expires_at > sqlc.arg('now_utc')
+                            )
                     ) THEN u.amount
                     ELSE 0
                 END
