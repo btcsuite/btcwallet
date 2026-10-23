@@ -54,7 +54,7 @@ var (
 
 	// ErrOutputUnlockNotAllowed is an error returned when an output unlock
 	// is attempted with a different ID than the one which locked it.
-	ErrOutputUnlockNotAllowed = errors.New("output unlock not alowed")
+	ErrOutputUnlockNotAllowed = errors.New("output unlock not allowed")
 
 	// ErrDuplicateTx is returned when attempting to record a mined or
 	// unmined transaction that is already recorded.
