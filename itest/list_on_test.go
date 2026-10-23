@@ -11,6 +11,10 @@ type testCase struct {
 
 	// TestFunc executes the test case.
 	TestFunc func(t *bwtest.HarnessTest)
+
+	// SQLOnly excludes contracts whose required persisted state is not
+	// representable on kvdb, before the shared case begins executing.
+	SQLOnly bool
 }
 
 // allTestCases is the full set of integration test cases.
@@ -159,6 +163,13 @@ var allTestCases = []*testCase{
 	{
 		Name:     "account manager query get watchonly",
 		TestFunc: testAccountManagerQueryGetWatchOnly,
+	},
+	// Kvdb supports declared imports but ignores NoChainSync, so it cannot
+	// supply the persisted true-value fixture required by this query case.
+	{
+		Name:     "account manager query no chain sync imported",
+		TestFunc: testAccountManagerQueryNoChainSyncImported,
+		SQLOnly:  true,
 	},
 	{
 		Name:     "account manager query list empty",
