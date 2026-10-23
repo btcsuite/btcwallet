@@ -740,6 +740,9 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 		},
 	).Once()
 
+	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
+		req.TxHash).Return(nil).Once()
+
 	// Act: Run CreateTxWithOps.
 	err := CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
@@ -793,6 +796,9 @@ func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
+
+	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
+		req.TxHash).Return(nil).Once()
 
 	err := CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
@@ -952,6 +958,9 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
 
+	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
+		req.TxHash).Return(nil).Once()
+
 	err = CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
 }
@@ -1005,6 +1014,9 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
+
+	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
+		req.TxHash).Return(nil).Once()
 
 	err = CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
@@ -1259,6 +1271,15 @@ func (m *mockCreateTxOps) MarkInputsSpent(ctx context.Context,
 	return args.Error(0)
 }
 
+// DeleteSpentLeases implements CreateTxOps.
+func (m *mockCreateTxOps) DeleteSpentLeases(ctx context.Context,
+	walletID uint32, txHash chainhash.Hash) error {
+
+	args := m.Called(ctx, walletID, txHash)
+
+	return args.Error(0)
+}
+
 // mockGetTxDetailOps is a mock implementation of GetTxDetailOps.
 type mockGetTxDetailOps struct {
 	mock.Mock
@@ -1436,6 +1457,15 @@ func (m *mockUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, state UpdateTxState) error {
 
 	args := m.Called(ctx, walletID, txHash, state)
+
+	return args.Error(0)
+}
+
+// DeleteSpentLeases implements UpdateTxOps.
+func (m *mockUpdateTxOps) DeleteSpentLeases(ctx context.Context,
+	walletID uint32, txHash chainhash.Hash) error {
+
+	args := m.Called(ctx, walletID, txHash)
 
 	return args.Error(0)
 }
@@ -1759,6 +1789,9 @@ func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
 			updatedState = stateArg
 		},
 	).Once()
+
+	ops.On("DeleteSpentLeases", mock.Anything, uint32(5), chainhash.Hash{1}).
+		Return(nil).Once()
 
 	// Act: Run UpdateTxWithOps against a stub backend adapter.
 	err := UpdateTxWithOps(context.Background(), params, ops)
