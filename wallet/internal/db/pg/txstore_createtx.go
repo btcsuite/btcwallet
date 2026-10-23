@@ -51,6 +51,14 @@ type createTxOps struct {
 
 var _ db.CreateTxOps = (*createTxOps)(nil)
 
+// DeleteSpentLeases deletes the leases on outputs spent by txHash if that
+// transaction is confirmed.
+func (o *createTxOps) DeleteSpentLeases(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) error {
+
+	return deleteSpentLeases(ctx, o.qtx, walletID, txHash)
+}
+
 // LoadExisting loads any existing wallet-scoped row for the requested tx hash.
 func (o *createTxOps) LoadExisting(ctx context.Context,
 	req db.CreateTxRequest) (*db.CreateTxExistingTarget, error) {
