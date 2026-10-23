@@ -7,10 +7,12 @@ package wallet
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/psbt/v2"
@@ -20,6 +22,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -167,6 +170,12 @@ const (
 	// full path follows the structure:
 	// m / purpose' / coin_type' / account' / branch / index.
 	BIP32PathLength = 5
+
+	// fundLeaseDuration bounds how long a successful FundPsbt attempt owns
+	// its selected inputs. It is long enough for a caller to sign and
+	// publish, and short enough that an abandoned attempt frees its inputs
+	// through ordinary lease expiry without any cleanup worker.
+	fundLeaseDuration = 10 * time.Minute
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -212,6 +221,45 @@ type FundResult struct {
 	// ChangeIndex is the index of the change output in
 	// `Packet.UnsignedTx.TxOut`, or -1 if no change output was added.
 	ChangeIndex int32
+
+	// LeaseID is the lock ID the wallet generated for this attempt. Every
+	// input of Packet is leased under it until the lease expires or the
+	// caller releases it through ReleaseOutput with this ID. The wallet
+	// draws a fresh random ID for every attempt, so no two attempts share
+	// a lease owner.
+	LeaseID wtxmgr.LockID
+}
+
+// FundReservationError reports a FundPsbt attempt whose input reservation
+// commit was ambiguous: the leases may or may not exist. FundPsbt returns no
+// packet in that case, so this error carries what the caller needs to release
+// any leases that did commit. It matches ErrIndeterminateCommit through
+// errors.Is; use errors.As to read its fields.
+//
+// Releasing an input another attempt has since leased returns
+// ErrOutputUnlockNotAllowed, which means the lease is not this attempt's and
+// can be ignored. Leases left in place expire on their own.
+type FundReservationError struct {
+	// LeaseID is the lock ID the attempt reserved under.
+	LeaseID wtxmgr.LockID
+
+	// Inputs lists the outpoints the attempt tried to reserve, in the order
+	// they appear in the funded transaction.
+	Inputs []wire.OutPoint
+
+	// cause is the ambiguous reservation failure, which supplies the
+	// message and wraps ErrIndeterminateCommit.
+	cause error
+}
+
+// Error returns the ambiguous reservation failure's message.
+func (e *FundReservationError) Error() string {
+	return e.cause.Error()
+}
+
+// Unwrap returns the ambiguous reservation failure.
+func (e *FundReservationError) Unwrap() error {
+	return e.cause
 }
 
 // SignPsbtParams encapsulates the arguments for signing a PSBT.
@@ -280,6 +328,14 @@ type SignPsbtResult struct {
 //	}
 //	result, err := psbtManager.FundPsbt(ctx, fundIntent)
 //	if err != nil {
+//		// An ambiguous reservation may have leased the inputs.
+//		var resErr *wallet.FundReservationError
+//		if errors.As(err, &resErr) {
+//			for _, op := range resErr.Inputs {
+//				_ = utxoManager.ReleaseOutput(ctx, resErr.LeaseID, op)
+//			}
+//		}
+//
 //		return err
 //	}
 //	fundedPacket := result.Packet
@@ -287,7 +343,9 @@ type SignPsbtResult struct {
 // The `fundedPacket` now contains the necessary inputs (fully decorated)
 // and a change output. The `result.ChangeIndex` indicates the index of the
 // change output in the `fundedPacket.UnsignedTx.TxOut` slice, or -1 if
-// no change output was added.
+// no change output was added. Every input of `fundedPacket` is leased
+// under the wallet-generated `result.LeaseID`; release them early with
+// ReleaseOutput if the transaction is abandoned.
 //
 // FundPsbt does not modify `barePacket`. It returns a funded packet of its
 // own, so every step below works on `fundedPacket`; `barePacket` still
@@ -335,8 +393,9 @@ type PsbtManager interface {
 	// validate and fund a specific set of manual inputs.
 	//
 	// The returned FundResult carries a fully funded transaction
-	// template, ready for signing, and the change output index (-1 if no
-	// change was added).
+	// template, ready for signing, the change output index (-1 if no
+	// change was added), and the wallet-generated lease ID that every
+	// input is reserved under.
 	FundPsbt(ctx context.Context, intent *FundIntent) (*FundResult, error)
 
 	// SignPsbt adds partial signatures to the PSBT for all inputs
@@ -682,8 +741,31 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 //     change output to the PSBT structure and sort it according to BIP 69.
 //  4. Registration: On SQL wallets, registering change kept by the funded
 //     packet from the live tip. A registration failure returns no packet while
-//     the committed change address stays in the wallet. Kvdb change and change
-//     for NoChainSync accounts are not registered.
+//     the committed change address stays in the wallet, and acquires no lease.
+//     Kvdb change and change for NoChainSync accounts are not registered.
+//  5. Reservation: Atomically leasing the packet's complete input set under a
+//     fresh random lease ID generated for this attempt. Either every input is
+//     leased or none is, and no packet is returned unless the attempt owns a
+//     lease on every input.
+//
+// The wallet owns lease ID generation so that two attempts can never share a
+// lease owner: the Store renews an active lease held under the same ID, so a
+// reused ID would let two attempts both reserve the same input.
+//
+// On success the caller owns unexpired leases for every input of the returned
+// packet under `FundResult.LeaseID`. They expire on their own after a fixed
+// wallet-defined duration, and the caller may release them earlier through
+// ReleaseOutput with that ID. If the reservation commit is ambiguous, FundPsbt
+// returns no result and a *FundReservationError, which matches
+// ErrIndeterminateCommit and carries the lease ID and inputs; the leases may or
+// may not exist, and the caller may release them with that ID. Every other
+// failure acquires no lease.
+//
+// A caller-selected input that is already leased is refused with
+// ErrUtxoNotEligible when it is checked during authoring. If another attempt
+// leases it after that check, input decoration or the reservation refuses it
+// with ErrOutputAlreadyLocked instead. Callers should treat both as an
+// unavailable input.
 //
 // FundPsbt deliberately invokes the neutral authoring boundary instead of the
 // public CreateTransaction wrapper. Their construction flow is identical
@@ -758,6 +840,15 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 	packet, changeIndex, err := w.populatePsbtPacket(
 		r.ctx, packet, authoredTx,
 	)
+
+	// Another attempt can lease an input after authoring accepted it but
+	// before decoration reads it. Report that as the same unavailable
+	// input the reservation would refuse, keeping DecorateInputs' own
+	// error unchanged.
+	if errors.Is(err, ErrUtxoLocked) {
+		err = fmt.Errorf("%w: %s", ErrOutputAlreadyLocked, err.Error())
+	}
+
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
 
@@ -775,10 +866,83 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 		return
 	}
 
+	// Draw this attempt's own lease owner only once it is about to
+	// reserve, so an attempt that fails earlier never mints an ID.
+	leaseID := newFundLeaseID()
+
+	outPoints := make([]wire.OutPoint, 0, len(packet.UnsignedTx.TxIn))
+	for _, txIn := range packet.UnsignedTx.TxIn {
+		outPoints = append(outPoints, txIn.PreviousOutPoint)
+	}
+
+	// Reserve the complete input set last, so selection, authoring, and
+	// chain calls stay outside the reservation transaction, an invalid
+	// packet or failed registration never acquires a lease, and the
+	// returned leases run a full duration from return.
+	err = w.reserveFundingInputs(r.ctx, leaseID, outPoints)
+
+	// An ambiguous commit may have leased the inputs, so the error carries
+	// what the caller needs to release them, but no packet is returned.
+	if errors.Is(err, ErrIndeterminateCommit) {
+		err = &FundReservationError{
+			LeaseID: leaseID,
+			Inputs:  outPoints,
+			cause:   err,
+		}
+	}
+
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
 	r.respChan <- fundPsbtResp{result: &FundResult{
 		Packet:      packet,
 		ChangeIndex: changeIndex,
+		LeaseID:     leaseID,
 	}}
+}
+
+// newFundLeaseID draws a fresh, uniformly random lease ID for one funding
+// attempt. A 256-bit random ID makes a collision with any other attempt's, or
+// with a caller-chosen ReleaseOutput/LeaseOutput ID, negligible. The ID comes
+// from crypto/rand because it is the capability that releases the leases, so
+// it must not be predictable.
+func newFundLeaseID() wtxmgr.LockID {
+	var id wtxmgr.LockID
+
+	// crypto/rand.Read never returns an error; it aborts the program if
+	// the system source fails.
+	_, _ = rand.Read(id[:])
+
+	return id
+}
+
+// reserveFundingInputs atomically leases the funded packet's complete input
+// set under the attempt's lease ID for the fixed funding duration.
+//
+// Coin selection skips leased outputs, but concurrent attempts can both see an
+// input as free before either reserves it. The all-or-nothing Store write is
+// the point where such a race is decided: the loser acquires no part of its
+// set and gets no packet.
+func (w *Wallet) reserveFundingInputs(ctx context.Context,
+	leaseID wtxmgr.LockID, outPoints []wire.OutPoint) error {
+
+	_, err := w.store.LeaseOutputs(ctx, db.LeaseOutputsParams{
+		WalletID:  w.id,
+		ID:        db.LockID(leaseID),
+		OutPoints: outPoints,
+		Duration:  fundLeaseDuration,
+	})
+	if err != nil {
+		// On an ambiguous commit the leases may or may not exist, so
+		// the result claims neither and is not retried or read back.
+		return fmt.Errorf("reserve funding inputs: %w",
+			translateLeaseErr(err))
+	}
+
+	return nil
 }
 
 // populatePsbtPacket updates the PSBT packet with the new transaction details,
