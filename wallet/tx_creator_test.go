@@ -108,6 +108,9 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 					t, w, deps, fixture.inputAddr, db.WitnessPubKey,
 					fixture.inputKey.PubKey(),
 				)
+				expectFundingLease(w, deps, []wire.OutPoint{
+					fixture.utxo.OutPoint,
+				}, nil)
 			}
 
 			result := make(chan error, 1)
