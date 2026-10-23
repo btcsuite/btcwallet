@@ -96,6 +96,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteUnminedTransactionByHashWithInvalidStmt, err = db.PrepareContext(ctx, DeleteUnminedTransactionByHashWithInvalid); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteUnminedTransactionByHashWithInvalid: %w", err)
 	}
+	if q.deleteUtxoLeasesSpentByConfirmedTxStmt, err = db.PrepareContext(ctx, DeleteUtxoLeasesSpentByConfirmedTx); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteUtxoLeasesSpentByConfirmedTx: %w", err)
+	}
 	if q.deleteUtxosByTxIDStmt, err = db.PrepareContext(ctx, DeleteUtxosByTxID); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteUtxosByTxID: %w", err)
 	}
@@ -450,6 +453,11 @@ func (q *Queries) Close() error {
 	if q.deleteUnminedTransactionByHashWithInvalidStmt != nil {
 		if cerr := q.deleteUnminedTransactionByHashWithInvalidStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteUnminedTransactionByHashWithInvalidStmt: %w", cerr)
+		}
+	}
+	if q.deleteUtxoLeasesSpentByConfirmedTxStmt != nil {
+		if cerr := q.deleteUtxoLeasesSpentByConfirmedTxStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteUtxoLeasesSpentByConfirmedTxStmt: %w", cerr)
 		}
 	}
 	if q.deleteUtxosByTxIDStmt != nil {
@@ -900,6 +908,7 @@ type Queries struct {
 	deleteKeyScopeSecretsStmt                     *sql.Stmt
 	deleteUnminedTransactionByHashStmt            *sql.Stmt
 	deleteUnminedTransactionByHashWithInvalidStmt *sql.Stmt
+	deleteUtxoLeasesSpentByConfirmedTxStmt        *sql.Stmt
 	deleteUtxosByTxIDStmt                         *sql.Stmt
 	getAccountByScopeAndNameStmt                  *sql.Stmt
 	getAccountByScopeAndNumberStmt                *sql.Stmt
@@ -1007,6 +1016,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteKeyScopeSecretsStmt:                     q.deleteKeyScopeSecretsStmt,
 		deleteUnminedTransactionByHashStmt:            q.deleteUnminedTransactionByHashStmt,
 		deleteUnminedTransactionByHashWithInvalidStmt: q.deleteUnminedTransactionByHashWithInvalidStmt,
+		deleteUtxoLeasesSpentByConfirmedTxStmt:        q.deleteUtxoLeasesSpentByConfirmedTxStmt,
 		deleteUtxosByTxIDStmt:                         q.deleteUtxosByTxIDStmt,
 		getAccountByScopeAndNameStmt:                  q.getAccountByScopeAndNameStmt,
 		getAccountByScopeAndNumberStmt:                q.getAccountByScopeAndNumberStmt,
