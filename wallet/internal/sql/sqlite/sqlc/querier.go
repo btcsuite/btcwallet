@@ -7,7 +7,6 @@ package sqlc
 import (
 	"context"
 	"database/sql"
-	"time"
 )
 
 type Querier interface {
@@ -31,16 +30,18 @@ type Querier interface {
 	// Lease semantics:
 	// - If the UTXO has no lease row, insert a new lease.
 	// - If the UTXO has an expired lease, steal it.
-	// - If the UTXO has an active lease with the same lock_id, renew it.
+	// - If the UTXO has an active lease with the same lock_id, renew it. A lease
+	//   without expiry stays without expiry.
 	// - If the UTXO has an active lease with a different lock_id, return no
 	//   rows (caller should treat this as "already leased").
 	//
-	// NOTE: expires_at is computed by the caller as time.Now().UTC()+duration, and
-	// callers must also pass a UTC-normalized now_utc for lease-expiry checks.
+	// NOTE: expires_at is computed by the caller as time.Now().UTC()+duration, or
+	// NULL for a lease without expiry, and callers must also pass a UTC-normalized
+	// now_utc for lease-expiry checks.
 	// Performance:
 	// - SQLite executes the resolution and lease write atomically inside one
 	//   statement, which avoids stale-ID races between separate helper calls.
-	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (sql.NullTime, error)
 	// Reserves the cursor past an exact account without consuming lower holes.
 	// The existing immediate transaction keeps this update and the account/key
 	// inserts atomic, including when the cursor already exceeds the minimum.
@@ -155,6 +156,16 @@ type Querier interface {
 	// Performance:
 	// - Targets at most one row by `(wallet_id, tx_hash)`.
 	DeleteUnminedTransactionByHashWithInvalid(ctx context.Context, arg DeleteUnminedTransactionByHashWithInvalidParams) (int64, error)
+	// Deletes the leases on outputs spent by one confirmed transaction.
+	//
+	// How:
+	// - Resolves the spender by wallet and hash, and deletes only when it has a
+	//   confirming block, so an unconfirmed spend keeps its leases.
+	// - Applies to timed leases and leases without expiry alike.
+	// Performance:
+	// - Resolves the spender through its unique hash and reaches its inputs
+	//   through the spent_by index.
+	DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error)
 	// Deletes all UTXO rows created by the provided transaction ID.
 	//
 	// How:
@@ -390,7 +401,8 @@ type Querier interface {
 	// How:
 	// - Starts from utxo_leases, then joins utxos and transactions so the result
 	//   can be returned as network outpoints.
-	// - Filters out expired rows using the caller-supplied UTC timestamp.
+	// - Filters out expired rows using the caller-supplied UTC timestamp. A NULL
+	//   expiration never expires.
 	// - Restricts the result to outputs that are still unspent and whose parent
 	//   transaction is still in `pending` or `published` status.
 	// Performance:

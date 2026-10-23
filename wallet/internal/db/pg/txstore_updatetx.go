@@ -41,6 +41,14 @@ type updateTxOps struct {
 
 var _ db.UpdateTxOps = (*updateTxOps)(nil)
 
+// DeleteSpentLeases deletes the leases on outputs spent by txHash if that
+// transaction is confirmed.
+func (o *updateTxOps) DeleteSpentLeases(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) error {
+
+	return deleteSpentLeases(ctx, o.qtx, walletID, txHash)
+}
+
 // LoadIsCoinbase loads the existing row metadata UpdateTx needs before it can
 // validate one patch.
 func (o *updateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,

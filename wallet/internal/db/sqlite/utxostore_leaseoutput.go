@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
@@ -56,9 +57,12 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 
 	expiration, err := o.qtx.AcquireUtxoLease(
 		ctx, sqlc.AcquireUtxoLeaseParams{
-			WalletID:    int64(params.WalletID),
-			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
+			WalletID: int64(params.WalletID),
+			LockID:   params.ID[:],
+			ExpiresAt: sql.NullTime{
+				Time:  expiresAt,
+				Valid: !expiresAt.IsZero(),
+			},
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: int64(params.OutPoint.Index),
 			NowUtc:      nowUTC,
@@ -72,7 +76,26 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 		return time.Time{}, fmt.Errorf("acquire lease row: %w", err)
 	}
 
-	return expiration, nil
+	// A NULL expiration scans as the zero time.
+	return expiration.Time, nil
+}
+
+// deleteSpentLeases deletes the leases on outputs spent by txHash if that
+// transaction is confirmed.
+func deleteSpentLeases(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, txHash chainhash.Hash) error {
+
+	_, err := qtx.DeleteUtxoLeasesSpentByConfirmedTx(
+		ctx, sqlc.DeleteUtxoLeasesSpentByConfirmedTxParams{
+			WalletID: int64(walletID),
+			TxHash:   txHash[:],
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("delete spent utxo leases: %w", err)
+	}
+
+	return nil
 }
 
 // HasUtxo reports whether the requested outpoint still exists as a current
@@ -96,4 +119,10 @@ func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 	}
 
 	return true, nil
+}
+
+// leaseNow wraps the lease-expiry reference time. sqlc types it as nullable
+// because queries compare it with the nullable utxo_leases.expires_at column.
+func leaseNow(nowUTC time.Time) sql.NullTime {
+	return sql.NullTime{Time: nowUTC, Valid: true}
 }

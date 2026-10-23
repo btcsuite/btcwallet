@@ -7,6 +7,7 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -34,7 +35,12 @@ FOR UPDATE OF u
 ON CONFLICT (utxo_id) DO UPDATE
     SET
         lock_id = excluded.lock_id,
-        expires_at = excluded.expires_at
+        -- A same-owner renewal keeps a lease without expiry. A NULL row can
+        -- only reach this update through the lock_id match below.
+        expires_at = CASE
+            WHEN utxo_leases.expires_at IS NULL THEN NULL
+            ELSE excluded.expires_at
+        END
     WHERE
     utxo_leases.wallet_id = excluded.wallet_id
     AND (
@@ -47,7 +53,7 @@ RETURNING expires_at
 type AcquireUtxoLeaseParams struct {
 	WalletID    int64
 	LockID      []byte
-	ExpiresAt   time.Time
+	ExpiresAt   sql.NullTime
 	TxHash      []byte
 	OutputIndex int32
 	NowUtc      time.Time
@@ -67,16 +73,18 @@ type AcquireUtxoLeaseParams struct {
 // Lease semantics:
 //   - If the UTXO has no lease row, insert a new lease.
 //   - If the UTXO has an expired lease, steal it.
-//   - If the UTXO has an active lease with the same lock_id, renew it.
+//   - If the UTXO has an active lease with the same lock_id, renew it. A lease
+//     without expiry stays without expiry.
 //   - If the UTXO has an active lease with a different lock_id, return no
 //     rows (caller should treat this as "already leased").
 //
-// NOTE: expires_at is stored as a UTC-normalized TIMESTAMP. Callers should pass
-// UTC values for both expires_at and now_utc.
+// NOTE: expires_at is stored as a UTC-normalized TIMESTAMP, or NULL for a
+// lease without expiry. Callers should pass UTC values for both expires_at and
+// now_utc.
 // Performance:
 //   - Locks the target utxo row during resolution so concurrent spend updates on
 //     that row serialize with lease acquisition.
-func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error) {
+func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (sql.NullTime, error) {
 	row := q.queryRow(ctx, q.acquireUtxoLeaseStmt, AcquireUtxoLease,
 		arg.WalletID,
 		arg.LockID,
@@ -85,7 +93,7 @@ func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeasePara
 		arg.OutputIndex,
 		arg.NowUtc,
 	)
-	var expires_at time.Time
+	var expires_at sql.NullTime
 	err := row.Scan(&expires_at)
 	return expires_at, err
 }
@@ -121,13 +129,51 @@ func (q *Queries) DeleteExpiredUtxoLeases(ctx context.Context, arg DeleteExpired
 	return result.RowsAffected()
 }
 
+const DeleteUtxoLeasesSpentByConfirmedTx = `-- name: DeleteUtxoLeasesSpentByConfirmedTx :execrows
+DELETE FROM utxo_leases
+WHERE
+    utxo_leases.wallet_id = $1
+    AND utxo_leases.utxo_id IN (
+        SELECT u.id
+        FROM transactions AS t
+        INNER JOIN utxos AS u ON t.id = u.spent_by_tx_id
+        WHERE
+            t.wallet_id = $1
+            AND t.tx_hash = $2
+            AND t.block_height IS NOT NULL
+    )
+`
+
+type DeleteUtxoLeasesSpentByConfirmedTxParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+// Deletes the leases on outputs spent by one confirmed transaction.
+//
+// How:
+//   - Resolves the spender by wallet and hash, and deletes only when it has a
+//     confirming block, so an unconfirmed spend keeps its leases.
+//   - Applies to timed leases and leases without expiry alike.
+//
+// Performance:
+//   - Resolves the spender through its unique hash and reaches its inputs
+//     through the spent_by index.
+func (q *Queries) DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error) {
+	result, err := q.exec(ctx, q.deleteUtxoLeasesSpentByConfirmedTxStmt, DeleteUtxoLeasesSpentByConfirmedTx, arg.WalletID, arg.TxHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetActiveUtxoLeaseLockID = `-- name: GetActiveUtxoLeaseLockID :one
 SELECT lock_id
 FROM utxo_leases
 WHERE
     wallet_id = $1
     AND utxo_id = $2
-    AND expires_at > $3::TIMESTAMP
+    AND (expires_at IS NULL OR expires_at > $3::TIMESTAMP)
 `
 
 type GetActiveUtxoLeaseLockIDParams struct {
@@ -162,10 +208,10 @@ INNER JOIN utxos AS u ON l.utxo_id = u.id
 INNER JOIN transactions AS t ON u.tx_id = t.id
 WHERE
     l.wallet_id = $1
-    AND l.expires_at > $2::TIMESTAMP
+    AND (l.expires_at IS NULL OR l.expires_at > $2::TIMESTAMP)
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
-ORDER BY l.expires_at
+ORDER BY l.expires_at IS NULL, l.expires_at
 `
 
 type ListActiveUtxoLeasesParams struct {
@@ -177,7 +223,7 @@ type ListActiveUtxoLeasesRow struct {
 	TxHash      []byte
 	OutputIndex int32
 	LockID      []byte
-	ExpiresAt   time.Time
+	ExpiresAt   sql.NullTime
 }
 
 // Lists all currently active leases for a wallet.
@@ -185,7 +231,8 @@ type ListActiveUtxoLeasesRow struct {
 // How:
 //   - Starts from utxo_leases, then joins utxos and transactions so the result
 //     can be returned as network outpoints.
-//   - Filters out expired rows using the caller-supplied UTC timestamp.
+//   - Filters out expired rows using the caller-supplied UTC timestamp. A NULL
+//     expiration never expires.
 //   - Restricts the result to outputs that are still unspent and whose parent
 //     transaction is still in `pending` or `published` status.
 //

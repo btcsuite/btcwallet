@@ -29,7 +29,7 @@ func (s *Store) ListUTXOs(ctx context.Context,
 		purpose, coinType := db.ScopeFilter(query.Scope)
 
 		rows, err := q.ListUtxos(ctx, sqlc.ListUtxosParams{
-			NowUtc:        time.Now().UTC(),
+			NowUtc:        leaseNow(time.Now().UTC()),
 			WalletID:      int64(query.WalletID),
 			Purpose:       purpose,
 			CoinType:      coinType,
