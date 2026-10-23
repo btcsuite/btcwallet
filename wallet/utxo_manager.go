@@ -487,33 +487,40 @@ func (w *Wallet) handleLeaseOutput(r leaseOutputReq) {
 		},
 	)
 	if err != nil {
-		// Translate the internal store sentinels into the public,
-		// wallet-owned errors so callers do not couple to the internal
-		// db package.
-		switch {
-		case errors.Is(err, db.ErrUtxoNotFound):
-			r.respChan <- leaseOutputResp{err: ErrUnknownOutput}
-
-			return
-
-		case errors.Is(err, db.ErrOutputAlreadyLeased):
-			r.respChan <- leaseOutputResp{
-				expiration: time.Time{},
-				err:        ErrOutputAlreadyLocked,
-			}
-
-			return
-		}
-
 		r.respChan <- leaseOutputResp{
 			expiration: time.Time{},
-			err:        fmt.Errorf("lease output: %w", err),
+			err: fmt.Errorf("lease output: %w",
+				translateLeaseErr(err)),
 		}
 
 		return
 	}
 
 	r.respChan <- leaseOutputResp{expiration: lease.Expiration}
+}
+
+// translateLeaseErr maps a Store lease error onto the public, wallet-owned
+// errors so callers do not couple to the internal db package. It is the single
+// error policy for every lease operation; callers add their own operation
+// context around the result.
+//
+// An ambiguous commit is checked first so no later classification can hide
+// it, and it carries only the wallet identity, never the Store sentinel.
+// Errors without a public counterpart are returned unchanged.
+func translateLeaseErr(err error) error {
+	switch {
+	case errors.Is(err, db.ErrIndeterminateCommit):
+		return fmt.Errorf("%w: %s", ErrIndeterminateCommit, err.Error())
+
+	case errors.Is(err, db.ErrOutputAlreadyLeased):
+		return ErrOutputAlreadyLocked
+
+	case errors.Is(err, db.ErrUtxoNotFound):
+		return ErrUnknownOutput
+
+	default:
+		return err
+	}
 }
 
 // ReleaseOutput unlocks a previously leased output, making it available for

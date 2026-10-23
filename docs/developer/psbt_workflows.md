@@ -46,24 +46,47 @@ flowchart LR
 
     ```go
     fundIntent := &wallet.FundIntent{
-    		Packet: packet,
-    		Policy: &wallet.InputsPolicy{
-    			Source: &wallet.ScopedAccount{
-    				AccountName: "default",
-    				KeyScope:    waddrmgr.KeyScopeBIP0086,
-    			},
-    			MinConfs: 1,
-    		},
-    		FeeRate: btcunit.NewSatPerKVByte(1000), // e.g., 1 sat/vb
-    	}
+        Packet: packet,
+        Policy: &wallet.InputsPolicy{
+            Source: &wallet.ScopedAccount{
+                AccountName: "default",
+                KeyScope:    waddrmgr.KeyScopeBIP0086,
+            },
+            MinConfs: 1,
+        },
+        FeeRate: btcunit.NewSatPerKVByte(1000), // e.g., 1 sat/vb
+    }
     
-    	fundedPacket, _, err := aliceWallet.FundPsbt(ctx, fundIntent)
+    result, err := aliceWallet.FundPsbt(ctx, fundIntent)
+    if err != nil {
+        // An ambiguous reservation may have leased the inputs.
+        var resErr *wallet.FundReservationError
+        if errors.As(err, &resErr) {
+            for _, op := range resErr.Inputs {
+                _ = aliceWallet.ReleaseOutput(ctx, resErr.LeaseID, op)
+            }
+        }
+
+        return err
+    }
+    fundedPacket := result.Packet
     
     ```
     
     The `fundedPacket` now contains the necessary inputs (fully decorated) and a change output.
     `FundPsbt` does not modify the packet it was given, so the remaining steps
     work on `fundedPacket`.
+
+    Before returning, `FundPsbt` atomically leases every input of
+    `fundedPacket` under a fresh random lease ID it generates for the attempt
+    and returns as `result.LeaseID`, so a concurrent funding attempt cannot
+    select the same coins. The leases expire on their own after a short
+    wallet-defined period; if the transaction is abandoned, release them early
+    with `ReleaseOutput` and `result.LeaseID`. If the reservation's commit is
+    ambiguous, `FundPsbt` returns no result and a
+    `*wallet.FundReservationError`, which matches
+    `wallet.ErrIndeterminateCommit` and carries the lease ID and inputs that
+    may be leased, so they can be released.
     
 3.  **Sign the PSBT:** The wallet signs all inputs it has the keys for.
 
@@ -327,4 +350,6 @@ A user can choose a specific UTXO to spend by creating a PSBT with that input
 already included before calling `FundPsbt`. The `FundPsbt` method will detect
 the existing input and enter a "completion" mode, where it simply calculates
 fees and adds a change output, rather than performing automatic coin selection.
+The caller-selected inputs are leased under the returned `result.LeaseID` just
+like automatically selected ones.
 This is how Alice specified her input in the Coordinator Model example.
