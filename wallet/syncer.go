@@ -242,13 +242,18 @@ type chainSyncer interface {
 }
 
 // txManager combines the Wallet capabilities used by the syncer for
-// publication and notification after successful commits.
+// publication, Wallet ownership selection and post-commit notification.
 type txManager interface {
 	TxPublisher
 	txNotifier
+
+	// filterRelevantTxs selects this Wallet's records from a shared event
+	// without changing source data observed by other Wallets.
+	filterRelevantTxs(ctx context.Context, records []*wtxmgr.TxRecord) (
+		[]*wtxmgr.TxRecord, error)
 }
 
-// Wallet supplies both capabilities through the same private dependency.
+// Wallet supplies these capabilities through the same private dependency.
 var _ txManager = (*Wallet)(nil)
 
 // syncer is a stateless blocking worker responsible for synchronizing the
