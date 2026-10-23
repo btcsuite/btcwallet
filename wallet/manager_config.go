@@ -77,9 +77,9 @@ type ManagerConfig struct {
 	ChainParams chaincfg.Params
 
 	// ChainSource is the caller-owned source shared by every managed Wallet.
-	// Callers must supply a usable implementation. Manager neither starts,
-	// stops, nor validates it, so nil or typed-nil values may panic when a
-	// managed Wallet uses the source.
+	// Callers keep it usable through Manager Stop and close it afterward.
+	// Manager neither starts, stops, nor validates it, so nil or typed-nil
+	// values may panic when a managed Wallet uses the source.
 	//
 	// TODO(yy): Replace direct Wallet consumption with Manager-owned fan-out
 	// so one source can deliver every event to each managed Wallet without
