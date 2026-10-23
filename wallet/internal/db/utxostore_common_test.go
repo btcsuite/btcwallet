@@ -160,6 +160,25 @@ func TestBuildLeasedOutput(t *testing.T) {
 	require.Equal(t, uint32(9), lease.OutPoint.Index)
 	require.Equal(t, byte(7), lease.LockID[0])
 	require.Equal(t, time.UTC, lease.Expiration.Location())
+	require.False(t, lease.NoExpiry)
+}
+
+// TestBuildLeasedOutputNoExpiry verifies that a lease row without expiration
+// is reported as a lease without expiry.
+func TestBuildLeasedOutputNoExpiry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build a valid hash and lock ID.
+	hash := chainhash.Hash{4, 5, 6}
+	lockID := make([]byte, 32)
+
+	// Act: Build the view from a NULL expiration, scanned as the zero time.
+	lease, err := BuildLeasedOutput(hash[:], 9, lockID, time.Time{})
+
+	// Assert: The lease has no expiry and a zero expiration.
+	require.NoError(t, err)
+	require.True(t, lease.NoExpiry)
+	require.True(t, lease.Expiration.IsZero())
 }
 
 // TestBuildLeasedOutput_InvalidLockID verifies that BuildLeasedOutput rejects
@@ -237,6 +256,61 @@ func TestLeaseOutputWithOpsRejectsNonPositiveDuration(t *testing.T) {
 	})
 
 	_, err := LeaseOutputWithOps(context.Background(), params, ops)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	ops.AssertNotCalled(t, "Acquire", mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything)
+}
+
+// TestLeaseOutputWithOpsNoExpiry verifies that the shared LeaseOutput helper
+// requests a zero expiration for a lease without expiry and reports the stored
+// expiration.
+func TestLeaseOutputWithOpsNoExpiry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Request a lease without expiry.
+	params := LeaseOutputParams{
+		WalletID: 5,
+		OutPoint: testLeaseOutPoint(),
+		ID:       LockID{7},
+		NoExpiry: true,
+	}
+	ops := &mockLeaseOutputOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	nowMatcher := mock.AnythingOfType("time.Time")
+	ops.On("Acquire", mock.Anything, params, nowMatcher, time.Time{}).Return(
+		time.Time{}, nil).Once()
+
+	// Act: Run the shared LeaseOutput flow.
+	lease, err := LeaseOutputWithOps(context.Background(), params, ops)
+
+	// Assert: The lease has no expiry.
+	require.NoError(t, err)
+	require.True(t, lease.NoExpiry)
+	require.True(t, lease.Expiration.IsZero())
+}
+
+// TestLeaseOutputWithOpsRejectsNoExpiryDuration verifies that the shared
+// LeaseOutput helper rejects a lease without expiry that also has a duration.
+func TestLeaseOutputWithOpsRejectsNoExpiryDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Request a lease without expiry that also has a duration.
+	params := LeaseOutputParams{
+		WalletID: 5,
+		OutPoint: testLeaseOutPoint(),
+		ID:       LockID{7},
+		Duration: time.Minute,
+		NoExpiry: true,
+	}
+	ops := &mockLeaseOutputOps{}
+
+	// Act: Run the shared LeaseOutput flow.
+	_, err := LeaseOutputWithOps(context.Background(), params, ops)
+
+	// Assert: The request is rejected before any write.
 	require.ErrorIs(t, err, ErrInvalidParam)
 	ops.AssertNotCalled(t, "Acquire", mock.Anything, mock.Anything,
 		mock.Anything, mock.Anything)
@@ -467,6 +541,14 @@ func TestLeaseOutputsParamsValidate(t *testing.T) {
 			name: "non-positive duration",
 			params: LeaseOutputsParams{
 				OutPoints: []wire.OutPoint{outPoint},
+			},
+		},
+		{
+			name: "no expiry with duration",
+			params: LeaseOutputsParams{
+				OutPoints: []wire.OutPoint{outPoint},
+				Duration:  time.Minute,
+				NoExpiry:  true,
 			},
 		},
 		{
