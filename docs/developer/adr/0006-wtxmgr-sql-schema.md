@@ -199,9 +199,17 @@ integrity checks.
 - the row is keyed by `utxo_id`, so one UTXO can have at most one lease row
 - wallet consistency between `utxo_leases.wallet_id` and the leased UTXO is
   enforced by trigger
-- `expires_at` is stored as a UTC `TIMESTAMP`
+- `expires_at` is stored as a UTC `TIMESTAMP`, or `NULL` for a lease without
+  expiry that the caller requested explicitly
 - lease acquisition, renewal, and cleanup compare against explicit UTC values
-  supplied by the caller
+  supplied by the caller; a `NULL` expiration never expires
+- a same-owner renewal keeps a lease without expiry, so a renewal never
+  shortens a reservation
+- a confirmed spend deletes the leases on its inputs under either policy, in
+  the same write that records the confirmation; an unconfirmed spend keeps
+  them, so the outputs stay reserved if that spend is removed
+- the lease records no spend history: once its spend confirms, the lease is
+  gone even if that spend is later disconnected
 
 ### 3.5 Triggers
 
