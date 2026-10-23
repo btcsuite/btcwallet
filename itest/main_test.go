@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/chain/port"
+	"github.com/btcsuite/btcwallet/wallet"
 )
 
 var (
@@ -68,6 +69,14 @@ func TestBtcWallet(t *testing.T) {
 
 	for _, tc := range allTestCases {
 		if tc == nil {
+			continue
+		}
+
+		// Exclude structurally SQL-only fixtures at registration selection;
+		// supported backends execute the same case without internal skips.
+		if tc.SQLOnly && *dbBackend != string(wallet.DBBackendSQLite) &&
+			*dbBackend != string(wallet.DBBackendPostgres) {
+
 			continue
 		}
 
