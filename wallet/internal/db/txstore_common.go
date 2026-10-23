@@ -820,14 +820,18 @@ var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
 //     row claims their wallet-owned inputs
 //   - Insert every wallet-owned credited output as a UTXO
 //   - attach any wallet-owned spent inputs to that final transaction row
+//   - delete the leases on those inputs if the transaction is confirmed
 //
 // Each backend implements those steps with its own sqlc-generated query types
 // while CreateTxWithOps keeps the high-level sequencing in one place.
 // That sequencing matters because confirmation, conflict invalidation, credit
 // creation, and spent-input claims must either all observe the same tx row or
 // all roll back together.
+//
+//nolint:interfacebloat // Each step of the shared CreateTx flow is one method.
 type CreateTxOps interface {
 	InvalidateUnminedTxOps
+	SpentLeaseOps
 
 	// LoadExisting loads any existing wallet-scoped transaction row for the
 	// same hash.
@@ -867,6 +871,14 @@ type CreateTxOps interface {
 	// MarkInputsSpent attaches wallet-owned parent outpoints to this
 	// transaction row and rejects conflicts or invalid wallet parents.
 	MarkInputsSpent(ctx context.Context, req CreateTxRequest, txID int64) error
+}
+
+// SpentLeaseOps deletes the leases that a confirmed spend ends.
+type SpentLeaseOps interface {
+	// DeleteSpentLeases deletes the leases on outputs spent by txHash if
+	// that transaction is confirmed, under either expiration policy.
+	DeleteSpentLeases(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) error
 }
 
 // checkReuseCreateTx reports whether CreateTx should reuse an existing wallet-
@@ -1245,6 +1257,12 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 		return fmt.Errorf("create tx spends: %w", err)
 	}
 
+	// A confirmed spend ends the leases on its inputs.
+	err = ops.DeleteSpentLeases(ctx, req.Params.WalletID, req.TxHash)
+	if err != nil {
+		return fmt.Errorf("create tx spent leases: %w", err)
+	}
+
 	return nil
 }
 
@@ -1428,6 +1446,7 @@ func validateUpdateTxState(state UpdateTxState, isCoinbase bool) error {
 //   - prepare any backend-specific block/status params next
 //   - apply the label patch if requested
 //   - apply the state patch last
+//   - delete the leases on its inputs if the patch confirmed the tx
 //
 // Keeping that sequence documented here matters because UpdateTx is
 // deliberately row-local. The backend adapters only supply query wiring. The
@@ -1435,6 +1454,8 @@ func validateUpdateTxState(state UpdateTxState, isCoinbase bool) error {
 // block/status patches from accidentally turning into graph-level
 // reconciliation.
 type UpdateTxOps interface {
+	SpentLeaseOps
+
 	// LoadIsCoinbase returns whether the existing row is coinbase history
 	// so the shared validation can enforce orphaning rules correctly.
 	LoadIsCoinbase(ctx context.Context, walletID uint32,
@@ -1491,6 +1512,13 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 		err = ops.UpdateState(ctx, params.WalletID, params.Txid, *params.State)
 		if err != nil {
 			return fmt.Errorf("update tx state: %w", err)
+		}
+
+		// A state patch that confirms the tx ends the leases on its
+		// inputs.
+		err = ops.DeleteSpentLeases(ctx, params.WalletID, params.Txid)
+		if err != nil {
+			return fmt.Errorf("update tx spent leases: %w", err)
 		}
 	}
 
