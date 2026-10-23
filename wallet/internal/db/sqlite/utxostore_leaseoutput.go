@@ -56,9 +56,12 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 
 	expiration, err := o.qtx.AcquireUtxoLease(
 		ctx, sqlc.AcquireUtxoLeaseParams{
-			WalletID:    int64(params.WalletID),
-			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
+			WalletID: int64(params.WalletID),
+			LockID:   params.ID[:],
+			ExpiresAt: sql.NullTime{
+				Time:  expiresAt,
+				Valid: !expiresAt.IsZero(),
+			},
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: int64(params.OutPoint.Index),
 			NowUtc:      nowUTC,
@@ -72,7 +75,8 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 		return time.Time{}, fmt.Errorf("acquire lease row: %w", err)
 	}
 
-	return expiration, nil
+	// A NULL expiration scans as the zero time.
+	return expiration.Time, nil
 }
 
 // HasUtxo reports whether the requested outpoint still exists as a current
@@ -96,4 +100,10 @@ func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 	}
 
 	return true, nil
+}
+
+// leaseNow wraps the lease-expiry reference time. sqlc types it as nullable
+// because queries compare it with the nullable utxo_leases.expires_at column.
+func leaseNow(nowUTC time.Time) sql.NullTime {
+	return sql.NullTime{Time: nowUTC, Valid: true}
 }
