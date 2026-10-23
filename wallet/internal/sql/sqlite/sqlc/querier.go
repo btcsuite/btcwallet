@@ -156,6 +156,16 @@ type Querier interface {
 	// Performance:
 	// - Targets at most one row by `(wallet_id, tx_hash)`.
 	DeleteUnminedTransactionByHashWithInvalid(ctx context.Context, arg DeleteUnminedTransactionByHashWithInvalidParams) (int64, error)
+	// Deletes the leases on outputs spent by one confirmed transaction.
+	//
+	// How:
+	// - Resolves the spender by wallet and hash, and deletes only when it has a
+	//   confirming block, so an unconfirmed spend keeps its leases.
+	// - Applies to timed leases and leases without expiry alike.
+	// Performance:
+	// - Resolves the spender through its unique hash and reaches its inputs
+	//   through the spent_by index.
+	DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error)
 	// Deletes all UTXO rows created by the provided transaction ID.
 	//
 	// How:
