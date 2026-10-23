@@ -15,6 +15,10 @@ func newManagedWallet(cfg Config, data *walletData) *Wallet {
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
+	// Allocate before publication so Manager and the worker retain opposite
+	// ends of one bounded mailbox governed by the existing Wallet lifetime.
+	chainEventChan := make(chan any, 1)
+
 	w := &Wallet{
 		cfg:               cfg,
 		id:                data.id,
@@ -24,6 +28,7 @@ func newManagedWallet(cfg Config, data *walletData) *Wallet {
 		keyVault:          data.vault,
 		txStore:           data.transactionStore,
 		requestChan:       make(chan any),
+		chainEventChan:    chainEventChan,
 		lifetimeCtx:       lifetimeCtx,
 		cancel:            cancel,
 		lockTimer:         lockTimer,
@@ -32,7 +37,7 @@ func newManagedWallet(cfg Config, data *walletData) *Wallet {
 	}
 
 	w.sync = newSyncer(
-		cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		cfg, w.addrStore, w.txStore, w, w.store, w.id, chainEventChan,
 	)
 	w.state = newWalletState(w.sync)
 
