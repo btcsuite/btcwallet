@@ -30,6 +30,11 @@ var (
 	// bucket is not available in the kvdb wallet database.
 	errMissingTxmgrNamespace = errors.New("missing wtxmgr namespace")
 
+	// errNoExpiryLease is returned for a lease without expiry, which the
+	// legacy store does not support.
+	errNoExpiryLease = fmt.Errorf("%w: kvdb does not support leases "+
+		"without expiry", db.ErrInvalidParam)
+
 	// errUnownedScript is returned when a legacy credit's pkScript cannot
 	// be resolved to a wallet-owned account. The iteration skips the row
 	// rather than propagating; wallet-owned outputs should always resolve.
@@ -227,15 +232,18 @@ func (s *Store) ListOutputsToWatch(_ context.Context,
 func (s *Store) LeaseOutput(_ context.Context,
 	params db.LeaseOutputParams) (*db.LeasedOutput, error) {
 
-	if params.Duration <= 0 {
-		return nil, fmt.Errorf(
-			"%w: lease duration must be positive", db.ErrInvalidParam,
-		)
+	err := params.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	if params.NoExpiry {
+		return nil, errNoExpiryLease
 	}
 
 	var expiration time.Time
 
-	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		if ns == nil {
 			return errMissingTxmgrNamespace
@@ -279,6 +287,10 @@ func (s *Store) LeaseOutputs(_ context.Context,
 	err := params.Validate()
 	if err != nil {
 		return nil, err
+	}
+
+	if params.NoExpiry {
+		return nil, errNoExpiryLease
 	}
 
 	var leases []db.LeasedOutput
