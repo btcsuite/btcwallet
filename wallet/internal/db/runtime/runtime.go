@@ -409,6 +409,9 @@ func readAttempt[Q any, T any](ctx context.Context, hooks ReadHooks, queries Q,
 // recording, ambiguous-commit accounting, and raw database handle used by the
 // helper.
 //
+// opts selects the backend's driver transaction options. A nil value preserves
+// the driver's default behavior.
+//
 // bind converts the started *sql.Tx into the caller's transactional query
 // handle, such as a sqlc Queries value bound to that transaction.
 //
@@ -421,7 +424,8 @@ func readAttempt[Q any, T any](ctx context.Context, hooks ReadHooks, queries Q,
 // with errors.Is(err, ErrAmbiguousTxCommit) before deciding whether retrying
 // or compensating work is safe.
 func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
-	bind func(*sql.Tx) Q, fn func(Q) (T, error)) (T, error) {
+	opts *sql.TxOptions, bind func(*sql.Tx) Q,
+	fn func(Q) (T, error)) (T, error) {
 
 	var zero T
 
@@ -433,7 +437,7 @@ func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
 
 	// Begin the transaction before invoking the callback so begin failures are
 	// still classified and recorded consistently.
-	tx, err := hooks.RawDB().BeginTx(ctx, nil)
+	tx, err := hooks.RawDB().BeginTx(ctx, opts)
 	if err != nil {
 		classifiedErr := hooks.ClassifyError(err)
 		hooks.RecordError(classifiedErr)
