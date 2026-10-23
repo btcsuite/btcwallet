@@ -13,8 +13,9 @@ CREATE TABLE utxo_leases (
     -- be compared without decoding application-specific payloads.
     lock_id BYTEA NOT NULL CHECK (length(lock_id) = 32),
 
-    -- UTC-normalized lease expiration timestamp.
-    expires_at TIMESTAMP NOT NULL,
+    -- UTC-normalized lease expiration timestamp. NULL marks a lease without
+    -- expiry, which lasts until its owner releases it or its spend confirms.
+    expires_at TIMESTAMP,
 
     -- The leased output must exist in the UTXO set. Wallet consistency is
     -- enforced by trigger below.
