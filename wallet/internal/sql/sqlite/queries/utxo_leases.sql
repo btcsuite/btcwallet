@@ -132,3 +132,26 @@ ORDER BY l.expires_at IS NULL, l.expires_at;
 --   cleanup pass.
 DELETE FROM utxo_leases
 WHERE wallet_id = ?1 AND expires_at <= sqlc.arg('now_utc');
+
+-- name: DeleteUtxoLeasesSpentByConfirmedTx :execrows
+-- Deletes the leases on outputs spent by one confirmed transaction.
+--
+-- How:
+-- - Resolves the spender by wallet and hash, and deletes only when it has a
+--   confirming block, so an unconfirmed spend keeps its leases.
+-- - Applies to timed leases and leases without expiry alike.
+-- Performance:
+-- - Resolves the spender through its unique hash and reaches its inputs
+--   through the spent_by index.
+DELETE FROM utxo_leases
+WHERE
+    utxo_leases.wallet_id = sqlc.arg('wallet_id')
+    AND utxo_leases.utxo_id IN (
+        SELECT u.id
+        FROM transactions AS t
+        INNER JOIN utxos AS u ON t.id = u.spent_by_tx_id
+        WHERE
+            t.wallet_id = sqlc.arg('wallet_id')
+            AND t.tx_hash = sqlc.arg('tx_hash')
+            AND t.block_height IS NOT NULL
+    );
