@@ -41,6 +41,13 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Recovery ingestion shares graph ordering with live mutations. Take
+		// the Wallet lock before horizons or tips can acquire other row locks.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		ops := scanHorizonOps{qtx: qtx, walletID: params.WalletID}
 		for i := range params.Horizons {
 			err := db.ExtendScanHorizon(
@@ -56,7 +63,7 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 		// created. CreateTxWithOps needs the confirming block row during
 		// PrepareBlock, so creating transactions first would fail with
 		// ErrBlockNotFound.
-		err := applyBatchSyncedBlocks(ctx, qtx, params)
+		err = applyBatchSyncedBlocks(ctx, qtx, params)
 		if err != nil {
 			return err
 		}

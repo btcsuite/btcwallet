@@ -35,7 +35,14 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		err := applyBatchSyncTip(ctx, qtx, params)
+		// Hold graph ordering before the tip or any transaction changes so
+		// notification batches cannot overlap branch discovery and removal.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
+		err = applyBatchSyncTip(ctx, qtx, params)
 		if err != nil {
 			return err
 		}

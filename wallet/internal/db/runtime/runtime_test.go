@@ -286,10 +286,18 @@ func TestReadUtilities(t *testing.T) {
 func TestWriteHealthyCheck(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Poison the store without a database so any attempted begin
+	// would fail rather than masking the required health check.
 	hooks := &fakeStore{healthyErr: ErrStoreUnhealthy}
-	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
-		return struct{}{}
-	}, func(struct{}) (string, error) { return "", nil })
+
+	// Act: Request a write using the unchanged driver-default options.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(*sql.Tx) struct{} { return struct{}{} },
+		func(struct{}) (string, error) { return "", nil },
+	)
+
+	// Assert: No result escapes and the unhealthy sentinel remains visible.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, ErrStoreUnhealthy)
 }
@@ -299,14 +307,18 @@ func TestWriteHealthyCheck(t *testing.T) {
 func TestWriteReturnsValue(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Bind a healthy store to a driver that can begin and commit.
 	dbConn := newTestDB(t, beginErrDriver{})
 	hooks := &fakeStore{db: dbConn}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "ok", nil
-	})
+	// Act: Return a value from the callback with driver-default options.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(tx *sql.Tx) *sql.Tx { return tx },
+		func(*sql.Tx) (string, error) { return "ok", nil },
+	)
+
+	// Assert: A successful commit makes the callback result available.
 	require.NoError(t, err)
 	require.Equal(t, "ok", result)
 }
@@ -316,6 +328,7 @@ func TestWriteReturnsValue(t *testing.T) {
 func TestWriteBeginFailure(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Inject a begin failure and map it to backend unavailability.
 	dbConn := newTestDB(t, beginErrDriver{err: driver.ErrBadConn})
 	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
 		return dberr.NewSQLError(
@@ -323,10 +336,14 @@ func TestWriteBeginFailure(t *testing.T) {
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
-		return struct{}{}
-	}, func(struct{}) (string, error) { return "", nil })
+	// Act: Begin through the shared runtime using driver-default options.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(*sql.Tx) struct{} { return struct{}{} },
+		func(struct{}) (string, error) { return "", nil },
+	)
 
+	// Assert: The failed begin yields no result and records its classification.
 	var sqlErr *dberr.SQLError
 
 	require.Empty(t, result)
@@ -340,15 +357,19 @@ func TestWriteBeginFailure(t *testing.T) {
 func TestWriteCallbackErrorPassthrough(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Use a healthy transaction and a non-SQL callback failure.
 	dbConn := newTestDB(t, beginErrDriver{})
 	hooks := &fakeStore{db: dbConn}
 	callbackErr := errRuntimeCallback
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "", callbackErr
-	})
+	// Act: Fail the callback after beginning with driver-default options.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(tx *sql.Tx) *sql.Tx { return tx },
+		func(*sql.Tx) (string, error) { return "", callbackErr },
+	)
+
+	// Assert: Rollback preserves the domain cause without SQL error accounting.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, callbackErr)
 	require.Zero(t, hooks.errorCount)
@@ -359,6 +380,7 @@ func TestWriteCallbackErrorPassthrough(t *testing.T) {
 func TestWriteCallbackErrorClassified(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Classify the callback failure as a PostgreSQL constraint error.
 	dbConn := newTestDB(t, beginErrDriver{})
 	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
 		return dberr.NewSQLError(
@@ -366,12 +388,14 @@ func TestWriteCallbackErrorClassified(t *testing.T) {
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "", errRuntimeCallback
-	})
+	// Act: Run the failing callback in a driver-default transaction.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(tx *sql.Tx) *sql.Tx { return tx },
+		func(*sql.Tx) (string, error) { return "", errRuntimeCallback },
+	)
 
+	// Assert: The runtime returns no result and accounts for the SQL failure.
 	var sqlErr *dberr.SQLError
 
 	require.Empty(t, result)
@@ -385,6 +409,7 @@ func TestWriteCallbackErrorClassified(t *testing.T) {
 func TestWriteCommitAmbiguous(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Lose the commit acknowledgement after a successful callback.
 	dbConn := newTestDB(t, beginErrDriver{commitErr: io.EOF})
 	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
 		return dberr.NewSQLError(
@@ -393,11 +418,14 @@ func TestWriteCommitAmbiguous(t *testing.T) {
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "applied", nil
-	})
+	// Act: Complete the callback and attempt the driver-default commit.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(tx *sql.Tx) *sql.Tx { return tx },
+		func(*sql.Tx) (string, error) { return "applied", nil },
+	)
+
+	// Assert: An unknown durable outcome hides the value and records ambiguity.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, ErrAmbiguousTxCommit)
 
@@ -413,6 +441,7 @@ func TestWriteCommitAmbiguous(t *testing.T) {
 func TestWriteCommitUnavailable(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Classify a definite commit failure without a transport cause.
 	dbConn := newTestDB(t, beginErrDriver{commitErr: errRuntimeOther})
 	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
 		return dberr.NewSQLError(
@@ -421,11 +450,14 @@ func TestWriteCommitUnavailable(t *testing.T) {
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "applied", nil
-	})
+	// Act: Commit the successful callback using driver-default options.
+	result, err := Write(
+		context.Background(), hooks, nil,
+		func(tx *sql.Tx) *sql.Tx { return tx },
+		func(*sql.Tx) (string, error) { return "applied", nil },
+	)
+
+	// Assert: A definite failure hides the value without ambiguous accounting.
 	require.Empty(t, result)
 	require.NotErrorIs(t, err, ErrAmbiguousTxCommit)
 

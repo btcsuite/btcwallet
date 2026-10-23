@@ -15,6 +15,13 @@ func (s *Store) DeleteUnminedTx(ctx context.Context,
 	params db.DeleteUnminedTxParams) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Keep the descendant snapshot stable through removal, including
+		// children that concurrent Wallet ingestion would otherwise miss.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		return db.DeleteUnminedTxWithOps(ctx, params, deleteUnminedTxOps{
 			invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 			rows:                   deleteTxOps{qtx: qtx},

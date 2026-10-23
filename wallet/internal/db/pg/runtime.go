@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -48,12 +50,15 @@ func (s *Store) execRead(ctx context.Context,
 }
 
 // execWrite executes one PostgreSQL write operation through the shared runtime
-// helper.
+// helper at read committed, independent of session defaults.
 func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
+	// Constraints, atomic updates, and acquired row locks protect writes.
+	// In particular, graph reads follow lockTxGraph and need fresh statement
+	// snapshots after acquiring the Wallet lock, not a fixed transaction view.
 	_, err := dbruntime.Write(
-		ctx, s,
+		ctx, s, &sql.TxOptions{Isolation: sql.LevelReadCommitted},
 		func(tx *sql.Tx) *sqlc.Queries {
 			return s.queries.WithTx(tx)
 		},
@@ -63,6 +68,22 @@ func (s *Store) execWrite(ctx context.Context,
 	)
 
 	return err
+}
+
+// lockTxGraph orders one Wallet's graph reads and mutations until the caller's
+// SQL transaction ends. Read committed alone lets a child commit after an
+// invalidation snapshots descendants but before it rewrites their parents.
+func lockTxGraph(ctx context.Context, qtx *sqlc.Queries, walletID int64) error {
+	// Reuse the existing Wallet-row NO KEY UPDATE lock, which permits foreign
+	// key checks. SQLite already excludes concurrent writers at BeginTx.
+	_, err := qtx.GetWalletForAccountCreation(ctx, walletID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lock wallet transaction graph: %w", err)
+	}
+
+	// An absent Wallet has no graph to lock. Let the operation preserve its
+	// existing missing-Wallet or missing-transaction validation result.
+	return nil
 }
 
 // defaultReadConfig returns the PostgreSQL read retry policy.
