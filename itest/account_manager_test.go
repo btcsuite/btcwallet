@@ -107,10 +107,13 @@ type watchOnlyQueryAccounts struct {
 	bip49Shared wallet.AccountInfo
 }
 
-// importWatchOnlyQueryAccounts imports overlapping and near-matching names,
-// including a present-zero fingerprint and a nested-witness schema override.
+// importWatchOnlyQueryAccounts imports accounts with shared and similar names.
+// One account has a zero fingerprint.
+// Both BIP49 branches use nested witness.
+// With noChainSync=true, each import declares its scope and keeps its account
+// number. With noChainSync=false, the imports have no account number.
 func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
-	keys importedAccountKeys) watchOnlyQueryAccounts {
+	keys importedAccountKeys, noChainSync bool) watchOnlyQueryAccounts {
 
 	h.Helper()
 
@@ -122,7 +125,14 @@ func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
 		XPub:                 keys.accountKey,
 		AddrType:             waddrmgr.WitnessPubKey,
 		MasterKeyFingerprint: &inputFingerprint,
+		NoChainSync:          noChainSync,
 	}
+
+	// Declare the scope so the import keeps the account number in the XPub.
+	if noChainSync {
+		account.Scope = &keys.scope
+	}
+
 	bip84Shared, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
@@ -136,6 +146,15 @@ func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
 	require.NoError(h, err)
 
 	account.AddrType = waddrmgr.NestedWitnessPubKey
+
+	// Declared imports use AddrSchema, not AddrType. Both BIP49 branches must
+	// use nested witness to avoid the BIP84 scripts from the same XPub.
+	if noChainSync {
+		scope := waddrmgr.KeyScopeBIP0049Plus
+		account.Scope = &scope
+		account.AddrSchema = &waddrmgr.KeyScopeBIP0049AddrSchema
+	}
+
 	bip49Shared, err := w.ImportAccount(ctx, account, false)
 	require.NoError(h, err)
 
@@ -411,7 +430,7 @@ func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	ctx := h.Context()
-	named := importWatchOnlyQueryAccounts(h, w, keys)
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
 
 	want := []wallet.AccountInfo{
 		named.bip84Shared, named.bip84Suffix, named.bip49Shared,
@@ -443,7 +462,7 @@ func testAccountManagerQueryScopeWatchOnly(h *bwtest.HarnessTest) {
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	ctx := h.Context()
-	named := importWatchOnlyQueryAccounts(h, w, keys)
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
 
 	wantByScope := map[waddrmgr.KeyScope][]wallet.AccountInfo{
 		waddrmgr.KeyScopeBIP0049Plus: {named.bip49Shared},
@@ -480,7 +499,7 @@ func testAccountManagerQueryNameWatchOnly(h *bwtest.HarnessTest) {
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	ctx := h.Context()
-	named := importWatchOnlyQueryAccounts(h, w, keys)
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
 
 	nameQueries := []struct {
 		name string
@@ -523,7 +542,7 @@ func testAccountManagerQueryGetWatchOnly(h *bwtest.HarnessTest) {
 	keys := deterministicImportedAccountKeys(h)
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	ctx := h.Context()
-	named := importWatchOnlyQueryAccounts(h, w, keys)
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
 
 	want := []wallet.AccountInfo{
 		named.bip84Shared, named.bip84Suffix, named.bip49Shared,
@@ -552,6 +571,104 @@ func testAccountManagerQueryGetWatchOnly(h *bwtest.HarnessTest) {
 		// Assert: import responses and raw serialization survive.
 		require.NoError(h, err)
 		require.Equal(h, account, *durable)
+	}
+}
+
+// testAccountManagerQueryNoChainSyncImported checks all account queries before
+// and after ReloadWallet. Each result must keep the imported account data and
+// NoChainSync=true.
+func testAccountManagerQueryNoChainSyncImported(h *bwtest.HarnessTest) {
+	// Kvdb ignores NoChainSync on import and returns false. Skip this case
+	// because its account queries require true.
+	//nolint:staticcheck // SA1019: identify the legacy backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("kvdb ignores NoChainSync")
+	}
+
+	// Arrange: use the existing query accounts with NoChainSync=true. Declare
+	// their scopes so each import keeps the account number from its XPub.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys, true)
+	zero, one := wallet.AccountNumber(0), wallet.AccountNumber(1)
+	require.Equal(h, &zero, named.bip84Shared.AccountNumber)
+	require.Equal(h, &one, named.bip84Suffix.AccountNumber)
+	require.Equal(h, &zero, named.bip49Shared.AccountNumber)
+
+	want := []wallet.AccountInfo{
+		named.bip84Shared, named.bip84Suffix, named.bip49Shared,
+	}
+	for _, account := range want {
+		require.True(h, account.NoChainSync)
+	}
+
+	// Act: list all accounts before the wallet is opened again.
+	accounts, err := w.ListAccounts(ctx)
+
+	// Assert: compare all public account fields with the import results.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, accounts)
+
+	for _, account := range want {
+		// Act: list accounts in the imported account's scope.
+		scoped, err := w.ListAccountsByScope(ctx, account.KeyScope)
+
+		// Assert: the result must include the complete imported account.
+		require.NoError(h, err)
+		require.Contains(h, scoped, account)
+
+		// Act: list accounts with the imported account's name.
+		byName, err := w.ListAccountsByName(ctx, account.AccountName)
+
+		// Assert: the name query must return the same account data.
+		require.NoError(h, err)
+		require.Contains(h, byName, account)
+
+		// Act: read the account by its scope and name.
+		got, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: the single-account query must match the import result.
+		require.NoError(h, err)
+		require.Equal(h, account, *got)
+	}
+
+	// Arrange: open the same stored wallet again. The locked replacement
+	// wallet must read the account data without the original wallet's cache.
+	w = h.ReloadWallet(w)
+
+	// Act: list all accounts from the replacement wallet.
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	// Assert: all account data and NoChainSync=true must survive ReloadWallet.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, durableAccounts)
+
+	for _, account := range want {
+		// Act: repeat the scope query after ReloadWallet.
+		scoped, err := w.ListAccountsByScope(ctx, account.KeyScope)
+
+		// Assert: stored scope results must include the complete account.
+		require.NoError(h, err)
+		require.Contains(h, scoped, account)
+
+		// Act: repeat the name query after ReloadWallet.
+		byName, err := w.ListAccountsByName(ctx, account.AccountName)
+
+		// Assert: stored name results must keep the same account data.
+		require.NoError(h, err)
+		require.Contains(h, byName, account)
+
+		// Act: repeat the single-account query after ReloadWallet.
+		got, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: compare the full stored result with the original import.
+		require.NoError(h, err)
+		require.Equal(h, account, *got)
 	}
 }
 
@@ -807,8 +924,54 @@ func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
 	require.Empty(h, addresses)
 
 	want := *created
-	want.PublicKey = canonicalAccountKey(h, want.PublicKey)
+
+	// Act: list all accounts before the wallet is opened again.
+	accounts, err := w.ListAccounts(h.Context())
+
+	// Assert: the list must contain the complete created account.
+	require.NoError(h, err)
+	require.Contains(h, accounts, want)
+
+	// Act: list accounts in the exact account's scope.
+	scoped, err := w.ListAccountsByScope(h.Context(), params.Scope)
+
+	// Assert: the scope query must return the same account data.
+	require.NoError(h, err)
+	require.Contains(h, scoped, want)
+
+	// Act: list accounts with the exact account's name.
+	byName, err := w.ListAccountsByName(h.Context(), params.Name)
+
+	// Assert: the unique name must return only the created account.
+	require.NoError(h, err)
+	require.Equal(h, []wallet.AccountInfo{want}, byName)
+
+	// Arrange: open the same stored wallet again. Keep the replacement wallet
+	// locked so the queries use stored public data without an unlock.
 	w = h.ReloadWallet(w)
+
+	// Act: list all accounts after ReloadWallet.
+	durableAccounts, err := w.ListAccounts(h.Context())
+
+	// Assert: all fields, including NoChainSync=true, must survive the reload.
+	require.NoError(h, err)
+	require.Contains(h, durableAccounts, want)
+
+	// Act: repeat the scope query on the replacement wallet.
+	durableScoped, err := w.ListAccountsByScope(h.Context(), params.Scope)
+
+	// Assert: the stored scope result must match the created account.
+	require.NoError(h, err)
+	require.Contains(h, durableScoped, want)
+
+	// Act: repeat the name query on the replacement wallet.
+	durableByName, err := w.ListAccountsByName(h.Context(), params.Name)
+
+	// Assert: the stored name result must keep the complete account data.
+	require.NoError(h, err)
+	require.Equal(h, []wallet.AccountInfo{want}, durableByName)
+
+	want.PublicKey = canonicalAccountKey(h, want.PublicKey)
 	durable, err := w.GetAccount(
 		h.Context(), params.Scope, params.Name,
 	)
@@ -972,9 +1135,52 @@ func testAccountManagerCreateCustomScopeAccount(h *bwtest.HarnessTest) {
 			require.Equal(h, tc.noChainSync, created.NoChainSync)
 			require.False(h, created.IsImported)
 
-			// Reopen through the harness to expose lost scope or account
-			// metadata rather than repeating an immediate account read.
+			// Act: list all accounts before the wallet is opened again.
+			accounts, err := w.ListAccounts(ctx)
+
+			// Assert: the list must contain the full custom-scope account.
+			require.NoError(h, err)
+			require.Contains(h, accounts, *created)
+
+			// Act: read accounts in the new custom scope.
+			scoped, err := w.ListAccountsByScope(ctx, scope)
+
+			// Assert: compare all public fields with the creation result.
+			require.NoError(h, err)
+			require.Contains(h, scoped, *created)
+
+			// Act: read accounts with the custom account's name.
+			byName, err := w.ListAccountsByName(ctx, accountName)
+
+			// Assert: the unique name must return only the created account.
+			require.NoError(h, err)
+			require.Equal(h, []wallet.AccountInfo{*created}, byName)
+
+			// Arrange: open the same stored wallet again. The replacement
+			// wallet must load the custom scope and its account from storage.
 			w = h.ReloadWallet(w)
+
+			// Act: list all accounts after ReloadWallet.
+			durableAccounts, err := w.ListAccounts(ctx)
+
+			// Assert: all fields and the chosen sync flag must survive.
+			require.NoError(h, err)
+			require.Contains(h, durableAccounts, *created)
+
+			// Act: read accounts in the stored custom scope.
+			durableScoped, err := w.ListAccountsByScope(ctx, scope)
+
+			// Assert: the stored scope result must keep all account data.
+			require.NoError(h, err)
+			require.Contains(h, durableScoped, *created)
+
+			// Act: read the custom account by name after ReloadWallet.
+			durableByName, err := w.ListAccountsByName(ctx, accountName)
+
+			// Assert: the stored name result must match the created account.
+			require.NoError(h, err)
+			require.Equal(h, []wallet.AccountInfo{*created}, durableByName)
+
 			durable, err := w.GetAccount(ctx, scope, accountName)
 			require.NoError(h, err)
 			require.Equal(h, created, durable)
