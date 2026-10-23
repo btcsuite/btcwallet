@@ -251,7 +251,7 @@ func WatchOutputFromRow(hash []byte, outputIndex int64,
 }
 
 // BuildLeasedOutput converts SQL lease-row fields into the public LeasedOutput
-// type.
+// type. A zero expiration marks a lease without expiry.
 func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 	expiration time.Time) (*LeasedOutput, error) {
 
@@ -267,11 +267,20 @@ func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 	var id LockID
 	copy(id[:], lockID)
 
+	return newLeasedOutput(outPoint, id, expiration), nil
+}
+
+// newLeasedOutput builds the public lease view. A zero expiration marks a
+// lease without expiry.
+func newLeasedOutput(outPoint wire.OutPoint, id LockID,
+	expiration time.Time) *LeasedOutput {
+
 	return &LeasedOutput{
 		OutPoint:   outPoint,
 		LockID:     id,
 		Expiration: expiration.UTC(),
-	}, nil
+		NoExpiry:   expiration.IsZero(),
+	}
 }
 
 // LeaseOutputOps is the backend adapter the shared LeaseOutput workflow uses.
@@ -287,7 +296,8 @@ func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 // the policy and sequencing while each backend keeps only query details.
 type LeaseOutputOps interface {
 	// Acquire attempts to write or renew the lease and returns the stored
-	// expiration timestamp when the write succeeds.
+	// expiration timestamp when the write succeeds. A zero expiresAt requests
+	// a lease without expiry, and a zero result reports one.
 	Acquire(ctx context.Context, params LeaseOutputParams, nowUTC time.Time,
 		expiresAt time.Time) (time.Time, error)
 
@@ -305,9 +315,9 @@ type LeaseOutputOps interface {
 func LeaseOutputWithOps(ctx context.Context, params LeaseOutputParams,
 	ops LeaseOutputOps) (*LeasedOutput, error) {
 
-	if params.Duration <= 0 {
-		return nil, fmt.Errorf("%w: lease duration must be positive",
-			ErrInvalidParam)
+	err := params.Validate()
+	if err != nil {
+		return nil, err
 	}
 
 	nowUTC := time.Now().UTC()
@@ -354,6 +364,7 @@ func LeaseOutputsWithOps(ctx context.Context, params LeaseOutputsParams,
 			ID:       params.ID,
 			OutPoint: params.OutPoints[i],
 			Duration: params.Duration,
+			NoExpiry: params.NoExpiry,
 		}, ops, nowUTC)
 		if err != nil {
 			return nil, err
@@ -390,15 +401,18 @@ func compareOutPoints(a, b wire.OutPoint) int {
 func leaseOutputAt(ctx context.Context, params LeaseOutputParams,
 	ops LeaseOutputOps, nowUTC time.Time) (*LeasedOutput, error) {
 
-	expiresAt := nowUTC.Add(params.Duration)
+	var expiresAt time.Time
+	if !params.NoExpiry {
+		expiresAt = nowUTC.Add(params.Duration)
+	}
 
+	// Report the stored expiration, since a renewal keeps a lease without
+	// expiry.
 	expiration, err := ops.Acquire(ctx, params, nowUTC, expiresAt)
 	if err == nil {
-		return &LeasedOutput{
-			OutPoint:   params.OutPoint,
-			LockID:     LockID(params.ID),
-			Expiration: expiration.UTC(),
-		}, nil
+		return newLeasedOutput(
+			params.OutPoint, LockID(params.ID), expiration,
+		), nil
 	}
 
 	if !errors.Is(err, ErrLeaseOutputNoRow) {
