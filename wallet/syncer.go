@@ -242,13 +242,18 @@ type chainSyncer interface {
 }
 
 // txManager combines the Wallet capabilities used by the syncer for
-// publication and notification after successful commits.
+// publication, Wallet ownership selection and post-commit notification.
 type txManager interface {
 	TxPublisher
 	txNotifier
+
+	// filterRelevantTxs selects this Wallet's records from a shared event
+	// without changing source data observed by other Wallets.
+	filterRelevantTxs(ctx context.Context, records []*wtxmgr.TxRecord) (
+		[]*wtxmgr.TxRecord, error)
 }
 
-// Wallet supplies both capabilities through the same private dependency.
+// Wallet supplies these capabilities through the same private dependency.
 var _ txManager = (*Wallet)(nil)
 
 // syncer is a stateless blocking worker responsible for synchronizing the
@@ -277,6 +282,10 @@ type syncer struct {
 	// from the controller. It is buffered to ensure that submitting a
 	// request does not unnecessarily block the calling goroutine.
 	scanReqChan chan *scanReq
+
+	// chainEventChan shares the existing worker with historical scans. Manager
+	// owns sends; Wallet cancellation joins processing without closing it.
+	chainEventChan <-chan any
 
 	// txManager rebroadcasts unmined transactions and announces committed
 	// observations while Wallet retains subscriber state and lifecycle.
@@ -322,19 +331,21 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
 // mandatory: every migrated runtime path reads and writes through the Store,
 // so there is no nil-store fallback. The notifier observes successful commits
-// without owning persistence or scan lifecycle.
+// without owning persistence or scan lifecycle. Managed Wallets supply their
+// mailbox; chainEventChan is nil for callers using only the maintained source.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
-	walletID uint32) *syncer {
+	walletID uint32, chainEventChan <-chan any) *syncer {
 
 	return &syncer{
-		cfg:         cfg,
-		addrStore:   addrStore,
-		txStore:     txStore,
-		scanReqChan: make(chan *scanReq, 1),
-		txManager:   txManager,
-		store:       store,
-		walletID:    walletID,
+		cfg:            cfg,
+		addrStore:      addrStore,
+		txStore:        txStore,
+		scanReqChan:    make(chan *scanReq, 1),
+		chainEventChan: chainEventChan,
+		txManager:      txManager,
+		store:          store,
+		walletID:       walletID,
 	}
 }
 
@@ -1969,10 +1980,48 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	return s.scanWithRewind(ctx, req)
 }
 
+// handleChainEvent selects Wallet transactions from a shared observation
+// before using the existing persistence handler. Source-channel observations
+// retain their backend filtering semantics.
+func (s *syncer) handleChainEvent(ctx context.Context, event any) error {
+	switch n := event.(type) {
+	case chain.RelevantTx:
+		records, err := s.txManager.filterRelevantTxs(
+			ctx, []*wtxmgr.TxRecord{n.TxRecord},
+		)
+		if err != nil {
+			return err
+		}
+
+		// An unrelated singleton is a successful no-op with no Store batch.
+		if len(records) == 0 {
+			return nil
+		}
+
+	case chain.FilteredBlockConnected:
+		// Copy only the value and selected slice; shared source records
+		// stay immutable, and empty matches still carry block progress.
+		records, err := s.txManager.filterRelevantTxs(ctx, n.RelevantTxs)
+		if err != nil {
+			return err
+		}
+
+		n.RelevantTxs = records
+		event = n
+	}
+
+	return s.handleChainUpdate(ctx, event)
+}
+
 // waitForEvent blocks until a notification, rescan job, or context
 // cancellation occurs, processing the event accordingly.
 func (s *syncer) waitForEvent(ctx context.Context) error {
 	select {
+	// Shared events use the historical worker and its ordinary error path,
+	// so the Wallet's existing sync loop owns logging and retry.
+	case event := <-s.chainEventChan:
+		return s.handleChainEvent(ctx, event)
+
 	// Process asynchronous notifications from the chain backend, such as
 	// new blocks or transactions.
 	case n, ok := <-s.cfg.Chain.Notifications():
@@ -1986,20 +2035,18 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 	// controller.
 	case job := <-s.scanReqChan:
 		err := s.handleScanReq(ctx, job)
-		if err == nil {
-			return nil
-		}
-
-		if errors.Is(err, context.Canceled) ||
-			errors.Is(err, ErrWalletShuttingDown) {
+		// Success and shutdown need no scan-specific recovery. Group
+		// their common return before handling operational scan failures.
+		switch {
+		case err == nil, errors.Is(err, context.Canceled),
+			errors.Is(err, ErrWalletShuttingDown):
 
 			return err
-		}
 
 		// A committed scan can leave live watches unregistered. Let that
 		// failure restart initialization instead of bypassing its retry.
-		if job.typ == scanTypeTargeted &&
-			s.syncState() != syncStateSyncing {
+		case job.typ == scanTypeTargeted &&
+			s.syncState() != syncStateSyncing:
 
 			// Rescan returns once the request is queued, so this
 			// execution failure cannot reach its caller. For now,
