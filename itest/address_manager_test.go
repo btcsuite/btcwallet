@@ -1121,6 +1121,133 @@ func testAddressManagerRotateUsedAddress(h *bwtest.HarnessTest) {
 	require.Equal(h, withoutFingerprint(want[1]), withoutFingerprint(info))
 }
 
+// testAddressManagerOldestUnusedAddress makes sure that SQL gives the oldest
+// unused child from the database. A payment in a block makes the wallet
+// select the next unused child. The calls do not change the branch key counts.
+func testAddressManagerOldestUnusedAddress(h *bwtest.HarnessTest) {
+	// The kvdb test is different because each kvdb call makes a new address.
+	//nolint:staticcheck // This guard excludes the deprecated backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("oldest-unused receiving requires SQL")
+	}
+
+	// Arrange: The test calculates the correct addresses from the account XPub.
+	// The batch makes three unused children in the database. The test opens the
+	// wallet again to use the data from the database.
+	const accountName = "oldest unused account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, accountName)
+	want := createTestAddressInfos(h, account, false, 3)
+	selector := wallet.NewAccountSelectorByName(scope, accountName)
+	_, err := w.NewBulkAddresses(ctx, selector, false, uint32(len(want)))
+	require.NoError(h, err)
+	before, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	w = h.ReloadWallet(w)
+
+	for range 2 {
+		// Act: The test uses NewAddress while all three children are unused.
+		// No payment can change which child the wallet selects.
+		info, err := w.NewAddress(ctx, selector, false)
+
+		// Assert: Each call must give the first child from the account XPub.
+		// SQL must not select a different child or make a new one.
+		require.NoError(h, err)
+		require.Equal(h, want[0], info)
+	}
+
+	// The same key counts show that the wallet did not make other children.
+	after, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, before.ExternalKeyCount, after.ExternalKeyCount)
+	require.Equal(h, before.InternalKeyCount, after.InternalKeyCount)
+
+	// Arrange: The test sends a payment to the first child's address to keep
+	// the other children unused. MineBlockWithTx waits until the wallet records
+	// the payment.
+	pkScript, err := txscript.PayToAddrScript(want[0].Addr)
+	require.NoError(h, err)
+
+	outputs := []*wire.TxOut{
+		wire.NewTxOut(int64(oneBTC), pkScript),
+	}
+	payment := h.SendOutputs(outputs, bwtest.MinerFeeRate)
+	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+
+	// Act: The test uses NewAddress after the wallet records the payment.
+	info, err := w.NewAddress(ctx, selector, false)
+
+	// Assert: The wallet must give the next unused child. The key counts
+	// must stay the same because the wallet does not make a new child.
+	require.NoError(h, err)
+	require.Equal(h, want[1], info)
+
+	after, err = w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, before.ExternalKeyCount, after.ExternalKeyCount)
+	require.Equal(h, before.InternalKeyCount, after.InternalKeyCount)
+}
+
+// testAddressManagerForceNextAddress makes sure that kvdb makes a new child
+// for each call. The wallet must keep the key count when it opens again.
+func testAddressManagerForceNextAddress(h *bwtest.HarnessTest) {
+	// The SQL test is different because SQL can give the same unused child.
+	if *dbBackend == string(wallet.DBBackendSQLite) ||
+		*dbBackend == string(wallet.DBBackendPostgres) {
+
+		h.Skip("force-next receiving requires kvdb")
+	}
+
+	// Arrange: All children stay unused because the test makes no payment.
+	// The test calculates the correct addresses from the account XPub.
+	const accountName = "force next account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	account := h.CreateTestAccount(w, scope, accountName)
+	want := createTestAddressInfos(h, account, false, 3)
+	selector := wallet.NewAccountSelectorByName(scope, accountName)
+
+	for _, expected := range want[:2] {
+		// Act: The test uses NewAddress before a payment. All previous
+		// children stay unused.
+		info, err := w.NewAddress(ctx, selector, false)
+
+		// Assert: Each call must give the next correct child. The test does
+		// not compare the fingerprint because kvdb gives zero.
+		require.NoError(h, err)
+		require.Equal(
+			h, withoutFingerprint(expected), withoutFingerprint(info),
+		)
+	}
+
+	// The key counts before the wallet opens again must show two external
+	// children. The wallet must not make an internal child.
+	before, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, uint32(2), before.ExternalKeyCount)
+	require.Zero(h, before.InternalKeyCount)
+
+	// Act: The test opens the wallet again and uses NewAddress. The call
+	// must use the key count from the database.
+	w = h.ReloadWallet(w)
+	info, err := w.NewAddress(ctx, selector, false)
+
+	// Assert: The call must give the third child. The external key count
+	// must include all three calls. The internal key count must stay zero.
+	require.NoError(h, err)
+	require.Equal(h, withoutFingerprint(want[2]), withoutFingerprint(info))
+
+	after, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, uint32(3), after.ExternalKeyCount)
+	require.Zero(h, after.InternalKeyCount)
+}
+
 // testAddressManagerListAddresses proves the account listing reports every
 // allocated address with its balance, before and after reopening the wallet.
 func testAddressManagerListAddresses(h *bwtest.HarnessTest) {
