@@ -12,8 +12,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -393,6 +395,69 @@ func (m *Manager) Stop() error {
 	m.started.Store(true)
 
 	return m.stopWallets(nil)
+}
+
+// chainRecipients fixes admission and membership against Start, Create and
+// Stop. It copies pointers while locked; delivery happens after unlock so a
+// full mailbox cannot prevent shutdown or publication.
+func (m *Manager) chainRecipients(ctx context.Context) ([]*Wallet, error) {
+	m.RLock()
+	defer m.RUnlock()
+
+	// Inactive state wins over caller cancellation, including after Stop has
+	// cleared the registry. KVDB retains its independent source consumer.
+	if !m.started.Load() || m.config.Backend == DBBackendKVDB {
+		return nil, ErrStateForbidden
+	}
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	wallets := make([]*Wallet, 0, len(m.wallets))
+	for _, wallet := range m.wallets {
+		wallets = append(wallets, wallet)
+	}
+
+	return wallets, nil
+}
+
+// dispatchChainEvent accepts an immutable chain event for every published
+// SQL Wallet. One caller supplies source order; each Wallet processes FIFO.
+// Success means acceptance, not processing completion. Wallet lifetime governs
+// accepted work; caller cancellation prevents admission.
+func (m *Manager) dispatchChainEvent(ctx context.Context, event any) error {
+	// The existing handler ignores header-only BlockConnected events. Use
+	// its filtered-block path to commit even an empty block's checkpoint.
+	switch update := event.(type) {
+	case chain.BlockConnected:
+		block := wtxmgr.BlockMeta(update)
+		event = chain.FilteredBlockConnected{Block: &block}
+
+	case chain.FilteredBlockConnected, chain.RelevantTx:
+
+	default:
+		return fmt.Errorf("unsupported chain event %T: %w",
+			event, db.ErrInvalidParam)
+	}
+
+	wallets, err := m.chainRecipients(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Bounded mailboxes apply backpressure without a processing barrier.
+	// Stop cancels blocked handoffs and joins accepted work before Store close.
+	for _, wallet := range wallets {
+		select {
+		case wallet.chainEventChan <- event:
+		case <-wallet.lifetimeCtx.Done():
+			return ErrManagerStopped
+		}
+	}
+
+	return nil
 }
 
 // String returns a summary of the active wallets managed by the Manager.

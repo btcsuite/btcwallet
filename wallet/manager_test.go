@@ -6,18 +6,120 @@ import (
 	"errors"
 	"iter"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// newChainEventTestWallet reuses the joined request-loop fixture for dispatcher
+// contract tests that supply processor outcomes through direct channels.
+func newChainEventTestWallet(t *testing.T, name string,
+	id uint32) *Wallet {
+
+	t.Helper()
+
+	w, deps := createTestWalletWithMocks(t)
+	w.cfg.Name = name
+	w.id = id
+	startLoadedWalletForTest(t, w)
+	deps.vault.On("Lock").Return().Once()
+
+	return w
+}
+
+// TestManagerChainEventRejectsDisconnect prevents connected fanout
+// from reaching the legacy per-Wallet rollback handler.
+func TestManagerChainEventRejectsDisconnect(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A strict registered processor and Store permit no event or
+	// rollback call; only normal fixture shutdown may touch the Vault.
+	w := newChainEventTestWallet(t, "first", 1)
+	manager := testSQLManager(t, &walletmock.Store{})
+	manager.wallets[w.cfg.Name] = w
+
+	// Act: Submit a disconnect to the connected-event entry point.
+	err := manager.dispatchChainEvent(
+		t.Context(), chain.BlockDisconnected{},
+	)
+
+	// Assert: Rejection is local validation and does not stop the Manager or
+	// transfer ownership of the disconnect to any processor.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.True(t, manager.started.Load())
+}
+
+// TestManagerChainEventOrder verifies asynchronous acceptance, bounded
+// backpressure and identical FIFO delivery without processing acknowledgments.
+func TestManagerChainEventOrder(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Capacity-one mailboxes let the first dispatch complete
+		// while both processors are held. A slow peer then bounds delivery.
+		first := newChainEventTestWallet(t, "first", 1)
+		second := newChainEventTestWallet(t, "second", 2)
+		manager := testSQLManager(t, &walletmock.Store{})
+		manager.wallets[first.cfg.Name] = first
+		manager.wallets[second.cfg.Name] = second
+		firstEvents := make(chan any, 1)
+		secondEvents := make(chan any, 1)
+		first.chainEventChan = firstEvents
+		second.chainEventChan = secondEvents
+
+		block := &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 1},
+		}
+		filtered := chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 2}},
+		}
+		events := []any{
+			chain.BlockConnected(*block), filtered,
+			chain.RelevantTx{TxRecord: &wtxmgr.TxRecord{}},
+		}
+		want := []any{
+			chain.FilteredBlockConnected{Block: block},
+			filtered, events[2],
+		}
+		results := make(chan error, len(events))
+
+		// Act: One ordered caller queues all three events. No recipient
+		// reports completion; reads alone release bounded backpressure.
+		go func() {
+			for _, event := range events {
+				results <- manager.dispatchChainEvent(t.Context(), event)
+			}
+		}()
+
+		// Assert: Acceptance precedes consumption, but the next dispatch
+		// waits for the slower mailbox. Both recipients retain source order.
+		require.NoError(t, <-results)
+
+		for i := range events {
+			require.Equal(t, want[i], <-firstEvents)
+			synctest.Wait()
+			require.Empty(t, results)
+			require.Equal(t, want[i], <-secondEvents)
+
+			if i+1 < len(events) {
+				require.NoError(t, <-results)
+			}
+		}
+	})
+}
 
 // TestWalletID verifies that Wallet.ID returns the cached runtime ID.
 func TestWalletID(t *testing.T) {
