@@ -71,6 +71,14 @@ var allTestCases = []*testCase{
 		TestFunc: testAddressManagerRotateUsedAddress,
 	},
 	{
+		Name:     "address manager oldest unused address",
+		TestFunc: testAddressManagerOldestUnusedAddress,
+	},
+	{
+		Name:     "address manager force next address",
+		TestFunc: testAddressManagerForceNextAddress,
+	},
+	{
 		Name:     "address manager list addresses",
 		TestFunc: testAddressManagerListAddresses,
 	},
