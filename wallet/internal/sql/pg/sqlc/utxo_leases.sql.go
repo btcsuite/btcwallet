@@ -129,6 +129,44 @@ func (q *Queries) DeleteExpiredUtxoLeases(ctx context.Context, arg DeleteExpired
 	return result.RowsAffected()
 }
 
+const DeleteUtxoLeasesSpentByConfirmedTx = `-- name: DeleteUtxoLeasesSpentByConfirmedTx :execrows
+DELETE FROM utxo_leases
+WHERE
+    utxo_leases.wallet_id = $1
+    AND utxo_leases.utxo_id IN (
+        SELECT u.id
+        FROM transactions AS t
+        INNER JOIN utxos AS u ON t.id = u.spent_by_tx_id
+        WHERE
+            t.wallet_id = $1
+            AND t.tx_hash = $2
+            AND t.block_height IS NOT NULL
+    )
+`
+
+type DeleteUtxoLeasesSpentByConfirmedTxParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+// Deletes the leases on outputs spent by one confirmed transaction.
+//
+// How:
+//   - Resolves the spender by wallet and hash, and deletes only when it has a
+//     confirming block, so an unconfirmed spend keeps its leases.
+//   - Applies to timed leases and leases without expiry alike.
+//
+// Performance:
+//   - Resolves the spender through its unique hash and reaches its inputs
+//     through the spent_by index.
+func (q *Queries) DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error) {
+	result, err := q.exec(ctx, q.deleteUtxoLeasesSpentByConfirmedTxStmt, DeleteUtxoLeasesSpentByConfirmedTx, arg.WalletID, arg.TxHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetActiveUtxoLeaseLockID = `-- name: GetActiveUtxoLeaseLockID :one
 SELECT lock_id
 FROM utxo_leases
