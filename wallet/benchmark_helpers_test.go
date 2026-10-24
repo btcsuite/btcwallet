@@ -1,11 +1,17 @@
 package wallet
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -1126,4 +1133,325 @@ func getUtxoDeprecated(w *Wallet, prevOut wire.OutPoint) (*Utxo, error) {
 		AddressType:   addrType,
 		Locked:        locked,
 	}, nil
+}
+
+// nodeBenchmarkKVDBPath returns a private closed database for either runtime.
+// Docker supplies a versioned fixture directory; direct Go invocations
+// without it seed normally. The cached original is never opened for writes.
+func nodeBenchmarkKVDBPath(tb testing.TB,
+	workload bwtest.ListUnspentWorkload) string {
+
+	tb.Helper()
+
+	path := testKVDBPath(tb)
+	fixtureDir := os.Getenv("BTCWALLET_BENCH_FIXTURE_DIR")
+	fixture := filepath.Join(fixtureDir, "kvdb", workload.ID+".db")
+
+	// Each invocation owns a new file, so startup and cleanup cannot mutate
+	// the persisted snapshot used by later legacy or maintained processes.
+	if fixtureDir != "" {
+		restoreStarted := time.Now()
+
+		data, err := os.ReadFile(filepath.Clean(fixture))
+		if err == nil {
+			require.NoError(tb, os.WriteFile(path, data, 0o600))
+			tb.Logf("fixture restoration: %s", time.Since(restoreStarted))
+
+			return path
+		}
+
+		if !errors.Is(err, os.ErrNotExist) {
+			tb.Fatalf("read node fixture: %v", err)
+		}
+	}
+
+	// Reuse normal creation and Store seeding only on a miss. Stop joins
+	// workers and closes the database before any file bytes are copied.
+	preparationStarted := time.Now()
+	params := nodeBenchmarkWalletParams(workload)
+	params.PubPassphrase = []byte(InsecurePubPassphrase)
+	manager := testKVDBManagerAt(tb, path)
+	w := createNodeBenchmarkWallet(tb, manager, params)
+
+	// Borrow the backend-owned handle for legacy bulk address allocation;
+	// Manager still owns its shutdown before the snapshot is saved.
+	backend, ok := manager.backend.(*kvdbManagerBackend)
+	require.True(tb, ok)
+
+	seedNodeBenchmarkKVDB(tb, w, backend.db, workload)
+	require.NoError(tb, manager.Stop())
+
+	if fixtureDir != "" {
+		data, err := os.ReadFile(filepath.Clean(path))
+		require.NoError(tb, err)
+		require.NoError(tb, os.MkdirAll(filepath.Dir(fixture), 0o700))
+
+		// Serial runs publish only complete snapshots. An interrupted write
+		// leaves a disposable sibling, never a cache entry for the next run.
+		pending := fixture + ".partial"
+		defer func() { _ = os.Remove(pending) }()
+
+		require.NoError(tb, os.WriteFile(pending, data, 0o600))
+		require.NoError(tb, os.Rename(pending, fixture))
+	}
+
+	tb.Logf("fixture preparation: %s", time.Since(preparationStarted))
+
+	return path
+}
+
+// nodeBenchmarkWalletParams keeps Wallet construction policy local while
+// using the shared case's keys and birthday for every backend.
+func nodeBenchmarkWalletParams(
+	workload bwtest.ListUnspentWorkload) CreateWalletParams {
+
+	return CreateWalletParams{
+		Name:              "list-unspent-benchmark",
+		Mode:              ModeImportSeed,
+		Seed:              workload.Seed,
+		Birthday:          workload.Birthday,
+		PrivatePassphrase: []byte("private"),
+	}
+}
+
+// createNodeBenchmarkWallet uses normal Manager publication and an
+// indefinite unlock so cryptographic setup and automatic relocking cannot
+// enter the read-only measurement.
+func createNodeBenchmarkWallet(tb testing.TB, manager *Manager,
+	params CreateWalletParams) *Wallet {
+
+	tb.Helper()
+
+	w, err := manager.Create(params)
+	require.NoError(tb, err)
+	err = w.Unlock(tb.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	})
+	require.NoError(tb, err)
+
+	return w
+}
+
+// seedNodeBenchmarkKVDB uses native scoped bulk derivation and Store history
+// writes. The borrowed DB remains Manager-owned; shared batch order gives SQL
+// and kvdb identical ordinary scripts and internal key-family indexes.
+func seedNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
+	dbConn walletdb.DB, workload bwtest.ListUnspentWorkload) {
+
+	tb.Helper()
+
+	phaseStarted := time.Now()
+	keyScope := waddrmgr.KeyScope{Purpose: 1017, Coin: 1}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	families := workload.Accounts - uint32(len(waddrmgr.DefaultKeyScopes))
+
+	// Kvdb already owns ordinary defaults. The scoped manager creates its
+	// internal default/imported accounts; subsequent account numbers match lnd.
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		internal, err := w.addrStore.NewScopedKeyManager(ns, keyScope, schema)
+		if err != nil {
+			return err
+		}
+
+		for account := uint32(1); account < families; account++ {
+			_, err := internal.NewAccount(ns, fmt.Sprintf("act:%d", account))
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	require.NoError(tb, err)
+	tb.Logf("fixture accounts: %s", time.Since(phaseStarted))
+	phaseStarted = time.Now()
+
+	// Bulk native derivation avoids rebuilding all existing account address
+	// metadata for each key. Internal keys stay unused because history only
+	// credits the ordinary receiving/change/closing branches.
+	var scripts [][]byte
+	for _, batch := range workload.AddressBatches() {
+		manager, err := w.addrStore.FetchScopedKeyManager(batch.Scope)
+		require.NoError(tb, err)
+
+		var addresses []waddrmgr.ManagedAddress
+
+		err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			if batch.Internal {
+				addresses, err = manager.NextInternalAddresses(
+					ns, batch.Account, batch.Count,
+				)
+			} else {
+				addresses, err = manager.NextExternalAddresses(
+					ns, batch.Account, batch.Count,
+				)
+			}
+
+			return err
+		})
+		require.NoError(tb, err)
+
+		if batch.Scope == keyScope {
+			continue
+		}
+
+		for _, addr := range addresses {
+			script, err := txscript.PayToAddrScript(addr.Address())
+			require.NoError(tb, err)
+
+			scripts = append(scripts, script)
+		}
+	}
+
+	tb.Logf("fixture allocation: %s", time.Since(phaseStarted))
+	phaseStarted = time.Now()
+
+	// Legacy sync metadata needs each confirmed predecessor tip. The shared
+	// builder leaves force-close records unconfirmed without adding credits;
+	// later confirmed sweep credits preserve the observed resolved endpoint.
+	batch := workload.Batch(w.id, scripts)
+	for _, transaction := range batch.Transactions {
+		require.NoError(tb, w.store.ApplyTxBatch(
+			tb.Context(), db.TxBatchParams{
+				WalletID:     w.id,
+				Transactions: []db.CreateTxParams{transaction},
+				SyncedTo:     transaction.Block,
+			},
+		))
+	}
+
+	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+}
+
+// RunKVDBBenchmark reopens each shared snapshot through its native runtime and
+// prepares a read before common measurement. A nil legacy factory marks a
+// semantically unmatched baseline unavailable before any Wallet startup.
+func RunKVDBBenchmark(b *testing.B,
+	before, after func(*testing.B, *Wallet,
+		bwtest.ListUnspentWorkload) func() error) {
+
+	b.Helper()
+
+	for _, workload := range bwtest.ListUnspentCases() {
+		b.Run(workload.ID+"/0-Before", func(b *testing.B) {
+			if before == nil {
+				b.Skip("legacy baseline unavailable for this request")
+			}
+
+			// Loader owns the old runtime and its database shutdown. It
+			// reads a private copy of the same saved file as Manager.
+			path := nodeBenchmarkKVDBPath(b, workload)
+			loader := NewLoader(
+				&chainParams, filepath.Dir(path), false,
+				defaultDBTimeout, 0,
+			)
+			w, err := loader.OpenExistingWallet(
+				[]byte(InsecurePubPassphrase), false,
+			)
+			require.NoError(b, err)
+			b.Cleanup(func() {
+				require.NoError(b, loader.UnloadWallet())
+			})
+			require.NoError(b, w.UnlockDeprecated([]byte("private"), nil))
+
+			bwtest.BenchmarkRead(b, before(b, w, workload))
+		})
+		b.Run(workload.ID+"/1-After", func(b *testing.B) {
+			// Manager starts only after a private closed file is ready;
+			// its existing fixture owns cleanup and worker shutdown.
+			path := nodeBenchmarkKVDBPath(b, workload)
+			manager := testKVDBManagerAt(b, path)
+			manager.RLock()
+			w := manager.wallets[""]
+			manager.RUnlock()
+			require.NoError(b, w.Unlock(b.Context(), UnlockRequest{
+				Passphrase: []byte("private"), Timeout: -1,
+			}))
+
+			bwtest.BenchmarkRead(b, after(b, w, workload))
+		})
+	}
+}
+
+// KVDBBenchmarkTarget selects the same cooperative return as SQL, outside
+// measurement. Legacy and maintained list order differs, so choose canonical
+// txid/index order. Legacy supplies only JSON outpoint/address request fields.
+func KVDBBenchmarkTarget(tb testing.TB, w *Wallet, legacy bool) *Utxo {
+	tb.Helper()
+
+	if legacy {
+		utxos, err := w.ListUnspentDeprecated(0, math.MaxInt32, "")
+		require.NoError(tb, err)
+
+		// Native list order differs. Sort outside measurement so the
+		// first cooperative return matches every maintained backend.
+		sort.Slice(utxos, func(i, j int) bool {
+			left, right := utxos[i], utxos[j]
+
+			return cmp.Or(
+				strings.Compare(left.TxID, right.TxID),
+				cmp.Compare(left.Vout, right.Vout),
+			) < 0
+		})
+
+		for _, utxo := range utxos {
+			amount, err := btcutil.NewAmount(utxo.Amount)
+			require.NoError(tb, err)
+
+			if amount != bwtest.NodeBenchmarkPointValue {
+				continue
+			}
+
+			hash, err := chainhash.NewHashFromStr(utxo.TxID)
+			require.NoError(tb, err)
+
+			addr, err := address.DecodeAddress(
+				utxo.Address, w.cfg.ChainParams,
+			)
+			require.NoError(tb, err)
+
+			// Point consumers need only the native JSON outpoint and
+			// address. Avoid the separate chain-dependent point API.
+			return &Utxo{
+				OutPoint: wire.OutPoint{
+					Hash:  *hash,
+					Index: utxo.Vout,
+				},
+				Address: addr,
+			}
+		}
+
+		tb.Fatal("prepare point read: no cooperative return")
+
+		return nil
+	}
+
+	utxos, err := w.ListUnspent(tb.Context(), UtxoQuery{
+		MaxConfs: math.MaxInt32,
+	})
+	require.NoError(tb, err)
+
+	// Use the same canonical key as the native legacy result above.
+	sort.Slice(utxos, func(i, j int) bool {
+		left, right := utxos[i].OutPoint, utxos[j].OutPoint
+
+		return cmp.Or(
+			strings.Compare(left.Hash.String(), right.Hash.String()),
+			cmp.Compare(left.Index, right.Index),
+		) < 0
+	})
+
+	for _, utxo := range utxos {
+		if utxo.Amount == bwtest.NodeBenchmarkPointValue {
+			return utxo
+		}
+	}
+
+	tb.Fatal("prepare point read: no cooperative return")
+
+	return nil
 }

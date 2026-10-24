@@ -28,6 +28,14 @@ Best practices for writing clear, effective, and maintainable unit tests.
 
 ---
 
+## Benchmarks
+
+Wallet benchmark methodology, setup, suite comparisons and measured results.
+
+**[Read the Benchmark Guide](./benchmark/README.md)**
+
+---
+
 ## 🧾 Transaction Invalidation Flows
 
 A focused guide to the wallet tx-store event model for transaction invalidation,
