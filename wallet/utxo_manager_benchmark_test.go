@@ -1,16 +1,37 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
+
+// legacyBenchmarkChain supplies the prepared tip without recording each read.
+// Unused chain methods retain the shared mock's unexpected-call checks.
+type legacyBenchmarkChain struct {
+	*bwmock.Chain
+
+	tip waddrmgr.BlockStamp
+}
+
+// Keep the benchmark dependency aligned with the Wallet's existing contract.
+var _ chain.Interface = (*legacyBenchmarkChain)(nil)
+
+// GetBestBlock excludes RPC transport and mock bookkeeping from Wallet work.
+func (c *legacyBenchmarkChain) GetBestBlock() (*chainhash.Hash, int32, error) {
+	return &c.tip.Hash, c.tip.Height, nil
+}
 
 // BenchmarkGetUtxoAPI benchmarks GetUtxo API and its deprecated variant
 // FetchOutpointInfo using same key scope and identical test data across
@@ -112,6 +133,63 @@ func BenchmarkGetUtxoAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Retain the legacy caller workflow and its confirmation semantics.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve the shared point and fixed tip before timing.
+				// The original wrapper needs DB and chain dependencies.
+				point := KVDBBenchmarkTarget(b, w, true).OutPoint
+				client := &legacyBenchmarkChain{
+					Chain: &bwmock.Chain{},
+					tip:   w.addrStore.SyncedTo(),
+				}
+				w.cfg.DB = w.db
+				w.chainClientLock.Lock()
+				w.chainClient = client
+				w.chainClientLock.Unlock()
+				b.Cleanup(func() {
+					// This tip has no workers; detach it before Loader
+					// shutdown reaches unused chain mock methods.
+					w.chainClientLock.Lock()
+					w.chainClient = nil
+					w.chainClientLock.Unlock()
+				})
+
+				// Include all existing ownership and lock lookups.
+				return func() error {
+					result, err := getUtxoDeprecated(w, point)
+
+					// Retain the result without inspecting its contents.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				point := KVDBBenchmarkTarget(b, w, false).OutPoint
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.GetUtxo(ctx, point)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkListUnspentAPI benchmarks ListUnspent API and its deprecated
@@ -591,4 +669,130 @@ func BenchmarkListLeasedOutputsAPI(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkGetUtxoDifferentAPI reads a different existing item on each call.
+func BenchmarkGetUtxoDifferentAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetUtxoRequests(b, w, true, false)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetUtxoRequests(b, w, false, false)
+			},
+		)
+	})
+}
+
+// BenchmarkGetUtxoNotFoundAPI reads a different missing item on each call.
+func BenchmarkGetUtxoNotFoundAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetUtxoRequests(b, w, true, true)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetUtxoRequests(b, w, false, true)
+			},
+		)
+	})
+}
+
+// benchmarkGetUtxoRequests prepares different inputs before timing.
+// BenchmarkRead uses the first input for its separate untimed call.
+func benchmarkGetUtxoRequests(b *testing.B, w *Wallet, legacy,
+	missing bool) func() error {
+
+	b.Helper()
+
+	// Keep native enumeration outside measurement; canonical keys match SQL.
+	// Reserve a different item for BenchmarkRead's untimed first call.
+	count := bwtest.BenchmarkReadCount(b) + 1
+
+	var targets []*Utxo
+	if missing {
+		targets = benchmarkMissingReadTargets(b, count)
+	} else {
+		targets = benchmarkPointReadTargets(b, w, legacy, count)
+	}
+
+	expected := ErrUnknownOutput
+	if legacy {
+		expected = ErrNotMine
+	}
+
+	if legacy && !missing {
+		// The existing successful legacy workflow needs a DB and a fixed
+		// chain tip. Missing transactions exit before those extra reads.
+		w.cfg.DB = w.db
+		client := &legacyBenchmarkChain{
+			Chain: &bwmock.Chain{},
+			tip:   w.addrStore.SyncedTo(),
+		}
+		w.chainClientLock.Lock()
+		w.chainClient = client
+		w.chainClientLock.Unlock()
+		b.Cleanup(func() {
+			// Detach this worker-free dependency before Loader cleanup.
+			w.chainClientLock.Lock()
+			w.chainClient = nil
+			w.chainClientLock.Unlock()
+		})
+	}
+
+	ctx := b.Context()
+	// The first item is for warmup; measured calls read the rest once.
+	index := 0
+
+	// Resolve the native operation inside each call, without request data
+	// generation, result validation or interaction-recording mocks.
+	read := func() error {
+		target := targets[index]
+		index++
+
+		var (
+			result *Utxo
+			err    error
+		)
+		if legacy {
+			result, err = getUtxoDeprecated(w, target.OutPoint)
+		} else {
+			result, err = w.GetUtxo(ctx, target.OutPoint)
+		}
+
+		runtime.KeepAlive(result)
+
+		if !missing {
+			return err
+		}
+
+		// Different native APIs expose different miss identities. Only
+		// that expected response completes this request successfully.
+		if errors.Is(err, expected) {
+			return nil
+		}
+
+		return errors.Join(
+			errors.New("expected not-found response"), err,
+		)
+	}
+
+	return read
 }
