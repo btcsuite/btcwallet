@@ -1,10 +1,14 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -172,6 +176,43 @@ func BenchmarkGetTxAPI(b *testing.B) {
 			)
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				hash := KVDBBenchmarkTarget(b, w, true).OutPoint.Hash
+
+				return func() error {
+					_, err := w.GetTransaction(hash)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				hash := KVDBBenchmarkTarget(b, w, false).OutPoint.Hash
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.GetTx(ctx, hash)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkGetTxAPIConcurrently benchmarks GetTx API and its deprecated
@@ -788,4 +829,119 @@ func expectedSummaryValue(summary TransactionSummary) int64 {
 	}
 
 	return value
+}
+
+// BenchmarkGetTxDifferentAPI reads a different existing item on each call.
+func BenchmarkGetTxDifferentAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetTxRequests(b, w, true, false)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetTxRequests(b, w, false, false)
+			},
+		)
+	})
+}
+
+// BenchmarkGetTxNotFoundAPI reads a different missing item on each call.
+func BenchmarkGetTxNotFoundAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetTxRequests(b, w, true, true)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetTxRequests(b, w, false, true)
+			},
+		)
+	})
+}
+
+// benchmarkGetTxRequests prepares different inputs before timing.
+// BenchmarkRead uses the first input for its separate untimed call.
+func benchmarkGetTxRequests(b *testing.B, w *Wallet, legacy,
+	missing bool) func() error {
+
+	b.Helper()
+
+	// Keep native enumeration outside measurement; canonical keys match SQL.
+	// Reserve a different item for BenchmarkRead's untimed first call.
+	count := bwtest.BenchmarkReadCount(b) + 1
+
+	var targets []*Utxo
+	if missing {
+		targets = benchmarkMissingReadTargets(b, count)
+	} else {
+		targets = benchmarkPointReadTargets(b, w, legacy, count)
+	}
+
+	expected := ErrTxNotFound
+	if legacy {
+		expected = ErrNoTx
+	}
+
+	// Select the native call once. The legacy API has no context parameter;
+	// only the modern callback owns a context-bearing Wallet request.
+	var lookup func(chainhash.Hash) error
+	if legacy {
+		lookup = func(hash chainhash.Hash) error {
+			result, err := w.GetTransaction(hash)
+			runtime.KeepAlive(result)
+
+			return err
+		}
+	} else {
+		ctx := b.Context()
+		lookup = func(hash chainhash.Hash) error {
+			result, err := w.GetTx(ctx, hash)
+			runtime.KeepAlive(result)
+
+			return err
+		}
+	}
+
+	// The first item is for warmup; measured calls read the rest once.
+	index := 0
+
+	// Request generation and native API selection are already complete;
+	// each call advances one key and retains its normal error response.
+	read := func() error {
+		target := targets[index]
+		index++
+		err := lookup(target.OutPoint.Hash)
+
+		if !missing {
+			return err
+		}
+
+		// Different native APIs expose different miss identities. Only
+		// that expected response completes this request successfully.
+		if errors.Is(err, expected) {
+			return nil
+		}
+
+		return errors.Join(
+			errors.New("expected not-found response"), err,
+		)
+	}
+
+	return read
 }
