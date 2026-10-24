@@ -2,9 +2,11 @@ package wallet
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -182,6 +184,30 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Legacy returns different scope/balance data; keep that baseline
+	// unavailable.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			nil,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListAccounts(ctx)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkListAccountsByNameAPI benchmarks ListAccountsByName API and a
@@ -472,6 +498,54 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Keep full legacy account result construction
+				// inside each measured call.
+				return func() error {
+					result, err := getAccountDeprecated(
+						w, waddrmgr.KeyScopeBIP0086,
+						"default",
+					)
+
+					// Retain the complete result so the
+					// call includes its construction.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					result, err := w.GetAccount(
+						ctx, waddrmgr.KeyScopeBIP0086,
+						"default",
+					)
+
+					// Retain the complete result so the
+					// call includes its construction.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkRenameAccountAPI benchmarks RenameAccount API and
