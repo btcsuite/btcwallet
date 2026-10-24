@@ -1,10 +1,13 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -472,6 +475,54 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Keep full legacy account result construction
+				// inside each measured call.
+				return func() error {
+					result, err := getAccountDeprecated(
+						w, waddrmgr.KeyScopeBIP0086,
+						"default",
+					)
+
+					// Retain the complete result so the
+					// call includes its construction.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					result, err := w.GetAccount(
+						ctx, waddrmgr.KeyScopeBIP0086,
+						"default",
+					)
+
+					// Retain the complete result so the
+					// call includes its construction.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkRenameAccountAPI benchmarks RenameAccount API and
@@ -711,4 +762,117 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkGetAccountDifferentAPI reads a different existing item on each call.
+func BenchmarkGetAccountDifferentAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAccountRequests(
+					b, w, workload, true, false,
+				)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAccountRequests(
+					b, w, workload, false, false,
+				)
+			},
+		)
+	})
+}
+
+// BenchmarkGetAccountNotFoundAPI reads a different missing item on each call.
+func BenchmarkGetAccountNotFoundAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAccountRequests(
+					b, w, workload, true, true,
+				)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAccountRequests(
+					b, w, workload, false, true,
+				)
+			},
+		)
+	})
+}
+
+// benchmarkGetAccountRequests prepares different inputs before timing.
+// BenchmarkRead uses the first input for its separate untimed call.
+func benchmarkGetAccountRequests(b *testing.B, w *Wallet,
+	workload bwtest.NodeBenchmarkWorkload, legacy, missing bool) func() error {
+
+	b.Helper()
+
+	// Prepare the shared account mix before timing; each suite keeps
+	// its native lookup and not-found error handling.
+	count := bwtest.BenchmarkReadCount(b) + 1
+	scopes, names := bwtest.NodeBenchmarkAccountReadTargets(
+		b, workload, count, missing,
+	)
+
+	expected := ErrAccountNotFound
+	if legacy {
+		expected = errAccountNotFound
+	}
+
+	ctx := b.Context()
+	// The first item is for warmup; measured calls read the rest once.
+	index := 0
+
+	// Resolve the native operation inside each call, without request data
+	// generation, result validation or interaction-recording mocks.
+	read := func() error {
+		scope, name := scopes[index], names[index]
+		index++
+		// Keep native result types so benchmark bookkeeping does not
+		// box the modern value into an interface and add allocations.
+		var err error
+		if legacy {
+			result, readErr := getAccountDeprecated(w, scope, name)
+			runtime.KeepAlive(result)
+
+			err = readErr
+		} else {
+			result, readErr := w.GetAccount(ctx, scope, name)
+			runtime.KeepAlive(result)
+
+			err = readErr
+		}
+
+		if !missing {
+			return err
+		}
+
+		// Different native APIs expose different miss identities. Only
+		// that expected response completes this request successfully.
+		if errors.Is(err, expected) {
+			return nil
+		}
+
+		return errors.Join(
+			errors.New("expected not-found response"), err,
+		)
+	}
+
+	return read
 }
