@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -218,6 +219,46 @@ func BenchmarkListUnspentAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				return func() error {
+					_, err := w.ListUnspentDeprecated(
+						workload.MinConfs, workload.MaxConfs, workload.Account,
+					)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				query := UtxoQuery{
+					Account: workload.Account, MinConfs: workload.MinConfs,
+					MaxConfs: workload.MaxConfs,
+				}
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListUnspent(ctx, query)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkLeaseOutputAPI benchmarks LeaseOutput API and its deprecated
