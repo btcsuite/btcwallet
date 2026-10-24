@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -172,6 +173,43 @@ func BenchmarkGetTxAPI(b *testing.B) {
 			)
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				hash := KVDBBenchmarkTarget(b, w, true).OutPoint.Hash
+
+				return func() error {
+					_, err := w.GetTransaction(hash)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				hash := KVDBBenchmarkTarget(b, w, false).OutPoint.Hash
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.GetTx(ctx, hash)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkGetTxAPIConcurrently benchmarks GetTx API and its deprecated
@@ -476,6 +514,40 @@ func BenchmarkListTxnsAPI(b *testing.B) {
 			)
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				return func() error {
+					_, err := w.GetTransactions(nil, nil, "", nil)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListTxns(ctx, 0, -1)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkListTxnsAPIConcurrently benchmarks ListTxns API and its deprecated

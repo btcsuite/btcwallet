@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -108,6 +109,32 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Legacy returns different scope/balance data; keep that baseline
+	// unavailable.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			nil,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListAddresses(
+						ctx, "default", waddrmgr.TaprootPubKey,
+					)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkGetAddressInfoAPI benchmarks GetAddressInfo API and its deprecated
@@ -203,6 +230,43 @@ func BenchmarkGetAddressInfoAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				addr := KVDBBenchmarkTarget(b, w, true).Address
+
+				return func() error {
+					_, err := w.AddressInfoDeprecated(addr)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				addr := KVDBBenchmarkTarget(b, w, false).Address
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.GetAddressInfo(ctx, addr)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkNewAddressUsedRotationAPI benchmarks NewAddress, marking each

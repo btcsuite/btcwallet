@@ -142,8 +142,8 @@ unit-bench:
 	@$(call print, "Running benchmark tests.")
 	$(UNIT_BENCH)
 
-#? bench: Run one Docker benchmark (set BENCH_PACKAGE and BENCH_CASE)
-#? bench (vars): method=<label> db=legacy|kvdb|sqlite|postgres case=smoke|small-node|medium-node|large-node profile=cpu|mem duration=<value> out=<path>
+#? bench: Run Docker benchmarks (method=<read>, or set BENCH_PACKAGE/BENCH_CASE)
+#? bench (vars): db=legacy|kvdb|sqlite|postgres|all case="smoke|small-node|medium-node|large-node ..." profile=cpu|mem|all duration=<value> out=<path>
 # Default to one tiny smoke iteration; full cases require explicit selection.
 # The script owns Docker settings so new methods do not need new Make targets.
 bench:

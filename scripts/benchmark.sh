@@ -19,6 +19,59 @@ if [[ -z "$bench_method" ]]; then
     exit 1
 fi
 
+# Friendly selectors exist only for installed read consumers. Explicit package
+# and pattern inputs bypass both automatic mapping and collection expansion.
+bench_api=
+case "$bench_method" in
+    list-unspent) bench_api=ListUnspent ;;
+    get-utxo) bench_api=GetUtxo ;;
+    list-addresses) bench_api=ListAddresses ;;
+    get-address-info) bench_api=GetAddressInfo ;;
+    get-tx) bench_api=GetTx ;;
+    list-txns) bench_api=ListTxns ;;
+    get-account) bench_api=GetAccount ;;
+    list-accounts) bench_api=ListAccounts ;;
+esac
+
+# Named collections select a fresh native leaf only without an explicit pair.
+if [[ -n "$bench_api" &&
+    -z "$bench_pkg" && -z "$bench_case" ]]; then
+    # Expand explicit collections into the same single-case command. Scalar child
+    # calls bypass this block, keeping each benchmark in a fresh process and leaving
+    # fixture, image and timer policy in one place. Omitted cases stay tiny.
+    read -r -a bench_workloads <<< "$bench_workload"
+    if (( ${#bench_workloads[@]} > 1 )) ||
+        [[ "$bench_db" == all || "$bench_profile" == all ]]; then
+        bench_orders=("$bench_db")
+        if [[ "$bench_db" == all ]]; then
+            bench_orders=('legacy kvdb postgres sqlite')
+            if [[ -z "$bench_profile" ]]; then
+                # Rotate and reverse timing order so every position appears twice.
+                bench_orders+=(
+                    'kvdb postgres sqlite legacy' 'postgres sqlite legacy kvdb'
+                    'sqlite legacy kvdb postgres' 'postgres kvdb legacy sqlite'
+                    'kvdb legacy sqlite postgres' 'legacy sqlite postgres kvdb'
+                    'sqlite postgres kvdb legacy'
+                )
+            fi
+        fi
+        bench_profiles=("$bench_profile")
+        if [[ "$bench_profile" == all ]]; then bench_profiles=(cpu mem); fi
+        for bench_order in "${bench_orders[@]}"; do
+            for bench_selected_case in "${bench_workloads[@]}"; do
+                for bench_selected_db in $bench_order; do
+                    for bench_selected_profile in "${bench_profiles[@]}"; do
+                        "$0" "$bench_method" "$bench_selected_db" \
+                            "$bench_selected_case" "$bench_selected_profile" \
+                            "$bench_duration" "$bench_out"
+                    done
+                done
+            done
+        done
+        exit 0
+    fi
+fi
+
 case "$bench_workload" in
     smoke) bench_duration=${bench_duration:-1x} ;;
     small-node|medium-node|large-node) bench_duration=${bench_duration:-3s} ;;
@@ -36,6 +89,36 @@ case "$bench_db" in
     legacy|kvdb|sqlite|postgres) ;;
     *) echo 'Select db=legacy|kvdb|sqlite|postgres' >&2; exit 1 ;;
 esac
+# Selectors fill omitted inputs; explicit calls retain their exact selection.
+if [[ -n "$bench_api" &&
+    -z "$bench_pkg" && -z "$bench_case" ]]; then
+    # Legacy point/list requests have different dependencies or semantics.
+    # Skip before Docker for profiles too, so absent captures never reach pprof.
+    if [[ "$bench_db" == legacy &&
+        ( "$bench_api" == GetUtxo || "$bench_api" == ListAddresses ||
+          "$bench_api" == ListAccounts ) ]]; then
+        git rev-parse HEAD
+        echo "$bench_method/$bench_workload/legacy: unavailable (unmatched request)"
+        exit 0
+    fi
+    # Both suites consume the same cases, but keep their native API entrypoints.
+    # Anchors select exactly one leaf, avoiding the original kvdb growth matrix.
+    case "$bench_db" in
+        legacy|kvdb)
+            bench_pkg=./wallet
+            bench_variant=0-Before
+            if [[ "$bench_db" == kvdb ]]; then bench_variant=1-After; fi
+            bench_case='^Benchmark'"$bench_api"'API$/^matched$/^'"$bench_workload"'$/^'"$bench_variant"'$'
+            ;;
+        sqlite|postgres)
+            bench_pkg=./wallet/bench
+            # Select the backend's named entrypoint before any fixture setup.
+            bench_variant=SQLite
+            if [[ "$bench_db" == postgres ]]; then bench_variant=Postgres; fi
+            bench_case='^Benchmark'"$bench_api""$bench_variant"'$/^'"$bench_workload"'$'
+            ;;
+    esac
+fi
 if [[ -z "$bench_pkg" || -z "$bench_case" ]]; then
     echo 'Set BENCH_PACKAGE and BENCH_CASE for the selected entrypoint' >&2
     exit 1

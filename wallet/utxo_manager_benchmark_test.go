@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -111,6 +112,30 @@ func BenchmarkGetUtxoAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Legacy needs a chain-tip RPC and uses different confirmation counts.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			nil,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				point := KVDBBenchmarkTarget(b, w, false).OutPoint
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.GetUtxo(ctx, point)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkListUnspentAPI benchmarks ListUnspent API and its deprecated
@@ -218,6 +243,46 @@ func BenchmarkListUnspentAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				return func() error {
+					_, err := w.ListUnspentDeprecated(
+						workload.MinConfs, workload.MaxConfs, workload.Account,
+					)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.ListUnspentWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				query := UtxoQuery{
+					Account: workload.Account, MinConfs: workload.MinConfs,
+					MaxConfs: workload.MaxConfs,
+				}
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListUnspent(ctx, query)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkLeaseOutputAPI benchmarks LeaseOutput API and its deprecated
