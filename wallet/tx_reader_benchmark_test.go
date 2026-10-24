@@ -517,6 +517,40 @@ func BenchmarkListTxnsAPI(b *testing.B) {
 			)
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				return func() error {
+					_, err := w.GetTransactions(nil, nil, "", nil)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListTxns(ctx, 0, -1)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkListTxnsAPIConcurrently benchmarks ListTxns API and its deprecated
