@@ -117,6 +117,47 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Preserve native workflows; the report states scope/balance differences.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Include the original caller's address and receipt reads.
+				return func() error {
+					result, err := listAddressesDeprecated(
+						w, waddrmgr.DefaultAccountNum,
+					)
+
+					// Retain the result without inspecting its contents.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListAddresses(
+						ctx, "default", waddrmgr.TaprootPubKey,
+					)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkGetAddressInfoAPI benchmarks GetAddressInfo API and its deprecated
