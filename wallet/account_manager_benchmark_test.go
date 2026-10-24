@@ -185,6 +185,43 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Preserve native workflows; the report states scope/balance differences.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Include every scoped Accounts call and its existing mapping.
+				return func() error {
+					result, err := listAccountsDeprecated(w)
+
+					// Retain the result without inspecting its contents.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListAccounts(ctx)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkListAccountsByNameAPI benchmarks ListAccountsByName API and a
