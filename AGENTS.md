@@ -18,6 +18,7 @@ Welcome to the `btcwallet` knowledge base. This file defines the global project
 |------------------------|:--------------------------|:-----------------------------------------------------------|:--------------------------------|
 | `docs/developer/`      | **Docs**                  | Deep-dive design docs (ADRs) and development guides.       | None                            |
 | `wallet/`              | **Wallet Core**           | Business logic, HD key derivation, transaction building.   | `wallet/AGENTS.md`              |
+| `wallet/bench/`        | **Benchmarks**            | Independent SQL Wallet measurements.                     | `wallet/bench/AGENTS.md`        |
 | `wallet/internal/db/`  | **Database Layer**        | Storage drivers, migrations, SQL-based relational logic.   | `wallet/internal/db/AGENTS.md`  |
 | `wallet/internal/sql/` | **SQL Assets**            | SQL schema, query, migration, and sqlc codegen.            | `wallet/internal/sql/AGENTS.md` |
 | `rpc/`                 | **RPC**                   | gRPC and legacy JSON-RPC APIs and server implementations.  | None                            |
