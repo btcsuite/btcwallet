@@ -1,6 +1,7 @@
 package bwtest
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -316,6 +317,69 @@ func BuildSyncBenchmarkFunding(funding []*wire.MsgTx,
 	}
 
 	return tx, nil
+}
+
+// BuildSyncBenchmarkBackground spends miner outputs from either the initial
+// fan-out or the prior background block. Each payment leaves one miner change
+// output for the next block, so callers retain only the previous block.
+func BuildSyncBenchmarkBackground(ctx context.Context,
+	previous []*wire.MsgTx) ([]*wire.MsgTx, error) {
+
+	addr, key, err := syncBenchmarkMinerAddress()
+	if err != nil {
+		return nil, err
+	}
+	defer key.Zero()
+
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, fmt.Errorf("miner script: %w", err)
+	}
+
+	var transactions []*wire.MsgTx
+	for _, parent := range previous {
+		hash := parent.TxHash()
+
+		var index uint32
+		for _, output := range parent.TxOut {
+			point := wire.OutPoint{Hash: hash, Index: index}
+			index++
+
+			// Only miner change rolls forward. Distinct foreign P2WSH
+			// payments stay unrelated to every Wallet and later lane.
+			if !bytes.Equal(output.PkScript, script) {
+				continue
+			}
+
+			err = ctx.Err()
+			if err != nil {
+				return nil, err
+			}
+
+			recipient, _ := syncBenchmarkContract(point)
+			tx := wire.NewMsgTx(syncBenchmarkTxVersion)
+			tx.AddTxIn(wire.NewTxIn(&point, nil, nil))
+			tx.AddTxOut(wire.NewTxOut(syncBenchmarkPaymentValue, recipient))
+			tx.AddTxOut(wire.NewTxOut(
+				output.Value-syncBenchmarkPaymentValue-syncBenchmarkPaymentFee,
+				script,
+			))
+			prevout := txscript.NewCannedPrevOutputFetcher(script, output.Value)
+			hashes := txscript.NewTxSigHashes(tx, prevout)
+
+			tx.TxIn[0].Witness, err = txscript.WitnessSignature(
+				tx, hashes, 0, output.Value, script,
+				txscript.SigHashAll, key, true,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("sign background payment: %w", err)
+			}
+
+			transactions = append(transactions, tx)
+		}
+	}
+
+	return transactions, nil
 }
 
 // syncBenchmarkMinerAddress fixes coinbase ownership independently of Wallet
