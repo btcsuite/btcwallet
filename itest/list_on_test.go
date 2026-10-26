@@ -98,6 +98,11 @@ var allTestCases = []*testCase{
 		Name:     "address manager new address fingerprint",
 		TestFunc: testAddressManagerNewAddressFingerprint,
 	},
+	// Confirmed transactions must update both Wallets sharing one Manager.
+	{
+		Name:     "manager multi wallet transactions",
+		TestFunc: testManagerMultiWalletTransactions,
+	},
 	// Fresh-client cases prove persisted and recovered watch delivery without
 	// relying on filters retained by an earlier Wallet runtime.
 	{
