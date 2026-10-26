@@ -1241,11 +1241,41 @@ func createNodeBenchmarkWallet(tb testing.TB, manager *Manager,
 	return w
 }
 
-// seedNodeBenchmarkKVDB uses native scoped bulk derivation and Store history
-// writes. The borrowed DB remains Manager-owned; shared batch order gives SQL
-// and kvdb identical ordinary scripts and internal key-family indexes.
+// seedNodeBenchmarkKVDB applies read history after reusable native metadata
+// allocation; real-chain startup preparation needs only the unsynced inventory.
 func seedNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
 	dbConn walletdb.DB, workload bwtest.NodeBenchmarkWorkload) {
+
+	tb.Helper()
+
+	scripts := allocateNodeBenchmarkKVDB(tb, w, dbConn, workload)
+
+	phaseStarted := time.Now()
+
+	// Legacy sync metadata needs each confirmed predecessor tip. The shared
+	// builder leaves force-close records unconfirmed without adding credits;
+	// later confirmed sweep credits preserve the observed resolved endpoint.
+	batch := workload.Batch(w.id, scripts)
+	for _, transaction := range batch.Transactions {
+		require.NoError(tb, w.store.ApplyTxBatch(
+			tb.Context(), db.TxBatchParams{
+				WalletID:     w.id,
+				Transactions: []db.CreateTxParams{transaction},
+				SyncedTo:     transaction.Block,
+			},
+		))
+	}
+
+	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+
+	// Both runtimes reuse this snapshot, so check its committed totals once.
+	bwtest.AssertNodeBenchmarkWallet(tb, w.store, w.id, workload)
+}
+
+// allocateNodeBenchmarkKVDB derives the established inventory without
+// applying history, so a real-chain fixture can save an unsynced baseline.
+func allocateNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
+	dbConn walletdb.DB, workload bwtest.NodeBenchmarkWorkload) [][]byte {
 
 	tb.Helper()
 
@@ -1320,26 +1350,8 @@ func seedNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
 	}
 
 	tb.Logf("fixture allocation: %s", time.Since(phaseStarted))
-	phaseStarted = time.Now()
 
-	// Legacy sync metadata needs each confirmed predecessor tip. The shared
-	// builder leaves force-close records unconfirmed without adding credits;
-	// later confirmed sweep credits preserve the observed resolved endpoint.
-	batch := workload.Batch(w.id, scripts)
-	for _, transaction := range batch.Transactions {
-		require.NoError(tb, w.store.ApplyTxBatch(
-			tb.Context(), db.TxBatchParams{
-				WalletID:     w.id,
-				Transactions: []db.CreateTxParams{transaction},
-				SyncedTo:     transaction.Block,
-			},
-		))
-	}
-
-	tb.Logf("fixture history: %s", time.Since(phaseStarted))
-
-	// Both runtimes reuse this snapshot, so check its committed totals once.
-	bwtest.AssertNodeBenchmarkWallet(tb, w.store, w.id, workload)
+	return scripts
 }
 
 // RunKVDBBenchmark reopens each shared snapshot through its native runtime and
