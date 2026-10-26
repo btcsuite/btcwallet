@@ -281,6 +281,7 @@ type syncer struct {
 	// txManager rebroadcasts unmined transactions and announces committed
 	// observations while Wallet retains subscriber state and lifecycle.
 	txManager txManager
+
 	// chainSyncer owns subscriptions and prepares live matches for this
 	// processor; every maintained Wallet receives its Manager's instance.
 	chainSyncer    chainRouter
@@ -300,7 +301,7 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 
 	// Wallet shutdown must still cancel registration. A later sync
 	// initialization reads the persisted watch set again.
-	err = s.cfg.Chain.WatchAddrsFromTip(ctx, addrs)
+	err = s.chainSyncer.watchAddresses(ctx, s.walletID, addrs)
 	if err != nil {
 		return fmt.Errorf("register addresses: %w", err)
 	}
@@ -320,7 +321,7 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 		return nil
 	}
 
-	return s.cfg.Chain.NotifySpent(outpoints)
+	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
 }
 
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
@@ -406,7 +407,7 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	// this call a btcd-backed wallet would stop receiving live block
 	// connect/disconnect events. The call is idempotent on the wrappers
 	// that already enabled notifications, so it is safe for all backends.
-	err = s.cfg.Chain.NotifyBlocks()
+	err = s.chainSyncer.notifyBlocks(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start block "+
 			"notifications: %w", err)
@@ -1890,7 +1891,7 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 
 // processChainUpdate writes a single chain update to the database.
 func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
-	switch n := update.(type) {
+	switch update.(type) {
 	case chain.BlockConnected:
 		return nil
 
@@ -1899,17 +1900,6 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	// handles both single block disconnects and deeper reorgs robustly.
 	case chain.BlockDisconnected:
 		return s.checkRollback(ctx)
-
-	// We only expect individual transaction notifications for unconfirmed
-	// transactions as they enter the mempool. Confirmed transactions are
-	// handled atomically via FilteredBlockConnected.
-	case chain.RelevantTx:
-		matches := s.prepareTxMatches([]*wtxmgr.TxRecord{n.TxRecord})
-		return s.putTxNotifications(ctx, matches, n.Block)
-
-	case chain.FilteredBlockConnected:
-		matches := s.prepareTxMatches(n.RelevantTxs)
-		return s.putBlockNotifications(ctx, matches, n.Block)
 	}
 
 	return nil
@@ -1930,50 +1920,6 @@ func (s *syncer) processChainEvent(ctx context.Context,
 	default:
 		return s.handleChainUpdate(ctx, event.notification)
 	}
-}
-
-// prepareTxMatches extracts address entries from a batch of transactions and
-// groups them by transaction hash.
-func (s *syncer) prepareTxMatches(recs []*wtxmgr.TxRecord) TxEntries {
-	matches := make(TxEntries, 0, len(recs))
-	for _, rec := range recs {
-		entries := s.extractAddrEntries(rec.MsgTx.TxOut)
-		matches = append(matches, TxEntry{
-			Rec:     rec,
-			Entries: entries,
-		})
-	}
-
-	return matches
-}
-
-// extractAddrEntries collects all addresses from transaction outputs and
-// creates initial AddrEntry objects with output indices.
-func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
-	var entries []AddrEntry
-	for i, output := range txOuts {
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, s.cfg.ChainParams,
-		)
-		if err != nil {
-			log.Warnf("Cannot extract non-std pkScript=%x",
-				output.PkScript)
-
-			continue
-		}
-
-		for _, addr := range addrs {
-			entries = append(entries, AddrEntry{
-				Address: addr,
-				Credit: wtxmgr.CreditEntry{
-					//nolint:gosec // bounded.
-					Index: uint32(i),
-				},
-			})
-		}
-	}
-
-	return entries
 }
 
 // handleScanReq processes a user-initiated rescan request.
@@ -1998,14 +1944,8 @@ func (s *syncer) handleScanReq(ctx context.Context,
 // cancellation occurs, processing the event accordingly.
 func (s *syncer) waitForEvent(ctx context.Context) error {
 	select {
-	// Process asynchronous notifications from the chain backend, such as
-	// new blocks or transactions.
-	case n, ok := <-s.cfg.Chain.Notifications():
-		if !ok {
-			return ErrWalletShuttingDown
-		}
-
-		return s.handleChainUpdate(ctx, n)
+	case event := <-s.chainEventChan:
+		return s.processChainEvent(ctx, event)
 
 	// Handle synchronous rescan or resync requests submitted via the
 	// controller.

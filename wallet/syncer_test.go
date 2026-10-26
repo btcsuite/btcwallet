@@ -1013,7 +1013,10 @@ func TestHandleChainUpdate(t *testing.T) {
 
 	// Act & Assert: Verify that a RelevantTx notification is correctly
 	// processed.
-	err = s.handleChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{TxRecord: rec},
+		matches:      liveMatches(rec),
+	})
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
@@ -1216,7 +1219,10 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 		Txid:     rec.Hash,
 	}).Return(nil, db.ErrTxNotFound).Once()
 
-	event := chainEvent{
+	mailbox := make(chan chainEvent, 1)
+
+	s.chainEventChan = mailbox
+	mailbox <- chainEvent{
 		notification: chain.RelevantTx{TxRecord: rec},
 		matches:      liveMatches(rec),
 	}
@@ -1226,8 +1232,8 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 	).Return(nil).Once()
 
 	// Act: Consume an unconfirmed Manager-prepared notification through the
-	// prepared processor path, with no raw source dependency.
-	err = s.processChainEvent(t.Context(), event)
+	// SQL processor mailbox, with no raw source dependency.
+	err = s.waitForEvent(t.Context())
 
 	// Assert: The notification was written through the store batch API.
 	require.NoError(t, err)
@@ -1280,7 +1286,10 @@ func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
 		),
 	).Return(nil).Once()
 
-	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{TxRecord: rec},
+		matches:      liveMatches(rec),
+	})
 
 	require.NoError(t, err)
 	store.AssertExpectations(t)
@@ -1320,7 +1329,10 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 		matchUnminedTxBatch(walletID, tx, memberAddr, received),
 	).Return(nil).Once()
 
-	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{TxRecord: rec},
+		matches:      liveMatches(rec),
+	})
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
@@ -1404,9 +1416,10 @@ func TestProcessRelevantTxUsesStoreConfirmedBlock(t *testing.T) {
 	).Return(nil).Once()
 
 	// Act: Process a confirmed relevant transaction notification.
-	err = s.processChainUpdate(
-		t.Context(), chain.RelevantTx{TxRecord: rec, Block: block},
-	)
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{TxRecord: rec, Block: block},
+		matches:      liveMatches(rec),
+	})
 
 	// Assert: The batch carries the confirming block but leaves the sync
 	// tip untouched. The mock registers only ApplyTxBatch (and address
@@ -1582,9 +1595,12 @@ func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
 	).Return(nil).Once()
 
 	// Act: Process a filtered block connected notification.
-	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
-		Block:       block,
-		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.FilteredBlockConnected{
+			Block:       block,
+			RelevantTxs: []*wtxmgr.TxRecord{rec},
+		},
+		matches: liveMatches(rec),
 	})
 
 	// Assert: The member credit candidates were written through the store batch
@@ -1709,9 +1725,12 @@ func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
 	).Return(nil).Once()
 
 	// Act: Process a filtered block connected notification.
-	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
-		Block:       block,
-		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.FilteredBlockConnected{
+			Block:       block,
+			RelevantTxs: []*wtxmgr.TxRecord{rec},
+		},
+		matches: liveMatches(rec),
 	})
 
 	// Assert: All output addresses were carried as candidates and left
@@ -1765,7 +1784,10 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		matchBlockTxBatch(walletID, tx, addr, received, block),
 	).Return(nil).Once()
 
-	event := chainEvent{
+	mailbox := make(chan chainEvent, 1)
+
+	s.chainEventChan = mailbox
+	mailbox <- chainEvent{
 		notification: chain.FilteredBlockConnected{
 			Block:       block,
 			RelevantTxs: []*wtxmgr.TxRecord{rec},
@@ -1774,8 +1796,8 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	}
 
 	// Act: Apply a Manager-prepared filtered block on the existing worker's
-	// prepared path, preserving its atomic transaction/checkpoint boundary.
-	err = s.processChainEvent(t.Context(), event)
+	// mailbox path, preserving its atomic transaction/checkpoint boundary.
+	err = s.waitForEvent(t.Context())
 
 	// Assert: The block transaction and sync tip were written together.
 	require.NoError(t, err)
@@ -1792,28 +1814,51 @@ func TestProcessFilteredBlockOrder(t *testing.T) {
 		current      int32
 		notification int32
 	}{
-		{name: "stale", current: 102, notification: 101},
-		{name: "duplicate", current: 102, notification: 102},
-		{name: "gap", current: 100, notification: 102},
+		{
+			name:         "stale",
+			current:      102,
+			notification: 101,
+		},
+		{
+			name:         "duplicate",
+			current:      102,
+			notification: 102,
+		},
+		{
+			name:         "gap",
+			current:      100,
+			notification: 102,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Arrange: Load the current tip while allowing no checkpoint write
+			// for stale, duplicate or skipped progress metadata.
 			store := &walletmock.Store{}
 			expectSyncedTip(store, waddrmgr.BlockStamp{
 				Height: test.current,
 			})
 
 			s := newTestSyncer(Config{}, nil, nil, nil, store, 0)
-			err := s.processChainUpdate(
-				t.Context(), chain.FilteredBlockConnected{
-					Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{
-						Height: test.notification,
-					}},
+
+			// Act: Apply the prepared block through the normal processor.
+			err := s.processChainEvent(
+				t.Context(), chainEvent{
+					notification: chain.FilteredBlockConnected{
+						Block: &wtxmgr.BlockMeta{
+							Block: wtxmgr.Block{
+								Height: test.notification,
+							},
+						},
+					},
 				},
 			)
+
+			// Assert: Reconciliation stays with catch-up rather than forcing a
+			// checkpoint; the strict Store mock permits only the tip read.
 			require.NoError(t, err)
 			store.AssertExpectations(t)
 		})
@@ -3660,15 +3705,8 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and create a P2PKH output for address
-	// extraction.
-	mockPublisher := &mockTxPublisher{}
-	s := newTestSyncer(
-		Config{ChainParams: &chainParams}, nil, nil,
-		mockPublisher,
-		&walletmock.Store{}, 0,
-	)
-
+	// Arrange: Create a standard P2PKH output whose address and credit index
+	// can be checked without any processor or persistence dependencies.
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chainParams,
 	)
@@ -3677,6 +3715,8 @@ func TestExtractAddrEntries(t *testing.T) {
 	require.NoError(t, err)
 
 	txOut := &wire.TxOut{Value: 1000, PkScript: pkScript}
+
+	s := newChainSyncer(nil, &chainParams)
 
 	// Act: Extract address entries from the output.
 	entries := s.extractAddrEntries([]*wire.TxOut{txOut})
@@ -3827,11 +3867,11 @@ func TestWaitForEvent(t *testing.T) {
 	)
 
 	// Mock chain notifications channel.
-	notificationChan := make(chan any, 1)
-	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
+	notificationChan := make(chan chainEvent, 1)
+	s.chainEventChan = notificationChan
 
 	// Case 1: Test event handling when a chain notification arrives.
-	notificationChan <- chain.BlockConnected{}
+	notificationChan <- chainEvent{notification: chain.BlockConnected{}}
 
 	// Act & Assert: Call waitForEvent and verify it correctly processes
 	// the arriving notification.
@@ -3860,9 +3900,17 @@ func TestWaitForEventTargetedScanResults(t *testing.T) {
 		name string
 		err  error
 	}{
-		{name: "scan succeeds"},
-		{name: "scan canceled", err: context.Canceled},
-		{name: "wallet shuts down", err: ErrWalletShuttingDown},
+		{
+			name: "scan succeeds",
+		},
+		{
+			name: "scan canceled",
+			err:  context.Canceled,
+		},
+		{
+			name: "wallet shuts down",
+			err:  ErrWalletShuttingDown,
+		},
 	}
 
 	for _, test := range tests {
@@ -3876,9 +3924,8 @@ func TestWaitForEventTargetedScanResults(t *testing.T) {
 
 			mockChain := &bwmock.Chain{}
 			s.cfg.Chain = mockChain
+			s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
 
-			mockChain.On("Notifications").
-				Return((<-chan any)(nil)).Once()
 			mockChain.On("GetBestBlock").Run(func(mock.Arguments) {
 				require.Equal(
 					t, syncStateRescanning, s.syncState(),
@@ -3926,7 +3973,6 @@ func TestWaitForEventRewindFailure(t *testing.T) {
 	store.On("RewindWallet", mock.Anything,
 		matchRewindWalletParams(0, start),
 	).Return(errDBMockSync).Once()
-	mockChain.On("Notifications").Return((<-chan any)(nil)).Once()
 	require.NoError(t, s.requestScan(t.Context(), &scanReq{
 		typ:        scanTypeRewind,
 		startBlock: start,
@@ -4004,9 +4050,6 @@ func TestSyncerFullRun(t *testing.T) {
 		time.Sleep(1500 * time.Millisecond)
 		cancel()
 	}()
-
-	notificationChan := make(chan any)
-	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
 
 	// Act & Assert: Execute the syncer's run loop and verify that it
 	// completes all initial sync steps and enters the idle loop.
@@ -4643,30 +4686,6 @@ func TestFilterBatch_EmptyFilter(t *testing.T) {
 	require.Len(t, results, 1)
 }
 
-// TestWaitForEvent_NotificationsClosed verifies that the loop exits when the
-// notifications channel is closed.
-func TestWaitForEvent_NotificationsClosed(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup a syncer with a closed notification channel.
-	mockChain := &bwmock.Chain{}
-	s := newTestSyncer(
-		Config{Chain: mockChain}, nil, nil, nil,
-		&walletmock.Store{}, 0,
-	)
-
-	closedChan := make(chan any)
-	close(closedChan)
-
-	mockChain.On("Notifications").Return((<-chan any)(closedChan)).Once()
-
-	// Act: Start waiting for events.
-	err := s.waitForEvent(t.Context())
-
-	// Assert: Verify that the loop exits with the expected error.
-	require.ErrorIs(t, err, ErrWalletShuttingDown)
-}
-
 // TestWaitForEvent_ContextCancelled verifies exit on context cancellation.
 func TestWaitForEvent_ContextCancelled(t *testing.T) {
 	t.Parallel()
@@ -4678,9 +4697,6 @@ func TestWaitForEvent_ContextCancelled(t *testing.T) {
 		Config{Chain: mockChain}, nil, nil, nil,
 		&walletmock.Store{}, 0,
 	)
-
-	blockChan := make(chan any)
-	mockChain.On("Notifications").Return((<-chan any)(blockChan)).Once()
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -5168,10 +5184,12 @@ func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
 			defer mockChain.AssertExpectations(t)
 
 			s.cfg.Chain = mockChain
+			s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
 			s.cfg.SyncMethod = SyncMethodAuto
 			s.cfg.MaxCFilterItems = 100
 			s.cfg.RecoveryWindow = testScanRecoveryWindow
 			other.cfg.Chain = mockChain
+			other.chainSyncer = newChainSyncer(mockChain, other.cfg.ChainParams)
 
 			syncedToBefore, err := s.syncedTo(t.Context())
 			require.NoError(t, err)
@@ -5292,6 +5310,7 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	defer mockChain.AssertExpectations(t)
 
 	s.cfg.Chain = mockChain
+	s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
 	s.cfg.SyncMethod = SyncMethodAuto
 	s.cfg.MaxCFilterItems = 100
 	s.cfg.RecoveryWindow = testScanRecoveryWindow
@@ -5561,6 +5580,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
+		s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
 		s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 		req := &scanReq{
@@ -5593,6 +5613,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
+		s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
 		s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 		req := &scanReq{
@@ -5692,37 +5713,6 @@ func TestProcessChainUpdate(t *testing.T) {
 			setup: func(*walletmock.Store, *bwmock.Chain) {},
 		},
 		{
-			name: "RelevantTx",
-			update: chain.RelevantTx{
-				TxRecord: &wtxmgr.TxRecord{MsgTx: *wire.NewMsgTx(1)},
-			},
-			setup: func(store *walletmock.Store, c *bwmock.Chain) {
-				store.On("GetTx", mock.Anything, db.GetTxQuery{
-					WalletID: 0,
-				}).Return(nil, db.ErrTxNotFound).Once()
-				store.On("ApplyTxBatch", mock.Anything,
-					mock.Anything).Return(nil).Once()
-			},
-		},
-		{
-			name: "FilteredBlockConnected",
-			update: chain.FilteredBlockConnected{
-				Block: &wtxmgr.BlockMeta{
-					Block: wtxmgr.Block{Height: 102},
-				},
-			},
-			setup: func(store *walletmock.Store, c *bwmock.Chain) {
-				expectSyncedTip(
-					store, waddrmgr.BlockStamp{Height: 101},
-				)
-				store.On("ApplyTxBatch", mock.Anything, mock.MatchedBy(
-					func(params db.TxBatchParams) bool {
-						return params.SyncedTo != nil &&
-							params.SyncedTo.Height == 102
-					})).Return(nil).Once()
-			},
-		},
-		{
 			name: "BlockDisconnected",
 			update: chain.BlockDisconnected{
 				Block: wtxmgr.Block{Height: 100, Hash: chainhash.Hash{0x01}},
@@ -5740,7 +5730,9 @@ func TestProcessChainUpdate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange
+			// Arrange: Program the Store/chain outcome for the remaining raw
+			// header and disconnect handlers; transaction payloads are prepared
+			// by Manager and covered through processChainEvent instead.
 			store := &walletmock.Store{}
 			mockChain := &bwmock.Chain{}
 			s := newTestSyncer(
@@ -5754,10 +5746,11 @@ func TestProcessChainUpdate(t *testing.T) {
 
 			tc.setup(store, mockChain)
 
-			// Act
+			// Act: Send control metadata through its unchanged handler.
 			err := s.processChainUpdate(t.Context(), tc.update)
 
-			// Assert
+			// Assert: The header is inert and disconnect performs its
+			// rollback query, with each programmed Store call verified once.
 			require.NoError(t, err)
 			store.AssertExpectations(t)
 		})
@@ -6279,10 +6272,12 @@ func TestRunSyncStep_Success(t *testing.T) {
 	store.On("ListTxns", mock.Anything, mock.Anything).Return(
 		[]db.TxInfo{}, nil).Once()
 
-	notifChan := make(chan any, 1)
-	mockChain.On("Notifications").Return((<-chan any)(notifChan)).Maybe()
+	notifChan := make(chan chainEvent, 1)
+	s.chainEventChan = notifChan
 
-	notifChan <- chain.BlockConnected{Block: wtxmgr.Block{Height: 101}}
+	notifChan <- chainEvent{
+		notification: chain.BlockConnected{Block: wtxmgr.Block{Height: 101}},
+	}
 
 	// Act: Execute a sync step.
 	err := s.runSyncStep(t.Context())
@@ -6766,14 +6761,8 @@ func TestDispatchScanStrategy_FullBlocksError(t *testing.T) {
 func TestExtractAddrEntries_NonStd(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and create various output scripts,
-	// including non-standard and OP_RETURN scripts.
-	s := newTestSyncer(
-		Config{ChainParams: &chainParams},
-		nil, nil, nil,
-		&walletmock.Store{}, 0,
-	)
-
+	// Arrange: Mix malformed, OP_RETURN, and standard scripts to verify the
+	// shared parser retains only outputs that provide address candidates.
 	pkh, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chainParams,
 	)
@@ -6795,6 +6784,8 @@ func TestExtractAddrEntries_NonStd(t *testing.T) {
 			PkScript: pkScript,
 		},
 	}
+
+	s := newChainSyncer(nil, &chainParams)
 
 	// Act: Extract address entries.
 	entries := s.extractAddrEntries(txOuts)
@@ -7300,11 +7291,16 @@ func TestLiveWatchTargetedCommitUncertainty(t *testing.T) {
 
 // newLiveWatchManager creates a SQLite wallet with mocked chain notifications
 // so tests can control registration and block delivery.
-func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet) {
+func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet,
+	chan any) {
+
 	t.Helper()
-	manager := testSQLiteManager(t)
 	client := createTestChain(t)
-	manager.config.ChainSource = client
+	notifications := make(chan any, 1)
+
+	client.On("Notifications").Unset()
+	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+	manager := testSQLiteManagerWithChain(t, client)
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 	client.On("NotifySpent", mock.Anything).Unset()
 
@@ -7323,7 +7319,7 @@ func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet) {
 	})
 	require.NoError(t, err)
 
-	return manager, client, w
+	return manager, client, w, notifications
 }
 
 // TestLiveWatchScanRetry restores a watch whose registration failed after its
@@ -7333,7 +7329,7 @@ func TestLiveWatchScanRetry(t *testing.T) {
 
 	// Arrange: Keep the real sync worker waiting for backend readiness while
 	// preparing one funding block and an external spend of its only credit.
-	manager, client, w := newLiveWatchManager(t)
+	manager, client, w, notifications := newLiveWatchManager(t)
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Once()
 
@@ -7380,8 +7376,6 @@ func TestLiveWatchScanRetry(t *testing.T) {
 
 	// Registration rejects the committed credit once. Only its successful
 	// replay admits the spend notification; no receiving output can match it.
-	notifications := make(chan interface{}, 1)
-	client.On("Notifications").Return((<-chan interface{})(notifications))
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Times(3)
 	client.On("NotifyBlocks").Return(nil).Twice()
@@ -7450,7 +7444,10 @@ func TestLiveWatchScanRetry(t *testing.T) {
 
 	// Act: Announce one new block and hold registration after its commit.
 	// The small-gap path must revoke readiness despite reaching the new tip.
-	notifications <- chain.BlockConnected{}
+	notifications <- chain.BlockConnected{
+		Block: wtxmgr.Block{Hash: hash, Height: 1},
+		Time:  block.Header.Timestamp,
+	}
 
 	<-registering
 
@@ -7487,7 +7484,7 @@ func TestLiveWatchTargetedScanFailure(t *testing.T) {
 
 	// Arrange: Keep the worker waiting for backend readiness and prepare a
 	// historical payment that only the explicitly driven rescan discovers.
-	_, client, w := newLiveWatchManager(t)
+	_, client, w, _ := newLiveWatchManager(t)
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Once()
 
@@ -7555,7 +7552,6 @@ func TestLiveWatchTargetedScanFailure(t *testing.T) {
 
 	// Queue the scan through the worker mailbox so a registration failure
 	// cannot be swallowed as an ordinary targeted-scan execution failure.
-	client.On("Notifications").Return((<-chan any)(nil)).Once()
 	require.NoError(t, s.requestScan(t.Context(), &scanReq{
 		typ:        scanTypeTargeted,
 		startBlock: waddrmgr.BlockStamp{Height: 1},
