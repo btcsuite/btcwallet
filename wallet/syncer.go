@@ -281,6 +281,10 @@ type syncer struct {
 	// txManager rebroadcasts unmined transactions and announces committed
 	// observations while Wallet retains subscriber state and lifecycle.
 	txManager txManager
+	// chainSyncer owns subscriptions and prepares live matches for this
+	// processor; every maintained Wallet receives its Manager's instance.
+	chainSyncer    chainRouter
+	chainEventChan <-chan chainEvent
 }
 
 // A compile-time assertion to ensure that syncer implements chainProcessor.
@@ -322,19 +326,23 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
 // mandatory: every migrated runtime path reads and writes through the Store,
 // so there is no nil-store fallback. The notifier observes successful commits
-// without owning persistence or scan lifecycle.
+// without owning persistence or scan lifecycle. The Manager's required routing
+// owner and inbox supply prepared live events to this existing worker.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
-	walletID uint32) *syncer {
+	walletID uint32, chainSyncer chainRouter,
+	events <-chan chainEvent) *syncer {
 
 	return &syncer{
-		cfg:         cfg,
-		addrStore:   addrStore,
-		txStore:     txStore,
-		scanReqChan: make(chan *scanReq, 1),
-		txManager:   txManager,
-		store:       store,
-		walletID:    walletID,
+		cfg:            cfg,
+		addrStore:      addrStore,
+		txStore:        txStore,
+		scanReqChan:    make(chan *scanReq, 1),
+		txManager:      txManager,
+		store:          store,
+		walletID:       walletID,
+		chainSyncer:    chainSyncer,
+		chainEventChan: events,
 	}
 }
 
@@ -1907,6 +1915,23 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	return nil
 }
 
+// processChainEvent applies Manager-prepared matches without parsing them
+// again. Control and disconnect notifications keep their existing handlers.
+func (s *syncer) processChainEvent(ctx context.Context,
+	event chainEvent) error {
+
+	switch n := event.notification.(type) {
+	case chain.RelevantTx:
+		return s.putTxNotifications(ctx, event.matches, n.Block)
+
+	case chain.FilteredBlockConnected:
+		return s.putBlockNotifications(ctx, event.matches, n.Block)
+
+	default:
+		return s.handleChainUpdate(ctx, event.notification)
+	}
+}
+
 // prepareTxMatches extracts address entries from a batch of transactions and
 // groups them by transaction hash.
 func (s *syncer) prepareTxMatches(recs []*wtxmgr.TxRecord) TxEntries {
@@ -1985,38 +2010,45 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 	// Handle synchronous rescan or resync requests submitted via the
 	// controller.
 	case job := <-s.scanReqChan:
-		err := s.handleScanReq(ctx, job)
-		if err == nil {
-			return nil
-		}
-
-		if errors.Is(err, context.Canceled) ||
-			errors.Is(err, ErrWalletShuttingDown) {
-
-			return err
-		}
-
-		// A committed scan can leave live watches unregistered. Let that
-		// failure restart initialization instead of bypassing its retry.
-		if job.typ == scanTypeTargeted &&
-			s.syncState() != syncStateSyncing {
-
-			// Rescan returns once the request is queued, so this
-			// execution failure cannot reach its caller. For now,
-			// it is visible only in the logs; swallow it here to
-			// keep live notification processing running.
-			log.Errorf("Targeted rescan failed: %v", err)
-
-			return nil
-		}
-
-		return err
+		return s.handleScanEvent(ctx, job)
 
 	// Exit gracefully if the context is canceled or the wallet is shutting
 	// down.
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// handleScanEvent preserves asynchronous scan error policy: a failed watch
+// refresh restarts initialization, while ordinary targeted failures remain
+// local because submission already returned before worker execution.
+func (s *syncer) handleScanEvent(ctx context.Context, job *scanReq) error {
+	err := s.handleScanReq(ctx, job)
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, ErrWalletShuttingDown) {
+
+		return err
+	}
+
+	// A committed scan can leave live watches unregistered. Let that
+	// failure restart initialization instead of bypassing its retry.
+	if job.typ == scanTypeTargeted &&
+		s.syncState() != syncStateSyncing {
+
+		// Rescan returns once the request is queued, so this
+		// execution failure cannot reach its caller. For now,
+		// it is visible only in the logs; swallow it here to
+		// keep live notification processing running.
+		log.Errorf("Targeted rescan failed: %v", err)
+
+		return nil
+	}
+
+	return err
 }
 
 // scanWithRewind rewinds the wallet's sync status to the requested start

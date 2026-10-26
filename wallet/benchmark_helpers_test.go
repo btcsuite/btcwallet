@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -239,6 +240,9 @@ func decimalWidth(value int) int {
 
 // benchmarkWalletConfig holds configuration for benchmark wallet setup.
 type benchmarkWalletConfig struct {
+	// chainSource selects publication and registration before owner assembly.
+	chainSource chain.Interface
+
 	// scopes is the key scopes to create accounts in.
 	scopes []waddrmgr.KeyScope
 
@@ -309,8 +313,20 @@ func setupBenchmarkWallet(tb testing.TB,
 		}
 	}
 
+	// Select the backend before the owner captures it, so subscription and
+	// publication cannot silently use different sources.
+	if cfg.chainSource != nil {
+		w.cfg.Chain = cfg.chainSource
+	}
+
+	w.chainSyncer = newChainSyncer(w.cfg.Chain, w.cfg.ChainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
+
 	if w.sync == nil {
-		w.sync = newSyncer(w.cfg, w.addrStore, w.txStore, w, w.store, w.id)
+		w.sync = newSyncer(
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+			w.chainSyncer, w.chainEventChan,
+		)
 	}
 
 	require.NotNil(tb, w.store)

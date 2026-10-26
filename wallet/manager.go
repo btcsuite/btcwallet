@@ -154,6 +154,9 @@ type Manager struct {
 
 	// config is the immutable shared policy retained at construction.
 	config ManagerConfig
+
+	// chainSyncer owns live routing for every Wallet served by this Manager.
+	chainSyncer chainRouter
 }
 
 // NewManager opens the one database described by cfg and returns a Manager that
@@ -239,7 +242,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 			return wallets, err
 		}
 
-		wallet := newManagedWallet(cfg, walletData)
+		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
 		wallets = append(wallets, wallet)
 
 		err = wallet.start(ctx)
@@ -395,6 +398,46 @@ func (m *Manager) Stop() error {
 	return m.stopWallets(nil)
 }
 
+// chainRecipients fixes active membership without holding the Manager lock
+// across matching or potentially blocked delivery to a Wallet mailbox.
+func (m *Manager) chainRecipients() []*Wallet {
+	m.RLock()
+	defer m.RUnlock()
+
+	wallets := make([]*Wallet, 0, len(m.wallets))
+	for _, w := range m.wallets {
+		wallets = append(wallets, w)
+	}
+
+	return wallets
+}
+
+// dispatchChainEvent admits source-ordered events to existing Wallet workers.
+// Capacity-one mailboxes deliberately backpressure the sole reader; Wallet
+// and reader cancellation both release delivery during terminal shutdown.
+func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
+	wallets := m.chainRecipients()
+
+	events := m.chainSyncer.routeChainEvent(n, wallets)
+	log.Debugf("Routing chain event %T to %d Wallets", n, len(events))
+
+	for _, w := range wallets {
+		event, relevant := events[w.id]
+		if !relevant {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-w.lifetimeCtx.Done():
+		case w.chainEventChan <- event:
+		}
+	}
+
+	return nil
+}
+
 // String returns a summary of the active wallets managed by the Manager.
 func (m *Manager) String() string {
 	m.RLock()
@@ -525,7 +568,7 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	return newManagedWallet(walletCfg, data), nil
+	return newManagedWallet(walletCfg, data, m.chainSyncer), nil
 }
 
 // validateInitialAccounts checks resolved scope and script ownership before

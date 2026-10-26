@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -13,6 +14,32 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// chainRouter supplies live subscriptions and prepared events while its caller
+// owns the reader lifetime and each Wallet owns transaction persistence.
+type chainRouter interface {
+	// run reads the borrowed stream until cancellation or source failure.
+	run(ctx context.Context,
+		dispatch func(context.Context, any) error) error
+
+	// routeChainEvent prepares matches for the current membership snapshot.
+	routeChainEvent(n any, wallets []*Wallet) map[uint32]chainEvent
+
+	// watchAddresses records recipients before native tip-based activation.
+	watchAddresses(ctx context.Context, id uint32,
+		addrs []address.Address) error
+
+	// watchOutpoints records input-only recipients before native activation.
+	watchOutpoints(ctx context.Context, id uint32,
+		points []*wire.OutPoint) error
+
+	// notifyReceived preserves accepted publication's native subscription.
+	notifyReceived(ctx context.Context, id uint32,
+		addrs []address.Address) error
+
+	// notifyBlocks enables the backend's existing block/control notifications.
+	notifyBlocks(ctx context.Context) error
+}
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
 // Manager supplies its lifetime to the blocking reader instead of giving this
@@ -27,6 +54,9 @@ type chainSyncer struct {
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
 }
+
+// chainSyncer implements the behavior shared by Manager and its Wallets.
+var _ chainRouter = (*chainSyncer)(nil)
 
 // watchRegistry indexes observed addresses/outpoints directly to Wallet ID
 // sets, so shared interests need no per-Wallet scan or second reverse index.
@@ -331,4 +361,28 @@ func (r *watchRegistry) matchRecipients(match TxEntry,
 	}
 
 	return recipients
+}
+
+// run is the sole managed consumer of the borrowed backend stream. A
+// closed stream is terminal; cancellation releases blocked mailbox delivery.
+func (s *chainSyncer) run(ctx context.Context,
+	dispatch func(context.Context, any) error) error {
+
+	notifications := s.source.Notifications()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case n, ok := <-notifications:
+			if !ok {
+				return errors.New("chain notification source closed")
+			}
+
+			err := dispatch(ctx, n)
+			if err != nil {
+				return err
+			}
+		}
+	}
 }

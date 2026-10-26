@@ -54,8 +54,15 @@ func newTestSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 		txNotifier:  &Wallet{},
 	}
 
+	// Keep live preparation on the same source/network as historical work.
+	params := cfg.ChainParams
+	if params == nil {
+		params = &chainParams
+	}
+
 	return newSyncer(
 		cfg, addrStore, txStore, manager, store, walletID,
+		newChainSyncer(cfg.Chain, params), make(chan chainEvent, 1),
 	)
 }
 
@@ -959,6 +966,12 @@ func TestAdvanceChainSync(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// liveMatches builds Manager-prepared event data for processor tests using
+// the real output parser without subscribing a chain source.
+func liveMatches(recs ...*wtxmgr.TxRecord) TxEntries {
+	return newChainSyncer(nil, &chainParams).prepareTxMatches(recs)
+}
+
 // TestHandleChainUpdate verifies notification handling.
 func TestHandleChainUpdate(t *testing.T) {
 	t.Parallel()
@@ -1203,12 +1216,18 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 		Txid:     rec.Hash,
 	}).Return(nil, db.ErrTxNotFound).Once()
 
+	event := chainEvent{
+		notification: chain.RelevantTx{TxRecord: rec},
+		matches:      liveMatches(rec),
+	}
+
 	store.On("ApplyTxBatch", mock.Anything,
 		matchUnminedTxBatch(walletID, tx, addr, received),
 	).Return(nil).Once()
 
-	// Act: Process an unconfirmed relevant transaction notification.
-	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	// Act: Consume an unconfirmed Manager-prepared notification through the
+	// prepared processor path, with no raw source dependency.
+	err = s.processChainEvent(t.Context(), event)
 
 	// Assert: The notification was written through the store batch API.
 	require.NoError(t, err)
@@ -1746,11 +1765,17 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		matchBlockTxBatch(walletID, tx, addr, received, block),
 	).Return(nil).Once()
 
-	// Act: Process a filtered block connected notification.
-	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
-		Block:       block,
-		RelevantTxs: []*wtxmgr.TxRecord{rec},
-	})
+	event := chainEvent{
+		notification: chain.FilteredBlockConnected{
+			Block:       block,
+			RelevantTxs: []*wtxmgr.TxRecord{rec},
+		},
+		matches: liveMatches(rec),
+	}
+
+	// Act: Apply a Manager-prepared filtered block on the existing worker's
+	// prepared path, preserving its atomic transaction/checkpoint boundary.
+	err = s.processChainEvent(t.Context(), event)
 
 	// Assert: The block transaction and sync tip were written together.
 	require.NoError(t, err)
@@ -2984,7 +3009,7 @@ func TestResolveScanTargetsDoesNotUseSQLAccountID(t *testing.T) {
 			number := uint32(7)
 			scope := waddrmgr.KeyScopeBIP0084
 			store := &walletmock.Store{}
-			s := newSyncer(Config{}, nil, nil, nil, store, 3)
+			s := newTestSyncer(Config{}, nil, nil, nil, store, 3)
 			store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
 				WalletID:      3,
 				SkipBalance:   true,
@@ -3028,7 +3053,7 @@ func TestResolveScanTargetsSuppliedPath(t *testing.T) {
 	number := uint32(7)
 	scope := waddrmgr.KeyScopeBIP0084
 	store := &walletmock.Store{}
-	s := newSyncer(Config{}, nil, nil, nil, store, 3)
+	s := newTestSyncer(Config{}, nil, nil, nil, store, 3)
 	store.On("ListAccounts", t.Context(), db.ListAccountsQuery{
 		WalletID:      3,
 		SkipBalance:   true,
@@ -7738,7 +7763,7 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 			w, deps := createStartedWalletWithMocks(t)
 			s := newSyncer(
 				w.cfg, w.addrStore, w.txStore, w,
-				deps.store, w.id,
+				deps.store, w.id, w.chainSyncer, w.chainEventChan,
 			)
 			events, _, err := w.SubscribeTxns(t.Context())
 			require.NoError(t, err)
@@ -7801,7 +7826,7 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	w, deps := createStartedWalletWithMocks(t)
 	s := newSyncer(
 		w.cfg, w.addrStore, w.txStore, w,
-		deps.store, w.id,
+		deps.store, w.id, w.chainSyncer, w.chainEventChan,
 	)
 	events, _, err := w.SubscribeTxns(t.Context())
 	require.NoError(t, err)

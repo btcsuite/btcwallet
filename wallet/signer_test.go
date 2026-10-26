@@ -1872,6 +1872,11 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 		id: walletInfo.ID,
 	}
 
+	// Supply the same routing dependency as Manager assembly before address
+	// or import calls can activate native notifications on this fixture.
+	w.chainSyncer = newChainSyncer(chain, &chainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
+
 	// Disable auto-lock timing so this fixture exercises only its API call.
 	w.lockTimer.Stop()
 	startLoadedWalletForTest(t, w)
@@ -2227,6 +2232,11 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 		},
 		id: walletInfo.ID,
 	}
+
+	// Supply the same routing dependency as Manager assembly before address
+	// or import calls can activate native notifications on this fixture.
+	w.chainSyncer = newChainSyncer(chain, &chainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
 
 	// Disable auto-lock timing so this fixture exercises only its API call.
 	w.lockTimer.Stop()

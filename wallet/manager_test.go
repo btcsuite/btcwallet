@@ -66,9 +66,8 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 			Return(nil).Once()
 	}
 
-	chainSource := createTestChain(t)
 	manager := testSQLManager(t, store)
-	manager.config.ChainSource = chainSource
+	chainSource := manager.config.ChainSource
 	manager.config.SyncMethod = SyncMethodFullBlocks
 	manager.config.WalletSyncRetryInterval = 2 * time.Second
 	manager.config.RecoveryWindow = 12
@@ -703,6 +702,8 @@ func newManagerLifecycleTest(t *testing.T,
 			ChainParams: chainParams,
 		},
 	}
+
+	manager.chainSyncer = newChainSyncer(chain, &manager.config.ChainParams)
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
 	t.Cleanup(func() {
@@ -2650,4 +2651,51 @@ func TestChainSyncerProgressRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestManagerChainEventMembership verifies snapshots include a newly published
+// Wallet without retaining the Manager lock during mailbox delivery.
+func TestManagerChainEventMembership(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Only the first Wallet is published for the initial snapshot.
+	first := &Wallet{
+		id:             1,
+		lifetimeCtx:    t.Context(),
+		chainEventChan: make(chan chainEvent, 1),
+	}
+	second := &Wallet{
+		id:             2,
+		lifetimeCtx:    t.Context(),
+		chainEventChan: make(chan chainEvent, 1),
+	}
+
+	manager := &Manager{
+		wallets:     map[string]*Wallet{"first": first},
+		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
+	}
+
+	// Act: Publish under the existing membership lock between two events.
+	require.NoError(
+		t, manager.dispatchChainEvent(
+			t.Context(), chain.BlockConnected{},
+		),
+	)
+	manager.Lock()
+	manager.wallets["second"] = second
+	manager.Unlock()
+	<-first.chainEventChan
+	require.NoError(
+		t, manager.dispatchChainEvent(
+			t.Context(), chain.BlockDisconnected{},
+		),
+	)
+
+	// Assert: Both current members receive the next disconnect unchanged.
+	require.IsType(
+		t, chain.BlockDisconnected{}, (<-first.chainEventChan).notification,
+	)
+	require.IsType(
+		t, chain.BlockDisconnected{}, (<-second.chainEventChan).notification,
+	)
 }
