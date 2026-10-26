@@ -13,7 +13,7 @@ func TestStateSecureByDefault(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a new state in Initialized (default) mode.
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 	s := newWalletState(syncer)
 
 	// Act & Assert: Verify initial state.
@@ -52,7 +52,7 @@ func TestStateSecureByDefault(t *testing.T) {
 func TestStateAuthentication(t *testing.T) {
 	t.Parallel()
 
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 	s := newWalletState(syncer)
 
 	// Arrange: Start the wallet (must be started to be useful).
@@ -151,7 +151,7 @@ func TestStateCanSignLifecycle(t *testing.T) {
 func TestStateSynchronization(t *testing.T) {
 	t.Parallel()
 
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 	s := newWalletState(syncer)
 	require.NoError(t, s.toStarting())
 	require.NoError(t, s.toStarted())
@@ -187,7 +187,7 @@ func TestStateNilSyncer(t *testing.T) {
 func TestStateThreadSafety(t *testing.T) {
 	t.Parallel()
 
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 	s := newWalletState(syncer)
 
 	// Arrange: Hammer the start/stop transitions.
@@ -232,7 +232,7 @@ func TestStateThreadSafety(t *testing.T) {
 func TestValidateSynced(t *testing.T) {
 	t.Parallel()
 
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 	s := newWalletState(syncer)
 
 	// Case 1: Not started.
@@ -353,7 +353,7 @@ func TestStateString(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a specific state.
-	ms := &mockChainSyncer{}
+	ms := &mockChainProcessor{}
 	ms.On("syncState").Return(syncStateSyncing)
 
 	state := newWalletState(ms)
@@ -560,7 +560,7 @@ func TestStateAuthChecks(t *testing.T) {
 func TestStateAuxiliaryMethods(t *testing.T) {
 	t.Parallel()
 
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 	s := newWalletState(syncer)
 
 	// Case 1: Initialized -> All forbidden.
