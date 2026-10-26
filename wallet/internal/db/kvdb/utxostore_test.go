@@ -496,46 +496,6 @@ func TestLeaseOutputSuccess(t *testing.T) {
 	require.True(t, lease.Expiration.After(time.Now().UTC()))
 }
 
-// TestLeaseNoExpiryRejected verifies that kvdb rejects leases without expiry
-// instead of writing a lease that expires immediately.
-func TestLeaseNoExpiryRejected(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Store one known credit.
-	dbConn, cleanup := newTestDB(t)
-	t.Cleanup(cleanup)
-
-	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore, nil)
-	outPoint := insertKnownCredit(
-		t, dbConn, txStore, []byte{0x51}, 2500, 2,
-	)
-
-	// Act: Lease it without expiry, singly and as a set.
-	_, leaseErr := store.LeaseOutput(
-		t.Context(), db.LeaseOutputParams{
-			ID:       db.LockID{1},
-			OutPoint: outPoint,
-			NoExpiry: true,
-		},
-	)
-	_, setErr := store.LeaseOutputs(
-		t.Context(), db.LeaseOutputsParams{
-			ID:        db.LockID{1},
-			OutPoints: []wire.OutPoint{outPoint},
-			NoExpiry:  true,
-		},
-	)
-
-	leases, err := store.ListLeasedOutputs(t.Context(), 0)
-	require.NoError(t, err)
-
-	// Assert: Both calls fail and leave no lease.
-	require.ErrorIs(t, leaseErr, errNoExpiryLease)
-	require.ErrorIs(t, setErr, errNoExpiryLease)
-	require.Empty(t, leases)
-}
-
 // TestLeaseOutputRejectsSpentByUnminedTx verifies leases cannot be acquired for
 // outputs already spent by an unmined wallet transaction.
 func TestLeaseOutputRejectsSpentByUnminedTx(t *testing.T) {
