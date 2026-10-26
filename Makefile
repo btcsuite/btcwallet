@@ -35,7 +35,10 @@ LINT_WORKERS = --concurrency=$(workers)
 
 GOLANGCI_LINT = golangci-lint run -v --config .golangci.yml $(LINT_WORKERS)
 LINT_DB_SQLITE_PKGS = ./wallet/internal/db/sqlite ./wallet/internal/db/itest
-LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg ./wallet/internal/db/itest
+
+# Tagged benchmark fixtures need the PostgreSQL CI type and lint checks too.
+LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg \
+	./wallet/internal/db/itest ./wallet/bench
 
 define lint_targets
 	@$(call print, "Linting source.")
