@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
@@ -489,22 +490,31 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	require.ErrorContains(t, err, "lookup input conflict")
 }
 
-// TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing verifies that the
-// rollback sync-state rewind surfaces database errors when the block table is
-// gone.
+// TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing checks that a
+// missing block table stops rollback, whichever query first reads the table.
 func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Drop the shared block table so rollback cannot read history.
 	store := NewTestStore(t)
 	dropTableForCorruption(t, store, "blocks")
 
+	// Act: Ask rollback to disconnect blocks from height one.
 	err := store.RollbackToBlock(t.Context(), 1)
-	require.Error(t, err)
 
-	// Rollback rewinds sync-state references by querying the greatest stored
-	// block below the rollback boundary, so both SQL backends now touch the
-	// blocks table before the delete step.
-	require.ErrorContains(t, err, "rewind wallet sync state heights")
+	// Assert: Require the SQL wrapper and native code, so wrapper text cannot
+	// pass this check. Missing tables use SQLSTATE 42P01 on PostgreSQL and
+	// SQLITE_ERROR (1) on SQLite, regardless of which query reads them first.
+	var sqlErr *dberr.SQLError
+	require.ErrorAs(t, err, &sqlErr)
+	require.Equal(t, testBackend(), sqlErr.Backend)
+
+	expectedCode := "42P01"
+	if testBackend() == dberr.BackendSQLite {
+		expectedCode = "1"
+	}
+
+	require.Equal(t, expectedCode, sqlErr.Code)
 }
 
 // TestLeaseAndReleaseReturnQueryErrorsWhenLeaseTablesMissing verifies that the
