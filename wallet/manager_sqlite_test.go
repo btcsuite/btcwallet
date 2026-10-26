@@ -140,19 +140,20 @@ func TestFundPsbtReservationSQLite(t *testing.T) {
 	// Arrange: Create a real SQLite wallet over a current chain so the
 	// real syncer reaches synced at genesis, and store two pending credits
 	// to a committed wallet script.
-	chain, idle := newCurrentTestChain(t)
+	chain := newTestChain(t, true)
 	chain.On("BlockStamp").Return(&waddrmgr.BlockStamp{
 		Hash: *chainParams.GenesisHash,
 	}, nil).Maybe()
 
 	w := createSQLiteWallet(t, chain)
-	select {
-	case <-idle:
-	case <-time.After(5 * time.Second):
-		t.Fatal("wallet did not finish startup sync")
-	}
-
-	require.Equal(t, syncStateSynced, w.state.syncState())
+	// Manager opens the shared stream before Wallet startup. Observe the
+	// Wallet's own sync status before funding, rather than source readiness.
+	require.Eventually(
+		t, func() bool {
+			info, err := w.Info(t.Context())
+			return err == nil && info.Synced
+		}, 5*time.Second, time.Millisecond,
+	)
 
 	script, first, second := storeFundingCredits(t, w)
 	fund := func(value int64, input wire.OutPoint) (*FundResult, error) {

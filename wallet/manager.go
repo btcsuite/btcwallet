@@ -157,6 +157,17 @@ type Manager struct {
 
 	// chainSyncer owns live routing for every Wallet served by this Manager.
 	chainSyncer chainRouter
+
+	// lifetimeCtx outlives construction and startup requests. Wallets keep
+	// their own lifetimes; canceling this one releases shared event delivery.
+	//nolint:containedctx // Manager owns and joins the shared reader lifetime.
+	lifetimeCtx context.Context
+
+	// cancel signals terminal reader shutdown before draining Wallet work.
+	cancel context.CancelFunc
+
+	// wg joins routing after releasing the lock needed by recipient snapshots.
+	wg sync.WaitGroup
 }
 
 // NewManager opens the one database described by cfg and returns a Manager that
@@ -220,11 +231,20 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	// another reference in the Manager's otherwise immutable configuration.
 	cfg.KVDBPubPassphrase = nil
 
-	return &Manager{
-		wallets: make(map[string]*Wallet),
-		backend: backend,
-		config:  cfg,
-	}, nil
+	// Runtime ownership is independent of the request that opened storage.
+	lifetimeCtx, cancel := context.WithCancel(context.Background())
+
+	m := &Manager{
+		wallets:     make(map[string]*Wallet),
+		backend:     backend,
+		config:      cfg,
+		lifetimeCtx: lifetimeCtx,
+		cancel:      cancel,
+	}
+
+	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+
+	return m, nil
 }
 
 // startWallets assembles and starts durable Wallets in stable identifier order.
@@ -269,6 +289,8 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 // from failed Start/Create calls that are not in m.wallets.
 // The caller holds the write lock and must have a non-nil backend.
 func (m *Manager) stopWallets(wallets []*Wallet) error {
+	m.cancel()
+
 	for _, wallet := range m.wallets {
 		wallets = append(wallets, wallet)
 	}
@@ -291,7 +313,8 @@ func (m *Manager) stopWallets(wallets []*Wallet) error {
 	}
 
 	// Clear runtime ownership after shutdown has settled. The nil backend
-	// keeps later Start calls from reopening a terminal Manager.
+	// keeps later Start calls from reopening a terminal Manager. Wallet work
+	// is drained; the reader uses no Store and joins after its caller unlocks.
 	err := errors.Join(errs...)
 	err = errors.Join(err, m.backend.close())
 	m.backend = nil
@@ -351,7 +374,15 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 	}
 
 	m.Lock()
-	defer m.Unlock()
+	defer func() {
+		// A terminal startup must release membership before joining a
+		// reader; successful startup leaves that reader running.
+		m.Unlock()
+
+		if m.lifetimeCtx.Err() != nil {
+			m.wg.Wait()
+		}
+	}()
 
 	err := ctx.Err()
 	if err != nil {
@@ -376,6 +407,12 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 		return nil, errors.Join(err, m.stopWallets(wallets))
 	}
 
+	// Enroll under admission so shutdown cannot miss a reader whose
+	// goroutine has not yet been scheduled.
+	m.wg.Add(1)
+
+	go m.startChainSyncer()
+
 	return wallets, nil
 }
 
@@ -383,7 +420,14 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 // It waits for startup, accepted creation, and any other Stop to finish.
 // After shutdown, Stop is a no-op.
 func (m *Manager) Stop() error {
+	// Release a reader blocked on a full mailbox before waiting for admission.
+	m.cancel()
+
 	m.Lock()
+
+	// LIFO releases membership before joining, including repeated Stop after
+	// storage closed. The reader can be parked on its recipient snapshot.
+	defer m.wg.Wait()
 	defer m.Unlock()
 
 	// Preserve terminal admission on repeated no-op shutdown calls.
@@ -396,6 +440,25 @@ func (m *Manager) Stop() error {
 	m.started.Store(true)
 
 	return m.stopWallets(nil)
+}
+
+// startChainSyncer reads the shared stream until shutdown or source loss.
+// Its caller enrolls it before launch so terminal shutdown joins the reader.
+func (m *Manager) startChainSyncer() {
+	err := m.chainSyncer.run(m.lifetimeCtx, m.dispatchChainEvent)
+
+	// No reader work follows Done. Automatic teardown can therefore
+	// reuse Stop without waiting for this goroutine to join itself.
+	m.wg.Done()
+
+	if err != nil && m.lifetimeCtx.Err() == nil {
+		log.Warnf("Chain notification reader stopped: %v", err)
+
+		err := m.Stop()
+		if err != nil {
+			log.Errorf("Unable to stop manager: %v", err)
+		}
+	}
 }
 
 // chainRecipients fixes active membership without holding the Manager lock
@@ -471,14 +534,18 @@ func validateManagedWalletName(name string) error {
 // database transaction.
 func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 	m.Lock()
-	defer m.Unlock()
+	defer func() {
+		// Failed creation terminally drains the Manager; its reader may
+		// still need membership, so join only after releasing admission.
+		m.Unlock()
 
-	if !m.started.Load() {
-		err := ErrStateForbidden
-		if m.backend == nil {
-			err = ErrManagerStopped
+		if m.lifetimeCtx.Err() != nil {
+			m.wg.Wait()
 		}
+	}()
 
+	err := m.checkCreate()
+	if err != nil {
 		return nil, err
 	}
 
@@ -520,6 +587,25 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 	m.wallets[w.cfg.Name] = w
 
 	return w, nil
+}
+
+// checkCreate rejects terminal admission after Stop cancels the reader, even
+// before Stop obtains admission and closes storage. The caller holds the lock.
+func (m *Manager) checkCreate() error {
+	if m.lifetimeCtx.Err() != nil {
+		return ErrManagerStopped
+	}
+
+	if !m.started.Load() {
+		err := ErrStateForbidden
+		if m.backend == nil {
+			err = ErrManagerStopped
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 // createWallet prepares a durable candidate while Create holds the Manager

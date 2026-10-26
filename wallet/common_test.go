@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -139,6 +138,7 @@ func newTestChain(tb testing.TB, current bool) *bwmock.Chain {
 
 	// Info reports the chain name without selecting any sync behavior.
 	chain.On("BackEnd").Return("mock").Maybe()
+	chain.On("Notifications").Return((<-chan any)(nil)).Maybe()
 
 	// Sync initialization and committed batches register the watch set.
 	// Tests that inspect registration replace these defaults.
@@ -167,25 +167,6 @@ func newTestChain(tb testing.TB, current bool) *bwmock.Chain {
 	})
 
 	return chain
-}
-
-// newCurrentTestChain builds a current mock chain and returns a channel that
-// closes when the syncer first waits for chain notifications. The syncer only
-// waits there after startup sync has stored the synced state, so the channel
-// marks the wallet as ready without polling. The returned notification channel
-// is nil, so the syncer then idles until shutdown.
-func newCurrentTestChain(tb testing.TB) (*bwmock.Chain, <-chan struct{}) {
-	tb.Helper()
-
-	chain := newTestChain(tb, true)
-	idle := make(chan struct{})
-
-	var once sync.Once
-	chain.On("Notifications").Run(func(mock.Arguments) {
-		once.Do(func() { close(idle) })
-	}).Return((<-chan any)(nil)).Maybe()
-
-	return chain, idle
 }
 
 // testSQLiteManager opens a Manager over a real SQLite database at a fresh temp
@@ -228,8 +209,12 @@ func testSQLiteManagerWithChain(tb testing.TB, chain *bwmock.Chain) *Manager {
 func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 	tb.Helper()
 
+	// Match the service lifetime; the existing Stop cleanup cancels and joins.
+	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		wallets: make(map[string]*Wallet),
+		lifetimeCtx: lifetimeCtx,
+		cancel:      cancel,
+		wallets:     make(map[string]*Wallet),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },

@@ -29,6 +29,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -3360,4 +3361,71 @@ func TestNewAddressKVDBAllocatesSuccessive(t *testing.T) {
 
 	require.NotEqual(t, first.Addr, second.Addr)
 	require.NotEqual(t, second.Addr, third.Addr)
+}
+
+// TestNewAddressKVDBRoutesLiveTransactions prevents native address activation
+// from bypassing Manager ownership and losing the first payment notification.
+func TestNewAddressKVDBRoutesLiveTransactions(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the real kvdb allocation path, but emit a payment inside
+	// its native subscription call, before NewAddress can return to its caller.
+	m := testKVDBManager(t)
+
+	// The kvdb fixture supplies this concrete mock for native expectations.
+	client, _ := m.config.ChainSource.(*bwmock.Chain)
+
+	params := sqliteCreateParams(t)
+	params.PubPassphrase = []byte("public")
+	w, err := m.Create(params)
+	require.NoError(t, err)
+
+	var (
+		callbackErr error
+		record      *wtxmgr.TxRecord
+		matched     TxEntries
+	)
+	client.On("NotifyReceived", mock.MatchedBy(
+		func(addrs []address.Address) bool { return len(addrs) == 1 },
+	)).Run(func(args mock.Arguments) {
+		addrs, ok := args.Get(0).([]address.Address)
+		if !ok {
+			callbackErr = errors.New("unexpected subscription addresses")
+			return
+		}
+
+		// Return callback failures to the test goroutine: the native method
+		// runs on Wallet's request worker, where FailNow is not permitted.
+		script, err := txscript.PayToAddrScript(addrs[0])
+		if err != nil {
+			callbackErr = err
+			return
+		}
+		tx := wire.NewMsgTx(2)
+		tx.AddTxOut(&wire.TxOut{Value: 1, PkScript: script})
+		record, callbackErr = wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		if callbackErr != nil {
+			return
+		}
+
+		events := m.chainSyncer.routeChainEvent(
+			chain.RelevantTx{TxRecord: record}, []*Wallet{w},
+		)
+		matched = events[w.id].matches
+	}).Return(nil).Once()
+
+	// Act: Allocate through the public single-address API; its response joins
+	// the callback before the test inspects the captured routing result.
+	_, err = w.NewAddress(
+		t.Context(), NewAccountSelectorByNumber(
+			waddrmgr.KeyScopeBIP0084, 0,
+		), false,
+	)
+
+	// Assert: Ownership was visible during activation rather than installed
+	// afterward. Fixture cleanup verifies the one native subscription call.
+	require.NoError(t, err)
+	require.NoError(t, callbackErr)
+	require.Len(t, matched, 1)
+	require.Same(t, record, matched[0].Rec)
 }

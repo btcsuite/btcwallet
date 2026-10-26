@@ -208,8 +208,9 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	t.Helper()
 
 	// Arrange: provide the complete Manager policy, including a strict chain
-	// mock with no expected calls because this test stops before chain sync.
+	// mock whose one stream is read even before a Wallet exists.
 	chainSource := &bwmock.Chain{}
+	chainSource.On("Notifications").Return((<-chan any)(nil)).Once()
 	h := &HarnessTest{
 		T:              t,
 		dbType:         dbType,
@@ -248,8 +249,8 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	}
 
 	// Assert: a fresh Manager proves teardown released the database, while
-	// the strict chain mock proves neither failed creation nor cleanup
-	// crossed into chain synchronization.
+	// the strict chain mock verifies that the shared reader was acquired only
+	// once and teardown did not take ownership of the borrowed backend.
 	reopenCfg := wallet.ManagerConfig{
 		Backend:     backend,
 		DataSource:  h.WalletDBSource,
