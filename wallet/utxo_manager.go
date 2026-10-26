@@ -93,8 +93,31 @@ type LeasedOutput struct {
 	// LockID is the lease owner identifier.
 	LockID wtxmgr.LockID
 
-	// Expiration is when the current lease expires.
+	// Expiration is when the current lease expires. It is zero when
+	// NoExpiry is set.
 	Expiration time.Time
+
+	// NoExpiry reports that the lease has no expiration. It lasts until its
+	// owner releases it or a confirmed transaction spends the output.
+	NoExpiry bool
+}
+
+// LeaseOption configures a LeaseOutput call.
+type LeaseOption func(*leaseOptions)
+
+// leaseOptions holds the optional LeaseOutput settings.
+type leaseOptions struct {
+	noExpiry bool
+}
+
+// WithNoExpiry requests a lease without expiration. It lasts until its owner
+// releases it or a confirmed transaction spends the output, and the duration
+// passed to LeaseOutput must be zero. An owner whose spend never confirms must
+// release the lease explicitly.
+func WithNoExpiry() LeaseOption {
+	return func(opts *leaseOptions) {
+		opts.noExpiry = true
+	}
 }
 
 // UtxoQuery holds the set of options for a ListUnspent query.
@@ -122,9 +145,11 @@ type UtxoManager interface {
 	GetUtxo(ctx context.Context, prevOut wire.OutPoint) (*Utxo, error)
 
 	// LeaseOutput locks an output for a given duration, preventing it from
-	// being used in transactions.
+	// being used in transactions. WithNoExpiry instead requests a lease
+	// without expiration, reported by a zero expiration.
 	LeaseOutput(ctx context.Context, id wtxmgr.LockID,
-		op wire.OutPoint, duration time.Duration) (time.Time, error)
+		op wire.OutPoint, duration time.Duration,
+		opts ...LeaseOption) (time.Time, error)
 
 	// ReleaseOutput unlocks a previously leased output, making it available
 	// for use.
@@ -170,6 +195,7 @@ type leaseOutputReq struct {
 	id       wtxmgr.LockID
 	op       wire.OutPoint
 	duration time.Duration
+	opts     leaseOptions
 	respChan chan leaseOutputResp
 }
 
@@ -439,6 +465,10 @@ func (w *Wallet) handleGetUtxo(r getUtxoReq) {
 // LeaseOutput locks an output for a given duration, reserving it so that it is
 // not selected for other transactions until the lease expires.
 //
+// WithNoExpiry requests a lease without expiration instead. A same-ID renewal
+// with a duration keeps such a lease without expiry. The returned expiration
+// is zero whenever the stored lease has no expiry.
+//
 // The lock is acquired by delegating to the wallet's db.Store implementation,
 // which records the lease under the supplied LockID and returns its expiration
 // time. The store's internal sentinels are translated into the public,
@@ -448,11 +478,17 @@ func (w *Wallet) handleGetUtxo(r getUtxoReq) {
 //
 // NOTE: This is part of the UtxoManager interface implementation.
 func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
-	op wire.OutPoint, duration time.Duration) (time.Time, error) {
+	op wire.OutPoint, duration time.Duration,
+	opts ...LeaseOption) (time.Time, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return time.Time{}, err
+	}
+
+	var leaseOpts leaseOptions
+	for _, opt := range opts {
+		opt(&leaseOpts)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
@@ -461,6 +497,7 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 		id:       id,
 		op:       op,
 		duration: duration,
+		opts:     leaseOpts,
 		respChan: make(chan leaseOutputResp, 1),
 	}
 
@@ -484,6 +521,7 @@ func (w *Wallet) handleLeaseOutput(r leaseOutputReq) {
 			ID:       db.LockID(r.id),
 			OutPoint: r.op,
 			Duration: r.duration,
+			NoExpiry: r.opts.noExpiry,
 		},
 	)
 	if err != nil {
@@ -636,6 +674,7 @@ func (w *Wallet) handleListLeasedOutputs(r listLeasedOutputsReq) {
 			OutPoint:   leases[i].OutPoint,
 			LockID:     wtxmgr.LockID(leases[i].LockID),
 			Expiration: leases[i].Expiration,
+			NoExpiry:   leases[i].NoExpiry,
 		}
 	}
 

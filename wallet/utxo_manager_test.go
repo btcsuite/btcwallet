@@ -341,6 +341,36 @@ func TestLeaseOutput(t *testing.T) {
 	require.Equal(t, expiration, actualExpiration)
 }
 
+// TestLeaseOutputNoExpiry verifies that WithNoExpiry requests a lease without
+// expiry from the store and reports it through a zero expiration.
+func TestLeaseOutputNoExpiry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Expect a store lease without expiry.
+	w, mocks := createStartedWalletWithMocks(t)
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	mocks.store.On("LeaseOutput", mock.Anything, db.LeaseOutputParams{
+		WalletID: w.id,
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		NoExpiry: true,
+	}).Return(&db.LeasedOutput{
+		OutPoint: outPoint,
+		LockID:   db.LockID{1},
+		NoExpiry: true,
+	}, nil).Once()
+
+	// Act: Lease the output without expiry.
+	expiration, err := w.LeaseOutput(
+		t.Context(), wtxmgr.LockID{1}, outPoint, 0, WithNoExpiry(),
+	)
+
+	// Assert: The lease reports a zero expiration.
+	require.NoError(t, err)
+	require.True(t, expiration.IsZero())
+}
+
 // TestLeaseOutputErr tests that LeaseOutput translates the store's db-native
 // sentinels into the public, wallet-owned errors.
 func TestLeaseOutputErr(t *testing.T) {
@@ -509,5 +539,34 @@ func TestListLeasedOutputs(t *testing.T) {
 		OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 		LockID:     wtxmgr.LockID{1},
 		Expiration: leasedOutput.Expiration,
+	}}, leasedOutputs)
+}
+
+// TestListLeasedOutputsNoExpiry verifies that ListLeasedOutputs reports a
+// store lease without expiry.
+func TestListLeasedOutputsNoExpiry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return one store lease without expiry.
+	w, mocks := createStartedWalletWithMocks(t)
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	mocks.store.On("ListLeasedOutputs", mock.Anything, w.id).Return(
+		[]db.LeasedOutput{{
+			OutPoint: outPoint,
+			LockID:   db.LockID{1},
+			NoExpiry: true,
+		}}, nil,
+	).Once()
+
+	// Act: List the leased outputs.
+	leasedOutputs, err := w.ListLeasedOutputs(t.Context())
+
+	// Assert: The lease reports no expiry.
+	require.NoError(t, err)
+	require.Equal(t, []*LeasedOutput{{
+		OutPoint: outPoint,
+		LockID:   wtxmgr.LockID{1},
+		NoExpiry: true,
 	}}, leasedOutputs)
 }
