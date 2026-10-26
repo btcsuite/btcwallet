@@ -3,12 +3,15 @@ package wallet
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
@@ -151,6 +154,115 @@ func (s *chainSyncer) notifyBlocks(ctx context.Context) error {
 	return nil
 }
 
+// chainEvent carries shared immutable preparation to the existing Wallet
+// worker. Original block/control metadata is preserved for its normal handler.
+type chainEvent struct {
+	notification any
+	matches      TxEntries
+}
+
+// routeChainEvent selects recipients without Store reads or backend calls.
+// Only actual filtered blocks carry prepared block matches; a header remains
+// a wakeup for catch-up to scan recovery-window addresses before checkpointing.
+func (s *chainSyncer) routeChainEvent(n any,
+	wallets []*Wallet) map[uint32]chainEvent {
+
+	events := make(map[uint32]chainEvent, len(wallets))
+	for _, w := range wallets {
+		events[w.id] = chainEvent{notification: n}
+	}
+
+	var records []*wtxmgr.TxRecord
+	switch update := n.(type) {
+	case chain.RelevantTx:
+		records = []*wtxmgr.TxRecord{update.TxRecord}
+
+	case chain.FilteredBlockConnected:
+		records = update.RelevantTxs
+
+	default:
+		// Headers and control events need no transaction matching. Every
+		// processor retains its own catch-up and disconnect handling.
+		return events
+	}
+
+	matches := s.prepareTxMatches(records)
+
+	for _, match := range matches {
+		recipients := s.watches.matchRecipients(match, s.params)
+
+		// Each recipient gets one immutable entry even when several of
+		// its watched inputs and outputs match the same transaction.
+		for id := range recipients {
+			event, active := events[id]
+			if !active {
+				// Create can register after this event's membership
+				// snapshot, before publishing its new Wallet.
+				continue
+			}
+
+			event.matches = append(event.matches, match)
+			events[id] = event
+		}
+	}
+
+	// Blocks advance every processor, even with no matching transactions.
+	// Standalone transactions are admitted only to interested Wallets.
+	if _, tx := n.(chain.RelevantTx); tx {
+		maps.DeleteFunc(
+			events, func(_ uint32, event chainEvent) bool {
+				return len(event.matches) == 0
+			},
+		)
+	}
+
+	return events
+}
+
+// prepareTxMatches decodes each transaction once for shared routing while
+// retaining its record and output indices for Wallet Store application.
+func (s *chainSyncer) prepareTxMatches(recs []*wtxmgr.TxRecord) TxEntries {
+	matches := make(TxEntries, 0, len(recs))
+	for _, rec := range recs {
+		entries := s.extractAddrEntries(rec.MsgTx.TxOut)
+		matches = append(matches, TxEntry{
+			Rec:     rec,
+			Entries: entries,
+		})
+	}
+
+	return matches
+}
+
+// extractAddrEntries collects all addresses from transaction outputs and
+// creates initial AddrEntry objects with output indices.
+func (s *chainSyncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
+	var entries []AddrEntry
+	for i, output := range txOuts {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, s.params,
+		)
+		if err != nil {
+			log.Warnf("Cannot extract non-std pkScript=%x",
+				output.PkScript)
+
+			continue
+		}
+
+		for _, addr := range addrs {
+			entries = append(entries, AddrEntry{
+				Address: addr,
+				Credit: wtxmgr.CreditEntry{
+					//nolint:gosec // bounded.
+					Index: uint32(i),
+				},
+			})
+		}
+	}
+
+	return entries
+}
+
 // recordOutpoint adds an association while the caller holds mu. Both native
 // registration and queued-parent learning retain the same additive ownership.
 func (r *watchRegistry) recordOutpoint(id uint32, point wire.OutPoint) {
@@ -159,4 +271,64 @@ func (r *watchRegistry) recordOutpoint(id uint32, point wire.OutPoint) {
 	}
 
 	r.outpoints[point][id] = struct{}{}
+}
+
+// matchRecipients unions output owners with input address/outpoint owners,
+// including spends whose funding outpoints recovery has not learned yet. It
+// learns owned outputs under the lock before matching another transaction.
+func (r *watchRegistry) matchRecipients(match TxEntry,
+	params *chaincfg.Params) map[uint32]struct{} {
+
+	// Recovery can register addresses before learning their outpoints.
+	// Mirror native input matching without creating output credits.
+	inputAddrs := make([]string, 0, len(match.Rec.MsgTx.TxIn))
+	for _, input := range match.Rec.MsgTx.TxIn {
+		pkScript, err := txscript.ComputePkScript(
+			input.SignatureScript, input.Witness,
+		)
+		if err != nil {
+			// Unsupported scripts still use known-outpoint matching.
+			continue
+		}
+
+		addr, err := pkScript.Address(params)
+		if err != nil {
+			continue
+		}
+
+		inputAddrs = append(inputAddrs, addr.EncodeAddress())
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	recipients := make(map[uint32]struct{})
+	for _, entry := range match.Entries {
+		owners := r.addresses[entry.Address.EncodeAddress()]
+		point := wire.OutPoint{
+			Hash:  match.Rec.Hash,
+			Index: entry.Credit.Index,
+		}
+
+		// Learn owned outputs before another record can spend them,
+		// including while the parent waits in a Wallet's mailbox.
+		for id := range owners {
+			recipients[id] = struct{}{}
+			r.recordOutpoint(id, point)
+		}
+	}
+
+	for _, addr := range inputAddrs {
+		for id := range r.addresses[addr] {
+			recipients[id] = struct{}{}
+		}
+	}
+
+	for _, input := range match.Rec.MsgTx.TxIn {
+		for id := range r.outpoints[input.PreviousOutPoint] {
+			recipients[id] = struct{}{}
+		}
+	}
+
+	return recipients
 }
