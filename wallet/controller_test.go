@@ -2157,10 +2157,6 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 			Horizons: []db.ScanHorizon{},
 		}).Return(errDBMock).Once()
 
-		notifications := make(chan any, 1)
-		deps.chain.On("Notifications").
-			Return((<-chan any)(notifications)).Times(3)
-
 		block := &wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{Hash: chainhash.Hash{101}, Height: 101},
 			Time:  time.Unix(1710004300, 0).UTC(),
@@ -2193,7 +2189,9 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 
 		synctest.Wait()
 
-		notifications <- chain.FilteredBlockConnected{Block: block}
+		w.chainEventChan <- chainEvent{
+			notification: chain.FilteredBlockConnected{Block: block},
+		}
 
 		// Assert: Let the worker settle before cleanup verifies persistence
 		// and the single initialization through the mock expectations.

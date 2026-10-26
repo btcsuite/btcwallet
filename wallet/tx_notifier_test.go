@@ -24,7 +24,7 @@ import (
 func subscriptionWallet(t *testing.T) (*Wallet, *bwmock.Chain, []byte) {
 	t.Helper()
 
-	_, client, w := newLiveWatchManager(t)
+	_, client, w, _ := newLiveWatchManager(t)
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Once()
 

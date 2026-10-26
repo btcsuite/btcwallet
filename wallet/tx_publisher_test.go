@@ -1091,12 +1091,20 @@ func TestCheckMempool(t *testing.T) {
 	}
 }
 
-// TestPublishTx tests the publishTx helper function.
+// TestPublishTx verifies native registration failures and broadcast results
+// retain their existing caller-visible identities through Manager ownership.
 func TestPublishTx(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Use an encodable watch address so each existing result row
+	// exercises registration ownership before the configured native outcome.
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
 	tx := &wire.MsgTx{}
-	addrs := []address.Address{&address.AddressPubKey{}}
+	addrs := []address.Address{addr}
 
 	testCases := []struct {
 		name        string
@@ -1145,21 +1153,24 @@ func TestPublishTx(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			// Arrange: Expect one registration and, when it succeeds, one
+			// native send. Fixture cleanup verifies the mock once.
 			w, m := createStartedWalletWithMocks(t)
 
-			m.chain.On("NotifyReceived",
-				mock.Anything, mock.Anything,
-				mock.Anything).Return(tc.notifyErr)
+			m.chain.On("NotifyReceived", addrs).Return(tc.notifyErr).Once()
 
 			// We only expect SendRawTransaction to be called if
 			// NotifyReceived succeeds.
 			if tc.notifyErr == nil {
-				m.chain.On("SendRawTransaction",
-					mock.Anything, mock.Anything,
-				).Return(nil, tc.sendErr)
+				m.chain.On("SendRawTransaction", tx, false).
+					Return(nil, tc.sendErr).Once()
 			}
 
+			// Act: Publish through the existing native delegation path.
 			err := w.publishTx(tx, addrs)
+
+			// Assert: Wrapping preserves causal failures while the existing
+			// already-known results remain successful.
 			require.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
