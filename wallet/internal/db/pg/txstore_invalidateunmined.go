@@ -17,6 +17,13 @@ func (s *Store) InvalidateUnminedTx(ctx context.Context,
 	params db.InvalidateUnminedTxParams) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Lock before descendant discovery so concurrent children join
+		// this invalidation instead of escaping the branch snapshot.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		return db.InvalidateUnminedTxWithOps(
 			ctx, params, invalidateUnminedTxOps{qtx: qtx},
 		)

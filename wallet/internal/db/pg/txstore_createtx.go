@@ -34,6 +34,13 @@ func (s *Store) CreateTx(ctx context.Context,
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Lock before graph reads so a concurrent write cannot add a child
+		// after conflict handling reads the descendants.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		return db.CreateTxWithOps(ctx, req, &createTxOps{
 			invalidateUnminedTxOps: invalidateUnminedTxOps{
 				qtx: qtx,
