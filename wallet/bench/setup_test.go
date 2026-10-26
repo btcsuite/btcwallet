@@ -126,10 +126,33 @@ func saveSQLBenchmarkFixture(tb testing.TB,
 	require.NoError(tb, os.Rename(pending, fixture))
 }
 
-// seedSQLBenchmarkWallet uses normal Manager account/key allocation followed by
-// Store history writes. The standalone seeding Store has no key deriver.
+// seedSQLBenchmarkWallet retains read fixture history application after
+// allocation; startup preparation reuses allocation without synthetic writes.
 func seedSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
 	store db.Store, workload bwtest.NodeBenchmarkWorkload) {
+
+	tb.Helper()
+
+	w, scripts := allocateSQLBenchmarkWallet(tb, manager, workload)
+
+	phaseStarted := time.Now()
+
+	// SQL can persist the complete normalized graph and final tip through
+	// its existing batch transaction; no legacy sync-tip progression is
+	// needed.
+	require.NoError(tb, store.ApplyTxBatch(
+		tb.Context(), workload.Batch(w.ID(), scripts),
+	))
+	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+
+	// Validate committed data before a newly prepared snapshot can be saved.
+	bwtest.AssertNodeBenchmarkWallet(tb, store, w.ID(), workload)
+}
+
+// allocateSQLBenchmarkWallet creates the shared accounts and key inventory
+// through public APIs, leaving its caller to choose real-chain or read history.
+func allocateSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
+	workload bwtest.NodeBenchmarkWorkload) (*wallet.Wallet, [][]byte) {
 
 	tb.Helper()
 
@@ -225,18 +248,8 @@ func seedSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
 	}
 
 	tb.Logf("fixture allocation: %s", time.Since(phaseStarted))
-	phaseStarted = time.Now()
 
-	// SQL can persist the complete normalized graph and final tip through
-	// its existing batch transaction; no legacy sync-tip progression is
-	// needed.
-	require.NoError(tb, store.ApplyTxBatch(
-		tb.Context(), workload.Batch(w.ID(), scripts),
-	))
-	tb.Logf("fixture history: %s", time.Since(phaseStarted))
-
-	// Validate committed data before a newly prepared snapshot can be saved.
-	bwtest.AssertNodeBenchmarkWallet(tb, store, w.ID(), workload)
+	return w, scripts
 }
 
 // RunSQLBenchmark restores each shared case using the build-selected backend:
