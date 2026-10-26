@@ -242,6 +242,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 		},
 	}
 
+	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
 	m.started.Store(true)
 
 	// The fixture owns required-call verification. Stop joins workers before
@@ -364,6 +365,9 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 			ChainParams: &chainParams,
 		},
 	}
+	// Match managed assembly so every producer declares its routing interest.
+	w.chainSyncer = newChainSyncer(mockChain, &chainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
 	w.cache = newStoreRuntimeCache(mockStore)
 
 	// Stop the timer immediately to avoid leaks.

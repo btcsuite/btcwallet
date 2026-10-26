@@ -120,6 +120,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
+					chainSource:  chainBackend,
 					scopes:       scopes,
 					numAccounts:  accountGrowth[i],
 					numAddresses: addressGrowth[i],
@@ -128,7 +129,6 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 					numTxOutputs: txIOGrowth[i],
 				},
 			)
-			bw.cfg.Chain = chainBackend
 
 			var (
 				beforeResult map[chainhash.Hash]*wire.MsgTx
@@ -335,6 +335,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
+					chainSource:  chainBackend,
 					scopes:       scopes,
 					numAccounts:  accountGrowth[i],
 					numAddresses: addressGrowth[i],
@@ -343,7 +344,6 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 					numTxOutputs: txIOGrowth[i],
 				},
 			)
-			bw.cfg.Chain = chainBackend
 
 			var (
 				beforeResult map[chainhash.Hash]*wire.MsgTx
