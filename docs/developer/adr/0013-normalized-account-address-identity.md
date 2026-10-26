@@ -2,37 +2,42 @@
 
 ## 1. Context
 
-The SQL wallet store originally modeled account and address variants by mixing
-shared identity columns with nullable subtype columns:
+The SQL wallet store first modeled account and address variants with a mix of
+shared identity columns and nullable subtype columns:
 
-- `accounts.account_number` was nullable so imported xpub accounts could live in
+- `accounts.account_number` was nullable so imported xpub accounts could be in
   the same table as wallet-derived BIP44 accounts.
-- `addresses.account_id` was required, so raw imported addresses had to live
-  under a reserved account named `imported` even though they are not account
+- `addresses.account_id` was required. Thus raw imported addresses had to be
+  under a reserved account named `imported`, although they are not account
   children in the HD derivation tree.
 - `addresses.address_branch` and `addresses.address_index` were nullable so
-  raw imports could live beside derived addresses.
+  raw imports could be beside derived addresses.
 
-That shape caused the store to carry fake identity. Imported xpub accounts could
-be accidentally interpreted as account number `0`, and raw imported addresses
-looked like members of an account solely because SQL needed a non-null
+Because of that shape, the store carried fake identity. Imported xpub accounts
+could be accidentally interpreted as account number `0`. Raw imported addresses
+looked like members of an account only because SQL needed a non-null
 `account_id`.
 
-The recovery follow-up needs immutable SQL identity for imported xpub scan
+The recovery follow-up needs an immutable SQL identity for imported xpub scan
 horizons. Account names and nullable account numbers are not suitable for that
-purpose: names can be renamed, and unnumbered caller-supplied XPub accounts do
-not have account numbers.
+purpose. Names can be renamed. Unnumbered caller-supplied XPub accounts do not
+have account numbers.
 
-The word "imported" is overloaded across wallet layers. A wallet may be
-imported from a seed while its accounts remain derivable from that seed. An
-account XPub may be imported while its child addresses remain derivable from
-the XPub. A raw script or public-key address import is not derivable at all.
-The SQL schema therefore keeps account-key provenance separate from whether an
+The word "imported" has more than one meaning across wallet layers:
+
+- A wallet may be imported from a seed while its accounts remain derivable
+  from that seed.
+- An account XPub may be imported while its child addresses remain derivable
+  from the XPub.
+- A raw script or public-key address import is not derivable at all.
+
+Thus the SQL schema keeps account-key provenance separate from whether an
 address row has derivation identity.
 
 ## 2. Decision
 
-Normalize account and address identity around real persisted identity only:
+Normalize account and address identity so that it uses only real persisted
+identity:
 
 | Case | Parent | Number | Child path |
 | --- | --- | --- | --- |
@@ -44,54 +49,71 @@ Normalize account and address identity around real persisted identity only:
 | Numbered-XPub child address | caller-supplied account | required | branch/index |
 | Raw imported address | none | none | none; no scope |
 
-The SQL primitive is `is_derived` rather than `is_imported`. An imported-xpub
-child address is imported from a user perspective, but it is still derived from
-an account xpub and has branch/index path facts. A raw imported address is not
-derived from an account and has no scope or path facts.
+The SQL primitive is `is_derived`, not `is_imported`. From the user
+perspective, an imported-xpub child address is imported. But the address is
+still derived from an account xpub and has branch/index path facts. A raw
+imported address is not derived from an account and has no scope or path facts.
 
-The address `is_derived` boolean describes row shape only. Account
-`is_derived` has the narrower meaning "the account XPub was derived from this
-wallet's private root." It is an immutable custody/provenance fact and does not
-say whether child addresses can be derived: all three account shapes derive
-branch and address children from an account XPub.
+The address `is_derived` boolean describes row shape only. The account
+`is_derived` boolean has the narrower meaning "the account XPub was derived
+from this wallet's private root." The account `is_derived` boolean is an
+immutable custody/provenance fact. It does not tell whether child addresses can
+be derived. All three account shapes derive branch and address children from an
+account XPub.
 
 ### Accounts
 
-`accounts` is the stable account identity table. It holds wallet, scope, name,
-account-level public key, master fingerprint, next external/internal derivation
-indexes, an `is_derived` provenance bit, and a nullable `account_number`.
+`accounts` is the stable account identity table. It holds these fields:
+
+- wallet
+- scope
+- name
+- account-level public key
+- master fingerprint
+- next external/internal derivation indexes
+- an `is_derived` provenance bit
+- a nullable `account_number`
 
 Wallet-root-derived accounts set `is_derived` and have a non-null account
 number. Unnumbered caller-supplied XPub accounts clear `is_derived` and leave
 `account_number` NULL. Numbered caller-supplied XPub accounts also clear
-`is_derived`, because the wallet did not derive their account key, but retain
-the real non-null hardened account component encoded by the supplied
-depth-three XPub.
+`is_derived`, because the wallet did not derive their account key. But these
+accounts keep the real non-null hardened account component that the supplied
+depth-three XPub encodes.
 
 There is no `derived_accounts` table. The account ID remains an internal Store
-identity for all account shapes. It is not a portable public identifier.
-Numbered public lookup uses `(scope, account_number)` for either root-derived
-or numbered caller-supplied provenance. An unnumbered caller-supplied account
-has no number and is selected by its mutable name within its scope.
+identity for all account shapes. The account ID is not a portable public
+identifier. A numbered public lookup uses `(scope, account_number)` for
+root-derived provenance and for numbered caller-supplied provenance. An
+unnumbered caller-supplied account has no number. Lookup selects it by its
+mutable name within its scope.
 
 All numbered accounts in one wallet scope share the same account-number
-namespace regardless of provenance. A numbered caller-supplied account
-occupies its `(scope, account_number)` slot, and another account that declares
-the same pair is rejected. Wallet-root-derived and caller-supplied accounts may
+namespace, whatever their provenance. A numbered caller-supplied account
+occupies its `(scope, account_number)` slot. Another account that declares the
+same pair is rejected. Wallet-root-derived and caller-supplied accounts may
 coexist under the custody policy in
 [ADR 0012](0012-wallet-level-watch-only-uniformity.md).
-The numbered namespace does not acquire a separate caller-supplied domain.
+The numbered namespace does not get a separate caller-supplied domain.
 
-Account provenance, account-number presence and value, master-fingerprint
-presence and value, scope, effective address schema, `NoChainSync`, and XPub
-are immutable after creation. Account names remain mutable, scope-unique
-display and lookup metadata. SQL row IDs and kvdb adapter account numbers never
-cross the Store boundary as semantic identity.
+These account facts are immutable after creation:
+
+- account provenance
+- account-number presence and value
+- master-fingerprint presence and value
+- scope
+- effective address schema
+- `NoChainSync`
+- XPub
+
+Account names remain mutable. They are scope-unique metadata for display and
+lookup. SQL row IDs and kvdb adapter account numbers never cross the Store
+boundary as semantic identity.
 
 #### Account Creation Identity
 
-Whether the account key was imported and whether its account number is known
-are separate facts. The supported account shapes are:
+Two facts are separate: whether the account key was imported, and whether its
+account number is known. The supported account shapes are:
 
 | Source | Account custody | Account key | Number | Fingerprint |
 | --- | --- | --- | --- | --- |
@@ -100,65 +122,72 @@ are separate facts. The supported account shapes are:
 | Imported XPub, unnumbered | watch-only | imported | absent | optional |
 | Imported XPub, numbered | watch-only | imported | required | optional |
 
-The persisted `is_derived` fact and public `IsImported` result distinguish a
-wallet-derived account key from an imported account key. An optional account
+The persisted `is_derived` fact and the public `IsImported` result distinguish
+a wallet-derived account key from an imported account key. An optional account
 number distinguishes numberless imports from imports with a known number.
 Accounts derived from an imported private wallet root remain wallet-derived.
 
-For a numbered import, the caller declares purpose and coin type and may
-supply the master fingerprint; the account number comes from the XPub's
-hardened child index.
-The wallet validates the key's network, depth and hardened account child. It
-cannot authenticate the hardened purpose or coin ancestors or the supplied
-fingerprint. `ImportAccountParams.MasterKeyFingerprint` uses the wallet-owned
-`*MasterFingerprint`: SQL preserves nil as absent and a non-nil zero as a
-valid supplied fingerprint. The BIP32 fingerprint is a four-byte hash prefix
-and can be all zero, so it cannot also represent omission. Legacy kvdb rows
-have only a scalar fingerprint and retain their existing zero default when
-metadata is omitted; this does not add optional-metadata parity to kvdb.
-Wallet-derived accounts use the wallet-computed fingerprint.
+For a numbered import, the caller declares the purpose and coin type. The
+caller may also supply the master fingerprint. The account number comes from
+the hardened child index of the XPub.
+
+The wallet validates the network, depth and hardened account child of the key.
+The wallet cannot authenticate the hardened purpose or coin ancestors or the
+supplied fingerprint. `ImportAccountParams.MasterKeyFingerprint` uses the
+wallet-owned `*MasterFingerprint`. SQL preserves nil as absent. SQL preserves a
+non-nil zero as a valid supplied fingerprint. The BIP32 fingerprint is a
+four-byte hash prefix and can be all zero. Thus zero cannot also represent
+omission.
+
+Legacy kvdb rows have only a scalar fingerprint. When metadata is omitted,
+these rows keep their existing zero default. This behavior does not add
+optional-metadata parity to kvdb. Wallet-derived accounts use the
+wallet-computed fingerprint.
 
 #### Account Creation Requests
 
-`NewAccountParams` retains the name, scope, optional account number, address
-schema and `NoChainSync` inputs for deriving an account from the wallet seed.
+`NewAccountParams` keeps these inputs to derive an account from the wallet
+seed: name, scope, optional account number, address schema and `NoChainSync`.
 Existing account XPubs are imported through `ImportAccount`.
 
 `ImportAccount` accepts `ImportAccountParams` and the existing `dryRun`
 argument. The renamed existing account record also supplies
-`CreateWalletParams.InitialAccounts`, so initial and live imports share the
-same key, name, fingerprint, scope and schema validation.
+`CreateWalletParams.InitialAccounts`. Thus initial imports and live imports
+share the same key, name, fingerprint, scope and schema validation.
 
-A nil `Scope` retains XPub-version/address-type inference and a numberless
-import. A declared `Scope` retains the number encoded by the XPub's hardened
-account child. `AddrSchema` requires a declared scope; canonical scopes use
-their existing default schema when omitted, while custom scopes require one.
-The declared purpose and coin type select the scope independently of the
-extended-key version, which is still checked for the configured network.
+A nil `Scope` keeps XPub-version/address-type inference and a numberless
+import. A declared `Scope` keeps the number that the hardened account child of
+the XPub encodes. `AddrSchema` requires a declared scope. When `AddrSchema` is
+omitted, canonical scopes use their existing default schema. Custom scopes
+require an `AddrSchema`. The declared purpose and coin type select the scope
+independently of the extended-key version. The extended-key version is still
+checked for the configured network.
 
-Both SQL backends reuse the imported-account transaction to insert the optional
-number and advance the existing `next_account_number` cursor. Numbered imports
-remain `is_derived=false` and must return the requested effective schema before
-commit. Failures and dry runs roll back account, secret, scope and cursor
-writes. kvdb reuses its watch-only account writer at the known number and
-advances its existing account cursor without consuming lower holes. Its existing
-account metadata record retains the optional number alongside the timestamp;
-old and inferred imports keep an unknown number. Account and address reads,
-numeric selection and reopening preserve declared imports on either backend.
+Both SQL backends reuse the imported-account transaction. This transaction
+inserts the optional number and advances the existing `next_account_number`
+cursor. Numbered imports remain `is_derived=false`. They must return the
+requested effective schema before commit. Failures and dry runs roll back
+account, secret, scope and cursor writes.
 
-The shared import input accepts `NoChainSync` on SQL backends, defaulting to
-false. It excludes the account from automatic chain synchronization through
-the existing account policy. Legacy kvdb ignores this flag and reports false.
-`AccountInfo` exposes the immutable fact without making it a custody or signing
-signal.
+kvdb reuses its watch-only account writer at the known number. kvdb advances
+its existing account cursor and does not consume lower holes. The existing kvdb
+account metadata record keeps the optional number with the timestamp. Old
+imports and inferred imports keep an unknown number. On either backend, account
+and address reads, numeric selection and reopening preserve declared imports.
 
-lnd's online remote-signer wallet imports external account XPubs before wallet
-startup, including purpose-1017 key-family accounts and mixed BIP49 schemas.
-These inputs fit the existing import and initial-account paths.
+On SQL backends, the shared import input accepts `NoChainSync`. The default is
+false. The flag uses the existing account policy to exclude the account from
+automatic chain synchronization. Legacy kvdb ignores this flag and reports
+false. `AccountInfo` exposes the immutable fact, but does not make the fact a
+custody or signing signal.
+
+Before wallet startup, lnd's online remote-signer wallet imports external
+account XPubs. These XPubs include purpose-1017 key-family accounts and mixed
+BIP49 schemas. These inputs fit the existing import and initial-account paths.
 
 #### Chain Synchronization
 
-`NoChainSync` is an immutable boolean independent of wallet-level signing
+`NoChainSync` is an immutable boolean. It is independent of wallet-level signing
 custody:
 
 | Wallet custody | `NoChainSync=false` | `NoChainSync=true` |
@@ -166,104 +195,137 @@ custody:
 | Spendable | automatic chain sync | excluded from automatic chain sync |
 | Uniformly watch-only | automatic chain sync | excluded from automatic chain sync |
 
-When false, the account participates in automatic chain discovery and live
-script registration. When true, its derived scripts are excluded from both.
-Neither value changes address ownership, public child derivation, or signing
-capability, and neither causes an owned transaction learned through another
-ingestion path to be discarded. Signing continues to follow the wallet's
-existing custody model.
+When `NoChainSync` is false, the account participates in automatic chain
+discovery and live script registration. When `NoChainSync` is true, the derived
+scripts of the account are excluded from both. Neither value changes address
+ownership, public child derivation, or signing capability. Also, neither value
+causes the wallet to discard an owned transaction that the wallet learned
+through another ingestion path. Signing still follows the existing custody
+model of the wallet.
 
 #### Scope And Branch Schema
 
-An omitted address schema reuses an existing scope's persisted schema or the
-canonical schema for a standard scope. Creating a new custom scope requires an
-explicit schema. Supplying a schema for an existing scope is an equality
-assertion; any external/internal branch mismatch is a conflict and the request
-fails before mutation.
+If the address schema is omitted, the request reuses the persisted schema of an
+existing scope or the canonical schema for a standard scope. A new custom scope
+requires an explicit schema. A schema supplied for an existing scope is an
+equality assertion. Any external/internal branch mismatch is a conflict. In
+that case, the request fails before mutation.
 
 Each branch must be derivable from a single account key. The supported forms
-are P2PKH (`PubKeyHash`), P2SH-P2WPKH (`NestedWitnessPubKey`), P2WPKH
-(`WitnessPubKey`), and key-path P2TR (`TaprootPubKey`); other forms are not
-account schemas.
+are:
 
-For collision comparison within one wallet, an account XPub's normalized
-payload is its public key and chain code. Version bytes, depth, parent
-fingerprint, child number, name, optional account number, provenance, and
-declared master fingerprint do not distinguish that payload.
+- P2PKH (`PubKeyHash`)
+- P2SH-P2WPKH (`NestedWitnessPubKey`)
+- P2WPKH (`WitnessPubKey`)
+- key-path P2TR (`TaprootPubKey`)
 
-Accounts with equal normalized payloads conflict when their corresponding
-external branch schemas or corresponding internal branch schemas can derive
-the same scripts. External and internal branches are not cross-compared because
-their `/0/` and `/1/` derivation paths are disjoint. Admission is allowed only
-when both corresponding branch-schema pairs are disjoint. Equal normalized
-payloads in one scope always conflict because accounts in that scope share its
-effective schema.
+Other forms are not account schemas.
 
-Existing schema fields, including `coin_pub_key`, `key_scope_secrets`, and all
-other columns, remain. Account-shape constraints and affected validation and
+For collision comparison in one wallet, the normalized payload of an account
+XPub is its public key and chain code. These values do not distinguish that
+payload:
+
+- version bytes
+- depth
+- parent fingerprint
+- child number
+- name
+- optional account number
+- provenance
+- declared master fingerprint
+
+Accounts with equal normalized payloads conflict when one of these pairs can
+derive the same scripts:
+
+- their corresponding external branch schemas
+- their corresponding internal branch schemas
+
+External and internal branches are not cross-compared, because their `/0/` and
+`/1/` derivation paths are disjoint. Admission is allowed only when both
+corresponding branch-schema pairs are disjoint. Equal normalized payloads in
+one scope always conflict, because accounts in that scope share its effective
+schema.
+
+Existing schema fields remain, including `coin_pub_key`, `key_scope_secrets`,
+and all other columns. Account-shape constraints and affected validation and
 read paths must admit a caller-supplied numbered account with
-`is_derived=false` and a non-null `account_number` while preserving the
-root-derived numbered and caller-supplied unnumbered shapes.
+`is_derived=false` and a non-null `account_number`. They must also preserve the
+root-derived numbered shape and the caller-supplied unnumbered shape.
 
 #### Store Adapter Identity
 
-The shared Store projection needs a stable account selector for each backend,
-but that selector is not a public account identity. The internal
-`db.AccountInfo.AccountID` field carries the backend adapter's persisted
-identity: SQL maps it from `accounts.id`, while kvdb maps it from waddrmgr's
-internal account number.
+The shared Store projection needs a stable account selector for each backend.
+But that selector is not a public account identity. The internal
+`db.AccountInfo.AccountID` field carries the persisted identity of the backend
+adapter. SQL maps the field from `accounts.id`. kvdb maps the field from the
+internal account number of waddrmgr.
 
 Shared code identifies this adapter value by the `(KeyScope, AccountID)` pair.
-kvdb account numbers restart in every key scope, so an `AccountID` can recur
-within one wallet. SQL row IDs happen to have wider uniqueness, but shared code
+kvdb account numbers restart in every key scope. Thus an `AccountID` can recur
+in one wallet. SQL row IDs happen to have wider uniqueness. But shared code
 must not depend on that backend-specific property.
 
-kvdb populates the adapter identity for wallet-derived accounts, imported-XPub
-accounts, and its imported-address pseudo-account. An imported account has no
-public `AccountNumber` under the legacy ordinary-import contract, but waddrmgr
-still persists an unmasked internal account number for scoped lookup. Recovery
-also uses the adapter identity to key per-account state and stamp scan
-horizons. Returning no kvdb adapter identity would therefore make imported-
-account recovery and numeric kvdb lookup ambiguous or unusable.
+kvdb populates the adapter identity for these accounts:
 
-`AccountNumber` remains an optional known hardened account component, and
-`AccountName` remains mutable display and lookup metadata. A wallet-derived
-kvdb account's adapter ID may numerically equal its account number, but that
-coincidence does not give the two fields the same meaning or prove provenance.
+- wallet-derived accounts
+- imported-XPub accounts
+- its imported-address pseudo-account
 
-The adapter identity is stable only for an account within its backing Store
-and backend-defined domain. SQL row IDs and kvdb account numbers are not
-comparable, may repeat across key scopes or wallets, and may change during a
-backend conversion. They must remain inside Store, recovery, and adapter lookup
-boundaries. A wallet-owned public account contract must not expose either
-backend's adapter value, an SQL row ID, or the current
-`RecoveryState.AccountID` accessor as a portable account ID.
+Under the legacy ordinary-import contract, an imported account has no public
+`AccountNumber`. But waddrmgr still persists an unmasked internal account
+number for scoped lookup. Recovery also uses the adapter identity to key
+per-account state and to stamp scan horizons. If kvdb returned no adapter
+identity, imported-account recovery and numeric kvdb lookup would be ambiguous
+or unusable.
+
+`AccountNumber` remains an optional known hardened account component.
+`AccountName` remains mutable display and lookup metadata. The adapter ID of a
+wallet-derived kvdb account may numerically equal its account number. That
+coincidence does not give the two fields the same meaning. The coincidence also
+does not prove provenance.
+
+The adapter identity is stable only for an account within its backing Store and
+backend-defined domain. SQL row IDs and kvdb account numbers:
+
+- are not comparable.
+- may repeat across key scopes or wallets.
+- may change during a backend conversion.
+
+These values must remain inside the Store, recovery, and adapter lookup
+boundaries. A wallet-owned public account contract must not expose any of these
+values as a portable account ID:
+
+- the adapter value of either backend
+- an SQL row ID
+- the current `RecoveryState.AccountID` accessor
 
 #### Account Alternatives
 
-The first rejected alternative was to keep mapping unnumbered caller-supplied
-XPub accounts to account number `0`. That preserves compatibility with
-BIP44-shaped callers, but it makes unnumbered imports collide with the default
-wallet-derived account and forces runtime code to distinguish fake `0` from
-real `0`.
+The first rejected alternative was to continue to map unnumbered
+caller-supplied XPub accounts to account number `0`. That alternative preserves
+compatibility with BIP44-shaped callers. But it makes unnumbered imports collide
+with the default wallet-derived account. It also forces runtime code to
+distinguish fake `0` from real `0`.
 
 The second rejected alternative was to split BIP44 account numbers into a
-`derived_accounts` table. That matched the subtype model, but it mostly moved
-one nullable field out of `accounts` while adding another join and a
-parent/child shape invariant. A row-local check on `accounts` is simpler and
-still prevents unnumbered caller-supplied XPub accounts from being mistaken
-for account `0`.
+`derived_accounts` table. That alternative matched the subtype model. But it
+mostly moved one nullable field out of `accounts`. It also added another join
+and a parent/child shape invariant. A row-local check on `accounts` is simpler.
+The check also still prevents unnumbered caller-supplied XPub accounts from
+being mistaken for account `0`.
 
-The accepted tradeoff is a nullable `account_number` interpreted together with
-immutable account provenance. This keeps the invariant local to the account
-row, admits a truthful numbered caller-supplied path, and still removes fake
-identity.
+The accepted tradeoff is a nullable `account_number` that is interpreted
+together with immutable account provenance. This tradeoff:
 
-A new path table is unnecessary because `accounts` already holds the scope,
-optional number, XPub and fingerprint. A second public import method, duplicate
-input record or compatibility wrapper would repeat existing import behavior.
-Rename the shared record to `ImportAccountParams` rather than adding another
-type, and keep importing existing keys separate from wallet-seed derivation.
+- keeps the invariant local to the account row.
+- admits a truthful numbered caller-supplied path.
+- still removes fake identity.
+
+A new path table is unnecessary, because `accounts` already holds the scope,
+optional number, XPub and fingerprint. A second public import method, a
+duplicate input record or a compatibility wrapper would repeat existing import
+behavior. Rename the shared record to `ImportAccountParams`. Do not add another
+type. Keep the import of existing keys separate from wallet-seed derivation.
 
 #### Account Consequences
 
@@ -273,25 +335,33 @@ Pros:
   account `0`.
 - Numbered lookup can represent both root-derived and numbered
   caller-supplied accounts without accepting a backend ID.
-- SQL recovery can key unnumbered-XPub scan horizons by immutable internal
-  `account_id` while public code uses semantic selectors.
+- SQL recovery can key unnumbered-XPub scan horizons by the immutable internal
+  `account_id`. Public code uses semantic selectors.
 - Account lists remain low-cardinality reads over one identity table.
 
 Cons:
 
 - Go callers must treat account numbers as optional.
-- Code handling unnumbered caller-supplied accounts must not collapse SQL NULL
-  to Go zero.
+- Code that handles unnumbered caller-supplied accounts must not collapse SQL
+  NULL to Go zero.
 - Read paths must consistently reject impossible account shapes.
 
 ### Addresses
 
-`addresses` is the stable wallet-local script identity table. It holds wallet,
-script pubkey, script type, creation time, imported public-key material, and a
-structural `is_derived` bit. It does not store scope, account, branch, or index.
+`addresses` is the stable wallet-local script identity table. It holds these
+fields:
+
+- wallet
+- script pubkey
+- script type
+- creation time
+- imported public-key material
+- a structural `is_derived` bit
+
+The table does not store scope, account, branch, or index.
 
 `derived_addresses` stores HD child ownership and path data: wallet ID, account
-ID, branch, and index. Derived address scope is inherited through the owning
+ID, branch, and index. A derived address inherits its scope through the owning
 account:
 
 ```text
@@ -299,36 +369,37 @@ derived_addresses.account_id -> accounts.scope_id
 ```
 
 Raw imported addresses are `addresses` rows with no `derived_addresses` child.
-They have no account, no scope, no branch, and no index.
+These rows have no account, no scope, no branch, and no index.
 
 The reserved name `imported` remains a user-facing compatibility alias for raw
-imported addresses. It is not materialized as an SQL account row. APIs that list
-raw imported addresses use an accountless query where both `Scope` and
-`AccountName` are unset. UTXO and balance filters do not have a raw-import-only
-SQL selector: nil filters mean whole wallet, while account filters match real
-accounts only.
+imported addresses. The name is not materialized as an SQL account row. APIs
+that list raw imported addresses use an accountless query. In that query, both
+`Scope` and `AccountName` are unset. UTXO and balance filters do not have an
+SQL selector for raw imports only. Nil filters mean the whole wallet. Account
+filters match real accounts only.
 
-Address identity fields, including `id`, `wallet_id`, and `is_derived`, are
-immutable after creation. `derived_addresses` rows are insert-only because their
-account ownership and address path data are structural identity facts.
+Address identity fields are immutable after creation. These fields include
+`id`, `wallet_id`, and `is_derived`. `derived_addresses` rows are insert-only,
+because their account ownership and address path data are structural identity
+facts.
 
 #### Address Alternatives
 
 The first rejected alternative was to store raw imported addresses under an SQL
 account named `imported`. ADR 0012 chose that bucket shape for the earlier
-watch-only decision, but this identity decision rejects it for SQL because it
-gives raw imports fake account and scope identity. The reserved name remains
-only as a wallet-facing alias.
+watch-only decision. This identity decision rejects that shape for SQL, because
+the shape gives raw imports fake account and scope identity. The reserved name
+remains only as a wallet-facing alias.
 
 The second rejected alternative was to keep nullable `account_id`,
-`address_branch`, and `address_index` columns on `addresses`. That would make
-the derived/raw invariant row-local, but it would also make the base address
-table carry HD path columns that are meaningless for raw imports.
+`address_branch`, and `address_index` columns on `addresses`. That alternative
+would make the derived/raw invariant row-local. But it would also make the base
+address table carry HD path columns that have no meaning for raw imports.
 
-The accepted tradeoff is a `derived_addresses` subtype table. It adds a join
-and requires consistent shape checks, but it keeps raw imports as wallet-local
-script identity only and lets derived-address indexes start from account/path
-facts.
+The accepted tradeoff is a `derived_addresses` subtype table. The subtype table
+adds a join and requires consistent shape checks. But the table keeps raw
+imports as wallet-local script identity only. The table also lets
+derived-address indexes start from account/path facts.
 
 #### Address Consequences
 
@@ -338,18 +409,18 @@ Pros:
 - Raw imports no longer carry fake scope or derivation-path identity.
 - Unnumbered-XPub, numbered-XPub, and wallet-root-derived child addresses share
   the same derived-address path model.
-- Derived address queries can start from account/path facts, while raw import
+- Derived address queries can start from account/path facts. Raw import
   queries can start from wallet-local script identity.
 - Account-scoped address creation and address-index checks can use
-  `derived_addresses(account_id, branch, index)` without scanning raw imports.
+  `derived_addresses(account_id, branch, index)` without a scan of raw imports.
 - Script and UTXO reads can join to derived-path metadata only when callers need
-  account ownership, leaving raw imports anchored by wallet/script identity.
+  account ownership. Raw imports stay anchored by wallet/script identity.
 
 Cons:
 
 - Address reads need additional joins and generated query churn.
-- Write workflows and database constraints own parent/child shape validation;
-  read paths should not duplicate those checks on UTXO and balance queries.
+- Write workflows and database constraints own parent/child shape validation.
+  Read paths should not duplicate those checks on UTXO and balance queries.
 - Raw-import compatibility paths must not rely on a scoped SQL account alias.
 
 ## 3. Implementation Notes
@@ -357,36 +428,38 @@ Cons:
 - Modify the existing unmerged account and address migrations in place. Do not
   add new migration numbers for this feature-branch schema rewrite.
 - The normalized schema applies to the PostgreSQL and SQLite backends. kvdb
-  keeps its legacy waddrmgr storage, including the fixed imported account name
-  and scoped imported buckets, and only maps legacy rows into the shared Go
-  types.
+  keeps its legacy waddrmgr storage. This storage includes the fixed imported
+  account name and the scoped imported buckets. kvdb only maps legacy rows into
+  the shared Go types.
 - `db.AccountInfo` exposes an internal adapter `AccountID` and makes
-  `AccountNumber` optional. SQL maps `AccountID` from `accounts.id`; kvdb maps
-  it from waddrmgr's per-scope internal account number. SQL account numbers are
-  present for root-derived and numbered caller-supplied accounts and absent
-  for unnumbered caller-supplied accounts. Shared code pairs adapter identity
-  with `KeyScope` and must not expose it as a portable public account ID.
+  `AccountNumber` optional. SQL maps `AccountID` from `accounts.id`. kvdb maps
+  `AccountID` from the per-scope internal account number of waddrmgr. SQL
+  account numbers are present for root-derived and numbered caller-supplied
+  accounts. SQL account numbers are absent for unnumbered caller-supplied
+  accounts. Shared code pairs the adapter identity with `KeyScope`. Shared code
+  must not expose the adapter identity as a portable public account ID.
 - `db.AddressInfo` makes `AccountID` and `AccountNumber` optional. SQL raw
-  imports have neither, use an empty account name and zero key scope, and are
-  listed with an accountless query. Unnumbered-XPub child addresses have an
-  account ID and scope inherited from their account but no account number;
-  numbered-XPub children retain their real number.
+  imports have neither field. They use an empty account name and a zero key
+  scope. An accountless query lists them. Unnumbered-XPub child addresses
+  inherit an account ID and scope from their account, but have no account
+  number. Numbered-XPub children keep their real number.
 - `AddressDerivationParams` carries an optional account number. Unnumbered-XPub
   child addresses must not synthesize `0` and accidentally claim a full public
   origin or derive wallet-seed keys. A numbered caller-supplied child may
-  report its caller-declared origin when its fingerprint is also known,
-  without claiming the wallet authenticated its hardened ancestors. Missing
-  fingerprint metadata omits the complete public origin while retaining the
-  child's branch/index; an explicitly supplied zero remains known.
-- `ListAddressesQuery` uses pointer selectors: both `Scope` and `AccountName`
-  set means account-scoped derived children; both nil means raw imported
-  addresses; one set without the other is invalid.
+  report its caller-declared origin when its fingerprint is also known. In that
+  case, the child does not claim that the wallet authenticated its hardened
+  ancestors. Missing fingerprint metadata omits the complete public origin, but
+  the child keeps its branch/index. An explicitly supplied zero remains known.
+- `ListAddressesQuery` uses pointer selectors:
+  - Both `Scope` and `AccountName` set means account-scoped derived children.
+  - Both nil means raw imported addresses.
+  - One set without the other is invalid.
 - `ListUTXOs` account filters match real accounts only. A nil account filter is
-  wallet-wide and includes raw imports, so higher layers that expose the
+  wallet-wide and includes raw imports. Thus higher layers that expose the
   reserved imported alias must filter accountless raw-import UTXOs locally.
 - Low-cardinality account lists may start from `accounts`. Derived address reads
-  can start from account/path data, while raw imported address reads can start
-  from wallet-local script identity.
+  can start from account/path data. Raw imported address reads can start from
+  wallet-local script identity.
 
 ## 4. References
 
@@ -395,6 +468,6 @@ Cons:
   from wallet transaction state.
 - [ADR 0012](0012-wallet-level-watch-only-uniformity.md): wallet root mode and
   effective account custody. This ADR supersedes its SQL imported-address
-  bucket shape: raw imports now use the reserved name only as an alias, not as
+  bucket shape. Raw imports now use the reserved name only as an alias, not as
   a stored account row.
 - [lnd watch-only account imports](https://github.com/lightningnetwork/lnd/blob/d932f48678228e337a7cc75ee4e864245e6e2b99/config_builder.go#L1608).
