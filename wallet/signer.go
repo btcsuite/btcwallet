@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -321,6 +322,29 @@ func (t KeyTweak) apply(key *btcec.PrivateKey) error {
 	}
 
 	return nil
+}
+
+// pubKey returns the public key apply produces from base's private key:
+// mul*base + add*G.
+func (t KeyTweak) pubKey(base *btcec.PublicKey) (*btcec.PublicKey, error) {
+	if t == (KeyTweak{}) {
+		return base, nil
+	}
+
+	var point, mulPoint, addPoint, result btcec.JacobianPoint
+	base.AsJacobian(&point)
+	btcec.ScalarMultNonConst(&t.mul, &point, &mulPoint)
+	btcec.ScalarBaseMultNonConst(&t.add, &addPoint)
+	btcec.AddNonConst(&mulPoint, &addPoint, &result)
+
+	if (result.X.IsZero() && result.Y.IsZero()) || result.Z.IsZero() {
+		return nil, fmt.Errorf("%w: tweak cancels the key",
+			ErrInvalidSignParam)
+	}
+
+	result.ToAffine()
+
+	return btcec.NewPublicKey(&result.X, &result.Y), nil
 }
 
 // UnlockingScriptParams provides all the necessary parameters to generate an
@@ -1534,33 +1558,50 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 func (w *Wallet) handleComputeRawSig(r rawSigReq) {
 	// Reuse raw signing shared with PSBTs and finish key cleanup before
 	// delivery.
-	signature, err := w.computeRawSig(r.ctx, r.params)
+	signature, _, err := w.computeRawSig(r.ctx, r.params, nil)
 	r.respChan <- rawSigResp{signature: signature, err: err}
 }
 
-// computeRawSig signs and zeroes its key inside the accepted request.
-func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams) (
-	RawSignature, error) {
+// computeRawSig signs and zeroes its key inside the accepted request. With
+// signers set, the tweaked key must be one of them, as PSBT records name keys,
+// before it signs; the matching one is returned.
+func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
+	signers [][]byte) (RawSignature, []byte, error) {
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer privKey.Zero()
 
 	err = params.Tweak.apply(privKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	var signer []byte
+	if signers != nil {
+		pubKey := privKey.PubKey()
+
+		idx := slices.IndexFunc(signers, func(key []byte) bool {
+			return recordKeyIs(key, pubKey)
+		})
+		if idx < 0 {
+			return nil, nil, fmt.Errorf("%w: derived key differs",
+				ErrSigningKeyMismatch)
+		}
+
+		signer = signers[idx]
 	}
 
 	// With the private key retrieved and tweaked, we can now delegate the
 	// actual signing to the version-specific details object.
 	rawSig, err := params.Details.Sign(params, privKey)
 	if err != nil {
-		return nil, fmt.Errorf("cannot sign transaction: %w", err)
+		return nil, nil, fmt.Errorf("cannot sign transaction: %w", err)
 	}
 
-	return rawSig, nil
+	return rawSig, signer, nil
 }
 
 // DerivePrivKey derives a private key from a full BIP-32 derivation

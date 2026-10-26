@@ -71,14 +71,6 @@ var (
 	// counts.
 	ErrOutputCountMismatch = errors.New("output count mismatch")
 
-	// ErrUnknownAddressType is returned when an unknown address type is
-	// encountered.
-	ErrUnknownAddressType = errors.New("unknown address type")
-
-	// ErrUnknownBip32Purpose is returned when a BIP32 path has a purpose
-	// that is not supported by the wallet.
-	ErrUnknownBip32Purpose = errors.New("unknown BIP32 purpose")
-
 	// ErrInvalidBip32Path is returned when a BIP32 derivation path is
 	// invalid (e.g. wrong length, missing hardening, wrong coin type).
 	ErrInvalidBip32Path = errors.New("invalid BIP32 path")
@@ -270,6 +262,11 @@ type SignPsbtParams struct {
 
 	// InputTweaks maps input indices to the tweak applied to that input's
 	// derived key before it signs.
+	//
+	// A Taproot derivation record names only an x-only key. The tweak
+	// applies to the derived key with whichever parity it has, as lnd
+	// applies it, so the input must commit to the tweaked key for one of
+	// the two parities.
 	//
 	// NOTE: The ideal implementation would be to add a new field to
 	// psbt.PInput that holds the tweak, but that would require a change
@@ -1363,8 +1360,13 @@ type psbtSignPlan struct {
 	// params is everything the signer needs except the key.
 	params *RawSigParams
 
-	// apply adds the produced signature to the planned input.
-	apply func(pInput *psbt.PInput, sig RawSignature)
+	// signers are the keys, as the emitted record names them, one of
+	// which the derived and tweaked key must be.
+	signers [][]byte
+
+	// apply adds the produced signature, by the matching signer, to the
+	// planned input.
+	apply func(pInput *psbt.PInput, sig RawSignature, signer []byte)
 }
 
 // planPsbtInputs plans every input the wallet will sign, without looking up a
@@ -1372,6 +1374,13 @@ type psbtSignPlan struct {
 func (w *Wallet) planPsbtInputs(packet *psbt.Packet,
 	sigHashes *txscript.TxSigHashes,
 	tweaks map[int]KeyTweak) ([]*psbtSignPlan, error) {
+
+	for i := range tweaks {
+		if i < 0 || i >= len(packet.Inputs) {
+			return nil, fmt.Errorf("%w: tweak for input %d of %d",
+				ErrInvalidSignParam, i, len(packet.Inputs))
+		}
+	}
 
 	plans := make([]*psbtSignPlan, 0, len(packet.Inputs))
 	for i := range packet.Inputs {
@@ -1520,21 +1529,6 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	return bip32Path, nil
 }
 
-// addressTypeFromPurpose maps a BIP purpose to a wallet address type.
-func addressTypeFromPurpose(purpose uint32) (waddrmgr.AddressType, error) {
-	// TODO(yy): Currently, we hardcode the supported BIP purposes.
-	// A more robust solution would dynamically query the `waddrmgr` to
-	// determine supported key scopes configured in the database, allowing
-	// for custom purposes (e.g., LND's 1017 purpose key) to be seamlessly
-	// supported without code changes here.
-	addrType, err := waddrmgr.AddressTypeForPurpose(purpose)
-	if err != nil {
-		return 0, fmt.Errorf("%w: %d", ErrUnknownBip32Purpose, purpose)
-	}
-
-	return addrType, nil
-}
-
 // shouldSkipInput determines whether the input at the given index should be
 // skipped during the signing process.
 //
@@ -1590,13 +1584,6 @@ func shouldSkipSigningError(err error, idx int) bool {
 		errors.Is(err, ErrWatchOnlyAccount)
 	if errors.Is(err, errComputeRawSig) && missingSigningKey {
 		log.Debugf("Skipping input %d: %v", idx, err)
-		return true
-	}
-
-	// If the derivation path has an unknown purpose, it likely belongs to
-	// another signer or a scheme we don't support. We skip these as well.
-	if errors.Is(err, ErrUnknownBip32Purpose) {
-		log.Debugf("Skipping input %d: unknown BIP32 purpose", idx)
 		return true
 	}
 
@@ -1680,15 +1667,15 @@ func fetchPsbtUtxo(packet *psbt.Packet, idx int) (*wire.TxOut, error) {
 // checkTaprootScriptSpendSig checks if a Taproot script-path signature already
 // exists for the given input and derivation details. It returns
 // errAlreadySigned, if a matching signature is found, otherwise nil.
-func checkTaprootScriptSpendSig(pInput *psbt.PInput,
-	tapDerivation *psbt.TaprootBip32Derivation) error {
+func checkTaprootScriptSpendSig(pInput *psbt.PInput, keys [][]byte,
+	leafHash []byte) error {
 
 	for _, sig := range pInput.TaprootScriptSpendSig {
-		if bytes.Equal(
-			sig.XOnlyPubKey, tapDerivation.XOnlyPubKey,
-		) && bytes.Equal(
-			sig.LeafHash, tapDerivation.LeafHashes[0],
-		) {
+		isKey := func(key []byte) bool {
+			return bytes.Equal(sig.XOnlyPubKey, key)
+		}
+		if slices.ContainsFunc(keys, isKey) &&
+			bytes.Equal(sig.LeafHash, leafHash) {
 
 			return errAlreadySigned
 		}
@@ -1697,14 +1684,15 @@ func checkTaprootScriptSpendSig(pInput *psbt.PInput,
 	return nil
 }
 
-// addTaprootSigToPInput adds the generated signature to the PSBT input. The
+// addTaprootSigToPInput adds the generated signature to the PSBT input, as a
+// script-path record under xOnlyKey and leafHash for a script-path spend. The
 // signature already ends in its sighash byte when the type is not
 // SIGHASH_DEFAULT.
 //
 // NOTE: This method modifies the `pInput` in-place.
 func addTaprootSigToPInput(pInput *psbt.PInput, sig []byte,
 	sighashType txscript.SigHashType, details TaprootSpendDetails,
-	tapDerivation *psbt.TaprootBip32Derivation) {
+	xOnlyKey, leafHash []byte) {
 
 	if details.SpendPath == KeyPathSpend {
 		pInput.TaprootKeySpendSig = sig
@@ -1712,8 +1700,8 @@ func addTaprootSigToPInput(pInput *psbt.PInput, sig []byte,
 		// The record carries the sighash in its own field and
 		// serializes it after the signature.
 		tsSig := &psbt.TaprootScriptSpendSig{
-			XOnlyPubKey: tapDerivation.XOnlyPubKey,
-			LeafHash:    tapDerivation.LeafHashes[0],
+			XOnlyPubKey: xOnlyKey,
+			LeafHash:    leafHash,
 			Signature:   sig[:schnorr.SignatureSize],
 			SigHash:     sighashType,
 		}
@@ -1723,24 +1711,21 @@ func addTaprootSigToPInput(pInput *psbt.PInput, sig []byte,
 	}
 }
 
-// addBip32SigToPInput adds the generated signature to the PSBT input for
-// non-Taproot (Legacy/SegWit) inputs.
+// addBip32SigToPInput adds the generated signature by pubKey to the PSBT
+// input for non-Taproot (Legacy/SegWit) inputs.
 //
 // NOTE: This method modifies the `pInput` in-place.
 func addBip32SigToPInput(pInput *psbt.PInput, sig []byte,
-	sighashType txscript.SigHashType, derivation *psbt.Bip32Derivation,
-	addrType waddrmgr.AddressType) {
+	sighashType txscript.SigHashType, pubKey []byte, witness bool) {
 
 	// Append sighash type if needed (SegWit v0).
-	if addrType == waddrmgr.NestedWitnessPubKey ||
-		addrType == waddrmgr.WitnessPubKey {
-
+	if witness {
 		sig = append(sig, byte(sighashType))
 	}
 
 	pInput.PartialSigs = append(pInput.PartialSigs,
 		&psbt.PartialSig{
-			PubKey:    derivation.PubKey,
+			PubKey:    pubKey,
 			Signature: sig,
 		},
 	)
@@ -1764,9 +1749,9 @@ func addBip32SigToPInput(pInput *psbt.PInput, sig []byte,
 // Returns `ErrMissingTaprootLeafScript` or `ErrTaprootLeafHashMismatch` for
 // invalid script path state.
 // Returns `errAlreadySigned` if a valid signature already exists for the
-// target path.
+// target path, by one of keys on the script path.
 func createTaprootSpendDetails(pInput *psbt.PInput,
-	tapDerivation *psbt.TaprootBip32Derivation) (
+	tapDerivation *psbt.TaprootBip32Derivation, keys [][]byte) (
 	TaprootSpendDetails, error) {
 
 	var details TaprootSpendDetails
@@ -1828,7 +1813,9 @@ func createTaprootSpendDetails(pInput *psbt.PInput,
 		}
 
 		// Check if we have already signed this input.
-		err := checkTaprootScriptSpendSig(pInput, tapDerivation)
+		err := checkTaprootScriptSpendSig(
+			pInput, keys, tapDerivation.LeafHashes[0],
+		)
 		if err != nil {
 			return details, err
 		}
@@ -1841,68 +1828,25 @@ func createTaprootSpendDetails(pInput *psbt.PInput,
 	return details, nil
 }
 
-// createBip32SpendDetails constructs the spending details (e.g. redeem scripts,
-// witness scripts) required for signing a BIP32 input.
+// createBip32SpendDetails constructs the spending details required for a
+// signature by pubKey over a resolved ECDSA script.
 //
-// It inspects the input's address type and existing script information in the
-// PSBT to determine the correct spending path (Legacy, SegWit v0, or Nested
-// SegWit).
-//
-// Returns `ErrUnknownAddressType` if the address type is not supported.
-// Returns `errAlreadySigned` if a valid signature for the derived key already
-// exists.
-//
-// NOTE: Taproot key-path spends must be routed through the taproot-specific
-// signing path before reaching this helper. Grouping `TaprootPubKey` with other
-// unsupported families here used to hide that misrouting.
-func createBip32SpendDetails(pInput *psbt.PInput, utxo *wire.TxOut,
-	addrType waddrmgr.AddressType,
-	derivation *psbt.Bip32Derivation) (SpendDetails, error) {
-
-	subScript := bip32SubScript(pInput, utxo)
+// Returns `errAlreadySigned` if the input already holds a signature by pubKey.
+func createBip32SpendDetails(pInput *psbt.PInput,
+	scriptCtx ecdsaScriptContext, pubKey []byte) (SpendDetails, error) {
 
 	// Check if we have already signed this input.
 	for _, sig := range pInput.PartialSigs {
-		if bytes.Equal(sig.PubKey, derivation.PubKey) {
+		if bytes.Equal(sig.PubKey, pubKey) {
 			return nil, errAlreadySigned
 		}
 	}
 
-	signingMethod, err := addrType.SigningMethod()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-			addrType)
+	if scriptCtx.witness {
+		return SegwitV0SpendDetails{WitnessScript: scriptCtx.script}, nil
 	}
 
-	switch signingMethod {
-	case waddrmgr.SigningMethodWitnessV0:
-		return SegwitV0SpendDetails{WitnessScript: subScript}, nil
-
-	case waddrmgr.SigningMethodLegacy:
-		return LegacySpendDetails{RedeemScript: subScript}, nil
-
-	case waddrmgr.SigningMethodTaprootKeySpend:
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-			addrType)
-	}
-
-	return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-		addrType)
-}
-
-// bip32SubScript returns the subscript that should be used for bip32-based
-// signing decisions.
-func bip32SubScript(pInput *psbt.PInput, utxo *wire.TxOut) []byte {
-	switch {
-	case len(pInput.RedeemScript) > 0:
-		return pInput.RedeemScript
-
-	case len(pInput.WitnessScript) > 0:
-		return pInput.WitnessScript
-
-	default:
-		return utxo.PkScript
-	}
+	return LegacySpendDetails{RedeemScript: scriptCtx.script}, nil
 }
 
 // planTaprootPsbtInput plans the signature for a single Taproot input of a
@@ -1910,9 +1854,11 @@ func bip32SubScript(pInput *psbt.PInput, utxo *wire.TxOut) []byte {
 //
 // It performs the following steps:
 //  1. Parses the BIP32 derivation path to ensure it is valid.
-//  2. Determines the specific spending path (Key Path vs Script Path) using
+//  2. Applies the tweak to the derivation key for both parities.
+//  3. Determines the specific spending path (Key Path vs Script Path) using
 //     createTaprootSpendDetails.
-//  3. Returns a plan that adds the signature to the PSBT input (either as the
+//  4. Checks that the spend uses one of the tweaked keys.
+//  5. Returns a plan that adds the signature to the PSBT input (either as the
 //     key spend signature or as a script spend signature).
 //
 // Returns an error if the input is invalid or already signed.
@@ -1940,8 +1886,22 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 		return nil, fmt.Errorf("invalid derivation path: %w", err)
 	}
 
+	signers, err := taprootSignerKeys(tapDerivation.XOnlyPubKey, tweak)
+	if err != nil {
+		return nil, err
+	}
+
 	// Determine the SpendDetails (Key Path or Script Path).
-	details, err := createTaprootSpendDetails(pInput, tapDerivation)
+	details, err := createTaprootSpendDetails(
+		pInput, tapDerivation, signers,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	signers, err = authorizeTaprootSigner(
+		pInput, utxo, tapDerivation, signers,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1957,13 +1917,21 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 		Details:    details,
 	}
 
+	var leafHash []byte
+	if details.SpendPath == ScriptPathSpend {
+		leafHash = tapDerivation.LeafHashes[0]
+	}
+
 	return &psbtSignPlan{
-		idx:    idx,
-		params: params,
-		apply: func(pInput *psbt.PInput, sig RawSignature) {
+		idx:     idx,
+		params:  params,
+		signers: signers,
+		apply: func(pInput *psbt.PInput, sig RawSignature,
+			signer []byte) {
+
 			addTaprootSigToPInput(
-				pInput, sig, params.HashType, details,
-				tapDerivation,
+				pInput, sig, params.HashType, details, signer,
+				leafHash,
 			)
 		},
 	}, nil
@@ -1973,11 +1941,14 @@ func (w *Wallet) planTaprootPsbtInput(packet *psbt.Packet, idx int,
 // (Legacy/SegWit) input of a PSBT, without looking up a key.
 //
 // It performs the following steps:
-//  1. Parses the BIP32 derivation path to determine the address type.
-//  2. Constructs the spending details (redeem scripts, etc.) using
-//     createBip32SpendDetails.
-//  3. Returns a plan that adds the signature to the PSBT input's PartialSigs
-//     list.
+//  1. Parses the BIP32 derivation path.
+//  2. Applies the tweak to the derivation key and resolves the script the
+//     input runs.
+//  3. Constructs the spending details using createBip32SpendDetails, which
+//     skips an input already signed by the tweaked key.
+//  4. Checks that the script checks the tweaked key.
+//  5. Returns a plan that adds the signature to the PSBT input's PartialSigs
+//     list under the tweaked key.
 //
 // Returns an error if the input is invalid or already signed.
 func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
@@ -2003,15 +1974,25 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 		return nil, fmt.Errorf("invalid derivation path: %w", err)
 	}
 
-	addrType, err := addressTypeFromPurpose(path.KeyScope.Purpose)
+	signer, err := ecdsaSignerKey(derivation.PubKey, tweak)
 	if err != nil {
 		return nil, err
 	}
 
-	// Construct SpendDetails for Legacy/SegWit input.
-	details, err := createBip32SpendDetails(
-		pInput, utxo, addrType, derivation,
-	)
+	scriptCtx, err := ecdsaScriptFor(pInput, utxo)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSigningKeyMismatch, err)
+	}
+
+	// Construct SpendDetails for Legacy/SegWit input. An existing record
+	// by the key has already been verified, so it is kept rather than
+	// checked again here.
+	details, err := createBip32SpendDetails(pInput, scriptCtx, signer)
+	if err != nil {
+		return nil, err
+	}
+
+	err = authorizeEcdsaSigner(scriptCtx, signer)
 	if err != nil {
 		return nil, err
 	}
@@ -2028,12 +2009,15 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 	}
 
 	return &psbtSignPlan{
-		idx:    idx,
-		params: params,
-		apply: func(pInput *psbt.PInput, sig RawSignature) {
+		idx:     idx,
+		params:  params,
+		signers: [][]byte{signer},
+		apply: func(pInput *psbt.PInput, sig RawSignature,
+			signer []byte) {
+
 			addBip32SigToPInput(
-				pInput, sig, params.HashType, derivation,
-				addrType,
+				pInput, sig, params.HashType, signer,
+				scriptCtx.witness,
 			)
 		},
 	}, nil
@@ -2045,7 +2029,7 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 	plan *psbtSignPlan) (bool, error) {
 
-	sig, err := w.computeRawSig(ctx, plan.params)
+	sig, signer, err := w.computeRawSig(ctx, plan.params, plan.signers)
 	if err != nil {
 		err = fmt.Errorf("%w: %w", errComputeRawSig, err)
 		if shouldSkipSigningError(err, plan.idx) {
@@ -2055,7 +2039,7 @@ func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 		return false, err
 	}
 
-	plan.apply(&packet.Inputs[plan.idx], sig)
+	plan.apply(&packet.Inputs[plan.idx], sig, signer)
 
 	return true, nil
 }

@@ -625,8 +625,8 @@ func TestNewKeyTweak(t *testing.T) {
 }
 
 // TestKeyTweakApply tests that a tweak sets the key to mul*d + add, that the
-// zero value leaves it unchanged, and that a tweak cancelling the key is
-// refused.
+// zero value leaves it unchanged, that a tweak cancelling the key is refused,
+// and that pubKey predicts the public key apply produces.
 func TestKeyTweakApply(t *testing.T) {
 	t.Parallel()
 
@@ -682,21 +682,24 @@ func TestKeyTweakApply(t *testing.T) {
 			key := &btcec.PrivateKey{Key: base.Key}
 
 			err := tc.tweak.apply(key)
+			pubKey, pubErr := tc.tweak.pubKey(base.PubKey())
 
 			require.ErrorIs(t, err, tc.wantErr)
+			require.ErrorIs(t, pubErr, tc.wantErr)
 
 			if tc.wantErr == nil {
 				require.True(t, key.Key.Equals(&tc.want))
+				require.True(t, pubKey.IsEqual(key.PubKey()))
 			}
 		})
 	}
 }
 
 // TestKeyTweakMatchesLndDerivations tests that the tweaks lnd builds give the
-// keys lnd derives today: a single tweak d + sha256(C || D), a revocation key
-// r*d + c*s with r = sha256(D || C) and c = sha256(C || D), and a revocation
-// followed by a single tweak. The Lightning hashes are computed by the caller,
-// as lnd would.
+// keys, and public keys, lnd derives today: a single tweak d + sha256(C || D),
+// a revocation key r*d + c*s with r = sha256(D || C) and c = sha256(C || D),
+// and a revocation followed by a single tweak. The Lightning hashes are
+// computed by the caller, as lnd would.
 func TestKeyTweakMatchesLndDerivations(t *testing.T) {
 	t.Parallel()
 
@@ -766,9 +769,13 @@ func TestKeyTweakMatchesLndDerivations(t *testing.T) {
 			key := &btcec.PrivateKey{Key: base.Key}
 
 			err := tc.tweak.apply(key)
-
 			require.NoError(t, err)
+
+			pubKey, err := tc.tweak.pubKey(basePub)
+			require.NoError(t, err)
+
 			require.True(t, key.Key.Equals(&tc.want))
+			require.True(t, pubKey.IsEqual(key.PubKey()))
 		})
 	}
 }
