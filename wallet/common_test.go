@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,6 +126,15 @@ func testKVDBManager(tb testing.TB) *Manager {
 func createTestChain(tb testing.TB) *bwmock.Chain {
 	tb.Helper()
 
+	return newTestChain(tb, false)
+}
+
+// newTestChain builds the default mock chain and reports current as the
+// backend's IsCurrent answer. A current backend at the genesis tip lets a real
+// syncer reach the synced state without scanning.
+func newTestChain(tb testing.TB, current bool) *bwmock.Chain {
+	tb.Helper()
+
 	chain := &bwmock.Chain{}
 
 	// Info reports the chain name without selecting any sync behavior.
@@ -135,7 +145,14 @@ func createTestChain(tb testing.TB) *bwmock.Chain {
 	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Maybe()
 	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
-	chain.On("IsCurrent").Return(false).Maybe()
+	chain.On("IsCurrent").Return(current).Maybe()
+
+	// A current backend lets the syncer finish startup and subscribe to
+	// block notifications.
+	if current {
+		chain.On("NotifyBlocks").Return(nil).Maybe()
+	}
+
 	chain.On("GetBestBlock").Return(
 		chainParams.GenesisHash, int32(0), nil,
 	).Maybe()
@@ -152,17 +169,44 @@ func createTestChain(tb testing.TB) *bwmock.Chain {
 	return chain
 }
 
+// newCurrentTestChain builds a current mock chain and returns a channel that
+// closes when the syncer first waits for chain notifications. The syncer only
+// waits there after startup sync has stored the synced state, so the channel
+// marks the wallet as ready without polling. The returned notification channel
+// is nil, so the syncer then idles until shutdown.
+func newCurrentTestChain(tb testing.TB) (*bwmock.Chain, <-chan struct{}) {
+	tb.Helper()
+
+	chain := newTestChain(tb, true)
+	idle := make(chan struct{})
+
+	var once sync.Once
+	chain.On("Notifications").Run(func(mock.Arguments) {
+		once.Do(func() { close(idle) })
+	}).Return((<-chan any)(nil)).Maybe()
+
+	return chain, idle
+}
+
 // testSQLiteManager opens a Manager over a real SQLite database at a fresh temp
 // path, for tests that exercise the SQL path end to end rather than against a
 // mock store.
 func testSQLiteManager(tb testing.TB) *Manager {
 	tb.Helper()
 
+	return testSQLiteManagerWithChain(tb, createTestChain(tb))
+}
+
+// testSQLiteManagerWithChain opens a started SQLite Manager like
+// testSQLiteManager, but over the supplied chain source.
+func testSQLiteManagerWithChain(tb testing.TB, chain *bwmock.Chain) *Manager {
+	tb.Helper()
+
 	m, err := NewManager(context.Background(), ManagerConfig{
 		Backend:     DBBackendSQLite,
 		DataSource:  filepath.Join(tb.TempDir(), "runtime.sqlite"),
 		ChainParams: chainParams,
-		ChainSource: createTestChain(tb),
+		ChainSource: chain,
 	})
 	require.NoError(tb, err)
 

@@ -8,11 +8,14 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -124,6 +127,173 @@ func TestChangeWatchFailureSQLiteKeepsChange(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), stored.Branch)
 	require.Zero(t, stored.Index)
+}
+
+// TestFundPsbtReservationSQLite verifies the public FundPsbt reservation
+// against a real SQLite Store: a funded attempt owns every packet input for
+// the fixed duration, an attempt whose authoring fails leaves no lease, a
+// leased input cannot be funded again until released, and after an early
+// release a fresh attempt owns it.
+func TestFundPsbtReservationSQLite(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a real SQLite wallet over a current chain so the
+	// real syncer reaches synced at genesis, and store two pending credits
+	// to a committed wallet script.
+	chain, idle := newCurrentTestChain(t)
+	chain.On("BlockStamp").Return(&waddrmgr.BlockStamp{
+		Hash: *chainParams.GenesisHash,
+	}, nil).Maybe()
+
+	w := createSQLiteWallet(t, chain)
+	select {
+	case <-idle:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wallet did not finish startup sync")
+	}
+
+	require.Equal(t, syncStateSynced, w.state.syncState())
+
+	script, first, second := storeFundingCredits(t, w)
+	fund := func(value int64, input wire.OutPoint) (*FundResult, error) {
+		return w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  newFundingPacket(t, script, value, input),
+			FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				KeyScope:    waddrmgr.KeyScopeBIP0084,
+				AccountName: "funding",
+			},
+		})
+	}
+
+	// Act: Fund one input, fail authoring on the other by overspending
+	// it, try to fund the leased input again, then release it early under
+	// the returned lease ID and fund it again.
+	before := time.Now()
+	owned, ownErr := fund(10_000, first)
+	ownedLeases, err := w.ListLeasedOutputs(t.Context())
+	require.NoError(t, err)
+
+	overspent, overspendErr := fund(1_000_000, second)
+	afterOverspend, err := w.ListLeasedOutputs(t.Context())
+	require.NoError(t, err)
+
+	leased, leasedErr := fund(10_000, first)
+
+	require.NoError(t, ownErr)
+	require.NoError(t, w.ReleaseOutput(t.Context(), owned.LeaseID, first))
+	retried, retryErr := fund(10_000, first)
+	finalLeases, err := w.ListLeasedOutputs(t.Context())
+	require.NoError(t, err)
+
+	// Assert: The funded attempt owns its only input under the lease ID
+	// it returned for about ten minutes, the failed authoring left that
+	// single lease untouched, the leased input was refused before
+	// reservation, and after the release the retry owns it under a
+	// different, freshly generated ID.
+	funded := owned.Packet
+	require.Len(t, funded.UnsignedTx.TxIn, 1)
+	require.Equal(t, first, funded.UnsignedTx.TxIn[0].PreviousOutPoint)
+	require.NotEqual(t, wtxmgr.LockID{}, owned.LeaseID)
+	require.Len(t, ownedLeases, 1)
+	require.Equal(t, first, ownedLeases[0].OutPoint)
+	require.Equal(t, owned.LeaseID, ownedLeases[0].LockID)
+	require.WithinDuration(
+		t, before.Add(fundLeaseDuration), ownedLeases[0].Expiration,
+		time.Minute,
+	)
+
+	require.ErrorIs(t, overspendErr, insufficientFundsError(t))
+	require.Nil(t, overspent)
+	require.Equal(t, ownedLeases, afterOverspend)
+
+	require.ErrorIs(t, leasedErr, ErrUtxoNotEligible)
+	require.Nil(t, leased)
+
+	require.NoError(t, retryErr)
+	require.NotEqual(t, owned.LeaseID, retried.LeaseID)
+	require.Len(t, finalLeases, 1)
+	require.Equal(t, first, finalLeases[0].OutPoint)
+	require.Equal(t, retried.LeaseID, finalLeases[0].LockID)
+}
+
+// createSQLiteWallet creates and unlocks a real SQLite wallet over the
+// supplied chain and adds the BIP84 "funding" account used by funding tests.
+func createSQLiteWallet(t *testing.T, chain *bwmock.Chain) *Wallet {
+	t.Helper()
+
+	m := testSQLiteManagerWithChain(t, chain)
+	params := sqliteCreateParams(t)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase, Timeout: -1,
+	}))
+
+	_, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084, Name: "funding",
+	})
+	require.NoError(t, err)
+
+	return w
+}
+
+// storeFundingCredits stores one pending transaction paying 20,000 and 30,000
+// sats to a fresh "funding" account script, and returns that script and the
+// two credited outpoints.
+func storeFundingCredits(t *testing.T, w *Wallet) ([]byte, wire.OutPoint,
+	wire.OutPoint) {
+
+	t.Helper()
+
+	changeAccount, _, err := w.resolveChangeAccount(
+		t.Context(), &ScopedAccount{
+			KeyScope: waddrmgr.KeyScopeBIP0084, AccountName: "funding",
+		},
+	)
+	require.NoError(t, err)
+	change, err := w.allocateChangeAddress(
+		t.Context(), waddrmgr.KeyScopeBIP0084, changeAccount,
+	)
+	require.NoError(t, err)
+
+	script := change.ScriptPubKey
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: 1}})
+	tx.AddTxOut(wire.NewTxOut(20_000, script))
+	tx.AddTxOut(wire.NewTxOut(30_000, script))
+	err = w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: time.Now(),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil, 1: nil},
+	})
+	require.NoError(t, err)
+
+	return script, wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		wire.OutPoint{Hash: tx.TxHash(), Index: 1}
+}
+
+// newFundingPacket builds a PSBT spending the given inputs to one output of
+// value sats paying script.
+func newFundingPacket(t *testing.T, script []byte, value int64,
+	inputs ...wire.OutPoint) *psbt.Packet {
+
+	t.Helper()
+
+	spend := wire.NewMsgTx(wire.TxVersion)
+	for _, input := range inputs {
+		spend.AddTxIn(&wire.TxIn{PreviousOutPoint: input})
+	}
+
+	spend.AddTxOut(wire.NewTxOut(value, script))
+
+	packet, err := psbt.NewFromUnsignedTx(spend)
+	require.NoError(t, err)
+
+	return packet
 }
 
 // TestManagerCreateUsesCommittedWalletRow verifies that Create assembles the
