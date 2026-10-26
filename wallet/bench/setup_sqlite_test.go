@@ -1,3 +1,5 @@
+//go:build !test_db_postgres
+
 package bench
 
 import (
