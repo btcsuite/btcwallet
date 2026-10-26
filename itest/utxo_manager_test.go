@@ -584,3 +584,100 @@ func testListLeasedOutputs(h *bwtest.HarnessTest) {
 	}, pollTimeout)
 	require.NoError(h, err, "expired lease still listed")
 }
+
+// testLeaseOutputNoExpiry verifies that a lease with WithNoExpiry reports no
+// expiration and holds its output against another owner.
+func testLeaseOutputNoExpiry(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	expiration, err := w.LeaseOutput(
+		h.Context(), owner, op, 0, wallet.WithNoExpiry(),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	_, errTake := w.LeaseOutput(
+		h.Context(), wtxmgr.LockID{2}, op, leaseDuration,
+	)
+	errRelease := w.ReleaseOutput(h.Context(), wtxmgr.LockID{2}, op)
+
+	utxo, err := w.GetUtxo(h.Context(), op)
+	require.NoError(h, err, "failed to get leased utxo")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases")
+
+	require.True(h, expiration.IsZero(), "lease reported an expiration")
+	require.ErrorIs(
+		h, errTake, wallet.ErrOutputAlreadyLocked,
+		"another owner took the lease",
+	)
+	require.ErrorIs(
+		h, errRelease, wallet.ErrOutputUnlockNotAllowed,
+		"another owner released the lease",
+	)
+	require.True(h, utxo.Locked, "leased output not locked")
+	require.Equal(h, []*wallet.LeasedOutput{{
+		OutPoint: op,
+		LockID:   owner,
+		NoExpiry: true,
+	}}, leases, "unexpected leases")
+}
+
+// testLeaseOutputNoExpiryRenewal verifies that an owner renewal with a
+// duration keeps a lease without expiry.
+func testLeaseOutputNoExpiryRenewal(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, 0, wallet.WithNoExpiry(),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	expiration, err := w.LeaseOutput(h.Context(), owner, op, leaseDuration)
+	require.NoError(h, err, "failed to renew lease")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases")
+
+	require.True(h, expiration.IsZero(), "renewal set an expiration")
+	require.Equal(h, []*wallet.LeasedOutput{{
+		OutPoint: op,
+		LockID:   owner,
+		NoExpiry: true,
+	}}, leases, "renewal changed the lease")
+}
+
+// testLeaseOutputNoExpiryReload verifies that a lease without expiry keeps its
+// owner and policy across a wallet reload.
+func testLeaseOutputNoExpiryReload(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+	owner := wtxmgr.LockID{1}
+
+	_, err := w.LeaseOutput(
+		h.Context(), owner, op, 0, wallet.WithNoExpiry(),
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	// The listing below reads only state persisted before the reload.
+	w = h.ReloadWallet(w)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases after reload")
+
+	require.Equal(h, []*wallet.LeasedOutput{{
+		OutPoint: op,
+		LockID:   owner,
+		NoExpiry: true,
+	}}, leases, "reload changed the lease")
+}
