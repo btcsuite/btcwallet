@@ -53,3 +53,63 @@ measurement bias.
 
 See [reproducibility](reproducibility.md) for execution and profiling, and the
 [record template](template.md) for aggregation and ratio instructions.
+
+## Chain synchronization
+
+Startup-to-synced measures a fresh native lifecycle discovering a prepared
+chain. It uses the [startup dataset](reproducibility.md#startup-chain-dataset),
+which preserves the lnd Wallet shape and address distribution while defining
+block placement separately from the read snapshots. Shared Wallet inventory
+alone does not define a chain workload. Hold the chain, starting metadata,
+background traffic, source and completion condition fixed across implementations.
+
+Prepare and mine the target before measurement. Save a closed unfunded native
+Wallet at the common chain base. Restore private storage and construct a fresh
+Manager, chain source and connections for every sample. Database startup,
+physical open, restore, NewManager, mining, random generation and shutdown are
+untimed. There is no read warmup. Time Manager.Start, including durable Wallet
+loading, through public Info observing native readiness and the exact configured
+target hash/height. Legacy times OpenWithRetry, StartDeprecated and SynchronizeRPC
+through its equivalent persisted-tip/ChainSynced condition plus live-tip RPC.
+The live RPC matches Info's observation work and lets network polling progress
+on one processor. Unsuccessful observations yield; they add no completion sleep.
+
+Legacy uses native rescan; maintained kvdb, SQLite and PostgreSQL use full-block
+sync. Both kvdb leaves restore the same closed baseline and persist freelists.
+The SQL suite owns its usual native lifecycle independently. These paths need
+not have artificial structural symmetry. Report only this explicit workload
+and mode comparison; do not infer a general ranking of storage backends.
+
+The three nonzero full cases hold the same 204 Wallet graph transactions fixed
+and distribute them into 1, 10 or 100 matching blocks within 1,000 blocks. Thus
+average graph transactions per matching block changes as 204, 20.4 and 2.04. This
+studies placement/clustering with fixed Wallet work, not increasing Wallet
+transaction volume. The populated 0% baseline intentionally has no Wallet work.
+Treat that boundary explicitly when examining trends; three nonzero points do
+not establish general linear scaling. Background payments remain identical.
+
+Coinbase-only empty blocks are a separate control from populated blocks with
+no Wallet matches. Both start with the same unfunded metadata, including its
+existing addresses and keys. Keep empty-block results outside the populated
+hit-ratio relationship. Foreign-only graph transactions are not Wallet hits.
+
+Calibrate block payload by weight and serialized bytes rather than transaction
+count alone. The deterministic background payment template models scan load,
+while the Wallet graph preserves lnd transaction shapes. Mainnet traffic mixes
+and Lightning contract timing/witnesses remain disclosed simplifications.
+Inspect real pilot blocks before scaling; never silently substitute lighter
+blocks, synthetic Store ingestion, mocks or the legacy stress dataset.
+
+The maintained full-block scanner requests the whole 1,000-block window in one
+getblock batch, implying about 2.8 GB of reply hex at this payload before copies
+and decoded objects. This requires the explicit startup capacity budget in the
+[environment table](reproducibility.md#docker-environment). Keep those fixed
+settings across implementations and record them with the measured cohort.
+The small pilot establishes validity/reuse, not full-window memory feasibility.
+
+Use 1x for each restored lifecycle. CPU and heap captures are separate 1x runs;
+finish capture before Wallet/source teardown. Keep usual database and matched
+chain I/O measured. Fixture correctness belongs in tests and separate inspection,
+not benchmark assertions. Whole-command duration includes setup; a timeout or
+OOM supplies no startup timing or usable profile. Keep failed/excluded attempts
+with their actual source revision and never relabel old dense or biased runs.

@@ -70,7 +70,8 @@ CPUs and architectures; a speedup factor applies to its measured environment.
 
 | Component | Image and settings |
 | --- | --- |
-| Wallet client | `golang:1.25.11-bookworm`; 1 CPU, 4 GiB, no swap, GOMAXPROCS=1, CGO=0, `-buildvcs=false -trimpath -p=1`. |
+| Wallet client | `golang:1.25.11-bookworm`; 1 CPU, 4 GiB for reads or 16 GiB for start-to-synced, no swap, GOMAXPROCS=1, CGO=0, `-buildvcs=false -trimpath -p=1`. |
+| Bitcoin Core (startup only) | `lightninglabs/bitcoin-core:30`, version 30.2, digest `sha256:844f2a308e243ce3aa3df7918bd2fe230259419280f7826a62b896510ad3dcbd`, 1 CPU, 12 GiB, no swap, regtest, `-disablewallet -txindex -blockfilterindex=1 -mocktime=2100000000`, RPC/ZMQ. |
 | PostgreSQL | `postgres:18-alpine`, version 18.4; 1 CPU, 1 GiB, same-host bridge TCP, `fsync=on`. |
 | SQLite | Embedded in the client; WAL, native `synchronous=FULL`, foreign keys, 5s busy timeout. Both SQL pools use the normal 25-connection limit. |
 
@@ -331,3 +332,139 @@ before Wallet startup so timed reads have planner statistics. Preparation and
 restoration remain outside timing.
 
 [lnd-revocation]: https://github.com/lightningnetwork/lnd/blob/1a359d4aa1e58daad2c3c5ade1ff3f415f91ac1b/lnwallet/revocation_producer.go#L23-L33
+
+## Startup chain dataset
+
+Startup uses the same small-node Wallet model with a separate chain placement.
+Every case starts with one unfunded Wallet: 260 regular accounts, 203 ordinary
+addresses and 601 channel keys, the seed/birthday above and zero recovery
+lookahead. Keys already exist; a new or unfunded Wallet is not an empty
+metadata database. Ordinary receiving uses BIP84; change and closing addresses
+use BIP86. Internal channel-key families remain separate and unused as payment
+addresses. Backend-specific native allocation is reused without ApplyTxBatch.
+
+The nonzero cases use the same 204-transaction graph: one deposit, 100 openings,
+98 cooperative closes, two force closes and three sweeps. Shapes are 1-to-2
+openings/cooperative closes, 1-to-14 commitments, a 2-to-1 balance sweep,
+21-to-21 timeout/fee transaction and 20-to-1 final sweep. Owned scripts, amounts,
+ancestry and the expected 101 spendable outputs follow the shared model.
+The two foreign-only force parents need not appear as discovered Wallet
+records. See the [interpretation](methodology.md#chain-synchronization).
+
+| Startup case | Catch-up blocks | Background tx/block | Blocks with Wallet matches | Wallet graph tx |
+| --- | ---: | ---: | --- | ---: |
+| smoke | 10 | 6,000 | 5 | 204 |
+| empty | 1,000 | 0 | none | 0 |
+| hits-0 | 1,000 | 6,000 | none | 0 |
+| hits-1 | 1,000 | 6,000 | 500 | 204 |
+| small-node | 1,000 | 6,000 | 100,200,...,1,000 | 204 |
+| hits-100 | 1,000 | 6,000 | 10,20,...,1,000 | 204 |
+
+The three full nonzero ratios are 0.1%, 1% and 10% of blocks containing actual
+Wallet matches. They are not Wallet fractions of all transactions or counts
+of positive compact filters. Graph index i, starting at zero, is assigned to
+occupied block floor(i*H/204), interpreted as an index into the explicit H
+occupied heights. Keep parent-before-child order within a block. Foreign-only
+parents do not by themselves count as Wallet matches. Empty schedules still
+prepare all requested blocks; nil history is not a target-cache hit.
+
+Each unrelated transaction spends one miner P2WPKH input to a distinct tagged
+foreign P2WSH recipient and P2WPKH miner change. It pays 1,000 sat with a
+1,000 sat fee. Six thousand lanes roll change forward independently; only the
+prior background block is retained during preparation. Estimated background
+payload is about 3.6..3.7 million weight units and 1.4 MB per block. Actual
+mined block data belongs in run evidence, separately from these estimates.
+
+Calibration uses mainnet blocks 973169..973183, obtained from the
+[fixed-height metadata endpoint](https://mempool.space/api/v1/blocks/973183).
+Their 2,237..7,783 transactions occupy about 3.993..3.998 million weight units;
+median serialized size is 1,584,601 bytes. Raw examples at heights 973183,
+973182 and 973171 were inspected against their header hashes, byte counts and
+weights. This is a small reference window, not a universal traffic estimate.
+The controlled single-template background approximates payload and scan load;
+it does not reproduce mainnet input/output, witness, script or OP_RETURN mixes.
+
+The observed lnd lifecycle occupied 731 blocks: deposit 439, openings 440+6*i,
+cooperative closes 1040..1137, both force parents 1138, balance sweep 1142,
+timeout/fee 1165 and final sweep 1169. The controlled placements compress that
+schedule, including same-block ancestry. Tagged foreign witnesses replace
+Lightning CSV/CLTV contracts while preserving P2WSH type and distinctness.
+Their script/witness sizes differ from real Lightning contracts. This is a
+chain-valid shape model, not an lnd protocol replay or mainnet archive replay.
+Disclose these differences and inspect the pilot before scaling.
+
+### Prepare and reuse the startup fixture
+
+Mine 103 maturity blocks with the fixed preparation miner. Coinbase one funds
+the Wallet deposit. Mature coinbases two through four fund one 6,000-output
+P2WPKH fan-out at height 104. Their 150 BTC permits each lane to pay 2,000 sat
+per block throughout 1,000 blocks. Save the stopped common base 104, including
+this fan-out, even for the empty control. Its exact hash is retained in logs.
+Every native Wallet baseline synchronizes to this exact base before shutdown.
+
+After Wallet shutdown, mine the case's explicit ordered transactions through
+real Core generateblock. Core validates and submits each block. There is no
+mempool-throughput measurement or synthetic database ingestion. Full targets
+end at 1104; smoke ends at 114. Save the closed target before publishing each
+closed native Wallet baseline. Independent targets have their own hashes.
+The smoke contains 60,000 background and 204 Wallet graph transactions; each
+populated full target contains 6,000,000 background transactions and, when
+nonzero, 204 Wallet graph transactions. Coinbase and base funding are separate.
+
+The current volume namespace is `start-to-synced/v3/bitcoin-30.2`; the
+historical v2 namespace and its measured fixtures remain unchanged. Common base is
+`chain/base`; targets are `chain/<case>/target`. Kvdb baselines use
+`kvdb/<case>.db`; SQL uses `<schema-hash>/<backend>/<case>.db`. The case ID is
+separate from fixed Wallet model ID. Reuse across executable changes; read
+fixtures and old startup-v1 evidence remain separate. Restores are private
+closed files/directories, or the existing PostgreSQL dump/restore mechanism.
+A missing target is published even for zero-history cases.
+
+Untimed native and SQL preparation allow 20 minutes; measured samples retain
+30 minutes and the outer startup command retains one hour. The first full
+hits-0 attempt at `ff8ac2997bb64e0b41e82a0216d66651ee0099fb` exhausted the
+former ten-minute preparation context. It supplied no sync metric or recorded
+OOM event; its 619.103s whole-command duration is a failed preparation outcome.
+
+Use the resource table above for every implementation in this cohort. The
+Docker VM allocation was increased to 32 GB before collection. Old startup
+observations used smaller container limits and a different dense chain;
+retain their provenance and exclusions rather than pooling them with v2.
+Two selected SQLite smoke invocations establish real-chain validity and
+persistent reuse. Inspect the closed target block file separately to record
+actual weights, bytes, counts and placement; add no benchmark validation reads.
+They do not establish the capacity of a 1,000-block batch. After separate full
+run approval, begin with one hits-0 target and one maintained SQLite 1x sample,
+recording preparation time and exact deadline/OOM outcome. Continue an approved
+matrix only after that succeeds. A resource or deadline failure requires a
+replan before changing payload, limits, modes or existing preparation timeout.
+
+### Startup pilot observations
+
+The two selected SQLite smoke invocations on 2026-10-26 measured source
+`f993b2ea8c94bcb7d78a069a5e3466e76b6bbd54`. They used identical binaries,
+SHA256 `6c4f82c8403d22f2461d274e9cb17d7169e85c6bfa9cc0e1f1f1fd0737b79ac9`.
+These are development observations, not the full comparison result.
+
+| Invocation | ns/op | B/op | allocs/op | Whole command |
+| --- | ---: | ---: | ---: | ---: |
+| Initial preparation | 1,095,287,584 | 374,081,184 | 1,910,174 | 20.047s |
+| Persistent reuse | 1,089,946,168 | 378,279,024 | 1,907,960 | 6.781s |
+
+All 64 saved fixture files kept identical checksums after reuse, which logged
+restoration without allocation/mining. Both invocations completed at height 114,
+hash `3b86f077c7d8476b5a42aaf0ab299f9cdad04918ae7e888b51e1c7b473c16ea6`.
+The common base 104 hash is
+`2d95ea58f90bb55d546d4e6c56a7c57884b275799aeaebf969798993e7d452f5`.
+
+Standalone inspection of the closed target block file found exactly 60,000
+background transactions and 204 graph transactions. Offset 5 (height 109) has
+6,205 transactions including coinbase, of which 202 have modeled Wallet credits.
+Other catch-up blocks each have 6,001 transactions including coinbase.
+Their sizes are 1,407,205..1,407,278 bytes and weights 3,657,850..3,657,923 WU.
+The matching block is 1,451,049 bytes and 3,795,684 WU, including the graph.
+These observations confirm the selected payload fits individual valid blocks;
+they do not establish 1,000-block batch capacity. Raw command receipts, immutable
+fixture checksums and block-inspection.json are retained under the task-local
+`.lgtm/task-sync-bench/runs/chain-v2/` evidence directory. No full cases or
+profiles were collected for this cohort.

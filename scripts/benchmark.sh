@@ -75,11 +75,21 @@ if [[ -n "$bench_api" &&
     fi
 fi
 
-case "$bench_workload" in
-    smoke) bench_duration=${bench_duration:-1x} ;;
-    small-node|medium-node|large-node) bench_duration=${bench_duration:-3s} ;;
-    *) echo 'Select case=smoke|small-node|medium-node|large-node' >&2; exit 1 ;;
-esac
+# Startup IDs describe block placement independently of the shared read sizes.
+# Keep read selection and duration unchanged while each startup is one lifecycle.
+if [[ "$bench_method" == start-to-synced ]]; then
+    case "$bench_workload" in
+        smoke|empty|hits-0|hits-1|small-node|hits-100)
+            bench_duration=${bench_duration:-1x} ;;
+        *) echo 'Select case=smoke|empty|hits-0|hits-1|small-node|hits-100' >&2; exit 1 ;;
+    esac
+else
+    case "$bench_workload" in
+        smoke) bench_duration=${bench_duration:-1x} ;;
+        small-node|medium-node|large-node) bench_duration=${bench_duration:-3s} ;;
+        *) echo 'Select case=smoke|small-node|medium-node|large-node' >&2; exit 1 ;;
+    esac
+fi
 case "$bench_profile" in
     ''|cpu|mem) ;;
     *) echo 'Select profile=cpu|mem|all, or omit it for timing' >&2; exit 1 ;;
@@ -125,6 +135,10 @@ bench_out=$(cd "$bench_out" && pwd)
 # method consuming it. Bump its revision for fixture inputs or storage changes;
 # query/runtime changes must keep reusing the saved dataset.
 bench_fixture_revision=v1
+# One runner-owned mount identity is shared by the client and real chain node.
+# Consumers require these exported values instead of inventing another volume.
+bench_fixture_volume=btcwallet-bench-fixtures
+bench_fixture_root=/fixtures
 bench_schema=
 case "$bench_db" in
 
@@ -133,16 +147,23 @@ case "$bench_db" in
     sqlite) bench_schema=sqlite ;;
     postgres) bench_schema=pg ;;
 esac
+# Startup overrides the read revision after backend selection: corrected
+# numbered accounts need fresh native baselines without touching old evidence.
+bench_memory=4g
+if [[ "$bench_method" == start-to-synced ]]; then
+    bench_fixture_revision=v3
+    bench_memory=16g
+fi
 bench_gateway=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
 bench_image=golang:1.25.11-bookworm@sha256:b96f24a8d7d010ea0acb9c3ba99064740f02b6b984612b28bd3c9c5ab9453e38
 
 # Mount source read-only and give every client the same build/resource limits.
 # The Docker socket lets the SQL fixture provision PostgreSQL independently.
 git rev-parse HEAD
-docker run --rm --cpus=1 --memory=4g --memory-swap=4g \
+docker run --rm --cpus=1 --memory="$bench_memory" --memory-swap="$bench_memory" \
     -v "$(pwd):/build:ro" -w /build \
     -v /tmp/go-build-cache/benchmark:/cache \
-    -v btcwallet-bench-fixtures:/fixtures \
+    -v "$bench_fixture_volume:$bench_fixture_root" \
     -v "$bench_out:/artifacts" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -e GOMAXPROCS=1 -e CGO_ENABLED=0 \
@@ -151,8 +172,11 @@ docker run --rm --cpus=1 --memory=4g --memory-swap=4g \
     -e TESTCONTAINERS_HOST_OVERRIDE="$bench_gateway" \
     -e BENCH_PACKAGE="$bench_pkg" -e BENCH_CASE="$bench_case" \
     -e BENCH_DURATION="$bench_duration" \
+    -e BENCH_METHOD="$bench_method" \
     -e BENCH_FIXTURE_REVISION="$bench_fixture_revision" \
     -e BENCH_SCHEMA="$bench_schema" \
+    -e BTCWALLET_BENCH_FIXTURE_VOLUME="$bench_fixture_volume" \
+    -e BTCWALLET_BENCH_FIXTURE_ROOT="$bench_fixture_root" \
     -e BTCWALLET_BENCH_PROFILE="$bench_profile" \
     -e BTCWALLET_BENCH_PROFILE_DIR=/artifacts \
     "$bench_image" sh -ec '
@@ -164,15 +188,24 @@ docker run --rm --cpus=1 --memory=4g --memory-swap=4g \
         # SQL storage compatibility follows bootstrap/migration contents, not
         # queries or executable identity. Legacy and maintained share kvdb.
         fixture_key="lnd-wallet/$BENCH_FIXTURE_REVISION"
+        bench_timeout=20m
+        # Startup uses closed daemon directories and metadata-only baselines,
+        # independently of the read snapshots. Schema hashes remain SQL-only.
+        if [ "$BENCH_METHOD" = start-to-synced ]; then
+            fixture_key="start-to-synced/$BENCH_FIXTURE_REVISION/bitcoin-30.2"
+            export BTCWALLET_BENCH_SYNC_FIXTURE_DIR="$BTCWALLET_BENCH_FIXTURE_ROOT/$fixture_key"
+            # Full startup needs its bounded sample plus setup and cleanup.
+            bench_timeout=1h
+        fi
         if [ -n "$BENCH_SCHEMA" ]; then
             schema_key=$(cat wallet/internal/sql/"$BENCH_SCHEMA"/bootstrap/*.sql \
                 wallet/internal/sql/"$BENCH_SCHEMA"/migrations/*.sql | sha256sum)
             fixture_key="$fixture_key/${schema_key%% *}"
         fi
-        export BTCWALLET_BENCH_FIXTURE_DIR=/fixtures/$fixture_key
+        export BTCWALLET_BENCH_FIXTURE_DIR="$BTCWALLET_BENCH_FIXTURE_ROOT/$fixture_key"
         /artifacts/benchmark.test -test.run="^$" \
             -test.bench="$BENCH_CASE" -test.benchtime="$BENCH_DURATION" \
-            -test.count=1 -test.cpu=1 -test.benchmem -test.timeout=20m
+            -test.count=1 -test.cpu=1 -test.benchmem -test.timeout="$bench_timeout"
         # Analyze only completed diagnostic captures, after benchmark cleanup.
         # Heap subtraction separates allocation traffic from retained Go heap.
         case "$BTCWALLET_BENCH_PROFILE" in
