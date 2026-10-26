@@ -138,3 +138,121 @@ func TestSyncHistoryBuildsValidSpends(t *testing.T) {
 	require.NoError(t, err)
 	require.Error(t, engine.Execute())
 }
+
+// TestSyncBenchmarkCasesPlaceWalletMatches checks actual owned-match heights,
+// distinguishing zero-history and empty-block controls from foreign parents.
+func TestSyncBenchmarkCasesPlaceWalletMatches(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: reference ownership comes from the unchanged lnd graph. Fixed
+	// script bytes suffice because this test checks placement, not signing.
+	workload := NodeBenchmarkCases()[0]
+
+	scripts := make([][]byte, workload.NumAddresses)
+	for i := range scripts {
+		scripts[i] = append(
+			[]byte{txscript.OP_0, txscript.OP_DATA_20},
+			make([]byte, 20)...,
+		)
+	}
+
+	records := workload.Batch(1, scripts).Transactions
+	tests := []struct {
+		id      string
+		blocks  int32
+		noise   int
+		matches int
+		first   int32
+		last    int32
+		step    int32
+	}{
+		{
+			id:      "smoke",
+			blocks:  10,
+			noise:   6000,
+			matches: 1,
+			first:   5,
+			last:    5,
+			step:    1,
+		},
+		{
+			id:     "empty",
+			blocks: 1000,
+		},
+		{
+			id:     "hits-0",
+			blocks: 1000,
+			noise:  6000,
+		},
+		{
+			id:      "hits-1",
+			blocks:  1000,
+			noise:   6000,
+			matches: 1,
+			first:   500,
+			last:    500,
+			step:    1,
+		},
+		{
+			id:      "small-node",
+			blocks:  1000,
+			noise:   6000,
+			matches: 10,
+			first:   100,
+			last:    1000,
+			step:    100,
+		},
+		{
+			id:      "hits-100",
+			blocks:  1000,
+			noise:   6000,
+			matches: 100,
+			first:   10,
+			last:    1000,
+			step:    10,
+		},
+	}
+
+	// Act: obtain only the public case factory's schedules. Expectations above
+	// state the requested experiment independently of its grouping algorithm.
+	cases := SyncBenchmarkCases()
+
+	// Assert: count blocks with owned credits, rather than treating foreign
+	// force-close parents as Wallet hits. Ordered heights preserve ancestry.
+	require.Len(t, cases, len(tests))
+
+	for i, test := range tests {
+		scenario := cases[i]
+		require.Equal(t, test.id, scenario.ID)
+		require.Equal(t, test.blocks, scenario.Blocks)
+		require.Equal(t, test.noise, scenario.BackgroundTransactions)
+
+		if test.matches == 0 {
+			require.Empty(t, scenario.HistoryBlocks)
+			continue
+		}
+
+		require.Len(t, scenario.HistoryBlocks, 204)
+
+		matched := make(map[int32]bool)
+
+		var previous int32
+		for index, height := range scenario.HistoryBlocks {
+			require.GreaterOrEqual(t, height, previous)
+			require.Positive(t, height)
+			require.LessOrEqual(t, height, scenario.Blocks)
+
+			if len(records[index].Credits) != 0 {
+				matched[height] = true
+			}
+
+			previous = height
+		}
+
+		require.Len(t, matched, test.matches)
+
+		for height := test.first; height <= test.last; height += test.step {
+			require.True(t, matched[height])
+		}
+	}
+}

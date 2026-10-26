@@ -18,6 +18,113 @@ import (
 // canonical wallet-owned model values.
 const syncBenchmarkDepositFee = 1000
 
+// syncBenchmarkBackgroundLanes calibrates unrelated traffic near full-block
+// payload while leaving room for the complete lnd graph in one matching block.
+const (
+	syncBenchmarkBackgroundLanes = 6000
+	syncBenchmarkPaymentValue    = 1000
+	syncBenchmarkPaymentFee      = 1000
+	syncBenchmarkTxVersion       = 2
+)
+
+// SyncBenchmarkCase separates block placement from the shared Wallet inventory.
+// HistoryBlocks gives each modeled transaction's one-based catch-up block;
+// an empty schedule requests metadata only, including populated zero-hit cases.
+type SyncBenchmarkCase struct {
+	ID                     string
+	Workload               NodeBenchmarkWorkload
+	Blocks                 int32
+	BackgroundTransactions int
+	HistoryBlocks          []int32
+}
+
+// SyncBenchmarkCases holds Wallet inventory and nonzero graph volume fixed.
+// Only placement changes across the populated hit cases; coinbase-only empty
+// blocks are a separate control. Each value owns its deterministic seed.
+func SyncBenchmarkCases() []SyncBenchmarkCase {
+	const (
+		smokeBlocks   int32 = 10
+		historyBlocks int32 = 1000
+		denseStep     int32 = 10
+		periodicStep  int32 = 100
+	)
+
+	transactions := NodeBenchmarkCases()[0].NumTransactions
+
+	var periodic, dense []int32
+	for height := denseStep; height <= historyBlocks; height += denseStep {
+		dense = append(dense, height)
+		if height%periodicStep == 0 {
+			periodic = append(periodic, height)
+		}
+	}
+
+	cases := []SyncBenchmarkCase{
+		{
+			ID:                     "smoke",
+			Blocks:                 smokeBlocks,
+			BackgroundTransactions: syncBenchmarkBackgroundLanes,
+			HistoryBlocks: syncBenchmarkHistoryBlocks(
+				transactions, []int32{smokeBlocks / 2},
+			),
+		},
+		{
+			ID:     "empty",
+			Blocks: historyBlocks,
+		},
+		{
+			ID:                     "hits-0",
+			Blocks:                 historyBlocks,
+			BackgroundTransactions: syncBenchmarkBackgroundLanes,
+		},
+		{
+			ID:                     "hits-1",
+			Blocks:                 historyBlocks,
+			BackgroundTransactions: syncBenchmarkBackgroundLanes,
+			HistoryBlocks: syncBenchmarkHistoryBlocks(
+				transactions, []int32{historyBlocks / 2},
+			),
+		},
+		{
+			ID:                     "small-node",
+			Blocks:                 historyBlocks,
+			BackgroundTransactions: syncBenchmarkBackgroundLanes,
+			HistoryBlocks: syncBenchmarkHistoryBlocks(
+				transactions, periodic,
+			),
+		},
+		{
+			ID:                     "hits-100",
+			Blocks:                 historyBlocks,
+			BackgroundTransactions: syncBenchmarkBackgroundLanes,
+			HistoryBlocks: syncBenchmarkHistoryBlocks(
+				transactions, dense,
+			),
+		},
+	}
+
+	// Reuse native allocation inputs without sharing mutable seed storage
+	// between independent case preparations or changing the read cases.
+	for i := range cases {
+		cases[i].Workload = NodeBenchmarkCases()[0]
+	}
+
+	return cases
+}
+
+// syncBenchmarkHistoryBlocks evenly groups the ordered graph into the explicit
+// occupied blocks without changing parent-before-child transaction order.
+func syncBenchmarkHistoryBlocks(transactions uint32,
+	occupied []int32) []int32 {
+
+	heights := make([]int32, transactions)
+	for i := range heights {
+		heights[i] = occupied[i*len(occupied)/len(heights)]
+	}
+
+	return heights
+}
+
 // BuildSyncBenchmarkHistory materializes the existing graph using real funding.
 // Funding contains one miner coinbase per deposit, in model order. The caller's
 // unlocked preparation Wallet signs owned inputs before its baseline is closed.
@@ -161,6 +268,54 @@ func syncBenchmarkContract(point wire.OutPoint) ([]byte, []byte) {
 	script := append([]byte{txscript.OP_0, txscript.OP_DATA_32}, hash[:]...)
 
 	return script, witness
+}
+
+// BuildSyncBenchmarkFunding fans mature miner coinbases into independent
+// P2WPKH lanes. Callers supply positive lanes and mature miner-owned coinbases;
+// three coinbases fund 6,000 lanes through the full 1,000-block history.
+func BuildSyncBenchmarkFunding(funding []*wire.MsgTx,
+	lanes int) (*wire.MsgTx, error) {
+
+	addr, key, err := syncBenchmarkMinerAddress()
+	if err != nil {
+		return nil, err
+	}
+	defer key.Zero()
+
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, fmt.Errorf("miner script: %w", err)
+	}
+
+	// All source outputs belong to the existing preparation miner; divide
+	// their value after the fixed fee rather than introducing funding state.
+	tx := wire.NewMsgTx(syncBenchmarkTxVersion)
+	prevouts := txscript.NewMultiPrevOutFetcher(nil)
+
+	value := -int64(syncBenchmarkDepositFee)
+	for _, parent := range funding {
+		point := wire.OutPoint{Hash: parent.TxHash()}
+		tx.AddTxIn(wire.NewTxIn(&point, nil, nil))
+		prevouts.AddPrevOut(point, parent.TxOut[0])
+		value += parent.TxOut[0].Value
+	}
+
+	for range lanes {
+		tx.AddTxOut(wire.NewTxOut(value/int64(lanes), script))
+	}
+
+	hashes := txscript.NewTxSigHashes(tx, prevouts)
+	for index, parent := range funding {
+		tx.TxIn[index].Witness, err = txscript.WitnessSignature(
+			tx, hashes, index, parent.TxOut[0].Value, script,
+			txscript.SigHashAll, key, true,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("sign background funding: %w", err)
+		}
+	}
+
+	return tx, nil
 }
 
 // syncBenchmarkMinerAddress fixes coinbase ownership independently of Wallet
