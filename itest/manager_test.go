@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -729,4 +730,91 @@ func testManagerNeutrinoWatchReplay(h *bwtest.HarnessTest) {
 	got, err := w.GetTx(h.Context(), *payment)
 	require.NoError(h, err, "persisted address missed confirmed payment")
 	require.NotNil(h, got.Block, "payment was not recorded as confirmed")
+}
+
+// testManagerMultiWalletTransactions verifies one Manager's Wallets retain
+// their own coins and record both sides of a confirmed inter-Wallet payment.
+func testManagerMultiWalletTransactions(h *bwtest.HarnessTest) {
+	// Only SQL supports several Wallets in one Manager; all chain backends
+	// deliver the confirmed state this scenario observes, including Neutrino.
+	//nolint:staticcheck // SA1019: kvdb remains a maintained test backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("kvdb supports one Wallet per Manager")
+	}
+
+	// Arrange: Give two independently seeded Wallets one coin each through
+	// the existing harness, which owns their cleanup and mined-tip readiness.
+	manager := h.NewWalletManager()
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err)
+	firstParams := h.TestWalletParams()
+	firstParams.Name += "-first"
+	first, err := manager.Create(firstParams)
+	require.NoError(h, err)
+	h.RegisterWallet(manager, first)
+	secondParams := h.TestWalletParams()
+	secondParams.Name += "-second"
+	second, err := manager.Create(secondParams)
+	require.NoError(h, err)
+	h.RegisterWallet(manager, second)
+
+	firstFunding := h.FundWalletOfType(first, waddrmgr.WitnessPubKey, oneBTC)
+	secondFunding := h.FundWalletOfType(second, waddrmgr.WitnessPubKey, oneBTC)
+	receiving := h.NewWalletAddressOfType(second, waddrmgr.WitnessPubKey)
+	script, err := txscript.PayToAddrScript(receiving)
+	require.NoError(h, err)
+	h.UnlockWallet(first)
+
+	// Spend the whole first coin less a known fee, so final ownership needs
+	// no change/selection policy assertion and the second coin is a control.
+	transfer := h.SignSpend(first, bwtest.SpendFixture{
+		Inputs: firstFunding.WalletOutpoints,
+		Outputs: []wire.TxOut{
+			{
+				Value:    oneBTC - spendFee,
+				PkScript: script,
+			},
+		},
+	})
+
+	// Act: Publish through the sender's public API, then let harness mining
+	// synchronize both Wallets before querying their confirmed views directly.
+	err = first.Broadcast(h.Context(), transfer, "")
+	require.NoError(h, err)
+	h.MineBlockWithTx(h.AssertTxInMempool(transfer.TxHash()))
+
+	// Assert: Both Wallets see the same confirmed transaction with opposite
+	// net values. A has no coin; B keeps its funding and receives the payment.
+	sent, err := first.GetTx(h.Context(), transfer.TxHash())
+	require.NoError(h, err)
+	require.NotNil(h, sent.Block)
+	require.Equal(h, -btcutil.Amount(oneBTC), sent.Value)
+	received, err := second.GetTx(h.Context(), transfer.TxHash())
+	require.NoError(h, err)
+	require.NotNil(h, received.Block)
+	require.Equal(h, btcutil.Amount(oneBTC-spendFee), received.Value)
+
+	query := wallet.UtxoQuery{
+		MinConfs: 1,
+		MaxConfs: maxConfsLimit,
+	}
+	firstCoins, err := first.ListUnspent(h.Context(), query)
+	require.NoError(h, err)
+	require.Empty(h, firstCoins)
+	secondCoins, err := second.ListUnspent(h.Context(), query)
+	require.NoError(h, err)
+	require.Len(h, secondCoins, 2)
+	require.ElementsMatch(h, []wire.OutPoint{
+		secondFunding.WalletOutpoints[0],
+		{
+			Hash: transfer.TxHash(),
+		},
+	}, []wire.OutPoint{
+		secondCoins[0].OutPoint,
+		secondCoins[1].OutPoint,
+	})
+	require.Equal(
+		h, btcutil.Amount(twoBTC-spendFee),
+		secondCoins[0].Amount+secondCoins[1].Amount,
+	)
 }
