@@ -35,7 +35,14 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		err := applyBatchSyncTip(ctx, qtx, params)
+		// Lock before tip changes and graph reads. This keeps batch writes
+		// in the same order as single-transaction writes.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
+		err = applyBatchSyncTip(ctx, qtx, params)
 		if err != nil {
 			return err
 		}
