@@ -98,7 +98,7 @@ type walletState struct {
 	// 3. Consistency: By reading directly from the syncer's internal
 	//    state (via this interface), we ensure that the wallet always
 	//    reports a real-time, consistent view of its data freshness.
-	syncer chainSyncer
+	syncer chainProcessor
 
 	// unlocked tracks whether the wallet is unlocked (true) or locked
 	// (false). The zero value is false (Locked), which is secure by
@@ -111,7 +111,7 @@ type walletState struct {
 //   - Lifecycle: Initialized (awaiting its one permitted Start call).
 //   - Synchronization: BackendSyncing (until syncer is running and connected).
 //   - Authentication: Locked (secure by default).
-func newWalletState(syncer chainSyncer) walletState {
+func newWalletState(syncer chainProcessor) walletState {
 	return walletState{
 		syncer: syncer,
 	}

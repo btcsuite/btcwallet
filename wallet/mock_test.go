@@ -109,35 +109,37 @@ func (m *mockController) Rescan(ctx context.Context, startHeight uint32,
 	return args.Error(0)
 }
 
-// mockChainSyncer is a mock implementation of the chainSyncer interface.
-type mockChainSyncer struct {
+// mockChainProcessor is a mock implementation of the chainProcessor interface.
+type mockChainProcessor struct {
 	mock.Mock
 }
 
-// A compile-time assertion to ensure that mockChainSyncer implements the
-// chainSyncer interface.
-var _ chainSyncer = (*mockChainSyncer)(nil)
+// A compile-time assertion to ensure that mockChainProcessor implements the
+// chainProcessor interface.
+var _ chainProcessor = (*mockChainProcessor)(nil)
 
-// run implements the chainSyncer interface.
-func (m *mockChainSyncer) run(ctx context.Context) error {
+// run implements the chainProcessor interface.
+func (m *mockChainProcessor) run(ctx context.Context) error {
 	args := m.Called(ctx)
 	return args.Error(0)
 }
 
-// requestScan implements the chainSyncer interface.
-func (m *mockChainSyncer) requestScan(ctx context.Context, req *scanReq) error {
+// requestScan implements the chainProcessor interface.
+func (m *mockChainProcessor) requestScan(ctx context.Context,
+	req *scanReq) error {
+
 	args := m.Called(ctx, req)
 	return args.Error(0)
 }
 
-// syncState implements the chainSyncer interface.
-func (m *mockChainSyncer) syncState() syncState {
+// syncState implements the chainProcessor interface.
+func (m *mockChainProcessor) syncState() syncState {
 	args := m.Called()
 	return args.Get(0).(syncState)
 }
 
 // syncedTo exposes the processed tip and errors expected by wallet callers.
-func (m *mockChainSyncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp,
+func (m *mockChainProcessor) syncedTo(ctx context.Context) (waddrmgr.BlockStamp,
 	error) {
 
 	args := m.Called(ctx)

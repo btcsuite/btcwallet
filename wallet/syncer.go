@@ -224,9 +224,9 @@ type scanResult struct {
 	parentHash chainhash.Hash
 }
 
-// chainSyncer is a private interface that abstracts the chain synchronization
-// logic, allowing it to be mocked for testing the wallet and controller.
-type chainSyncer interface {
+// chainProcessor abstracts Wallet event processing and recovery, allowing
+// Wallet and controller tests to replace the existing worker.
+type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
@@ -283,8 +283,8 @@ type syncer struct {
 	txManager txManager
 }
 
-// A compile-time assertion to ensure that syncer implements chainSyncer.
-var _ chainSyncer = (*syncer)(nil)
+// A compile-time assertion to ensure that syncer implements chainProcessor.
+var _ chainProcessor = (*syncer)(nil)
 
 // refreshLiveWatches registers stored addresses and outpoints for transaction
 // notifications. The Store selects the addresses and outputs to watch.

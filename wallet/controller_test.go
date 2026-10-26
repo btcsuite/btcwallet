@@ -1796,7 +1796,7 @@ func TestControllerInfoCopiesChainParams(t *testing.T) {
 	// against a separately produced second snapshot.
 	store := &walletmock.Store{}
 	chain := &bwmock.Chain{}
-	syncer := &mockChainSyncer{}
+	syncer := &mockChainProcessor{}
 
 	store.On("GetWallet", mock.Anything, "isolated").Return(
 		&db.WalletInfo{}, nil,
