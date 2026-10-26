@@ -312,7 +312,7 @@ type mockWalletDeps struct {
 	vault          *keyvaultmock.Vault
 	store          *walletmock.Store
 	txStore        *bwmock.TxStore
-	syncer         *mockChainSyncer
+	syncer         *mockChainProcessor
 	chain          *bwmock.Chain
 	addr           *bwmock.ManagedAddress
 	accountManager *bwmock.AccountStore
@@ -333,7 +333,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	mockVault := &keyvaultmock.Vault{}
 	mockStore := &walletmock.Store{}
 	mockTxStore := &bwmock.TxStore{}
-	mockSyncer := &mockChainSyncer{}
+	mockSyncer := &mockChainProcessor{}
 	mockChain := &bwmock.Chain{}
 	mockAddr := &bwmock.ManagedAddress{}
 	mockAccountManager := &bwmock.AccountStore{}
