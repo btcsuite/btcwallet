@@ -1,8 +1,12 @@
 package bench
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +18,63 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
+
+// setupSQLBenchmarkWallet restores private storage before Wallet startup and
+// unlock. A missing snapshot uses the common node seed; every run follows the
+// same restore/reopen path outside measurement.
+func setupSQLBenchmarkWallet(tb testing.TB,
+	workload bwtest.NodeBenchmarkWorkload) *wallet.Wallet {
+
+	tb.Helper()
+
+	fixtureDir := os.Getenv("BTCWALLET_BENCH_FIXTURE_DIR")
+	if fixtureDir == "" {
+		fixtureDir = tb.TempDir()
+	}
+
+	native := newSQLBenchmarkFixture(tb)
+	config := native.config
+	fixture := filepath.Join(
+		fixtureDir, string(config.Backend), workload.ID+".db",
+	)
+
+	// Build missing data through normal APIs. Close the seeding Store and
+	// stop Manager to release every SQL connection before snapshotting.
+	_, err := os.Stat(filepath.Clean(fixture))
+	if errors.Is(err, os.ErrNotExist) {
+		preparationStarted := time.Now()
+		manager, _ := startSQLBenchmarkManager(tb, config)
+		func() {
+			store, closeStore := native.openStore(tb)
+			defer func() { require.NoError(tb, closeStore()) }()
+
+			seedSQLBenchmarkWallet(tb, manager, store, workload)
+		}()
+		require.NoError(tb, manager.Stop())
+		saveSQLBenchmarkFixture(tb, native, fixture)
+		tb.Logf("fixture preparation: %s", time.Since(preparationStarted))
+	} else {
+		require.NoError(tb, err)
+	}
+
+	// Even the first run restores private storage to avoid seeding caches in
+	// the measured Wallet. PostgreSQL uses its fresh container; SQLite opens
+	// a temporary copy. Log restoration separately from untimed provisioning
+	// and runtime startup so the receipt distinguishes their costs.
+	restoreStarted := time.Now()
+
+	native.restore(tb, fixture)
+	tb.Logf("fixture restoration: %s", time.Since(restoreStarted))
+	_, wallets := startSQLBenchmarkManager(tb, config)
+
+	w := wallets[0]
+	require.NoError(tb, w.Unlock(tb.Context(), wallet.UnlockRequest{
+		Passphrase: []byte("private"),
+		Timeout:    -1,
+	}))
+
+	return w
+}
 
 // startSQLBenchmarkManager registers shutdown before startup can fail. Stop
 // joins workers before the earlier chain mock and container cleanup run.
@@ -29,6 +90,40 @@ func startSQLBenchmarkManager(tb testing.TB,
 	require.NoError(tb, err)
 
 	return manager, wallets
+}
+
+// saveSQLBenchmarkFixture publishes complete snapshots for serial reuse. The
+// caller closes all SQL pools first: SQLite's final close checkpoints WAL, and
+// PostgreSQL's archive captures the database without active Wallet workers.
+func saveSQLBenchmarkFixture(tb testing.TB,
+	native *sqlBenchmarkFixture, fixture string) {
+
+	tb.Helper()
+
+	source := native.snapshot(tb)
+
+	defer func() { require.NoError(tb, source.Close()) }()
+
+	// Publish only a fully written, closed sibling. Cleanup removes partial
+	// writes without touching the previous fixture.
+	require.NoError(tb, os.MkdirAll(filepath.Dir(fixture), 0o700))
+
+	pending := fixture + ".partial"
+	defer func() { _ = os.Remove(pending) }()
+
+	func() {
+		file, err := os.OpenFile(
+			filepath.Clean(pending), os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+			0o600,
+		)
+
+		require.NoError(tb, err)
+		defer func() { require.NoError(tb, file.Close()) }()
+
+		_, err = io.Copy(file, source)
+		require.NoError(tb, err)
+	}()
+	require.NoError(tb, os.Rename(pending, fixture))
 }
 
 // seedSQLBenchmarkWallet uses normal Manager account/key allocation followed by
@@ -142,6 +237,26 @@ func seedSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
 
 	// Validate committed data before a newly prepared snapshot can be saved.
 	bwtest.AssertNodeBenchmarkWallet(tb, store, w.ID(), workload)
+}
+
+// RunSQLBenchmark restores each shared case using the build-selected backend:
+// SQLite by default, or PostgreSQL with test_db_postgres. Callers prepare the
+// request outside measurement and return only the native read operation.
+// SQL lifecycle and saved node data stay independent of the kvdb suite.
+func RunSQLBenchmark(b *testing.B,
+	prepare func(*testing.B, *wallet.Wallet,
+		bwtest.NodeBenchmarkWorkload) func() error) {
+
+	b.Helper()
+
+	for _, workload := range bwtest.NodeBenchmarkCases() {
+		b.Run(workload.ID, func(b *testing.B) {
+			w := setupSQLBenchmarkWallet(b, workload)
+			read := prepare(b, w, workload)
+
+			bwtest.BenchmarkRead(b, read)
+		})
+	}
 }
 
 // SQLBenchmarkTarget selects a retained cooperative return outside measurement.
