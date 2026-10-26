@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -63,6 +65,21 @@ func (s *Store) execWrite(ctx context.Context,
 	)
 
 	return err
+}
+
+// lockTxGraph orders a Wallet's graph writes until the SQL transaction ends.
+// A child must not commit between a descendant read and its parent's removal.
+func lockTxGraph(ctx context.Context, qtx *sqlc.Queries, walletID int64) error {
+	// This query uses FOR NO KEY UPDATE to lock the Wallet row. The lock
+	// permits foreign key checks and lasts until this transaction ends.
+	_, err := qtx.GetWalletForAccountCreation(ctx, walletID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lock wallet transaction graph: %w", err)
+	}
+
+	// If the Wallet does not exist, let the caller's normal checks report
+	// the error. There is no graph to lock.
+	return nil
 }
 
 // defaultReadConfig returns the PostgreSQL read retry policy.

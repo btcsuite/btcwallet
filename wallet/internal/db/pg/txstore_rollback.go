@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -18,7 +19,14 @@ func (s *Store) RewindWallet(ctx context.Context,
 	params db.RewindWalletParams) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		err := rewindWalletTransactions(ctx, qtx, params)
+		// Rewind can orphan coinbases and remove their descendants. Lock
+		// before graph reads so concurrent children cannot escape removal.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
+		err = rewindWalletTransactions(ctx, qtx, params)
 		if err != nil {
 			return err
 		}
@@ -106,6 +114,24 @@ func (s *Store) RollbackToBlock(ctx context.Context,
 	height uint32) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Rollback changes all Wallets. Read their IDs in ascending order
+		// so concurrent rollbacks take the graph locks in the same order.
+		wallets, err := qtx.ListWallets(
+			ctx, sqlc.ListWalletsParams{
+				PageLimit: math.MaxInt64,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("list rollback wallets: %w", err)
+		}
+
+		for _, wallet := range wallets {
+			err := lockTxGraph(ctx, qtx, wallet.ID)
+			if err != nil {
+				return err
+			}
+		}
+
 		return db.RollbackToBlockWithOps(ctx, height,
 			rollbackToBlockOps{qtx: qtx})
 	})
