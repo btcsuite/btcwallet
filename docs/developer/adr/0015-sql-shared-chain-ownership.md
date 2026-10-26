@@ -11,7 +11,8 @@
   targeted-rescan ownership and [ADR 0006](0006-wtxmgr-sql-schema.md) for SQL
   block identity and canonical-frontier semantics.
 - **Supersedes:** [ADR 0002](0002-controller-syncer-architecture.md).
-- **Amended by:** None.
+- **Amended by:** Proposed [ADR 0017](0017-manager-chain-routing.md) for
+  live matching and routing ownership.
 - **Superseded by:** None.
 
 ## 1. Problem

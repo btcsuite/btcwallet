@@ -68,3 +68,6 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0016: Wallet Transaction
   Subscriptions](./0016-wallet-transaction-subscriptions.md) defines
   best-effort Wallet notifications with bounded subscriber queues.
+- [ADR 0017: Manager Chain Routing](./0017-manager-chain-routing.md) proposes
+  moving live matching to Manager while retaining Wallet-owned processing and
+  historical recovery; partially amends ADR 0015.
