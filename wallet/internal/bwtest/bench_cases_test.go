@@ -256,3 +256,97 @@ func TestSyncBenchmarkCasesPlaceWalletMatches(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncBackgroundBuildsValidSpends checks two successive real payment blocks
+// so rolling change, independent lanes and valid signatures are exercised.
+func TestSyncBackgroundBuildsValidSpends(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: give three distinct coinbases to the same fixed preparation
+	// miner. The small fan-out is a dependency, not the operation under test.
+	addr, key, err := syncBenchmarkMinerAddress()
+	require.NoError(t, err)
+
+	defer key.Zero()
+
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	var funding []*wire.MsgTx
+	for height := byte(2); height <= 4; height++ {
+		parent := wire.NewMsgTx(2)
+		parent.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+			Index: ^uint32(0),
+		}, []byte{1, height}, nil))
+		parent.AddTxOut(wire.NewTxOut(5_000_000_000, script))
+		funding = append(funding, parent)
+	}
+
+	fanout, err := BuildSyncBenchmarkFunding(funding, 3)
+	require.NoError(t, err)
+
+	// Act: build consecutive blocks through the public background builder,
+	// passing only the prior block rather than a whole retained chain graph.
+	first, err := BuildSyncBenchmarkBackground(
+		t.Context(), []*wire.MsgTx{fanout},
+	)
+	require.NoError(t, err)
+	second, err := BuildSyncBenchmarkBackground(t.Context(), first)
+	require.NoError(t, err)
+
+	// Assert: both blocks retain exactly three lanes. Every fan-out/payment
+	// input must reference a known output, execute and conserve total value.
+	require.Len(t, first, 3)
+	require.Len(t, second, 3)
+
+	prevouts := txscript.NewMultiPrevOutFetcher(nil)
+	for _, parent := range funding {
+		prevouts.AddPrevOut(
+			wire.OutPoint{Hash: parent.TxHash()}, parent.TxOut[0],
+		)
+	}
+
+	transactions := append([]*wire.MsgTx{fanout}, first...)
+
+	transactions = append(transactions, second...)
+	for _, tx := range transactions {
+		hashes := txscript.NewTxSigHashes(tx, prevouts)
+
+		var inputs, outputs int64
+		for index, input := range tx.TxIn {
+			output := prevouts.FetchPrevOutput(input.PreviousOutPoint)
+			require.NotNil(t, output)
+			engine, err := txscript.NewEngine(
+				output.PkScript, tx, index, txscript.StandardVerifyFlags,
+				nil, hashes, output.Value, prevouts,
+			)
+			require.NoError(t, err)
+			require.NoError(t, engine.Execute())
+
+			inputs += output.Value
+		}
+
+		for index, output := range tx.TxOut {
+			require.Positive(t, output.Value)
+			outputs += output.Value
+			prevouts.AddPrevOut(wire.OutPoint{
+				Hash: tx.TxHash(), Index: uint32(index),
+			}, output)
+		}
+
+		require.Greater(t, inputs, outputs)
+	}
+
+	// Assert: removing a payment signature reproduces an invalid background
+	// transaction; ancestry and plausible counts alone must not pass.
+	unsigned := second[0].Copy()
+	unsigned.TxIn[0].Witness = nil
+	output := prevouts.FetchPrevOutput(unsigned.TxIn[0].PreviousOutPoint)
+	engine, err := txscript.NewEngine(
+		output.PkScript, unsigned, 0,
+		txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(unsigned, prevouts), output.Value, prevouts,
+	)
+	require.NoError(t, err)
+	require.Error(t, engine.Execute())
+}
