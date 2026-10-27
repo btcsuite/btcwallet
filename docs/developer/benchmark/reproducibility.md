@@ -468,3 +468,154 @@ they do not establish 1,000-block batch capacity. Raw command receipts, immutabl
 fixture checksums and block-inspection.json are retained under the task-local
 `.lgtm/task-sync-bench/runs/chain-v2/` evidence directory. No full cases or
 profiles were collected for this cohort.
+
+### Startup full collection
+
+The separately approved five-case collection ran from 2026-10-26 10:19 UTC
+through 2026-10-27 05:52 UTC on measured source
+`f575c826401688678350fb745d5dc2621cf9e169`. The Docker VM had a 32 GB allocation
+(33,601,318,912 bytes reported usable) and four CPUs. Client, Core and PostgreSQL
+limits remained those in the Docker environment table. The first full-window
+SQLite probe prepared its target in 14m29.349s and its native fixture in
+14m33.459s; its 120.970s sync observation is one accepted timing sample.
+Preparation and whole-command duration are not startup latency.
+
+The accepted set has 160 unprofiled timing invocations: eight independent 1x
+samples per implementation/case. Another 20 CPU and 20 heap invocations each
+measured one lifecycle. Profiling observations are excluded from timing
+medians. Each heap invocation saved before/after snapshots, giving 60 profile
+files in total. All successful receipts name the measured source above and
+the same target per case. Saved benchmark executable SHA256 values are:
+
+| Native suite | SHA256 |
+| --- | --- |
+| Legacy and maintained kvdb | `73fede6cce0f41f95eaec972ae8cf1f7bac6805c21196b0e5e28e77b88dfb6e2` |
+| PostgreSQL and SQLite | `6ce374718a4e78a3cf9dfe78fdffb92e01d5784d322f160ad124c30cdf4fa6c7` |
+
+The scheduled timing orders were `SLKP LKPS KPSL PSLK PKLS KLSP LSPK SPKL`.
+That schedule assigned each implementation to each position twice. Within each
+sample the case order was `hits-0`, `empty`, `hits-1`, `small-node`, `hits-100`.
+CPU and heap captures separately used SLKP in that case order and finished at
+04:30 UTC. The first SQLite hits-0 probe was retained in sample one. Collection
+paused between invocations for other leads' Docker/build windows; no source or
+settings changed. The replacement below ran alone after all profiles, so actual
+retained chronology differs from the scheduled rows; timestamps record this
+exception rather than claim an uninterrupted balanced collection.
+
+The full set contains one additional failed setup attempt, retained at
+`timing/06/hits-100/postgres-failed-attempt-1`. Core's configured ZMQ port could
+not be resolved while constructing the chain client, before timing began.
+It returned no metric and recorded no Docker OOM event. The same logical slot
+was retried without changing source, data or limits, and succeeded.
+
+A second exclusion is `timing/08/small-node/sqlite-contended-attempt-1`.
+Another Go container was present at the end of this invocation. Its start time
+could not be recovered, so the 111.161s timing was conservatively excluded as
+potentially contended. After the other lead's collector ended and Docker was
+quiet, the identical slot ran at 05:50..05:52 UTC, yielding 108.849s with no
+foreign container in either endpoint snapshot. It supplies SQLite's eighth
+accepted sample. Thus 162 timing attempts supplied 160 accepted observations.
+The earlier ten-minute preparation failure and SQLite smoke observations are
+separate cohorts above; none supply a value in the full comparison.
+
+The common starting tip is height 104, hash
+`2d95ea58f90bb55d546d4e6c56a7c57884b275799aeaebf969798993e7d452f5`.
+Each full target ends at height 1104:
+
+| Case | Target hash |
+| --- | --- |
+| empty | `3622d30aef39dae3a14004849d1d955612f4fce72af210929166c880a53af4ec` |
+| hits-0 | `558803af5385fb2e74f866ede5356f08734d3123d4afbcf8e6fae43cf446f16f` |
+| hits-1 | `069868432555c3b5fb5c7301ae8a2e745271cef8bb34ec1521522922576b0f20` |
+| small-node | `7cbd579148e1bf620f14ecef1fbe5bba25ed88f6f8b1fe30c998768b8ce67780` |
+| hits-100 | `45feb9879f0dbbca60d5c3291cae487ba2c2d5a5e063887d2e0989612d05f5a8` |
+
+#### Variation and profiles
+
+The following observed min..max ranges, in seconds, describe the eight timing
+samples behind each median in the [method record](start_to_synced.md).
+They are descriptive ranges, not confidence intervals.
+
+| Case | Legacy kvdb | Maintained kvdb | PostgreSQL | SQLite |
+| --- | ---: | ---: | ---: | ---: |
+| empty | 1.223..1.564 | 0.359..0.381 | 0.461..0.530 | 0.119..0.141 |
+| hits-0 | 90.794..104.763 | 106.682..125.220 | 93.618..103.576 | 94.493..123.331 |
+| hits-1 | 90.876..99.740 | 106.051..113.719 | 93.651..109.606 | 97.583..107.961 |
+| small-node | 92.853..103.363 | 95.955..115.216 | 93.158..107.720 | 95.381..109.330 |
+| hits-100 | 92.247..101.147 | 102.388..115.077 | 93.116..129.568 | 97.362..110.831 |
+
+Between the 0.1% and 10% cases, median latency changed by -0.32% for legacy,
+-3.87% for maintained kvdb, +1.35% for PostgreSQL and -0.14% for SQLite.
+No implementation's medians increase monotonically across the three nonzero
+cases. Fixed Wallet volume, changing clustering and overlapping ranges do not
+establish linear scaling with matching-block count. The six million background
+transactions are present in every populated case.
+
+All CPU captures produced a readable cpu profile; all heap pairs produced
+alloc_space and inuse_space delta analyses through the existing runner.
+In the 1% CPU captures, full-block scanning accounted for about 65..69% of
+sampled CPU in the maintained implementations; JSON processing and Bech32
+address work were prominent. Legacy also showed substantial Bech32 work.
+The 1% allocation profiles attributed about 46..52% of allocation bytes to
+io.ReadAll, with JSON and transaction decoding among the other large entries.
+These profiles show substantial chain/client work, rather than isolate a
+database engine. Cumulative allocations and end-of-operation retained heap
+do not measure peak process or Docker memory. No peak RAM or separate CPU-time
+metric was collected.
+
+#### Evidence and reproduction commands
+
+The preserved local evidence root is
+`.lgtm/task-sync-bench/runs/chain-v2/full-prep20m`. It is task-local evidence,
+not committed source. Its `aggregate.json` records the unrounded per-metric
+medians, targets, binary identities and excluded attempts. Each leaf
+`<phase>/<sample>/<case>/<backend>/` contains `receipt.json` and `command.log`.
+The receipt records exact command/selection, UTC dates, source, executable
+hash, metrics, target and container identities. Actual benchmark artifacts
+are nested at `start-to-synced/<case>/<backend>/<phase>/` within the leaf.
+Timing sample labels are 01..08; cpu and mem each use 01. Keep the complete
+evidence directory to reproduce the arithmetic or analyze the saved profiles.
+
+Run from the root of the dedicated worktree at the measured source. The
+[scalar runner](../../../scripts/benchmark.sh) contains the exact Docker run,
+read-only source mount at /build, pinned images, resources and profile analysis.
+The commands below invoke that runner, with distinct output roots to retain
+independent observations. Repeat the timing command in the recorded serial
+orders and substitute the exact backend selections in the shared README.
+The saved v2 fixtures are reused; a missing fixture is prepared outside timing.
+
+```sh
+# Select one real-chain lifecycle; separate roots preserve each invocation.
+startup_out=/tmp/btcwallet-bench/startup-reproduction
+export BENCH_PACKAGE=./wallet/bench
+export BENCH_CASE='^BenchmarkStartToSyncedSQLite$/^small-node$'
+bash scripts/benchmark.sh start-to-synced sqlite small-node '' 1x \
+  "$startup_out/timing/01/small-node/sqlite"
+# Capture the same lifecycle independently, keeping profiles out of timings.
+bash scripts/benchmark.sh start-to-synced sqlite small-node cpu 1x \
+  "$startup_out/cpu/01/small-node/sqlite"
+bash scripts/benchmark.sh start-to-synced sqlite small-node mem 1x \
+  "$startup_out/mem/01/small-node/sqlite"
+```
+
+To analyze saved files only, run from that same worktree root. The following
+uses the pinned Go image without launching a Wallet, Core or database. Change
+the case/backend in both the leaf and its nested artifact path together.
+
+```sh
+# Analyze the retained captures with their exact saved benchmark executable.
+startup_evidence="$PWD/.lgtm/task-sync-bench/runs/chain-v2/full-prep20m"
+docker run --rm \
+  -v "$startup_evidence:/evidence:ro" -w /evidence \
+  golang:1.25.11-bookworm@sha256:b96f24a8d7d010ea0acb9c3ba99064740f02b6b984612b28bd3c9c5ab9453e38 \
+  sh -ec '
+    cpu=cpu/01/small-node/sqlite/start-to-synced/small-node/sqlite/cpu
+    mem=mem/01/small-node/sqlite/start-to-synced/small-node/sqlite/mem
+    go tool pprof -top "$cpu/benchmark.test" "$cpu/cpu.pprof"
+    # Subtract setup history for allocation traffic and retained-heap deltas.
+    for sample in alloc_space inuse_space; do
+      go tool pprof -top -sample_index="$sample" \
+        -base "$mem/heap-before.pprof" \
+        "$mem/benchmark.test" "$mem/heap-after.pprof"
+    done'
+```
