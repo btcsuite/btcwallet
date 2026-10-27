@@ -34,6 +34,8 @@ Startup uses the same scalar runner with explicit native package/patterns.
 Its case IDs describe [chain placement](reproducibility.md#startup-chain-dataset),
 independently of read sizes. Use the [startup timing
 contract](methodology.md#chain-synchronization) and the shared environment table.
+The [completed comparison](start_to_synced.md) links to the full collection's
+source, samples, exclusions and profile evidence.
 Only the selected smoke/reuse milestone is authorized during implementation;
 full preparation, all cases and profiles need explicit run approval.
 
