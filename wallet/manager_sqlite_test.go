@@ -140,7 +140,7 @@ func TestFundPsbtReservationSQLite(t *testing.T) {
 	// Arrange: Create a real SQLite wallet over a current chain so the
 	// real syncer reaches synced at genesis, and store two pending credits
 	// to a committed wallet script.
-	chain := newTestChain(t, true)
+	chain := bwmock.NewGenesisChain(t, true)
 	chain.On("BlockStamp").Return(&waddrmgr.BlockStamp{
 		Hash: *chainParams.GenesisHash,
 	}, nil).Maybe()

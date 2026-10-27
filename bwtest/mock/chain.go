@@ -6,10 +6,12 @@ package mock
 
 import (
 	"context"
+	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
@@ -29,6 +31,46 @@ type Chain struct {
 // A compile-time assertion to ensure that Chain implements the
 // chain.Interface.
 var _ chain.Interface = (*Chain)(nil)
+
+// NewGenesisChain supplies a regression-genesis fixture for Wallet startup.
+// An unsynced backend waits for cancellation; a current backend can finish
+// syncing at genesis without scanning. Startup calls are optional because
+// scheduling and empty/reopened Wallets differ. Cleanup verifies expectations
+// once, after callers' later Wallet and container cleanup has completed.
+func NewGenesisChain(tb testing.TB, current bool) *Chain {
+	tb.Helper()
+
+	params := &chaincfg.RegressionNetParams
+	chain := &Chain{}
+
+	// Tests can replace these defaults when registration is under test.
+	chain.On("BackEnd").Return("mock").Maybe()
+	chain.On("Notifications").Return((<-chan any)(nil)).Maybe()
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Maybe()
+	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
+	chain.On("IsCurrent").Return(current).Maybe()
+
+	// Only a current backend subscribes after completing startup sync.
+	if current {
+		chain.On("NotifyBlocks").Return(nil).Maybe()
+	}
+
+	chain.On("GetBestBlock").Return(
+		params.GenesisHash, int32(0), nil,
+	).Maybe()
+	chain.On("GetBlockHash", int64(0)).Return(
+		params.GenesisHash, nil,
+	).Maybe()
+	chain.On("GetBlockHeader", params.GenesisHash).Return(
+		&params.GenesisBlock.Header, nil,
+	).Maybe()
+	tb.Cleanup(func() {
+		chain.AssertExpectations(tb)
+	})
+
+	return chain
+}
 
 // Start implements the chain.Interface interface.
 func (m *Chain) Start(ctx context.Context) error {

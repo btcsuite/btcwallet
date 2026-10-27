@@ -125,48 +125,7 @@ func testKVDBManager(tb testing.TB) *Manager {
 func createTestChain(tb testing.TB) *bwmock.Chain {
 	tb.Helper()
 
-	return newTestChain(tb, false)
-}
-
-// newTestChain builds the default mock chain and reports current as the
-// backend's IsCurrent answer. A current backend at the genesis tip lets a real
-// syncer reach the synced state without scanning.
-func newTestChain(tb testing.TB, current bool) *bwmock.Chain {
-	tb.Helper()
-
-	chain := &bwmock.Chain{}
-
-	// Info reports the chain name without selecting any sync behavior.
-	chain.On("BackEnd").Return("mock").Maybe()
-	chain.On("Notifications").Return((<-chan any)(nil)).Maybe()
-
-	// Sync initialization and committed batches register the watch set.
-	// Tests that inspect registration replace these defaults.
-	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Maybe()
-	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
-	chain.On("IsCurrent").Return(current).Maybe()
-
-	// A current backend lets the syncer finish startup and subscribe to
-	// block notifications.
-	if current {
-		chain.On("NotifyBlocks").Return(nil).Maybe()
-	}
-
-	chain.On("GetBestBlock").Return(
-		chainParams.GenesisHash, int32(0), nil,
-	).Maybe()
-	chain.On("GetBlockHash", int64(0)).Return(
-		chainParams.GenesisHash, nil,
-	).Maybe()
-	chain.On("GetBlockHeader", chainParams.GenesisHash).Return(
-		&chainParams.GenesisBlock.Header, nil,
-	).Maybe()
-	tb.Cleanup(func() {
-		chain.AssertExpectations(tb)
-	})
-
-	return chain
+	return bwmock.NewGenesisChain(tb, false)
 }
 
 // testSQLiteManager opens a Manager over a real SQLite database at a fresh temp
