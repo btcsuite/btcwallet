@@ -487,9 +487,11 @@ func validateTxIntent(intent *TxIntent) error {
 }
 
 // resolveChangeAccount resolves the account that receives change for
-// transaction authoring and the size of the change scripts it produces.
+// transaction authoring and the ChangeScriptInfo of the change scripts it
+// derives. Resolution commits nothing.
 func (w *Wallet) resolveChangeAccount(ctx context.Context,
-	changeAccount *ScopedAccount) (*db.AccountInfo, int, error) {
+	changeAccount *ScopedAccount) (*db.AccountInfo, txauthor.ChangeScriptInfo,
+	error) {
 
 	accountName := changeAccount.AccountName
 
@@ -516,13 +518,14 @@ func (w *Wallet) resolveChangeAccount(ctx context.Context,
 			},
 		)
 		if errors.Is(err, db.ErrAccountNotFound) {
-			return nil, 0, fmt.Errorf("%w: account %d",
-				ErrAccountNotFound, derivedAccount)
+			return nil, txauthor.ChangeScriptInfo{},
+				fmt.Errorf("%w: account %d", ErrAccountNotFound,
+					derivedAccount)
 		}
 
 		if err != nil {
-			return nil, 0, fmt.Errorf("get account %d: %w",
-				derivedAccount, err)
+			return nil, txauthor.ChangeScriptInfo{},
+				fmt.Errorf("get account %d: %w", derivedAccount, err)
 		}
 
 		derivationAccount = derivedInfo
@@ -543,13 +546,13 @@ func (w *Wallet) resolveChangeAccount(ctx context.Context,
 			},
 		)
 		if errors.Is(err, db.ErrAccountNotFound) {
-			return nil, 0, fmt.Errorf("%w: %s", ErrAccountNotFound,
-				accountName)
+			return nil, txauthor.ChangeScriptInfo{},
+				fmt.Errorf("%w: %s", ErrAccountNotFound, accountName)
 		}
 
 		if err != nil {
-			return nil, 0, fmt.Errorf("get account %q: %w",
-				accountName, err)
+			return nil, txauthor.ChangeScriptInfo{},
+				fmt.Errorf("get account %q: %w", accountName, err)
 		}
 
 		derivationAccount = accountInfo
@@ -559,16 +562,37 @@ func (w *Wallet) resolveChangeAccount(ctx context.Context,
 		derivationAccount.AddrSchema.InternalAddrType, false,
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, txauthor.ChangeScriptInfo{}, err
 	}
+
+	info, err := changeScriptInfoOf(addrType)
+	if err != nil {
+		return nil, txauthor.ChangeScriptInfo{}, err
+	}
+
+	return derivationAccount, info, nil
+}
+
+// changeScriptInfoOf returns the ChangeScriptInfo of the change scripts an
+// account deriving addrType produces.
+func changeScriptInfoOf(addrType waddrmgr.AddressType) (
+	txauthor.ChangeScriptInfo, error) {
 
 	scriptSize, err := addrType.ScriptPubKeySize()
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
+		return txauthor.ChangeScriptInfo{}, fmt.Errorf("%w: %v",
+			ErrUnsupportedAddressType, addrType)
 	}
 
-	return derivationAccount, scriptSize, nil
+	if scriptSize < 0 {
+		return txauthor.ChangeScriptInfo{}, fmt.Errorf("negative "+
+			"script size %d for address type %v", scriptSize, addrType)
+	}
+
+	return txauthor.ChangeScriptInfo{
+		ScriptSize:       uint(scriptSize),
+		IsWitnessProgram: addrType.PaysToWitnessProgram(),
+	}, nil
 }
 
 // allocateChangeAddress allocates a fresh change address on account in scope
@@ -700,8 +724,8 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 
 // authorTxIntent authors an unsigned transaction for a normalized intent and is
 // the neutral authoring boundary shared by both public wrappers. It resolves
-// the change account once, selects inputs sized for that account's change
-// script, allocates a fresh change address, and completes the transaction.
+// the change account and the form of its change scripts, selects inputs for
+// that form, allocates a fresh change address, and completes the transaction.
 // The change account and address are returned so the wrapper can register
 // kept change once its own result is final.
 func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
@@ -709,7 +733,7 @@ func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
 
 	changeScope := w.determineChangeSource(intent)
 
-	changeAccount, changeScriptSize, err := w.resolveChangeAccount(
+	changeAccount, changeInfo, err := w.resolveChangeAccount(
 		ctx, changeScope,
 	)
 	if err != nil {
@@ -722,7 +746,7 @@ func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
 	}
 
 	selection, err := w.selectTxInputs(
-		intent.Outputs, intent.FeeRate, inputSource, changeScriptSize,
+		intent.Outputs, intent.FeeRate, inputSource, changeInfo,
 	)
 	if err != nil {
 		return nil, nil, nil, err
@@ -735,7 +759,12 @@ func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
 		return nil, nil, nil, err
 	}
 
-	tx := completeTransaction(selection, change.ScriptPubKey)
+	// A committed script of other info would void the fee and dust
+	// decisions, so it fails authoring; the committed child stays unused.
+	tx, err := completeTransaction(selection, change.ScriptPubKey)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	return tx, changeAccount, change, nil
 }
@@ -757,12 +786,12 @@ func (w *Wallet) watchAuthoredChange(ctx context.Context, changeIndex int,
 }
 
 // selectTxInputs selects inputs that pay for outputs at feeRate, sizing the fee
-// for a change script of changeScriptSize bytes. Its narrow request keeps
-// wrapper-owned input policies, change accounts, labels, and lifecycle effects
-// outside coin selection.
+// and judging change for change scripts changeInfo describes. Its narrow
+// request keeps wrapper-owned input policies, change accounts, labels, and
+// lifecycle effects outside coin selection.
 func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
 	feeRate btcunit.SatPerKVByte, inputSource txauthor.InputSource,
-	changeScriptSize int) (*txauthor.InputSelection, error) {
+	changeInfo txauthor.ChangeScriptInfo) (*txauthor.InputSelection, error) {
 
 	// The txauthor.SelectInputs function expects a slice of *wire.TxOut,
 	// but our intent has a slice of wire.TxOut. We perform the conversion
@@ -780,7 +809,7 @@ func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
 	feeSatPerKb := feeRate.Val()
 
 	selection, err := txauthor.SelectInputs(
-		txOutputs, feeSatPerKb, inputSource, changeScriptSize,
+		txOutputs, feeSatPerKb, inputSource, changeInfo,
 	)
 	if err != nil {
 		return nil, translateAuthorError(err)
@@ -790,11 +819,14 @@ func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
 }
 
 // completeTransaction builds the unsigned transaction from selection, paying
-// change to changeScript when txauthor's dust rules keep a change output.
+// kept change to changeScript, and randomizes the change position.
 func completeTransaction(selection *txauthor.InputSelection,
-	changeScript []byte) *txauthor.AuthoredTx {
+	changeScript []byte) (*txauthor.AuthoredTx, error) {
 
-	tx := selection.Complete(changeScript)
+	tx, err := selection.Complete(changeScript)
+	if err != nil {
+		return nil, fmt.Errorf("complete transaction: %w", err)
+	}
 
 	// Randomize the position of the change output, if one was created. This
 	// helps to improve privacy by making it harder to distinguish change
@@ -803,7 +835,7 @@ func completeTransaction(selection *txauthor.InputSelection,
 		tx.RandomizeChangePosition()
 	}
 
-	return tx
+	return tx, nil
 }
 
 // authorError gives an authoring failure a wallet-facing identity without
