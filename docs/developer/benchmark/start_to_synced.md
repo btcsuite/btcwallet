@@ -6,6 +6,10 @@ from a saved unfunded Wallet at height 104. Populated cases have 6,000 unrelated
 transactions per block; the three nonzero cases place the same 204-transaction
 lnd-shaped Wallet graph into 1, 10 or 100 matching blocks.
 Measured source: `f575c826401688678350fb745d5dc2621cf9e169`.
+These are historical measurements, before the framework rebase. The measured
+PostgreSQL fixture used `fsync=off`; the current fixture uses `fsync=on`.
+The rebased branch has not repeated this full comparison. Fetch the preserved
+[measured sources](reproducibility.md#startup-measured-sources) for reproduction.
 [Methodology](methodology.md#chain-synchronization),
 [reproducibility](reproducibility.md#startup-full-collection) and
 [shared commands](README.md#startup-to-synced).
@@ -84,3 +88,15 @@ completed with the fixed startup limits. One untimed Docker port-resolution
 failure supplied no metric and was excluded; the identical retry succeeded.
 One potentially contended SQLite observation was also excluded and replaced
 after the other job finished; its later collection time is recorded separately.
+
+A separate [payload investigation](reproducibility.md#controlled-payload-investigation)
+measured `fd8bf1734925bb7def0d2a909ca2936df2a0cd5f`. The original 1% workload on
+current code favors maintained kvdb (0.860s versus 1.425s, with its embedded
+profiling). A controlled zero-hit study using the same binary favors maintained
+kvdb at 1 and 100 background transactions per block, then reverses at 6,000.
+This validates a workload-dependent crossover for legacy rescan versus
+maintained full-block sync; compact-filter mode was not measured. Profiles
+identify substantial JSON work; they do not establish an exclusive cause or
+a general backend ranking. A payload-dependent regression against historical
+code remains untested. These diagnostic observations do not enter the primary
+tables above.

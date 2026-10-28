@@ -335,6 +335,30 @@ restoration remain outside timing.
 
 ## Startup chain dataset
 
+### Startup measured sources
+
+The full comparison below measured
+`f575c826401688678350fb745d5dc2621cf9e169`; the payload investigation measured
+`fd8bf1734925bb7def0d2a909ca2936df2a0cd5f`. The current branch rebases onto a
+newer framework and does not claim new full-suite timings. Its numbered native
+account allocation uses fresh v3 startup fixtures; the original v2 fixtures
+and receipts remain historical evidence. The measured PostgreSQL rows used
+`fsync=off`, while the current build-selected fixture uses `fsync=on`.
+
+The signed tag `task-417-measured-payload-source` on the author's fork points
+to exact fd8bf173 and retains f575c826 as an ancestor. Fetch it before using the
+exact-source reproduction commands. Run primary commands in a separate
+worktree at f575c826 and controlled diagnostic commands at fd8bf173; the
+historical-harness command below archives fd8bf173 into disposable scratch.
+Old backend-suffixed SQL entrypoints below belong to those measured sources;
+current commands in the shared README use one build-selected SQL entrypoint.
+
+```sh
+# Retain both measured commits after rebase through their signed provenance tag.
+git fetch https://github.com/yyforyongyu/btcwallet \
+  tag task-417-measured-payload-source
+```
+
 Startup uses the same small-node Wallet model with a separate chain placement.
 Every case starts with one unfunded Wallet: 260 regular accounts, 203 ordinary
 addresses and 601 channel keys, the seed/birthday above and zero recovery
@@ -618,4 +642,163 @@ docker run --rm \
         -base "$mem/heap-before.pprof" \
         "$mem/benchmark.test" "$mem/heap-after.pprof"
     done'
+```
+
+### Controlled payload investigation
+
+The 2026-10-28 investigation measured source
+`fd8bf1734925bb7def0d2a909ca2936df2a0cd5f`. Both evidence legs used the same
+benchmark executable, SHA256
+`ff3c3dfe3ec2019f449dc10647da431b315b0cd169bdf0fd6f9d62de8fc5f141`.
+They are separate from the primary f575 cohort; none of these observations
+changes its five result tables.
+
+The controlled leg holds logical Wallet metadata, zero Wallet hits, base 104,
+exactly 1,000 catch-up blocks, transaction input/output scripts and shapes,
+payments/fees, recovery zero, completion boundaries and startup resources fixed.
+Only background transaction count changes. Opt-in cases payload-1 and
+payload-100 retain a prefix of the existing funded lanes; hits-0 reuses the
+saved 6,000-lane target. No new transaction builder or sync implementation.
+Maintained rows use SyncMethodFullBlocks against native legacy rescan.
+Compact-filter mode was not measured; this crossover does not establish its
+performance.
+
+Four independent unprofiled 1x samples per cell give these per-metric medians,
+rounded to whole units. Ranges describe observed seconds, not confidence bounds.
+
+| Background tx/block | Implementation | ns/op | B/op | allocs/op | Seconds min..max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Legacy kvdb | 1,832,902,481 | 116,948,392 | 808,279 | 1.267..1.968 |
+| 1 | Maintained kvdb | 390,070,668 | 39,031,852 | 334,825 | 0.378..0.403 |
+| 100 | Legacy kvdb | 3,281,691,440 | 651,900,272 | 4,978,608 | 3.041..3.527 |
+| 100 | Maintained kvdb | 1,781,318,126 | 552,591,852 | 2,621,135 | 1.712..1.837 |
+| 6,000 | Legacy kvdb | 91,920,495,042 | 36,641,791,448 | 252,857,190 | 89.449..93.787 |
+| 6,000 | Maintained kvdb | 116,596,291,470 | 33,897,961,256 | 142,030,341 | 111.816..142.716 |
+
+Maintained kvdb is 4.70x faster at one transaction and 1.84x faster at 100,
+then 26.84% slower at 6,000. The observed native ranges do not overlap at any
+level. This reproduces a crossover without changing the code revision, Wallet
+inventory, scan span or per-transaction shape; it does not locate its exact
+threshold or establish a general backend ranking.
+
+Collection ran 12:21..12:59 UTC, with scheduled pairs KL/LK/KL/LK. Two high-case
+legacy attempts had foreign lint containers in their endpoint snapshots. Their
+unchanged leaves remain legacy-contended-attempt-1; identical replacements ran
+later, after profiles. Thus 26 timing attempts supplied 24 accepted samples.
+The actual chronology differs from the scheduled rows and is retained in UTC
+receipts. Four independent CPU captures cover both native paths at the low/high
+levels; they do not supply timing medians. Other leads' work caused pauses.
+
+Independent inspection of closed targets verified all 1,000 blocks and rolling
+spends: payload-1 has 1,000 background transactions, 483..485 bytes and
+1,497..1,502 WU per block; payload-100 has 100,000 transactions, 23,683..23,712
+bytes and 61,824..61,854 WU per block. Each block also contains its coinbase.
+Target height is 1104; hashes are:
+
+| Case | Target hash |
+| --- | --- |
+| payload-1 | `71d1a5de6fd9752676273e153f1413839c21ffdebf0947610ee91f2eb2279f4d` |
+| payload-100 | `4e7beaa5540bd085e74f3b57c42064434c118e64f87ffecb0dab7b4af5c5744c` |
+
+The high case reuses the hits-0 target listed above. Inspection is outside the
+benchmark and adds no timed Wallet queries or validation assertions.
+At high payload, cumulative CPU samples under json.Unmarshal were 36.38% for
+maintained kvdb versus 11.82% for legacy; SegWit address encoding was also large.
+The measured rpcclient v0.26.0 batch path decodes the reply array and marshals
+each result again. This supports extra JSON processing as a contributor, not
+an exclusive causal attribution. Maintained total B/op is lower than legacy;
+more cumulative allocation alone cannot explain its slower latency. No peak
+RAM or new CPU-time metric was collected, and GC/peak-memory causation is not
+established by these captures.
+
+#### Original workload context
+
+[PR #1164](https://github.com/btcsuite/btcwallet/pull/1164) reports its 1% case
+at 1.102s legacy and 0.728s full-block. Its noise helper makes one SendOutputs
+call with about 100 outputs, not 100 distinct background transactions.
+The current-code BenchmarkSyncData one-percent leaves were each run three times
+at 1x, in LK/KL/LK order, from 13:03..13:26 UTC. Their medians are:
+
+| Original workload, profiled | Legacy kvdb | Maintained full-block |
+| --- | ---: | ---: |
+| ns/op | 1,424,663,167 | 860,226,500 |
+| B/op | 229,524,560 | 222,246,680 |
+| allocs/op | 1,258,769 | 794,236 |
+| Seconds min..max | 1.215..1.506 | 0.807..0.866 |
+
+The maintained path remains 1.66x faster in this context. Both outcomes occur
+in the same binary, so a revision change is not required for this crossover.
+This contradicts a blanket current-code slowdown across workloads, but a
+payload-dependent regression against historical code remains untested.
+The original recovery window 100, one-account/address-discovery model,
+embedded CPU profiling and 100ms polling remain unchanged. The nominal workload
+has 1,000 generated blocks
+plus helper maturity/funding history and a different birthday scan origin.
+Core and btcd run inside the one-CPU/16-GiB client cgroup here; controlled runs
+use the separately limited Core container. This is current-code original-harness
+context, not an exact January environment reproduction or clean timing baseline.
+Foreign Docker activity during untimed setup ended outside the measured profile
+windows; padded profile timestamps and retained container intervals verify all
+six captures. Do not pool these profiled results with the controlled medians.
+
+#### Diagnostic evidence and commands
+
+Evidence is under `.lgtm/task-sync-bench/runs/reversal-investigation`.
+Controlled receipts/logs use `controlled/<timing|cpu>/<sample>/<case>/<backend>`;
+nested artifacts follow the usual start-to-synced paths. Lower-target raw-file
+inspection lives under inspection. Historical runs use
+`historical/runs/<01..03>/<backend>`, with the saved executable, original .prof,
+cpu-top.txt, exact command receipt and profile-window-assessment.json. The
+writable archive's 786 source files kept identical hashes; its generated
+profiles are separate from source identity. All ten CPU files were readable.
+
+Run controlled scalar commands from the worktree root; replace the case in
+both selection and argument with payload-100 or hits-0 for the other levels.
+Use Legacy/db=legacy for the other native path and distinct roots per sample.
+
+```sh
+# Reuse the ordinary runner and closed fixtures; profiles get a separate call.
+export BENCH_PACKAGE=./wallet
+export BENCH_CASE='^BenchmarkStartToSynced$/^payload-1$/^KVDB$'
+bash scripts/benchmark.sh start-to-synced kvdb payload-1 '' 1x /tmp/sync-count-1
+bash scripts/benchmark.sh start-to-synced kvdb payload-1 cpu 1x /tmp/sync-count-cpu
+```
+
+The old harness needs a writable module cwd for its relative profiles and
+rpctest's btcd build. Reproduce one legacy invocation below from the worktree
+root, using fresh scratch/output paths. Replace Legacy with NewWithFullBlock
+in both benchmark selection and profile name for the maintained invocation.
+
+```sh
+# Archive exact source so only disposable scratch, not the worktree, is writable.
+diag_repro=/tmp/btcwallet-bench/sync-investigation
+mkdir -p "$diag_repro/source" "$diag_repro/bin" "$diag_repro/out"
+git archive fd8bf1734925bb7def0d2a909ca2936df2a0cd5f | tar -x -C "$diag_repro/source"
+diag_go_image=golang:1.25.11-bookworm@sha256:b96f24a8d7d010ea0acb9c3ba99064740f02b6b984612b28bd3c9c5ab9453e38
+diag_core_image=lightninglabs/bitcoin-core:30@sha256:844f2a308e243ce3aa3df7918bd2fe230259419280f7826a62b896510ad3dcbd
+# Use the pinned Linux daemon; the existing rpctest helper builds btcd untimed.
+docker run --rm --network none -v "$diag_repro/bin:/evidence" \
+  --entrypoint sh "$diag_core_image" -ec \
+  'cp /opt/bitcoin-30.2/bin/bitcoind /evidence/bitcoind'
+docker run --rm --cpus=1 --memory=16g --memory-swap=16g \
+  --cidfile "$diag_repro/out/client.cid" \
+  -v "$diag_repro/source:/build" -w /build \
+  -v /tmp/go-build-cache/benchmark:/cache \
+  -v "$diag_repro/bin/bitcoind:/usr/local/bin/bitcoind:ro" \
+  -v "$diag_repro/out:/artifacts" \
+  -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod \
+  -e GOMAXPROCS=1 -e CGO_ENABLED=0 \
+  -e GOFLAGS='-buildvcs=false -trimpath -p=1' "$diag_go_image" sh -ec '
+    bitcoind --version
+    go version
+    go test -c -o /artifacts/benchmark.test ./wallet
+    cd /build/wallet
+    /artifacts/benchmark.test -test.run="^$" \
+      -test.bench="^BenchmarkSyncData$/^UTXODensity-0[.]010$/^Legacy$" \
+      -test.benchtime=1x -test.count=1 -test.cpu=1 -test.benchmem -test.timeout=1h
+    # Preserve and analyze the old helper profile after all cleanup.
+    cp BenchmarkSyncData_UTXODensity-0.010_Legacy.prof /artifacts/
+    go tool pprof -top /artifacts/benchmark.test \
+      /artifacts/BenchmarkSyncData_UTXODensity-0.010_Legacy.prof \
+      > /artifacts/cpu-top.txt'
 ```
