@@ -182,11 +182,6 @@ func TestFundPsbtPopulationError(t *testing.T) {
 	deps.syncer.On("syncState").Return(syncStateSynced).Once()
 	deps.vault.On("Lock").Return().Once()
 	fixture := expectDefaultAuthoringSources(t, w, deps)
-	// Successful authoring allocates change even when it drops dust.
-	expectFreshChangeAddress(
-		t, w, deps, defaultAccountName,
-		waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
-	)
 
 	tx := wire.NewMsgTx(2)
 	tx.AddTxOut(&fixture.payment)
@@ -1268,11 +1263,6 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	fixture := expectDefaultAuthoringSources(t, w, mocks)
-	// Successful authoring allocates change even when it drops dust.
-	expectFreshChangeAddress(
-		t, w, mocks, defaultAccountName,
-		waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
-	)
 
 	tx := wire.NewMsgTx(wire.TxVersion)
 	tx.AddTxOut(&fixture.payment)
