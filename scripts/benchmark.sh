@@ -79,9 +79,9 @@ fi
 # Keep read selection and duration unchanged while each startup is one lifecycle.
 if [[ "$bench_method" == start-to-synced ]]; then
     case "$bench_workload" in
-        smoke|empty|hits-0|hits-1|small-node|hits-100)
+        smoke|empty|hits-0|hits-1|small-node|hits-100|payload-1|payload-100)
             bench_duration=${bench_duration:-1x} ;;
-        *) echo 'Select case=smoke|empty|hits-0|hits-1|small-node|hits-100' >&2; exit 1 ;;
+        *) echo 'Select case=smoke|empty|hits-0|hits-1|small-node|hits-100|payload-1|payload-100' >&2; exit 1 ;;
     esac
 else
     case "$bench_workload" in
