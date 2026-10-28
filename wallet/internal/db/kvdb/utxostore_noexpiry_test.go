@@ -123,6 +123,43 @@ func TestLeaseNoExpiryRenewalKeepsPolicy(t *testing.T) {
 	require.Equal(t, []db.LeasedOutput{*renewal}, leases)
 }
 
+// TestLeaseNoExpiryRejectsDuration verifies that kvdb rejects a lease
+// without expiry that also carries a duration, singly and as a set, and
+// leaves no lease behind.
+func TestLeaseNoExpiryRejectsDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store one known credit.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	// Act: Lease it without expiry and with a duration, singly and as a
+	// set.
+	_, leaseErr := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Minute,
+		NoExpiry: true,
+	})
+	_, setErr := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{outPoint},
+		Duration:  time.Minute,
+		NoExpiry:  true,
+	})
+
+	// Assert: Both calls are rejected and no lock was written.
+	require.ErrorIs(t, leaseErr, db.ErrInvalidParam)
+	require.ErrorIs(t, setErr, db.ErrInvalidParam)
+	require.Empty(t, legacyLocks(t, dbConn, txStore))
+}
+
 // TestLeaseOutputsNoExpiry verifies that kvdb leases a whole set without
 // expiry and reports each lease in request order.
 func TestLeaseOutputsNoExpiry(t *testing.T) {
