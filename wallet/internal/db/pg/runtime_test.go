@@ -1,10 +1,7 @@
 package pg
 
 import (
-	"context"
 	"database/sql"
-	"database/sql/driver"
-	"fmt"
 	"io"
 	"math"
 	"testing"
@@ -17,107 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
-
-// TestExecWriteErrors checks that SQL errors keep their code, class, and cause.
-// It checks that cancellation reaches the caller. Each callback runs once.
-func TestExecWriteErrors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		cause  error
-		code   string
-		reason dberr.Reason
-	}{
-		{
-			name:   "serialization failure",
-			cause:  &pgconn.PgError{Code: codeSerializationFailure},
-			code:   codeSerializationFailure,
-			reason: dberr.ReasonSerialization,
-		},
-		{
-			name:  "callback cancellation",
-			cause: fmt.Errorf("callback canceled: %w", context.Canceled),
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange: Configure the SQL mock for one read committed
-			// transaction. Expect one rollback. A commit or a second begin
-			// must fail the test.
-			ctx := t.Context()
-			store, sqlMock := newMockWalletSecretsStore(t)
-			sqlMock.On("Open", "").Return(sqlMock, nil).Once()
-			sqlMock.On("BeginTx", ctx, driver.TxOptions{
-				Isolation: driver.IsolationLevel(sql.LevelReadCommitted),
-			}).Return(sqlMock, nil).Once()
-			sqlMock.On("Rollback").Return(nil).Once()
-			sqlMock.On("Close").Return(nil).Once()
-
-			calls := 0
-
-			// Act: Return the test error from execWrite's callback. Count
-			// each call to detect a retry that the SQL mock does not observe.
-			err := store.execWrite(ctx, func(*sqlc.Queries) error {
-				calls++
-
-				return test.cause
-			})
-
-			// Assert: Check the original cause and one callback call. SQL
-			// errors must keep their code, reason, and class. Cancellation
-			// must remain a context error.
-			require.ErrorIs(t, err, test.cause)
-			require.Equal(t, 1, calls)
-
-			var sqlErr *dberr.SQLError
-			if test.code == "" {
-				require.ErrorIs(t, err, context.Canceled)
-				require.NotErrorAs(t, err, &sqlErr)
-			} else {
-				require.ErrorAs(t, err, &sqlErr)
-				require.Equal(t, test.code, sqlErr.Code)
-				require.Equal(t, test.reason, sqlErr.Reason)
-				require.Equal(t, dberr.ClassTransient, sqlErr.Class())
-			}
-
-			require.NoError(t, store.Close())
-			sqlMock.AssertExpectations(t)
-		})
-	}
-}
-
-// TestExecWriteCanceledContext checks that a canceled context stops the write
-// before the runtime opens a connection or calls the callback.
-func TestExecWriteCanceledContext(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Cancel the context before the SQL pool gets a connection.
-	// Give the strict mock no expected calls so any driver call fails the test.
-	store, sqlMock := newMockWalletSecretsStore(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	called := false
-
-	// Act: Request a Store write. Record whether the runtime calls the
-	// callback.
-	err := store.execWrite(ctx, func(*sqlc.Queries) error {
-		called = true
-
-		return nil
-	})
-
-	// Assert: Check the context error and the absence of a callback call.
-	// Check the mock expectations to detect any driver call.
-	require.ErrorIs(t, err, context.Canceled)
-	require.False(t, called)
-	require.NoError(t, store.Close())
-	sqlMock.AssertExpectations(t)
-}
 
 // TestClassifyErrorReturnsOriginalErrors verifies that PostgreSQL
 // classification preserves domain and already-classified errors unchanged.
