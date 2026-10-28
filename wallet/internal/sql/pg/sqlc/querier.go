@@ -326,6 +326,8 @@ type Querier interface {
 	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
+	// InsertBlock arbitrates both unique keys when wallets insert a shared block.
+	// ensureBlockExists still verifies the stored hash and timestamp afterward.
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	// InsertDatabaseIdentity writes the only permitted row after the namespace
 	// probe proves the fixed schema is absent and safe to claim.

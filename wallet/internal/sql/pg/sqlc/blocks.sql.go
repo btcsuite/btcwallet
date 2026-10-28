@@ -76,7 +76,7 @@ func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangePara
 const InsertBlock = `-- name: InsertBlock :exec
 INSERT INTO blocks (block_height, header_hash, block_timestamp)
 VALUES ($1, $2, $3)
-ON CONFLICT (block_height) DO NOTHING
+ON CONFLICT DO NOTHING
 `
 
 type InsertBlockParams struct {
@@ -85,6 +85,8 @@ type InsertBlockParams struct {
 	BlockTimestamp int64
 }
 
+// InsertBlock arbitrates both unique keys when wallets insert a shared block.
+// ensureBlockExists still verifies the stored hash and timestamp afterward.
 func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error {
 	_, err := q.db.Exec(ctx, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
 	return err
