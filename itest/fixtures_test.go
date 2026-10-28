@@ -78,20 +78,19 @@ type importedAccountKeys struct {
 	masterKeyFingerprint uint32
 }
 
-// deterministicImportedAccountKeys derives distinct BIP84 account XPubs from a
-// fixed root so imported-account cases are reproducible.
+// deterministicImportedAccountKeys derives BIP84 account XPubs reproducibly
+// within a test while isolating imported addresses between named cases.
 func deterministicImportedAccountKeys(
 	h *bwtest.HarnessTest) importedAccountKeys {
 
 	h.Helper()
 
 	scope := waddrmgr.KeyScopeBIP0084
+
+	// Keep each case's imported addresses separate even when another case
+	// funded the same child index on the shared miner.
 	root, err := hdkeychain.NewMaster(
-		[]byte{
-			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-			0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-		},
-		h.NetParams(),
+		h.SeedFromTestName(), h.NetParams(),
 	)
 	require.NoError(h, err, "failed to derive deterministic root key")
 
