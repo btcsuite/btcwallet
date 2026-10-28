@@ -123,6 +123,52 @@ func TestLeaseNoExpiryRenewalKeepsPolicy(t *testing.T) {
 	require.Equal(t, []db.LeasedOutput{*renewal}, leases)
 }
 
+// TestLeaseNoExpiryRenewalLiftsTimedLease verifies that a same-owner renewal
+// without expiry turns a timed lease into one without expiry, matching the SQL
+// backends.
+func TestLeaseNoExpiryRenewalLiftsTimedLease(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Lease one known credit with a duration.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	_, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Minute,
+	})
+	require.NoError(t, err)
+
+	// Act: Renew it under the same ID without expiry.
+	renewal, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		NoExpiry: true,
+	})
+	require.NoError(t, err)
+
+	leases, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+
+	locks := legacyLocks(t, dbConn, txStore)
+
+	// Assert: The renewal reports, and stored, a lease without expiry at
+	// release depth one.
+	require.True(t, renewal.NoExpiry)
+	require.True(t, renewal.Expiration.IsZero())
+	require.Equal(t, []db.LeasedOutput{*renewal}, leases)
+	require.Len(t, locks, 1)
+	require.Equal(t, uint32(noExpiryLeaseDepth),
+		locks[0].ReleaseAfterSpendConfs)
+}
+
 // TestLeaseNoExpiryRejectsDuration verifies that kvdb rejects a lease
 // without expiry that also carries a duration, singly and as a set, and
 // leaves no lease behind.
