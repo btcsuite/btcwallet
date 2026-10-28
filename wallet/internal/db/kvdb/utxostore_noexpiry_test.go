@@ -123,6 +123,62 @@ func TestLeaseNoExpiryRenewalKeepsPolicy(t *testing.T) {
 	require.Equal(t, []db.LeasedOutput{*renewal}, leases)
 }
 
+// TestLeaseNoExpiryRejectsDuration verifies that kvdb rejects a lease
+// without expiry that also carries a duration, and writes no lock.
+func TestLeaseNoExpiryRejectsDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store one known credit.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	// Act: Lease it without expiry and with a duration.
+	_, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Minute,
+		NoExpiry: true,
+	})
+
+	// Assert: The call is rejected and no lock was written.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.Empty(t, legacyLocks(t, dbConn, txStore))
+}
+
+// TestLeaseOutputsNoExpiryRejectsDuration verifies that kvdb rejects a set
+// lease without expiry that also carries a duration, and writes no lock.
+func TestLeaseOutputsNoExpiryRejectsDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store one known credit.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	// Act: Lease it as a set without expiry and with a duration.
+	_, err := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{outPoint},
+		Duration:  time.Minute,
+		NoExpiry:  true,
+	})
+
+	// Assert: The call is rejected and no lock was written.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.Empty(t, legacyLocks(t, dbConn, txStore))
+}
+
 // TestLeaseOutputsNoExpiry verifies that kvdb leases a whole set without
 // expiry and reports each lease in request order.
 func TestLeaseOutputsNoExpiry(t *testing.T) {
