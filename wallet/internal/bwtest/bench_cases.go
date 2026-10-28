@@ -3,6 +3,7 @@ package bwtest
 import (
 	"fmt"
 	"math"
+	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/stretchr/testify/require"
 )
 
 // NodeBenchmarkPointValue is the cooperative wallet return: 500000-sat capacity
@@ -238,6 +240,100 @@ func (w NodeBenchmarkWorkload) Batch(walletID uint32,
 		Transactions: history,
 		SyncedTo:     history[len(history)-1].Block,
 	}
+}
+
+// AssertNodeBenchmarkWallet checks committed fixture counts after seeding and
+// before saving a new snapshot. Branch counters verify address/key allocation
+// without an expensive address/balance scan. Cached restores do not repeat it.
+func AssertNodeBenchmarkWallet(tb testing.TB, store db.Store,
+	walletID uint32, workload NodeBenchmarkWorkload) {
+
+	tb.Helper()
+
+	// Full Store lists exclude legacy imported pseudo-accounts. Skip balances
+	// because this check needs only the derived account identities and counts.
+	accounts, err := store.ListAccounts(
+		tb.Context(), db.ListAccountsQuery{
+			WalletID:    walletID,
+			SkipBalance: true,
+		},
+	)
+	require.NoError(tb, err)
+	require.Len(
+		tb, accounts, int(workload.NumAccounts),
+		"fixture %s accounts", workload.ID,
+	)
+
+	// Read the recorded branch counter for each allocation group. Ordinary
+	// branches also contribute to the independent NumAddresses total.
+	var ordinaryAddresses uint32
+
+	for _, batch := range workload.AddressBatches() {
+		account, err := store.GetAccount(
+			tb.Context(), db.GetAccountQuery{
+				WalletID:      walletID,
+				Scope:         db.KeyScope(batch.Scope),
+				AccountNumber: &batch.Account,
+				SkipBalance:   true,
+			},
+		)
+		require.NoError(tb, err)
+
+		count := account.ExternalKeyCount
+		if batch.Internal {
+			count = account.InternalKeyCount
+		}
+
+		require.Equal(
+			tb, batch.Count, count,
+			"fixture %s branch %v/%d internal=%t", workload.ID,
+			batch.Scope, batch.Account, batch.Internal,
+		)
+
+		// Channel keys do not contribute to ordinary-address totals.
+		if batch.Scope != NodeBenchmarkChannelScope() {
+			ordinaryAddresses += count
+		}
+	}
+
+	require.Equal(
+		tb, workload.NumAddresses, ordinaryAddresses,
+		"fixture %s ordinary addresses", workload.ID,
+	)
+
+	// Confirmed-range reads exclude the retained unmined force closes. Count
+	// both views so the assertion covers the complete stored history.
+	confirmed, err := store.ListTxns(
+		tb.Context(), db.ListTxnsQuery{
+			WalletID:  walletID,
+			EndHeight: math.MaxInt32,
+		},
+	)
+	require.NoError(tb, err)
+
+	unmined, err := store.ListTxns(
+		tb.Context(), db.ListTxnsQuery{
+			WalletID:    walletID,
+			UnminedOnly: true,
+		},
+	)
+	require.NoError(tb, err)
+	require.Equal(
+		tb, int(workload.NumTransactions), len(confirmed)+len(unmined),
+		"fixture %s transactions", workload.ID,
+	)
+
+	// The current owned set is the resolved endpoint, after all history writes.
+	utxos, err := store.ListUTXOs(
+		tb.Context(), db.ListUtxosQuery{
+			WalletID: walletID,
+		},
+	)
+	require.NoError(tb, err)
+	require.Len(
+		tb, utxos, int(workload.NumUTXOs),
+		"fixture %s UTXOs", workload.ID,
+	)
 }
 
 // lndChannelHistory models one observed deposit without running lnd:
