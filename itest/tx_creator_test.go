@@ -4,9 +4,12 @@ package itest
 
 import (
 	"bytes"
+	"slices"
+	"sync"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -17,6 +20,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -74,6 +78,11 @@ func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
 		KeyScope:    scope,
 	}
 
+	before, err := w.GetAccount(
+		h.Context(), scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err, "failed to read account")
+
 	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
 		Outputs: []wire.TxOut{payment},
 		Inputs: &wallet.InputsPolicy{
@@ -125,6 +134,16 @@ func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
 	require.Equal(
 		h, txCreatorFundingType, changeInfo.AddrType,
 		"unexpected change address type",
+	)
+
+	// Kept change commits exactly one change address.
+	after, err := w.GetAccount(
+		h.Context(), scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err, "failed to read account")
+	require.Equal(
+		h, before.InternalKeyCount+1, after.InternalKeyCount,
+		"change address not committed once",
 	)
 
 	// The inputs cover both outputs, leaving a fee behind.
@@ -524,59 +543,109 @@ func testCreateTransactionCoinSource(h *bwtest.HarnessTest) {
 }
 
 // testCreateTransactionOmitChange verifies that a transaction whose remainder
-// would be dust is authored without a change output.
+// would be zero or dust is authored without a change output, and that no change
+// address is committed for it.
 func testCreateTransactionOmitChange(h *bwtest.HarnessTest) {
-	// smallCoin is the only coin the wallet holds, so the payment below is
-	// funded by it alone.
-	const smallCoin = 100_000
+	// smallCoin is the value of each funded coin. Every row spends its own,
+	// so its payment is funded by that coin alone.
+	const smallCoin btcutil.Amount = 100_000
 
-	// changeLeftover is what remains of the coin after the payment. The fee
-	// for this single input, single output shape at the default relay rate
-	// takes most of it, and what is left is below the dust limit for a
-	// witness pubkey change output, so the wallet must drop the change.
-	// Only that omission is asserted here; the fee itself is not.
-	const changeLeftover = 300
+	// zeroChangeFee is the fee for one P2WPKH input, the P2WPKH payment,
+	// and the P2WPKH change output the fee is sized for, at the relay rate.
+	// It is computed independently of the wallet, so paying the rest of the
+	// coin leaves exactly zero change.
+	zeroChangeFee := txrules.FeeForSerializeSize(
+		relayFeeRate.Val(), txsizes.EstimateVirtualSize(
+			0, 0, 1, 0, []*wire.TxOut{{
+				PkScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+			}}, txsizes.P2WPKHPkScriptSize,
+		),
+	)
+
+	testCases := []struct {
+		name    string
+		payment btcutil.Amount
+	}{
+		{
+			name:    "zero change",
+			payment: smallCoin - zeroChangeFee,
+		},
+		{
+			// The coin keeps 300 sat over the payment. The fee for
+			// this single input, single output shape takes most of
+			// it, and what is left is below the dust limit for a
+			// witness pubkey change output, so the wallet must drop
+			// the change. Only that omission is asserted here; the
+			// fee itself is not.
+			name:    "dust change",
+			payment: smallCoin - 300,
+		},
+	}
 
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
-		Amounts:  []btcutil.Amount{smallCoin},
+		Amounts:  []btcutil.Amount{smallCoin, smallCoin},
 		Unlocked: true,
 	})
 
-	outpoints := funding.WalletOutpoints
+	for i, tc := range testCases {
+		payment := deriveWalletPayment(
+			h, w, txCreatorFundingType, tc.payment,
+		)
 
-	payment := deriveWalletPayment(
-		h, w, txCreatorFundingType, smallCoin-changeLeftover,
-	)
+		before, err := w.GetAccount(
+			h.Context(), scope, waddrmgr.DefaultAccountName,
+		)
+		require.NoError(h, err, "failed to read account")
 
-	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
-		Outputs: []wire.TxOut{payment},
-		Inputs: &wallet.InputsManual{
-			UTXOs: []wire.OutPoint{outpoints[0]},
-		},
-		ChangeSource: &wallet.ScopedAccount{
-			AccountName: waddrmgr.DefaultAccountName,
-			KeyScope:    scope,
-		},
-		FeeRate: relayFeeRate,
-	})
-	require.NoError(h, err, "failed to create transaction")
+		authored, err := w.CreateTransaction(
+			h.Context(), &wallet.TxIntent{
+				Outputs: []wire.TxOut{payment},
+				Inputs: &wallet.InputsManual{
+					UTXOs: []wire.OutPoint{
+						funding.WalletOutpoints[i],
+					},
+				},
+				ChangeSource: &wallet.ScopedAccount{
+					AccountName: waddrmgr.DefaultAccountName,
+					KeyScope:    scope,
+				},
+				FeeRate: relayFeeRate,
+			},
+		)
+		require.NoError(h, err, "%s: failed to create transaction",
+			tc.name)
 
-	require.Equal(
-		h, -1, authored.ChangeIndex, "dust change output not omitted",
-	)
-	require.Len(h, authored.Tx.TxOut, 1, "unexpected output count")
-	require.Equal(
-		h, payment.PkScript, authored.Tx.TxOut[0].PkScript,
-		"payment script changed",
-	)
-	require.Equal(
-		h, payment.Value, authored.Tx.TxOut[0].Value,
-		"payment value changed",
-	)
+		require.Equal(
+			h, -1, authored.ChangeIndex,
+			"%s: change output not omitted", tc.name,
+		)
+		require.Len(
+			h, authored.Tx.TxOut, 1, "%s: unexpected output count",
+			tc.name,
+		)
+		require.Equal(
+			h, payment.PkScript, authored.Tx.TxOut[0].PkScript,
+			"%s: payment script changed", tc.name,
+		)
+		require.Equal(
+			h, payment.Value, authored.Tx.TxOut[0].Value,
+			"%s: payment value changed", tc.name,
+		)
+
+		// The omitted change commits no change address.
+		after, err := w.GetAccount(
+			h.Context(), scope, waddrmgr.DefaultAccountName,
+		)
+		require.NoError(h, err, "failed to read account")
+		require.Equal(
+			h, before.InternalKeyCount, after.InternalKeyCount,
+			"%s: change address committed", tc.name,
+		)
+	}
 }
 
 // testCreateTransactionRejectIntent verifies the stable errors a malformed or
@@ -1108,4 +1177,247 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 		h, err, wallet.ErrWalletStopped,
 		"create transaction after stop not rejected",
 	)
+}
+
+// testCreateTransactionConcurrentChange verifies that CreateTransaction calls
+// made at once, each keeping change, commit one distinct change address each.
+// Wallet requests run concurrently, so the calls race on change allocation.
+func testCreateTransactionConcurrentChange(h *bwtest.HarnessTest) {
+	// concurrentAuthors is the number of payments authored at once.
+	const concurrentAuthors = 4
+
+	// Arrange: Fund one coin per author, derive each author's payment,
+	// and record the account's committed change key count.
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts: slices.Repeat(
+			[]btcutil.Amount{oneBTC}, concurrentAuthors,
+		),
+		Unlocked: true,
+	})
+
+	payments := make([]wire.TxOut, concurrentAuthors)
+	for i := range payments {
+		payments[i] = deriveWalletPayment(
+			h, w, txCreatorFundingType, halfBTC,
+		)
+	}
+
+	before, err := w.GetAccount(
+		h.Context(), scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err, "failed to read account")
+
+	// Act: Author every payment concurrently, each from its own coin.
+	var (
+		wg       sync.WaitGroup
+		authored = make([]*txauthor.AuthoredTx, concurrentAuthors)
+		errs     = make([]error, concurrentAuthors)
+	)
+
+	for i := range concurrentAuthors {
+		wg.Go(func() {
+			authored[i], errs[i] = w.CreateTransaction(
+				h.Context(), &wallet.TxIntent{
+					Outputs: []wire.TxOut{payments[i]},
+					Inputs: &wallet.InputsManual{
+						UTXOs: []wire.OutPoint{
+							funding.WalletOutpoints[i],
+						},
+					},
+					ChangeSource: &wallet.ScopedAccount{
+						AccountName: waddrmgr.DefaultAccountName,
+						KeyScope:    scope,
+					},
+					FeeRate: relayFeeRate,
+				},
+			)
+		})
+	}
+
+	wg.Wait()
+
+	// Assert: Every transaction keeps change to its own change script,
+	// and exactly one change address is committed per transaction.
+	changeScripts := make(map[string]struct{}, concurrentAuthors)
+	for i, tx := range authored {
+		require.NoError(h, errs[i], "failed to create transaction")
+		require.GreaterOrEqual(h, tx.ChangeIndex, 0, "change not kept")
+
+		changeScripts[string(tx.Tx.TxOut[tx.ChangeIndex].PkScript)] =
+			struct{}{}
+	}
+
+	require.Len(
+		h, changeScripts, concurrentAuthors, "change address reused",
+	)
+
+	after, err := w.GetAccount(
+		h.Context(), scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err, "failed to read account")
+	require.Equal(
+		h, before.InternalKeyCount+concurrentAuthors,
+		after.InternalKeyCount, "change addresses not committed once",
+	)
+}
+
+// testFundPsbtDeferChange verifies that FundPsbt commits no change address
+// when the funded packet keeps no change. Each row leaves the coin with either
+// nothing or only dust over the payment and fee, so the account's committed
+// change key count must not move.
+func testFundPsbtDeferChange(h *bwtest.HarnessTest) {
+	// coin is the value of each funded coin. Every row spends its own.
+	const coin btcutil.Amount = 100_000
+
+	// zeroChangeFee is the fee for one P2WPKH input, the P2WPKH payment,
+	// and the P2WPKH change output the fee is sized for, at the relay rate.
+	// It is computed independently of the wallet, so paying the rest of the
+	// coin leaves exactly zero change.
+	zeroChangeFee := txrules.FeeForSerializeSize(
+		relayFeeRate.Val(), txsizes.EstimateVirtualSize(
+			0, 0, 1, 0, []*wire.TxOut{{
+				PkScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+			}}, txsizes.P2WPKHPkScriptSize,
+		),
+	)
+
+	testCases := []struct {
+		name    string
+		payment btcutil.Amount
+	}{
+		{
+			name:    "zero change",
+			payment: coin - zeroChangeFee,
+		},
+		{
+			// A 300 sat leftover is below the P2WPKH dust limit.
+			name:    "dust change",
+			payment: coin - 300,
+		},
+	}
+
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{coin, coin},
+		Unlocked: true,
+	})
+
+	for i, tc := range testCases {
+		// Arrange: Build a packet paying a fresh wallet address from the
+		// row's own coin, and record the account's committed change key
+		// count.
+		payment := deriveWalletPayment(
+			h, w, txCreatorFundingType, tc.payment,
+		)
+
+		tx := wire.NewMsgTx(wire.TxVersion)
+		tx.AddTxIn(&wire.TxIn{
+			PreviousOutPoint: funding.WalletOutpoints[i],
+		})
+		tx.AddTxOut(&payment)
+
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(h, err, "failed to create packet")
+
+		before, err := w.GetAccount(
+			h.Context(), scope, waddrmgr.DefaultAccountName,
+		)
+		require.NoError(h, err, "failed to read account")
+
+		// Act: Fund the packet.
+		result, err := w.FundPsbt(h.Context(), &wallet.FundIntent{
+			Packet: packet,
+			ChangeSource: &wallet.ScopedAccount{
+				AccountName: waddrmgr.DefaultAccountName,
+				KeyScope:    scope,
+			},
+			FeeRate: relayFeeRate,
+		})
+
+		// Assert: No change is kept and no change address is
+		// committed.
+		require.NoError(h, err, tc.name)
+		require.EqualValues(h, -1, result.ChangeIndex, tc.name)
+
+		after, err := w.GetAccount(
+			h.Context(), scope, waddrmgr.DefaultAccountName,
+		)
+		require.NoError(h, err, "failed to read account")
+		require.Equal(
+			h, before.InternalKeyCount, after.InternalKeyCount,
+			tc.name,
+		)
+	}
+}
+
+// testFundPsbtCommitChange verifies that FundPsbt commits exactly one change
+// address when the funded packet keeps change, and that the change output pays
+// that committed address.
+func testFundPsbtCommitChange(h *bwtest.HarnessTest) {
+	// Arrange: Fund one coin, build a packet paying half of it to a fresh
+	// wallet address, and record the account's committed change key count.
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: funding.WalletOutpoints[0]})
+	tx.AddTxOut(&payment)
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(h, err, "failed to create packet")
+
+	before, err := w.GetAccount(
+		h.Context(), scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err, "failed to read account")
+
+	// Act: Fund the packet.
+	result, err := w.FundPsbt(h.Context(), &wallet.FundIntent{
+		Packet: packet,
+		ChangeSource: &wallet.ScopedAccount{
+			AccountName: waddrmgr.DefaultAccountName,
+			KeyScope:    scope,
+		},
+		FeeRate: relayFeeRate,
+	})
+
+	// Assert: One change address is committed, and the change output pays
+	// a change address of the wallet.
+	require.NoError(h, err, "failed to fund packet")
+	require.GreaterOrEqual(h, result.ChangeIndex, int32(0), "change not kept")
+
+	after, err := w.GetAccount(
+		h.Context(), scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err, "failed to read account")
+	require.Equal(
+		h, before.InternalKeyCount+1, after.InternalKeyCount,
+		"change address not committed once",
+	)
+
+	changeOut := result.Packet.UnsignedTx.TxOut[result.ChangeIndex]
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		changeOut.PkScript, h.NetParams(),
+	)
+	require.NoError(h, err, "failed to decode change script")
+	require.Len(h, addrs, 1, "change script has no single address")
+
+	info, err := w.GetAddressInfo(h.Context(), addrs[0])
+	require.NoError(h, err, "change address not in wallet")
+	require.True(h, info.Internal, "change pays a non-change address")
 }
