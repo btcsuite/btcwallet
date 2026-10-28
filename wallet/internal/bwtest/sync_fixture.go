@@ -139,6 +139,9 @@ func SaveSyncBenchmarkTarget(ctx context.Context, tb testing.TB, dir,
 			previous, err = BuildSyncBenchmarkBackground(ctx, previous)
 			require.NoError(tb, err)
 
+			// Keep only the selected lanes from the common fan-out;
+			// subsequent blocks roll their change without extra traffic.
+			previous = previous[:scenario.BackgroundTransactions]
 			transactions = append(transactions, previous...)
 		}
 
