@@ -736,7 +736,8 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 //  1. Validation: Checking the `FundIntent` for consistency.
 //  2. Creation: Converting the intent into a `TxIntent` and authoring it
 //     through the shared `authorTxIntent` boundary, which selects inputs,
-//     allocates a change address, and completes the transaction.
+//     completes the transaction, and allocates one change address only when
+//     positive, non-dust change is kept.
 //  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
 //     change output to the PSBT structure and sort it according to BIP 69.
 //  4. Registration: On SQL wallets, registering change kept by the funded
@@ -760,6 +761,15 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 // ErrIndeterminateCommit and carries the lease ID and inputs; the leases may or
 // may not exist, and the caller may release them with that ID. Every other
 // failure acquires no lease.
+//
+// A change address is committed only once input selection keeps a positive,
+// non-dust change output. Funding that fails before that point, and packets
+// without change, leave the change branch untouched. A failure after the
+// commit, in completion, registration, decoration, or reservation, returns no
+// result and leaves the committed address unused; it is not released. An
+// ambiguous change allocation precedes any lease, so it returns an error
+// matching ErrIndeterminateCommit that is not a *FundReservationError, and no
+// result, without retrying.
 //
 // A caller-selected input that is already leased is refused with
 // ErrUtxoNotEligible when it is checked during authoring. If another attempt
