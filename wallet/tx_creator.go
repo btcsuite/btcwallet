@@ -658,6 +658,13 @@ type authoredTxResp struct {
 // CreateTransaction creates a new unsigned transaction spending unspent outputs
 // to the given outputs. It is the direct-transaction wrapper around the neutral
 // authoring boundary and the main implementation of the TxCreator interface.
+// A change address is committed only once input selection keeps a positive,
+// non-dust change output. Authoring that fails before that point, and results
+// without change, leave the change branch untouched. A failure after the
+// commit, such as a committed script that does not match the ChangeScriptInfo
+// the fee was sized for, returns no transaction and leaves the committed
+// address unused. An ambiguous allocation commit returns ErrIndeterminateCommit
+// and no transaction, without retrying.
 // Direct-transaction watch delivery belongs to this wrapper: on SQL wallets,
 // change kept by the returned transaction is registered from the live tip
 // before return, and a registration failure returns no transaction while the
@@ -724,10 +731,11 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 
 // authorTxIntent authors an unsigned transaction for a normalized intent and is
 // the neutral authoring boundary shared by both public wrappers. It resolves
-// the change account and the form of its change scripts, selects inputs for
-// that form, allocates a fresh change address, and completes the transaction.
-// The change account and address are returned so the wrapper can register
-// kept change once its own result is final.
+// the change account and the ChangeScriptInfo of its change scripts, selects
+// inputs for that info, and allocates one fresh change address only when the
+// selection keeps change. The change account and address, nil without change,
+// are returned so the wrapper can register kept change once its own result is
+// final.
 func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
 	*txauthor.AuthoredTx, *db.AccountInfo, *db.AddressInfo, error) {
 
@@ -750,6 +758,15 @@ func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
 	)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+
+	if !selection.NeedsChangeScript() {
+		tx, err := completeTransaction(selection, nil)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		return tx, changeAccount, nil, nil
 	}
 
 	change, err := w.allocateChangeAddress(

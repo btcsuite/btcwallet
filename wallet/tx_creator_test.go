@@ -36,24 +36,21 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 	t.Parallel()
 
 	for _, fundPsbt := range []bool{false, true} {
-		name := "create transaction"
-		if fundPsbt {
-			name = "fund psbt"
-		}
-
-		t.Run(name, func(t *testing.T) {
+		t.Run(authoringWrapper(fundPsbt), func(t *testing.T) {
 			t.Parallel()
 
 			// Arrange: pause coin selection inside an admitted request.
 			w, deps := createStartedSQLWalletWithMocks(t)
 			deps.syncer.On("syncState").Return(syncStateSynced).Once()
 
+			// Pay half the fixture coin so change is kept and allocation
+			// runs once selection resumes.
 			fixture := expectDefaultAuthoringSources(t, w, deps)
-			// Successful authoring allocates change even when it drops dust.
-			expectFreshChangeAddress(
-				t, w, deps, defaultAccountName,
-				waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
-			)
+			expectKeptChange(t, w, deps)
+
+			payment := wire.TxOut{
+				Value: 50_000, PkScript: fixture.payment.PkScript,
+			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			t.Cleanup(cancel)
 
@@ -86,7 +83,7 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 
 			policy := &InputsPolicy{Strategy: strategy}
 			tx := wire.NewMsgTx(wire.TxVersion)
-			tx.AddTxOut(&fixture.payment)
+			tx.AddTxOut(&payment)
 			packet, err := psbt.NewFromUnsignedTx(tx)
 			require.NoError(t, err)
 
@@ -124,7 +121,7 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 					})
 				} else {
 					_, err = w.CreateTransaction(ctx, &TxIntent{
-						Outputs: []wire.TxOut{fixture.payment},
+						Outputs: []wire.TxOut{payment},
 						Inputs:  policy, FeeRate: defaultFeeRate,
 					})
 				}
@@ -135,7 +132,7 @@ func TestChangeAllocationDuringStop(t *testing.T) {
 			_, err = waitForReq(ctx, entered)
 			require.NoError(t, err)
 
-			// Act: close admission before the change callback runs.
+			// Act: close admission before change is allocated.
 			stopped := make(chan error, 1)
 			go func() { stopped <- w.stop() }()
 
@@ -220,12 +217,45 @@ func expectFreshChangeAddress(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 	return script
 }
 
+// expectKeptChange configures the effects of default-account change that an
+// authored result keeps: one fresh internal BIP0086 child, its live watch, and
+// the Store lookup PSBT funding uses to decorate it. It returns the change
+// script.
+func expectKeptChange(t *testing.T, w *Wallet, mocks *mockWalletDeps) []byte {
+	t.Helper()
+
+	changeScript := expectFreshChangeAddress(
+		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
+		db.TaprootPubKey,
+	)
+	changeAddr, _, changeKey := expectedStoreAddress(
+		t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
+	)
+	mocks.chain.On(
+		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
+	).Return(nil).Once()
+
+	// Only PSBT funding decorates the change output.
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID: w.id, ScriptPubKey: changeScript,
+	}).Return(&db.AddressInfo{
+		AddrType:          db.TaprootPubKey,
+		HasDerivationPath: true,
+		KeyScope:          db.KeyScope(waddrmgr.KeyScopeBIP0086),
+		Branch:            1,
+		ScriptPubKey:      changeScript,
+		PubKey:            changeKey,
+	}, nil).Maybe()
+
+	return changeScript
+}
+
 // expectDefaultAuthoringSources configures automatic selection from the default
 // BIP0086 account. It registers the account-by-name and account-by-number
 // lookups, a processed tip at height 100, and one 100,000-sat P2WPKH UTXO
 // mined at that tip. The requested payment is 99,700 sat, leaving a sub-dust
-// remainder after fees. Successful callers register change allocation
-// separately so rejection tests do not permit an unreachable callback.
+// remainder after fees, so authoring commits no change. Callers that keep
+// change register its allocation separately.
 func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
 	mocks *mockWalletDeps) defaultAuthoringFixture {
 
@@ -1067,11 +1097,6 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 	w, mocks := createStartedSQLWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 	fixture := expectDefaultAuthoringSources(t, w, mocks)
-	// Successful authoring allocates change even when it drops dust.
-	expectFreshChangeAddress(
-		t, w, mocks, defaultAccountName,
-		waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
-	)
 
 	intent := &TxIntent{
 		Outputs: []wire.TxOut{fixture.payment},
@@ -1148,6 +1173,431 @@ func TestCreateTransactionWatchesChange(t *testing.T) {
 	}
 }
 
+// zeroChangePayment returns the payment that leaves exactly zero change from
+// the default fixture's 100,000-sat UTXO: its value less the fee for one P2WPKH
+// input, the P2WPKH payment, and the BIP0086 change output the fee is sized
+// for. The fee is an independent oracle built from txsizes rather than taken
+// from the wallet's own selection.
+func zeroChangePayment() int64 {
+	payment := &wire.TxOut{
+		PkScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+	}
+	size := txsizes.EstimateVirtualSize(
+		0, 0, 1, 0, []*wire.TxOut{payment}, txsizes.P2TRPkScriptSize,
+	)
+	fee := txrules.FeeForSerializeSize(defaultFeeRate.Val(), size)
+
+	return 100_000 - int64(fee)
+}
+
+// TestAuthoringFailedSelectionCommitsNoChange is a regression test for change
+// addresses that failed attempts used to consume. Selection fails before change
+// is judged, so neither public wrapper may commit a change address; the strict
+// Store mock fails any allocation.
+func TestAuthoringFailedSelectionCommitsNoChange(t *testing.T) {
+	t.Parallel()
+
+	t.Run("create transaction", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Pay more than the fixture's single 100,000-sat UTXO
+		// holds.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		payment := wire.TxOut{
+			Value: 200_000, PkScript: fixture.payment.PkScript,
+		}
+
+		// Act: Author the payment.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{payment},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: Selection fails without a result.
+		var sourceErr txauthor.InputSourceError
+		require.ErrorAs(t, err, &sourceErr)
+		require.Nil(t, authored)
+	})
+
+	t.Run("fund psbt", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Request more than the fixture's single 100,000-sat
+		// UTXO holds.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		packet := newPaymentPacket(t, wire.TxOut{
+			Value: 200_000, PkScript: fixture.payment.PkScript,
+		})
+
+		// Act: Fund the packet.
+		result, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			Policy:  &InputsPolicy{},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: Selection fails without a result.
+		var sourceErr txauthor.InputSourceError
+		require.ErrorAs(t, err, &sourceErr)
+		require.Nil(t, result)
+	})
+}
+
+// TestAuthoringZeroChangeCommitsNoChange is a regression test for change
+// addresses that zero-change attempts used to consume. The payment leaves
+// exactly nothing for change, so neither public wrapper may commit a change
+// address; the strict Store mock fails any allocation.
+func TestAuthoringZeroChangeCommitsNoChange(t *testing.T) {
+	t.Parallel()
+
+	t.Run("create transaction", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Pay the fixture's UTXO less the fee alone.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		payment := wire.TxOut{
+			Value:    zeroChangePayment(),
+			PkScript: fixture.payment.PkScript,
+		}
+
+		// Act: Author the payment.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{payment},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: Only the payment is paid and no change is reported.
+		require.NoError(t, err)
+		require.Equal(t, -1, authored.ChangeIndex)
+		require.Len(t, authored.Tx.TxOut, 1)
+		require.Equal(t, payment, *authored.Tx.TxOut[0])
+	})
+
+	t.Run("fund psbt", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Request the fixture's UTXO less the fee alone, and
+		// register the reads and lease funding performs.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		expectFunding(t, w, mocks, fixture)
+
+		payment := wire.TxOut{
+			Value:    zeroChangePayment(),
+			PkScript: fixture.payment.PkScript,
+		}
+		packet := newPaymentPacket(t, payment)
+
+		// Act: Fund the packet.
+		result, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			Policy:  &InputsPolicy{},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: Only the payment is paid and no change is reported.
+		require.NoError(t, err)
+		require.Equal(t, int32(-1), result.ChangeIndex)
+		require.Len(t, result.Packet.UnsignedTx.TxOut, 1)
+		require.Equal(t, payment, *result.Packet.UnsignedTx.TxOut[0])
+	})
+}
+
+// TestAuthoringKeptChangeCommitsOneChange verifies that a payment keeping
+// change commits exactly one change address, through either public wrapper,
+// and that the change output pays that committed address.
+func TestAuthoringKeptChangeCommitsOneChange(t *testing.T) {
+	t.Parallel()
+
+	t.Run("create transaction", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Pay half the fixture's UTXO and permit one change
+		// allocation.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		changeScript := expectKeptChange(t, w, mocks)
+		payment := wire.TxOut{
+			Value: 50_000, PkScript: fixture.payment.PkScript,
+		}
+
+		// Act: Author the payment.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{payment},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: The change output pays the one committed script.
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, authored.ChangeIndex, 0)
+		require.Equal(
+			t, changeScript,
+			authored.Tx.TxOut[authored.ChangeIndex].PkScript,
+		)
+	})
+
+	t.Run("fund psbt", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Request half the fixture's UTXO, permit one change
+		// allocation, and register the reads and lease funding
+		// performs.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		expectFunding(t, w, mocks, fixture)
+		changeScript := expectKeptChange(t, w, mocks)
+
+		packet := newPaymentPacket(t, wire.TxOut{
+			Value: 50_000, PkScript: fixture.payment.PkScript,
+		})
+
+		// Act: Fund the packet.
+		result, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			Policy:  &InputsPolicy{},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: The change output pays the one committed script.
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, result.ChangeIndex, int32(0))
+
+		txOuts := result.Packet.UnsignedTx.TxOut
+		require.Equal(
+			t, changeScript, txOuts[result.ChangeIndex].PkScript,
+		)
+	})
+}
+
+// TestAuthoringIndeterminateChangeCommit verifies that an ambiguous change
+// allocation commit reaches both public wrappers as ErrIndeterminateCommit
+// with no result. The allocation is attempted once and never retried, nothing
+// is registered, and FundPsbt leases nothing and does not report the failure
+// as an ambiguous reservation.
+func TestAuthoringIndeterminateChangeCommit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("create transaction", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Pay half the fixture's UTXO so change is kept, and
+		// make the Store report an ambiguous allocation commit. No
+		// watch expectation is registered, so a watch would fail the
+		// strict mocks.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		expectIndeterminateChangeCommit(w, mocks)
+
+		payment := wire.TxOut{
+			Value: 50_000, PkScript: fixture.payment.PkScript,
+		}
+
+		// Act: Author the payment.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{payment},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: The shared identity is returned without a result
+		// after exactly one allocation attempt.
+		require.ErrorIs(t, err, ErrIndeterminateCommit)
+		require.Nil(t, authored)
+	})
+
+	t.Run("fund psbt", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Request half the fixture's UTXO so change is kept,
+		// and make the Store report an ambiguous allocation commit. No
+		// watch or lease expectation is registered, so either would
+		// fail the strict mocks.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		expectIndeterminateChangeCommit(w, mocks)
+
+		packet := newPaymentPacket(t, wire.TxOut{
+			Value: 50_000, PkScript: fixture.payment.PkScript,
+		})
+
+		// Act: Fund the packet.
+		result, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			Policy:  &InputsPolicy{},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: The shared identity is returned without a result
+		// after exactly one allocation attempt, and is not reported as
+		// an ambiguous reservation.
+		require.ErrorIs(t, err, ErrIndeterminateCommit)
+		require.Nil(t, result)
+
+		var reservationErr *FundReservationError
+		require.NotErrorAs(t, err, &reservationErr)
+	})
+}
+
+// TestAuthoringChangeScriptInfoMismatch verifies that both public wrappers
+// refuse to pay kept change to a committed script that does not match the
+// ChangeScriptInfo the fee was sized and the dust rule judged for. The resolved
+// BIP0086 account expects P2TR change, while the Store commits a P2WPKH child.
+func TestAuthoringChangeScriptInfoMismatch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("create transaction", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Keep change on the default BIP0086 account, but
+		// commit a P2WPKH child. No watch expectation is registered,
+		// so a watch would fail the strict mocks.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		expectFreshChangeAddress(
+			t, w, mocks, defaultAccountName,
+			waddrmgr.KeyScopeBIP0086, db.WitnessPubKey,
+		)
+
+		payment := wire.TxOut{
+			Value: 50_000, PkScript: fixture.payment.PkScript,
+		}
+
+		// Act: Author the payment.
+		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{payment},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: The mismatch fails authoring without a result.
+		require.ErrorIs(t, err, txauthor.ErrChangeScriptInfoMismatch)
+		require.Nil(t, authored)
+	})
+
+	t.Run("fund psbt", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Keep change on the default BIP0086 account, but
+		// commit a P2WPKH child. No watch or lease expectation is
+		// registered, so either would fail the strict mocks.
+		w, mocks := createStartedSQLWalletWithMocks(t)
+		mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+		fixture := expectDefaultAuthoringSources(t, w, mocks)
+		expectFreshChangeAddress(
+			t, w, mocks, defaultAccountName,
+			waddrmgr.KeyScopeBIP0086, db.WitnessPubKey,
+		)
+
+		packet := newPaymentPacket(t, wire.TxOut{
+			Value: 50_000, PkScript: fixture.payment.PkScript,
+		})
+
+		// Act: Fund the packet.
+		result, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			Policy:  &InputsPolicy{},
+			FeeRate: defaultFeeRate,
+		})
+
+		// Assert: The mismatch fails funding without a result.
+		require.ErrorIs(t, err, txauthor.ErrChangeScriptInfoMismatch)
+		require.Nil(t, result)
+	})
+}
+
+// expectIndeterminateChangeCommit makes the one default-account change
+// allocation report an ambiguous commit.
+func expectIndeterminateChangeCommit(w *Wallet, mocks *mockWalletDeps) {
+	params := db.NewDerivedAddressParams{
+		WalletID:    w.id,
+		AccountName: defaultAccountName,
+		Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0086),
+		Change:      true,
+	}
+	commitErr := fmt.Errorf("allocate change: %w", db.ErrIndeterminateCommit)
+	mocks.store.On(
+		"NewDerivedAddresses", mock.Anything, params, uint32(1),
+	).Return(nil, commitErr).Once()
+}
+
+// newPaymentPacket returns an unfunded PSBT packet requesting payment.
+func newPaymentPacket(t *testing.T, payment wire.TxOut) *psbt.Packet {
+	t.Helper()
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(&payment)
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	return packet
+}
+
+// authoringWrapper names the public authoring wrapper a test drives.
+func authoringWrapper(fundPsbt bool) string {
+	if fundPsbt {
+		return "fund psbt"
+	}
+
+	return "create transaction"
+}
+
+// expectFunding registers the Store reads and lease FundPsbt performs once
+// authoring of the default fixture succeeds.
+func expectFunding(t *testing.T, w *Wallet, mocks *mockWalletDeps,
+	fixture defaultAuthoringFixture) {
+
+	t.Helper()
+
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id, OutPoint: fixture.utxo.OutPoint,
+	}).Return(&fixture.utxo, nil).Once()
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id, Txid: fixture.utxo.OutPoint.Hash,
+	}).Return(testStoreTxDetail(
+		fixture.utxo.OutPoint.Hash, wire.NewTxOut(
+			int64(fixture.utxo.Amount), fixture.utxo.PkScript,
+		),
+	), nil).Once()
+
+	// Input decoration needs the input's full derivation metadata.
+	fingerprint := uint32(1)
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID: w.id, ScriptPubKey: fixture.utxo.PkScript,
+	}).Return(&db.AddressInfo{
+		ScriptPubKey:         fixture.utxo.PkScript,
+		AddrType:             db.WitnessPubKey,
+		HasDerivationPath:    true,
+		AccountNumber:        new(uint32),
+		KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		MasterKeyFingerprint: &fingerprint,
+		PubKey:               fixture.inputKey.PubKey().SerializeCompressed(),
+	}, nil).Once()
+
+	mocks.store.On("LeaseOutputs", mock.Anything, mock.Anything).
+		Return([]db.LeasedOutput(nil), nil).Once()
+}
+
 // TestCreateTransactionConfirmationHeight checks public automatic selection
 // against the processed tip when cached chain notifications disagree.
 func TestCreateTransactionConfirmationHeight(t *testing.T) {
@@ -1164,10 +1614,6 @@ func TestCreateTransactionConfirmationHeight(t *testing.T) {
 		mocks.chain.On("BlockStamp").Return(
 			&waddrmgr.BlockStamp{Height: 99}, nil,
 		).Maybe()
-		expectFreshChangeAddress(
-			t, w, mocks, defaultAccountName,
-			waddrmgr.KeyScopeBIP0086, db.TaprootPubKey,
-		)
 
 		// Act: request one confirmation through the public authoring API.
 		authored, err := w.CreateTransaction(t.Context(), &TxIntent{
@@ -2558,11 +3004,6 @@ func TestCreateTransactionManualSelectionAccepted(t *testing.T) {
 
 	outpoints := expectCorruptAmountSources(
 		t, w, mocks, []btcutil.Amount{100_000},
-	)
-
-	expectFreshChangeAddress(
-		t, w, mocks, defaultAccountName, waddrmgr.KeyScopeBIP0086,
-		db.TaprootPubKey,
 	)
 
 	payment := wire.TxOut{
