@@ -484,6 +484,10 @@ var allTestCases = []*testCase{
 		TestFunc: testLeaseOutputNoExpiryRenewal,
 	},
 	{
+		Name:     "utxomanager lease output no expiry duration",
+		TestFunc: testLeaseOutputNoExpiryDuration,
+	},
+	{
 		Name:     "utxomanager lease output no expiry reload",
 		TestFunc: testLeaseOutputNoExpiryReload,
 	},
