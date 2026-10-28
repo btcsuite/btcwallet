@@ -211,6 +211,16 @@ func TestSyncBenchmarkCasesPlaceWalletMatches(t *testing.T) {
 			last:    1000,
 			step:    10,
 		},
+		{
+			id:     "payload-1",
+			blocks: 1000,
+			noise:  1,
+		},
+		{
+			id:     "payload-100",
+			blocks: 1000,
+			noise:  100,
+		},
 	}
 
 	// Act: obtain only the public case factory's schedules. Expectations above
