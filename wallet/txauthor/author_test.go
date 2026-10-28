@@ -6,6 +6,7 @@ package txauthor
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -365,7 +366,9 @@ func TestNewUnsignedTransactionChecksAmounts(t *testing.T) {
 			// must refuse the request just as early.
 			selection, err := SelectInputs(
 				tc.outputs, tc.relayFee, sources.input,
-				sources.change.ScriptSize,
+				ChangeScriptInfo{
+					ScriptSize: uint(sources.change.ScriptSize),
+				},
 			)
 
 			require.ErrorIs(t, err, tc.wantErr)
@@ -373,6 +376,43 @@ func TestNewUnsignedTransactionChecksAmounts(t *testing.T) {
 			require.Zero(t, sources.inputCalls)
 		})
 	}
+}
+
+// TestSelectInputsRejectsOversizedChangeScript verifies that a change script
+// size larger than any valid script is refused before the input source is
+// consulted, instead of being converted to a fee size or allocated.
+func TestSelectInputsRejectsOversizedChangeScript(t *testing.T) {
+	t.Parallel()
+
+	sources := newCountedSources(t, 50_000)
+
+	selection, err := SelectInputs(
+		p2pkhOutputs(1e6), 1e3, sources.input,
+		ChangeScriptInfo{ScriptSize: txscript.MaxScriptSize + 1},
+	)
+
+	require.ErrorIs(t, err, errChangeScriptSizeOutOfRange)
+	require.Nil(t, selection)
+	require.Zero(t, sources.inputCalls)
+}
+
+// TestNewUnsignedTransactionRejectsNegativeChangeScriptSize verifies that a
+// ChangeSource declaring a negative script size is refused before either
+// callback runs, since no change script has a negative size.
+func TestNewUnsignedTransactionRejectsNegativeChangeScriptSize(t *testing.T) {
+	t.Parallel()
+
+	sources := newCountedSources(t, 50_000)
+	sources.change.ScriptSize = -1
+
+	tx, err := NewUnsignedTransaction(
+		p2pkhOutputs(1e6), 1e3, sources.input, sources.change,
+	)
+
+	require.ErrorIs(t, err, errChangeScriptSizeOutOfRange)
+	require.Nil(t, tx)
+	require.Zero(t, sources.inputCalls)
+	require.Zero(t, sources.changeCalls)
 }
 
 // TestNewUnsignedTransactionSweep verifies the change-only authoring a sweep
@@ -414,17 +454,91 @@ func TestNewUnsignedTransactionNoChange(t *testing.T) {
 	require.NotNil(t, tx)
 	require.Equal(t, 1, sources.inputCalls)
 
-	// The change script is allocated even though the result carries no
-	// change output. That is the allocation timing Task 356 owns, not
-	// something this test asserts as desirable: when 356 lands and the
-	// script is only requested once a change output is known to survive,
-	// this expectation becomes zero.
+	// A ChangeSource cannot say whether its scripts are witness programs,
+	// so NewUnsignedTransaction draws the script before the dust rule can
+	// judge it. Callers that must not commit dropped change use
+	// InputSelection.NeedsChangeScript instead.
 	require.Equal(t, 1, sources.changeCalls)
 
 	// The input source funds exactly the requested target, which is the fee
 	// alone, so there is nothing left over to pay out as change.
 	require.Equal(t, -1, tx.ChangeIndex)
 	require.Empty(t, tx.Tx.TxOut)
+}
+
+// TestNewUnsignedTransactionJudgesChangeScript verifies that the legacy wrapper
+// judges change by the relay policy on the script its ChangeSource returns, not
+// by the script's size and witness status alone. Unspendable and data carrier
+// scripts are where the two disagree, and the wrapper must keep its relay
+// policy behavior for them.
+func TestNewUnsignedTransactionJudgesChangeScript(t *testing.T) {
+	t.Parallel()
+
+	// malformedPush declares a 75-byte push that the script cannot hold, so
+	// it is unspendable at a P2WPKH script's size.
+	malformedPush := make([]byte, txsizes.P2WPKHPkScriptSize)
+	malformedPush[0] = txscript.OP_DATA_75
+
+	tests := []struct {
+		name       string
+		script     []byte
+		surplus    btcutil.Amount
+		wantChange bool
+	}{
+		{
+			name:    "unspendable change dropped",
+			script:  malformedPush,
+			surplus: 50_000,
+		},
+		{
+			name:       "data carrier change kept",
+			script:     []byte{txscript.OP_RETURN},
+			surplus:    1,
+			wantChange: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Fund the surplus and hand out the row's change
+			// script.
+			sources := newCountedSources(t, test.surplus)
+			sources.change.NewScript = func() ([]byte, error) {
+				return test.script, nil
+			}
+
+			// Act: Author a sweep, whose only possible output is the
+			// change.
+			tx, err := NewUnsignedTransaction(
+				nil, 1e3, sources.input, sources.change,
+			)
+
+			// Assert: Change is kept exactly when the relay policy
+			// accepts the script's output.
+			require.NoError(t, err)
+			require.Equal(
+				t, txrules.IsDustOutput(
+					wire.NewTxOut(int64(test.surplus), test.script),
+					txrules.DefaultRelayFeePerKb,
+				), !test.wantChange,
+			)
+
+			if !test.wantChange {
+				require.Equal(t, -1, tx.ChangeIndex)
+				require.Empty(t, tx.Tx.TxOut)
+
+				return
+			}
+
+			require.Equal(t, 0, tx.ChangeIndex)
+			require.Equal(
+				t, wire.NewTxOut(int64(test.surplus), test.script),
+				tx.Tx.TxOut[0],
+			)
+		})
+	}
 }
 
 // TestInputSelectionComplete verifies that completing a selection keeps the
@@ -465,16 +579,20 @@ func TestInputSelectionComplete(t *testing.T) {
 			outputs[0] = p2pkhOutputs(1e6)[0]
 
 			selection, err := SelectInputs(
-				outputs, 1e3, sources.input, len(changeScript),
+				outputs, 1e3, sources.input,
+				NewChangeScriptInfo(changeScript),
 			)
 			require.NoError(t, err)
 			require.Equal(t, 1, sources.inputCalls)
 
 			// Act: Complete the selection with the caller's script.
-			tx := selection.Complete(changeScript)
+			tx, err := selection.Complete(changeScript)
 
-			// Assert: The inputs are carried over and the caller's
-			// output slice keeps its original element.
+			// Assert: The change decision matches the result, the
+			// inputs are carried over, and the caller's output slice
+			// keeps its original element.
+			require.NoError(t, err)
+			require.Equal(t, tc.wantChange, selection.NeedsChangeScript())
 			require.Len(t, tx.Tx.TxIn, 1)
 			require.Len(t, tx.PrevScripts, 1)
 			require.Equal(t, tx.PrevInputValues[0], tx.TotalInput)
@@ -495,5 +613,137 @@ func TestInputSelectionComplete(t *testing.T) {
 			require.Equal(t, int64(tc.surplus), change.Value)
 			require.Equal(t, changeScript, change.PkScript)
 		})
+	}
+}
+
+// TestInputSelectionCompleteWithoutChange verifies that a selection that keeps
+// no change completes without a change script, so a caller never has to commit
+// one for change that is dropped.
+func TestInputSelectionCompleteWithoutChange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Leave a dust surplus for P2WPKH change.
+	sources := newCountedSources(t, 100)
+	selection, err := SelectInputs(
+		p2pkhOutputs(1e6), 1e3, sources.input,
+		NewChangeScriptInfo(p2wpkhScript()),
+	)
+	require.NoError(t, err)
+
+	// Act: Complete the selection without a change script.
+	tx, err := selection.Complete(nil)
+
+	// Assert: The dust surplus went to the fee and no change was added.
+	require.NoError(t, err)
+	require.False(t, selection.NeedsChangeScript())
+	require.Equal(t, -1, tx.ChangeIndex)
+	require.Len(t, tx.Tx.TxOut, 1)
+}
+
+// TestInputSelectionCompleteInfoMismatch verifies that a selection keeping
+// change refuses a change script whose ChangeScriptInfo differs from the one it
+// was sized and judged for, since its fee and dust decisions would not hold.
+func TestInputSelectionCompleteInfoMismatch(t *testing.T) {
+	t.Parallel()
+
+	p2trScript := make([]byte, txsizes.P2TRPkScriptSize)
+	p2trScript[0] = txscript.OP_1
+	p2trScript[1] = txscript.OP_DATA_32
+
+	tests := []struct {
+		name         string
+		changeScript []byte
+	}{{
+		name:         "different size",
+		changeScript: p2trScript,
+	}, {
+		name:         "missing script",
+		changeScript: nil,
+	}, {
+		name:         "not a witness program",
+		changeScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Keep change for a P2WPKH change script.
+			sources := newCountedSources(t, 50_000)
+			selection, err := SelectInputs(
+				p2pkhOutputs(1e6), 1e3, sources.input,
+				NewChangeScriptInfo(p2wpkhScript()),
+			)
+			require.NoError(t, err)
+			require.True(t, selection.NeedsChangeScript())
+
+			// Act: Complete with a script of other info.
+			tx, err := selection.Complete(tc.changeScript)
+
+			// Assert: The script is refused and nothing is built.
+			require.ErrorIs(t, err, ErrChangeScriptInfoMismatch)
+			require.Nil(t, tx)
+		})
+	}
+}
+
+// TestIsDustChangeMatchesRelayPolicy verifies that judging change by its
+// ChangeScriptInfo agrees with the relay policy's dust rule on real scripts.
+// For each standard change script it checks the amounts on both sides of the
+// boundary txrules.IsDustOutput draws, so the info-based rule cannot drift
+// from it.
+func TestIsDustChangeMatchesRelayPolicy(t *testing.T) {
+	t.Parallel()
+
+	hash20 := make([]byte, 20)
+	hash32 := make([]byte, 32)
+
+	scripts := map[string][]byte{
+		"p2pkh": slices.Concat(
+			[]byte{
+				txscript.OP_DUP, txscript.OP_HASH160,
+				txscript.OP_DATA_20,
+			},
+			hash20,
+			[]byte{txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG},
+		),
+		"p2sh": slices.Concat(
+			[]byte{txscript.OP_HASH160, txscript.OP_DATA_20}, hash20,
+			[]byte{txscript.OP_EQUAL},
+		),
+		"p2wpkh": slices.Concat(
+			[]byte{txscript.OP_0, txscript.OP_DATA_20}, hash20,
+		),
+		"p2wsh": slices.Concat(
+			[]byte{txscript.OP_0, txscript.OP_DATA_32}, hash32,
+		),
+		"p2tr": slices.Concat(
+			[]byte{txscript.OP_1, txscript.OP_DATA_32}, hash32,
+		),
+	}
+
+	relayFee := txrules.DefaultRelayFeePerKb
+
+	for name, script := range scripts {
+		// The policy boundary is the first non-dust amount.
+		boundary := btcutil.Amount(0)
+		for txrules.IsDustOutput(
+			wire.NewTxOut(int64(boundary), script), relayFee,
+		) {
+			boundary++
+		}
+
+		info := NewChangeScriptInfo(script)
+		for _, amount := range []btcutil.Amount{
+			boundary - 1, boundary, boundary + 1,
+		} {
+			want := txrules.IsDustOutput(
+				wire.NewTxOut(int64(amount), script), relayFee,
+			)
+			require.Equal(
+				t, want, isDustChange(amount, info, relayFee),
+				"%s at %d", name, amount,
+			)
+		}
 	}
 }

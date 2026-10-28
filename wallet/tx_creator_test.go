@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -810,7 +811,7 @@ func TestSelectTxInputs(t *testing.T) {
 			// either public wallet wrapper.
 			selection, err := w.selectTxInputs(
 				[]wire.TxOut{output}, defaultFeeRate, inputSource,
-				len(changeScript),
+				txauthor.NewChangeScriptInfo(changeScript),
 			)
 
 			// Assert: The input source is queried exactly once and an
@@ -828,7 +829,8 @@ func TestSelectTxInputs(t *testing.T) {
 			// A completed selection must spend one input, preserve its
 			// previous script and total amount, and charge the target
 			// amount above the payment as its fee.
-			authored := completeTransaction(selection, changeScript)
+			authored, err := completeTransaction(selection, changeScript)
+			require.NoError(t, err)
 			require.Len(t, authored.Tx.TxIn, 1)
 			require.Equal(t, inputScript, authored.PrevScripts[0])
 			require.Equal(t, inputTarget+tc.changeAmount,
@@ -897,7 +899,8 @@ func TestSelectTxInputsChecksAmounts(t *testing.T) {
 	// Act: Author directly, bypassing the intent-level checks the public
 	// wrappers apply.
 	selection, err := w.selectTxInputs(
-		outputs, defaultFeeRate, inputSource, len(script),
+		outputs, defaultFeeRate, inputSource,
+		txauthor.NewChangeScriptInfo(script),
 	)
 
 	// Assert: The wallet's own error identifies the violation, the
@@ -1503,6 +1506,40 @@ func TestResolveChangeAccountImportedAliasBypassesGetAccount(t *testing.T) {
 			Scope:    db.KeyScope(scope),
 			Name:     &accountName,
 		})
+}
+
+// TestChangeScriptInfoOf verifies that the ChangeScriptInfo authoring sizes the
+// fee and judges dust by matches the change scripts the store actually derives,
+// for every key address type an account can derive change for.
+func TestChangeScriptInfoOf(t *testing.T) {
+	t.Parallel()
+
+	accountPubKey := storeDerivationAccountPubKey(t)
+
+	for _, addrType := range []db.AddressType{
+		db.PubKeyHash, db.NestedWitnessPubKey, db.WitnessPubKey,
+		db.TaprootPubKey,
+	} {
+		// Arrange: Derive the store's first internal child of the type.
+		_, changeScript, _ := expectedStoreAddress(
+			t, accountPubKey, addrType, 1, 0,
+		)
+		walletType, err := addresstype.ToWallet(addrType, false)
+		require.NoError(t, err)
+
+		// Act: Resolve the change script info of the same type.
+		info, err := changeScriptInfoOf(walletType)
+
+		// Assert: The info is that of the derived change script.
+		require.NoError(t, err)
+		require.Equal(
+			t, txauthor.NewChangeScriptInfo(changeScript), info, addrType,
+		)
+	}
+
+	// A bare public key has no fixed script to author change for.
+	_, err := changeScriptInfoOf(waddrmgr.RawPubKey)
+	require.ErrorIs(t, err, ErrUnsupportedAddressType)
 }
 
 // TestAllocateChangeAddressFailure verifies that a failed change allocation is
