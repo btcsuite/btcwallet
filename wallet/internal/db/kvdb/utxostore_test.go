@@ -496,6 +496,73 @@ func TestLeaseOutputSuccess(t *testing.T) {
 	require.True(t, lease.Expiration.After(time.Now().UTC()))
 }
 
+// TestLeaseOutputShortDuration verifies that a sub-second lease reports the
+// expiration it wrote, even though wtxmgr's whole-second record has already
+// expired by the time the write returns.
+func TestLeaseOutputShortDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store one known credit and note the time before the lease.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+	start := time.Now()
+
+	// Act: Lease it for one nanosecond.
+	lease, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Nanosecond,
+	})
+
+	// Assert: The lease is timed and its expiration is not truncated to a
+	// second before the call.
+	require.NoError(t, err)
+	require.Equal(t, outPoint, lease.OutPoint)
+	require.Equal(t, db.LockID{1}, lease.LockID)
+	require.False(t, lease.NoExpiry)
+	require.False(t, lease.Expiration.Before(start))
+}
+
+// TestLeaseOutputsShortDuration verifies that a sub-second set lease reports
+// every lease it wrote instead of rolling back the set.
+func TestLeaseOutputsShortDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store two known credits and note the time before the lease.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	first := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 2500, 2)
+	second := insertKnownCredit(t, dbConn, txStore, []byte{0x51}, 3500, 2)
+	start := time.Now()
+
+	// Act: Lease both for one nanosecond.
+	leases, err := store.LeaseOutputs(t.Context(), db.LeaseOutputsParams{
+		ID:        db.LockID{1},
+		OutPoints: []wire.OutPoint{second, first},
+		Duration:  time.Nanosecond,
+	})
+
+	// Assert: Both leases are timed, follow the request order, and keep
+	// their written expiration.
+	require.NoError(t, err)
+	require.Len(t, leases, 2)
+	require.Equal(t, second, leases[0].OutPoint)
+	require.Equal(t, first, leases[1].OutPoint)
+	require.False(t, leases[0].NoExpiry)
+	require.False(t, leases[1].NoExpiry)
+	require.False(t, leases[0].Expiration.Before(start))
+	require.False(t, leases[1].Expiration.Before(start))
+}
+
 // TestLeaseOutputRejectsSpentByUnminedTx verifies leases cannot be acquired for
 // outputs already spent by an unmined wallet transaction.
 func TestLeaseOutputRejectsSpentByUnminedTx(t *testing.T) {
