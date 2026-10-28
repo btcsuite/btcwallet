@@ -420,13 +420,12 @@ func testLeaseOutput(h *bwtest.HarnessTest) {
 		"lease of unknown outpoint not rejected",
 	)
 
-	// A non-positive lease duration is rejected. Both store backends return
-	// the internal db.ErrInvalidParam sentinel, which Wallet.LeaseOutput
-	// passes through unmapped, so an external caller cannot match it with
-	// errors.Is. require.Error is the strongest available assertion until
-	// the wallet exports a public sentinel for invalid lease durations.
+	// A non-positive lease duration is rejected.
 	_, err = w.LeaseOutput(h.Context(), lockID2, outpoints[1], 0)
-	require.Error(h, err, "non-positive lease duration not rejected")
+	require.ErrorIs(
+		h, err, wallet.ErrInvalidParam,
+		"non-positive lease duration not rejected",
+	)
 }
 
 // testReleaseOutput verifies ReleaseOutput unlocks a leased output, rejects
@@ -653,6 +652,29 @@ func testLeaseOutputNoExpiryRenewal(h *bwtest.HarnessTest) {
 		LockID:   owner,
 		NoExpiry: true,
 	}}, leases, "renewal changed the lease")
+}
+
+// testLeaseOutputNoExpiryDuration verifies that WithNoExpiry rejects a
+// duration with the public ErrInvalidParam and leaves the output unleased.
+func testLeaseOutputNoExpiryDuration(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+
+	_, errLease := w.LeaseOutput(
+		h.Context(), wtxmgr.LockID{1}, op, leaseDuration,
+		wallet.WithNoExpiry(),
+	)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases")
+
+	require.ErrorIs(
+		h, errLease, wallet.ErrInvalidParam,
+		"lease without expiry accepted a duration",
+	)
+	require.Empty(h, leases, "rejected lease was stored")
 }
 
 // testLeaseOutputNoExpiryReload verifies that a lease without expiry keeps its
