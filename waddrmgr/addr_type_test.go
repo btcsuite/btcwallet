@@ -317,3 +317,72 @@ func TestAddrFromPubKeyBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestPaysToWitnessProgram verifies which address types pay to a witness
+// program. Nested witness types pay to a P2SH script, so they do not.
+func TestPaysToWitnessProgram(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		addrType AddressType
+		want     bool
+	}{
+		{
+			name:     "pubkey hash",
+			addrType: PubKeyHash,
+			want:     false,
+		},
+		{
+			name:     "script hash",
+			addrType: Script,
+			want:     false,
+		},
+		{
+			name:     "nested witness pubkey",
+			addrType: NestedWitnessPubKey,
+			want:     false,
+		},
+		{
+			name:     "witness pubkey",
+			addrType: WitnessPubKey,
+			want:     true,
+		},
+		{
+			name:     "witness script hash",
+			addrType: WitnessScript,
+			want:     true,
+		},
+		{
+			name:     "taproot pubkey",
+			addrType: TaprootPubKey,
+			want:     true,
+		},
+		{
+			name:     "taproot script",
+			addrType: TaprootScript,
+			want:     true,
+		},
+		{
+			name:     "raw pubkey",
+			addrType: RawPubKey,
+			want:     false,
+		},
+		{
+			name:     "unknown",
+			addrType: AddressType(255),
+			want:     false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(
+				t, testCase.want,
+				testCase.addrType.PaysToWitnessProgram(),
+			)
+		})
+	}
+}

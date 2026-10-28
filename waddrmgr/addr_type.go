@@ -313,6 +313,21 @@ func (a AddressType) ScriptPubKeySize() (int, error) {
 	}
 }
 
+// PaysToWitnessProgram reports whether the address type's scriptPubKey is a
+// witness program. Nested witness types pay to a P2SH script, so they do not.
+func (a AddressType) PaysToWitnessProgram() bool {
+	switch a {
+	case WitnessPubKey, WitnessScript, TaprootPubKey, TaprootScript:
+		return true
+
+	case PubKeyHash, Script, NestedWitnessPubKey, RawPubKey:
+		return false
+
+	default:
+		return false
+	}
+}
+
 // WitnessVersion returns the witness version for the address type, if it uses
 // a witness program.
 func (a AddressType) WitnessVersion() (byte, error) {
