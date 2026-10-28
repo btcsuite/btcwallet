@@ -53,7 +53,7 @@ func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
 	_, err := dbruntime.Write(
-		ctx, s, nil,
+		ctx, s,
 		func(tx *sql.Tx) *sqlc.Queries {
 			return s.queries.WithTx(tx)
 		},
