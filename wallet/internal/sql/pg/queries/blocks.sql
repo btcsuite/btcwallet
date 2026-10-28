@@ -21,7 +21,9 @@ ORDER BY block_height;
 -- name: InsertBlock :exec
 INSERT INTO blocks (block_height, header_hash, block_timestamp)
 VALUES ($1, $2, $3)
-ON CONFLICT (block_height) DO NOTHING;
+-- InsertBlock arbitrates both unique keys when wallets insert a shared block.
+-- ensureBlockExists still verifies the stored hash and timestamp afterward.
+ON CONFLICT DO NOTHING;
 
 -- name: DeleteBlock :exec
 DELETE FROM blocks
