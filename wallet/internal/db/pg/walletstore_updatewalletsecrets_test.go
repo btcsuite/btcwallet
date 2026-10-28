@@ -249,9 +249,7 @@ func TestStoreUpdateWalletSecretsBypassesRead(t *testing.T) {
 
 			sqlMock.On("Open", "").Return(sqlMock, nil).Once()
 			sqlMock.On(
-				"BeginTx", mock.Anything, driver.TxOptions{
-					Isolation: driver.IsolationLevel(sql.LevelReadCommitted),
-				},
+				"BeginTx", mock.Anything, driver.TxOptions{},
 			).Return(sqlMock, nil).Once()
 			sqlMock.On(
 				"QueryContext", mock.Anything, sqlc.GetWalletByID,
@@ -311,9 +309,7 @@ func TestStoreUpdateWalletSecretsVerifiesAmbiguousCommit(t *testing.T) {
 
 	sqlMock.On("Open", "").Return(sqlMock, nil).Once()
 	sqlMock.On(
-		"BeginTx", mock.Anything, driver.TxOptions{
-			Isolation: driver.IsolationLevel(sql.LevelReadCommitted),
-		},
+		"BeginTx", mock.Anything, driver.TxOptions{},
 	).Return(sqlMock, nil).Once()
 	sqlMock.On(
 		"QueryContext", mock.Anything, sqlc.GetWalletByID,

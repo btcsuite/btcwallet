@@ -49,21 +49,13 @@ func (s *Store) execRead(ctx context.Context,
 	return err
 }
 
-// execWrite runs one PostgreSQL write transaction through the shared runtime.
-// It sets read committed so session defaults do not change write behavior.
+// execWrite executes one PostgreSQL write operation through the shared runtime
+// helper.
 func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
-	// Read committed gives each statement a new snapshot of committed data.
-	// Row locks, constraints, atomic counter updates, and conditional lease
-	// updates protect write invariants. These writes do not need one fixed
-	// snapshot for the full transaction.
-	//
-	// Repeatable read and serializable keep a fixed snapshot. A concurrent
-	// update can then cause a serialization failure. The write runtime does
-	// not retry callbacks, so these failures reach the caller.
 	_, err := dbruntime.Write(
-		ctx, s, &sql.TxOptions{Isolation: sql.LevelReadCommitted},
+		ctx, s,
 		func(tx *sql.Tx) *sqlc.Queries {
 			return s.queries.WithTx(tx)
 		},
