@@ -544,6 +544,18 @@ var allTestCases = []*testCase{
 		TestFunc: testCreateTransactionWalletState,
 	},
 	{
+		Name:     "txcreator concurrent change",
+		TestFunc: testCreateTransactionConcurrentChange,
+	},
+	{
+		Name:     "psbtmanager defer change",
+		TestFunc: testFundPsbtDeferChange,
+	},
+	{
+		Name:     "psbtmanager commit change",
+		TestFunc: testFundPsbtCommitChange,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
