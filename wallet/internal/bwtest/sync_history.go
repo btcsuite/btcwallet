@@ -39,15 +39,16 @@ type SyncBenchmarkCase struct {
 	HistoryBlocks          []int32
 }
 
-// SyncBenchmarkCases holds Wallet inventory and nonzero graph volume fixed.
-// Only placement changes across the populated hit cases; coinbase-only empty
-// blocks are a separate control. Each value owns its deterministic seed.
+// SyncBenchmarkCases holds Wallet inventory fixed. Primary cases vary graph
+// placement; payload diagnostics vary unrelated traffic without Wallet hits.
+// Each value owns its deterministic seed.
 func SyncBenchmarkCases() []SyncBenchmarkCase {
 	const (
-		smokeBlocks   int32 = 10
-		historyBlocks int32 = 1000
-		denseStep     int32 = 10
-		periodicStep  int32 = 100
+		smokeBlocks               int32 = 10
+		historyBlocks             int32 = 1000
+		denseStep                 int32 = 10
+		periodicStep              int32 = 100
+		diagnosticBackgroundLanes       = 100
 	)
 
 	transactions := NodeBenchmarkCases()[0].NumTransactions
@@ -101,6 +102,16 @@ func SyncBenchmarkCases() []SyncBenchmarkCase {
 			HistoryBlocks: syncBenchmarkHistoryBlocks(
 				transactions, dense,
 			),
+		},
+		{
+			ID:                     "payload-1",
+			Blocks:                 historyBlocks,
+			BackgroundTransactions: 1,
+		},
+		{
+			ID:                     "payload-100",
+			Blocks:                 historyBlocks,
+			BackgroundTransactions: diagnosticBackgroundLanes,
 		},
 	}
 
