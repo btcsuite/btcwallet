@@ -1230,58 +1230,145 @@ func testAccountManagerCreateAccountSequence(h *bwtest.HarnessTest) {
 }
 
 // testAccountManagerRejectAccountCreation verifies invalid, occupied, and
-// unsupported requests preserve public error identities and account state.
+// unsupported requests keep their public error identity and precedence, and
+// leave the account set and number sequence unchanged across reopen.
 func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 	const (
 		sourceName         = "account manager rejection source"
 		afterRejectionName = "account manager after rejection"
 	)
 
-	// Arrange: snapshot one existing account and its scope count so a
-	// rejected request cannot silently alter either observable value.
+	// Arrange: create one named account and snapshot the public inventory so
+	// a rejected request cannot silently add or alter an account.
 	scope := waddrmgr.KeyScopeBIP0084
+	customScope := waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    h.NetParams().HDCoinType,
+	}
+	customSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.WitnessPubKey,
+		InternalAddrType: waddrmgr.WitnessPubKey,
+	}
+	scriptSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.TaprootScript,
+		InternalAddrType: waddrmgr.TaprootScript,
+	}
+	externalScriptSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.TaprootScript,
+		InternalAddrType: waddrmgr.TaprootPubKey,
+	}
+	internalScriptSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.TaprootPubKey,
+		InternalAddrType: waddrmgr.TaprootScript,
+	}
+
+	// A vacant exact number every backend accepts, so only the row's earlier
+	// refusal can explain the error.
+	exactNumber := wallet.AccountNumber(7)
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 
-	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+	source, err := w.NewAccount(ctx, wallet.NewAccountParams{
 		Scope: scope,
 		Name:  sourceName,
 	})
 	require.NoError(h, err, "failed to create rejection source")
 
-	existing, err := w.GetAccount(ctx, scope, sourceName)
-	require.NoError(h, err, "failed to read rejection source")
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
 
-	wantExisting := *existing
-	wantExisting.PublicKey = canonicalAccountKey(h, wantExisting.PublicKey)
-	accounts, err := w.ListAccountsByScope(ctx, scope)
-	require.NoError(h, err, "failed to list source scope accounts")
-
-	wantCount := len(accounts)
-
-	// Each request has one refusal reason; the backend must preserve its
-	// public identity without changing account state.
+	// Each row pairs a refusal with any later, weaker refusal it must
+	// precede: invalid input before unsupported shapes, and an occupied name
+	// before the sequential exclusion refusal.
 	testCases := []struct {
-		name        string
-		accountName string
-		noChainSync bool
-		wantErr     error
+		name          string
+		scope         waddrmgr.KeyScope
+		accountName   string
+		addrSchema    *waddrmgr.ScopeAddrSchema
+		accountNumber *wallet.AccountNumber
+		noChainSync   bool
+		wantErr       error
 	}{
 		{
 			name:        "duplicate source name",
+			scope:       scope,
 			accountName: sourceName,
 			wantErr:     wallet.ErrAccountAlreadyExists,
 		},
 		{
 			name:        "empty name",
+			scope:       scope,
 			accountName: "",
 			wantErr:     wallet.ErrInvalidParam,
 		},
 		{
 			name:        "unsupported chain-sync exclusion",
+			scope:       scope,
 			accountName: "excluded account",
 			noChainSync: true,
 			wantErr:     wallet.ErrAccountOperationUnsupported,
+		},
+		{
+			name:        "empty name with chain-sync exclusion",
+			scope:       scope,
+			accountName: "",
+			noChainSync: true,
+			wantErr:     wallet.ErrInvalidParam,
+		},
+		// BIP86 defaults to key-path Taproot, so a folded schema would match
+		// and only the script-path check can refuse these rows.
+		{
+			name:          "script-path schema with exact number",
+			scope:         waddrmgr.KeyScopeBIP0086,
+			accountName:   "script-path account",
+			addrSchema:    &scriptSchema,
+			accountNumber: &exactNumber,
+			wantErr:       wallet.ErrInvalidParam,
+		},
+		{
+			name:          "external script-path schema with exact number",
+			scope:         waddrmgr.KeyScopeBIP0086,
+			accountName:   "external script-path account",
+			addrSchema:    &externalScriptSchema,
+			accountNumber: &exactNumber,
+			wantErr:       wallet.ErrInvalidParam,
+		},
+		{
+			name:          "internal script-path schema with exact number",
+			scope:         waddrmgr.KeyScopeBIP0086,
+			accountName:   "internal script-path account",
+			addrSchema:    &internalScriptSchema,
+			accountNumber: &exactNumber,
+			wantErr:       wallet.ErrInvalidParam,
+		},
+		{
+			name:          "conflicting schema with exact number",
+			scope:         scope,
+			accountName:   "conflicting schema account",
+			addrSchema:    &waddrmgr.KeyScopeBIP0049AddrSchema,
+			accountNumber: &exactNumber,
+			wantErr:       wallet.ErrInvalidParam,
+		},
+		{
+			name:        "custom scope without number",
+			scope:       customScope,
+			accountName: "custom scope account",
+			addrSchema:  &customSchema,
+			wantErr:     wallet.ErrInvalidParam,
+		},
+		{
+			name:        "duplicate name with chain-sync exclusion",
+			scope:       scope,
+			accountName: sourceName,
+			noChainSync: true,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:          "duplicate name with exact number",
+			scope:         scope,
+			accountName:   sourceName,
+			accountNumber: &exactNumber,
+			wantErr:       wallet.ErrAccountAlreadyExists,
 		},
 	}
 
@@ -1289,47 +1376,45 @@ func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 		// Act: submit the rejected request through the same public
 		// Wallet method for every maintained backend.
 		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
-			Scope:       scope,
-			Name:        tc.accountName,
-			NoChainSync: tc.noChainSync,
+			Scope:         tc.scope,
+			Name:          tc.accountName,
+			AddrSchema:    tc.addrSchema,
+			AccountNumber: tc.accountNumber,
+			NoChainSync:   tc.noChainSync,
 		})
 
-		// Assert: check the public refusal and compare the pre-existing
-		// account and count to their pre-call snapshots.
+		// Assert: check the public refusal and compare the account set to
+		// its pre-call snapshot.
 		require.ErrorIs(h, err, tc.wantErr, tc.name)
 
-		current, err := w.GetAccount(ctx, scope, sourceName)
-		require.NoError(
-			h, err, "failed to read source account after rejection",
-		)
-
-		currentInfo := *current
-		currentInfo.PublicKey = canonicalAccountKey(
-			h, currentInfo.PublicKey,
-		)
-		require.Equal(h, wantExisting, currentInfo)
-
-		accounts, err = w.ListAccountsByScope(ctx, scope)
-		require.NoError(
-			h, err, "failed to list accounts after rejection",
-		)
-		require.Len(
-			h, accounts, wantCount, "rejection changed account count",
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
 		)
 	}
 
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
+
 	// The account number is allocated before the insert, so only the
 	// rolled-back transaction keeps a rejected call from consuming one.
+	h.UnlockWallet(w)
 	next, err := w.NewAccount(ctx, wallet.NewAccountParams{
 		Scope: scope,
 		Name:  afterRejectionName,
 	})
 	require.NoError(h, err, "failed to create account after rejections")
-	require.NotNil(
-		h, next.AccountNumber, "account after rejections has no number",
-	)
 	require.Equal(
-		h, *wantExisting.AccountNumber+1, *next.AccountNumber,
+		h, *source.AccountNumber+1, *next.AccountNumber,
 		"rejected creation consumed an account number",
 	)
 }
