@@ -309,6 +309,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerRejectInvalidImportKey,
 	},
 	{
+		Name:     "account manager reject declared account import",
+		TestFunc: testAccountManagerRejectDeclaredAccountImport,
+	},
+	{
 		Name:     "account manager enforce account import lifecycle",
 		TestFunc: testAccountManagerEnforceAccountImportLifecycle,
 	},
