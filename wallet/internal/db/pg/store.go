@@ -76,7 +76,7 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		return nil, fmt.Errorf("initialize database identity: %w", err)
 	}
 
-	err = pg.ApplyMigrations(dbConn)
+	err = pg.ApplyMigrations(ctx, dbConn)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
