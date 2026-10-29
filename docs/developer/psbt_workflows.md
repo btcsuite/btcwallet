@@ -216,11 +216,11 @@ if !isValid(barePacket) {
 }
 
 // If valid, Bob's wallet decorates its own input.
-err := bobWallet.DecorateInputs(ctx, barePacket, true)
+bobPacket, err := bobWallet.DecorateInputs(ctx, barePacket, true)
 // The wallet finds bob_utxo_1 and adds its UTXO/derivation info.
 
 // Bob's wallet now signs its input.
-signParams := &wallet.SignPsbtParams{Packet: barePacket}
+signParams := &wallet.SignPsbtParams{Packet: bobPacket}
 _, err = bobWallet.SignPsbt(ctx, signParams)
 
 // Bob sends the partially signed PSBT back to the coordinator.

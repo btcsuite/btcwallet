@@ -369,7 +369,7 @@ type SignPsbtResult struct {
 //	err = broadcaster.Broadcast(ctx, finalTx, "payment")
 //
 // For more detailed examples, including multi-party collaborative workflows,
-// see the documentation in the `wallet/docs/psbt_workflows.md` file.
+// see the documentation in the `docs/developer/psbt_workflows.md` file.
 type PsbtManager interface {
 	// DecorateInputs enriches a PSBT's inputs with UTXO and derivation
 	// information known to the wallet.
