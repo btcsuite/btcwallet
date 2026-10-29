@@ -29,8 +29,8 @@ func (s *ScopedKeyManager) AllocateDerivedAccountNumber(
 // caller-supplied account material. The plaintext public key is encrypted
 // with cryptoKeyPub; the supplied encryptedPrivKey is persisted as-is.
 //
-// Must run inside the same walletdb.Update transaction as
-// AllocateDerivedAccountNumber.
+// Run inside walletdb.Update. The scoped account cursor advances monotonically;
+// sequential callers may allocate first in the same transaction.
 func (s *ScopedKeyManager) PutDerivedAccountWithKeys(
 	ns walletdb.ReadWriteBucket, account uint32, name string,
 	plaintextPubKey []byte, encryptedPrivKey []byte) error {
@@ -71,6 +71,20 @@ func (s *ScopedKeyManager) PutDerivedAccountWithKeys(
 	)
 	if err != nil {
 		return err
+	}
+
+	// Exact writes share the sequential namespace without consuming lower
+	// holes. The all-ones cursor denotes a scope with no allocated accounts.
+	lastAccount, err := fetchLastAccount(ns, &s.scope)
+	if err != nil {
+		return err
+	}
+
+	if lastAccount == ^uint32(0) || account > lastAccount {
+		err = putLastAccount(ns, &s.scope, account)
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = s.loadAccountInfo(ns, account)

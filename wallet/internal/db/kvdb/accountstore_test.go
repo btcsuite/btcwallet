@@ -504,46 +504,177 @@ func TestCreateDerivedAccount(t *testing.T) {
 	require.Equal(t, savingsAccountName, read.AccountName)
 }
 
-// TestCreateDerivedAccountRejectsExact verifies an unsupported exact request
-// neither derives material nor consumes the next legacy account number.
-func TestCreateDerivedAccountRejectsExact(t *testing.T) {
+// TestCreateDerivedAccountExact verifies sparse creation derives the requested
+// key path and advances the existing native account cursor to that slot.
+func TestCreateDerivedAccountExact(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: use a real legacy store and a callback that records invocation
-	// to prove rejection precedes key preparation as well as persistence.
+	// Arrange: the real store already has account zero; requesting seven
+	// must derive that actual path without creating intervening accounts.
 	store, mgr, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
+	derive := kvdbDeriveFnFixture(t, mgr)
+	scope := db.KeyScopeBIP0084
 	number := uint32(7)
 	params := db.CreateDerivedAccountParams{
-		Scope:         db.KeyScopeBIP0084,
+		Scope:         scope,
 		Name:          savingsAccountName,
 		AccountNumber: &number,
 	}
-	called := false
-	deriveFn := func(context.Context, db.KeyScope, uint32,
-		bool) (*db.DerivedAccountData, error) {
 
-		called = true
+	// Act: create the sparse account through the real shared transaction.
+	info, err := store.CreateDerivedAccount(t.Context(), params, derive)
 
-		return &db.DerivedAccountData{}, nil
+	// Assert: both the key and cursor identify seven rather than a relabeled
+	// sequential allocation. Existing hole/reopen cases cover later requests.
+	require.NoError(t, err)
+	require.Equal(t, number, *info.AccountNumber)
+
+	want, err := derive(t.Context(), scope, number, false)
+	require.NoError(t, err)
+	require.Equal(
+		t, db.AccountXPubPayload(want.PublicKey),
+		db.AccountXPubPayload(info.PublicKey),
+	)
+
+	scoped, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+	require.NoError(t, err)
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		last, err := scoped.LastAccount(tx.ReadBucket(waddrmgr.NamespaceKey))
+		require.NoError(t, err)
+		require.Equal(t, number, last)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestCreateDerivedAccountExactOccupied verifies refusal preserves an occupied
+// account's keys and children, including the native default and a sparse slot.
+func TestCreateDerivedAccountExactOccupied(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		number uint32
+	}{
+		{
+			name:   "native default",
+			number: 0,
+		},
+		{
+			name:   "sparse account",
+			number: 7,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: both slots exist before the subject call. Retain a
+			// child on the selected owner so replacement would expose lost
+			// counters or metadata as well as an overwritten account key.
+			store, mgr, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			derive := kvdbDeriveFnFixture(t, mgr)
+			scope := db.KeyScopeBIP0084
+			seven := uint32(7)
+			_, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					Scope:         scope,
+					Name:          savingsAccountName,
+					AccountNumber: &seven,
+				}, derive,
+			)
+			require.NoError(t, err)
+
+			_, err = store.NewDerivedAddress(
+				t.Context(), db.NewDerivedAddressParams{
+					Scope:         scope,
+					AccountNumber: &tc.number,
+				},
+			)
+			require.NoError(t, err)
+
+			query := db.GetAccountQuery{
+				Scope:         scope,
+				AccountNumber: &tc.number,
+				SkipBalance:   true,
+			}
+			before, err := store.GetAccount(t.Context(), query)
+			require.NoError(t, err)
+
+			// Act: request an occupied slot using a different free name.
+			info, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					Scope:         scope,
+					Name:          "replacement",
+					AccountNumber: &tc.number,
+				}, derive,
+			)
+
+			// Assert: refusal returns no account, preserves the complete owner
+			// snapshot, and leaves the highest allocated native slot at seven.
+			require.ErrorIs(t, err, db.ErrAccountNumberConflict)
+			require.Nil(t, info)
+
+			after, err := store.GetAccount(t.Context(), query)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+
+			scoped, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+			require.NoError(t, err)
+			err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+				last, err := scoped.LastAccount(
+					tx.ReadBucket(waddrmgr.NamespaceKey),
+				)
+				require.NoError(t, err)
+				require.Equal(t, seven, last)
+
+				return nil
+			})
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestCreateDerivedAccountNoChainSync verifies exact KVDB creation ignores
+// SQL-only exclusion and reports the same false policy on an independent read.
+func TestCreateDerivedAccountNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use a real Store and seed-derived keys for an exact request
+	// with SQL-only exclusion set, exposing the former exact-only exception.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := db.KeyScopeBIP0084
+	number := uint32(7)
+	params := db.CreateDerivedAccountParams{
+		Scope:         scope,
+		Name:          savingsAccountName,
+		AccountNumber: &number,
+		NoChainSync:   true,
 	}
 
-	// Act: reject exact creation, then retry the same name sequentially to
-	// expose either an accidentally persisted account or an advanced cursor.
-	info, err := store.CreateDerivedAccount(t.Context(), params, deriveFn)
-	params.AccountNumber = nil
-	next, nextErr := store.CreateDerivedAccount(
+	// Act: create the exact account through the real shared transaction.
+	created, err := store.CreateDerivedAccount(
 		t.Context(), params, kvdbDeriveFnFixture(t, mgr),
 	)
 
-	// Assert: no exact result or derivation occurred, and the first available
-	// legacy number remains one because the default account already exists.
-	require.ErrorIs(t, err, db.ErrInvalidParam)
-	require.Nil(t, info)
-	require.False(t, called)
-	require.NoError(t, nextErr)
-	require.Equal(t, uint32(1), *next.AccountNumber)
+	// Assert: creation and a separate persisted read both keep the KVDB
+	// policy false, rather than echoing the requested SQL-only exclusion.
+	require.NoError(t, err)
+	require.False(t, created.NoChainSync)
+
+	read, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope:         scope,
+		AccountNumber: &number,
+		SkipBalance:   true,
+	})
+	require.NoError(t, err)
+	require.False(t, read.NoChainSync)
 }
 
 // TestCreateDerivedAccountRollsBackOnDeriveError verifies that when the

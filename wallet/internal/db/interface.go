@@ -254,9 +254,9 @@ type AccountStore interface {
 		scope KeyScope) (ScopeAddrSchema, error)
 
 	// CreateDerivedAccount creates a new derived account with the given
-	// name and scope. SQL stores honor an optional exact AccountNumber and
-	// advance the cursor without consuming lower holes; kvdb rejects exact
-	// selection. After allocating the account number, the store
+	// name and scope. Stores honor an optional exact AccountNumber and
+	// advance the cursor without consuming lower holes. Occupied names or
+	// numbers are rejected without replacing their keys. The store
 	// invokes deriveFn to obtain the wallet-derived account material
 	// and persists it with the row.
 	//
