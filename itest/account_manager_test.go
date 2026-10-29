@@ -1600,6 +1600,119 @@ func testAccountManagerRejectExcludedAccountIdentity(h *bwtest.HarnessTest) {
 	)
 }
 
+// testAccountManagerRejectDerivedAccountIdentity verifies root derivation
+// refuses an XPub an imported account already owns, after name occupancy.
+func testAccountManagerRejectDerivedAccountIdentity(h *bwtest.HarnessTest) {
+	const candidateName = "account manager derived candidate"
+
+	// Arrange: derive the account-one XPub the seeded wallet will derive
+	// next, independently of the wallet, at m/purpose'/coin'/1'.
+	scope := waddrmgr.KeyScopeBIP0084
+	seed := h.SeedFromTestName()
+	root, err := hdkeychain.NewMaster(seed, h.NetParams())
+	require.NoError(h, err, "failed to derive seed root")
+	purpose, err := root.Derive(hdkeychain.HardenedKeyStart + scope.Purpose)
+	require.NoError(h, err, "failed to derive purpose key")
+	coinType, err := purpose.Derive(hdkeychain.HardenedKeyStart + scope.Coin)
+	require.NoError(h, err, "failed to derive coin type key")
+	accountKey, err := coinType.Derive(hdkeychain.HardenedKeyStart + 1)
+	require.NoError(h, err, "failed to derive account key")
+	derivedKey, err := accountKey.Neuter()
+	require.NoError(h, err, "failed to neuter account key")
+
+	// Requesting an address creates BIP84's default account, so the next
+	// sequential account is one on every backend.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		Seed:     seed,
+		Unlocked: true,
+	})
+	h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+
+	// Import that XPub first. A declared custom scope keeps the import out
+	// of BIP84's numbering, and its branch types overlap BIP84's.
+	customScope := waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    h.NetParams().HDCoinType,
+	}
+	overlapSchema := waddrmgr.ScopeAddrMap[scope]
+	_, err = w.ImportAccount(ctx, wallet.ImportAccountParams{
+		Name:       "account manager imported owner",
+		XPub:       derivedKey,
+		Scope:      &customScope,
+		AddrSchema: &overlapSchema,
+	}, false)
+	require.NoError(h, err, "failed to import identity owner")
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	// The default account occupies its name in BIP84, so that request must
+	// report the name before deriving the colliding key. The retry collides
+	// only if the first refusal left account one unallocated.
+	testCases := []struct {
+		name        string
+		accountName string
+		wantErr     error
+	}{
+		{
+			name:        "vacant name",
+			accountName: candidateName,
+			wantErr:     wallet.ErrAccountIdentityCollision,
+		},
+		{
+			name:        "vacant name retry",
+			accountName: candidateName,
+			wantErr:     wallet.ErrAccountIdentityCollision,
+		},
+		{
+			name:        "occupied name",
+			accountName: waddrmgr.DefaultAccountName,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Act: derive the next sequential BIP84 account.
+		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope: scope,
+			Name:  tc.accountName,
+		})
+
+		// Assert: the refusal keeps its identity and adds no account.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
+
+	// A durably consumed account number would derive account two and
+	// succeed here instead of colliding again.
+	h.UnlockWallet(w)
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  candidateName,
+	})
+	require.ErrorIs(
+		h, err, wallet.ErrAccountIdentityCollision,
+		"reopened retry consumed an account number",
+	)
+}
+
 // testAccountManagerEnforceAccountCreationLifecycle verifies NewAccount admits
 // neither locked nor stopped wallets.
 func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
