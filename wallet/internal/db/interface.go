@@ -260,10 +260,12 @@ type AccountStore interface {
 	// invokes deriveFn to obtain the wallet-derived account material
 	// and persists it with the row.
 	//
-	// If the key scope does not exist, it will be automatically created
-	// using AddrSchema or the ScopeAddrMap default with no coin public/private
-	// key material. Spendable scopes may later gain a key_scope_secrets row;
-	// watch-only scopes remain absent from that table.
+	// SQL creates a missing scope using AddrSchema or the canonical default,
+	// without coin keys; spendable scopes may later gain key_scope_secrets.
+	// KVDB exact creation uses its native scope, coin keys and default account
+	// zero, reusing that default for a same-transaction zero request.
+	// Sequential KVDB creation requires an existing scope. Supplied schemas
+	// must match.
 	CreateDerivedAccount(ctx context.Context,
 		params CreateDerivedAccountParams,
 		deriveFn AccountDerivationFunc) (*AccountInfo, error)
