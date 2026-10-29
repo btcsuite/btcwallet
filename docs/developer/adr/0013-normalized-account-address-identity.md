@@ -124,6 +124,19 @@ Wallet-derived accounts use the wallet-computed fingerprint.
 schema and `NoChainSync` inputs for deriving an account from the wallet seed.
 Existing account XPubs are imported through `ImportAccount`.
 
+KVDB root-derived creation supports exact account numbers through its existing
+scoped managers. Exact writes advance the native account cursor without
+consuming lower holes or replacing occupied account keys. Creating a missing
+scope uses the native coin-type keys and default account zero; a request for
+zero reuses that newly created default, while a nonzero request retains it.
+Sequential KVDB creation continues to require an existing scope.
+
+`NoChainSync` remains a SQL policy. KVDB ignores it and always reports false,
+including for exact root-derived accounts. Derived KVDB children use the
+account's persisted root fingerprint when available, with the native fallback
+retained for legacy metadata. Imported KVDB accounts retain their existing
+optional fingerprint representation.
+
 `ImportAccount` accepts `ImportAccountParams` and the existing `dryRun`
 argument. The renamed existing account record also supplies
 `CreateWalletParams.InitialAccounts`, so initial and live imports share the
