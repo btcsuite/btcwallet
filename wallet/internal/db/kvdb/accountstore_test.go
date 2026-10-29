@@ -677,6 +677,134 @@ func TestCreateDerivedAccountNoChainSync(t *testing.T) {
 	require.False(t, read.NoChainSync)
 }
 
+// TestCreateDerivedAccountCustomScope verifies bootstrap account zero reuses
+// native scope keys and leaves that scope ready for subsequent exact accounts.
+func TestCreateDerivedAccountCustomScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a previously unknown scope uses a non-default branch schema,
+	// and a renamed account zero exposes stale native default-name indexes.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+	derive := kvdbDeriveFnFixture(t, mgr)
+	scope := db.KeyScope{Purpose: 1017, Coin: 1}
+	schema := db.ScopeAddrSchema{
+		ExternalAddrType: db.WitnessPubKey,
+		InternalAddrType: db.NestedWitnessPubKey,
+	}
+	zero := uint32(0)
+	params := db.CreateDerivedAccountParams{
+		Scope:         scope,
+		Name:          "key family zero",
+		AddrSchema:    &schema,
+		AccountNumber: &zero,
+	}
+
+	// Act: bootstrap the scope through the same shared Store operation used
+	// for existing scopes, then create a later key family in that scope.
+	first, err := store.CreateDerivedAccount(t.Context(), params, derive)
+	require.NoError(t, err)
+
+	seven := uint32(7)
+	params.AccountNumber = &seven
+	params.Name = "key family seven"
+	later, err := store.CreateDerivedAccount(t.Context(), params, derive)
+
+	// Assert: zero retains the root's real key and requested schema. The
+	// native default name disappears when renamed, and later exact creation
+	// can use the registered scope without replacing its bootstrap account.
+	require.NoError(t, err)
+	require.Equal(t, zero, *first.AccountNumber)
+	require.Equal(t, seven, *later.AccountNumber)
+	require.Equal(t, scope, first.KeyScope)
+	require.Equal(t, schema, first.AddrSchema)
+	want, err := derive(t.Context(), scope, zero, false)
+	require.NoError(t, err)
+	require.Equal(
+		t, db.AccountXPubPayload(want.PublicKey),
+		db.AccountXPubPayload(first.PublicKey),
+	)
+
+	defaultName := waddrmgr.DefaultAccountName
+	_, err = store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope:       scope,
+		Name:        &defaultName,
+		SkipBalance: true,
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	read, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope:         scope,
+		AccountNumber: &zero,
+		SkipBalance:   true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, first.PublicKey, read.PublicKey)
+	require.Equal(t, first.AccountName, read.AccountName)
+}
+
+// TestCreateDerivedAccountCustomScopeRollback verifies failure or a sequential
+// missing-scope request cannot publish the provisional scope or its default.
+func TestCreateDerivedAccountCustomScopeRollback(t *testing.T) {
+	t.Parallel()
+
+	zero := uint32(0)
+	for _, tc := range []struct {
+		name   string
+		number *uint32
+		want   error
+	}{
+		{
+			name:   "derivation failure",
+			number: &zero,
+			want:   errTestBoom,
+		},
+		{
+			name: "sequential missing scope",
+			want: db.ErrAccountNotFound,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an absent scope and failing derivation share the same
+			// real transaction fixture; only the account selector varies.
+			store, _, cleanup := newAccountStoreFixture(t)
+			t.Cleanup(cleanup)
+
+			scope := db.KeyScope{Purpose: 1017, Coin: 1}
+			schema := db.ScopeAddrSchema{
+				ExternalAddrType: db.WitnessPubKey,
+				InternalAddrType: db.WitnessPubKey,
+			}
+			fail := func(context.Context, db.KeyScope, uint32,
+				bool) (*db.DerivedAccountData, error) {
+
+				return nil, errTestBoom
+			}
+
+			// Act: fail the write after scope creation, either at allocation
+			// admission or at derivation, before a scope can commit.
+			info, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					Scope:         scope,
+					Name:          savingsAccountName,
+					AddrSchema:    &schema,
+					AccountNumber: tc.number,
+				}, fail,
+			)
+
+			// Assert: the failed write returns no account and leaves the scope
+			// absent through the Store's normal schema lookup. Native scope
+			// commit tests separately own database/cache publication coverage.
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, info)
+
+			_, err = store.GetKeyScopeSchema(t.Context(), 0, scope)
+			require.ErrorIs(t, err, db.ErrKeyScopeNotFound)
+		})
+	}
+}
+
 // TestCreateDerivedAccountRollsBackOnDeriveError verifies that when the
 // derivation callback fails after the account number has been allocated,
 // the underlying walletdb transaction rolls back so the lastAccount counter
