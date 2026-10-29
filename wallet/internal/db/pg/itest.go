@@ -3,6 +3,7 @@
 package pg
 
 import (
+	"context"
 	"database/sql"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
@@ -21,10 +22,10 @@ func (s *Store) Queries() *sqlc.Queries {
 
 // RollbackAllMigrations rolls back all PostgreSQL migrations.
 func (s *Store) RollbackAllMigrations() error {
-	return pg.RollbackMigrations(s.db)
+	return pg.RollbackMigrations(context.Background(), s.db)
 }
 
 // ApplyAllMigrations reapplies all PostgreSQL migrations.
 func (s *Store) ApplyAllMigrations() error {
-	return pg.ApplyMigrations(s.db)
+	return pg.ApplyMigrations(context.Background(), s.db)
 }
