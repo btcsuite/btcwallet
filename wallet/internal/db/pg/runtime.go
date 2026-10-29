@@ -52,10 +52,25 @@ func (s *Store) execRead(ctx context.Context,
 func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
+	// Bind one transaction to the existing runtime so outcome accounting
+	// and deferred cleanup stay identical for both SQL drivers.
 	_, err := dbruntime.Write(
-		ctx, s,
-		func(tx *sql.Tx) *sqlc.Queries {
-			return s.queries.WithTx(tx)
+		ctx, s, dbruntime.WriteTxOps[*sql.Tx, *sqlc.Queries]{
+			Begin: func(ctx context.Context) (*sql.Tx, error) {
+				return s.db.BeginTx(ctx, nil)
+			},
+			Bind: s.queries.WithTx,
+			Commit: func(tx *sql.Tx) dbruntime.CommitResult {
+				err := tx.Commit()
+
+				return dbruntime.CommitResult{
+					Err:       err,
+					Ambiguous: isCommitAmbiguous(err),
+				}
+			},
+			Rollback: func(tx *sql.Tx) error {
+				return tx.Rollback()
+			},
 		},
 		func(qtx *sqlc.Queries) (struct{}, error) {
 			return struct{}{}, fn(qtx)
@@ -112,11 +127,6 @@ func (s *Store) RecordRetryExhausted() {
 // outcome.
 func (s *Store) RecordAmbiguousTxCommit() {
 	s.runtimeStats.RecordAmbiguousTxCommit()
-}
-
-// RawDB returns the PostgreSQL database handle used by shared runtime writes.
-func (s *Store) RawDB() *sql.DB {
-	return s.db
 }
 
 // StatsSnapshot returns the current PostgreSQL runtime counters.

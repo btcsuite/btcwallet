@@ -3,17 +3,18 @@ package runtime
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+const runtimeAppliedResult = "applied"
 
 // Test errors used by the runtime helper tests.
 var (
@@ -21,70 +22,83 @@ var (
 	errRuntimeRetry    = errors.New("retry")
 	errRuntimeCallback = errors.New("callback failed")
 	errRuntimeOther    = errors.New("other")
-	errRuntimeUnused   = errors.New("unused")
+	errRuntimeNoRows   = sql.ErrNoRows
 )
 
-// fakeStore implements the runtime hook interfaces for tests.
-type fakeStore struct {
-	healthyErr       error
-	classifyFn       func(error) error
-	errorCount       int
-	retryAttempts    int
-	retrySuccesses   int
-	retryExhausted   int
-	ambiguousCommits int
-	db               *sql.DB
+// runtimeHooksMock verifies the public runtime contract without independent
+// counters that could disagree with the expected calls.
+type runtimeHooksMock struct {
+	mock.Mock
 }
 
-// CheckHealthy returns the configured health-check result for fakeStore.
-func (s *fakeStore) CheckHealthy() error {
-	return s.healthyErr
+var (
+	_ ReadHooks  = (*runtimeHooksMock)(nil)
+	_ WriteHooks = (*runtimeHooksMock)(nil)
+)
+
+// newRuntimeHooksMock verifies all arranged runtime calls once at cleanup.
+func newRuntimeHooksMock(t *testing.T) *runtimeHooksMock {
+	t.Helper()
+
+	hooks := &runtimeHooksMock{}
+	hooks.Test(t)
+	t.Cleanup(func() {
+		hooks.AssertExpectations(t)
+	})
+
+	return hooks
 }
 
-// ClassifyError applies the configured classifier when one is present.
-func (s *fakeStore) ClassifyError(err error) error {
-	if s.classifyFn != nil {
-		return s.classifyFn(err)
-	}
+// CheckHealthy returns the configured admission result.
+func (s *runtimeHooksMock) CheckHealthy() error {
+	args := s.Called()
 
-	return err
+	return args.Error(0)
 }
 
-// RecordError increments the fake classified-error counter.
-func (s *fakeStore) RecordError(error) {
-	s.errorCount++
+// ClassifyError supplies the configured backend normalization.
+func (s *runtimeHooksMock) ClassifyError(err error) error {
+	args := s.Called(err)
+
+	return args.Error(0)
 }
 
-// RecordRetryAttempt increments the fake retry-attempt counter.
-func (s *fakeStore) RecordRetryAttempt() {
-	s.retryAttempts++
+// RecordError records the expected runtime outcome.
+func (s *runtimeHooksMock) RecordError(err error) {
+	s.Called(err)
 }
 
-// RecordRetrySuccess increments the fake retry-success counter.
-func (s *fakeStore) RecordRetrySuccess() {
-	s.retrySuccesses++
+// RecordRetryAttempt records the expected runtime outcome.
+func (s *runtimeHooksMock) RecordRetryAttempt() {
+	s.Called()
 }
 
-// RecordRetryExhausted increments the fake retry-exhausted counter.
-func (s *fakeStore) RecordRetryExhausted() {
-	s.retryExhausted++
+// RecordRetrySuccess records the expected runtime outcome.
+func (s *runtimeHooksMock) RecordRetrySuccess() {
+	s.Called()
 }
 
-// RecordAmbiguousTxCommit increments the fake ambiguous-commit counter.
-func (s *fakeStore) RecordAmbiguousTxCommit() {
-	s.ambiguousCommits++
+// RecordRetryExhausted records the expected runtime outcome.
+func (s *runtimeHooksMock) RecordRetryExhausted() {
+	s.Called()
 }
 
-// RawDB returns the fake database handle used by transaction tests.
-func (s *fakeStore) RawDB() *sql.DB {
-	return s.db
+// RecordAmbiguousTxCommit records the expected runtime outcome.
+func (s *runtimeHooksMock) RecordAmbiguousTxCommit() {
+	s.Called()
 }
 
 // TestReadHealthyCheck verifies that unhealthy stores fail fast.
 func TestReadHealthyCheck(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{healthyErr: ErrStoreUnhealthy}
+	// Arrange: Reject admission before the read callback can execute. Explicit
+	// expectations also reject any extra lifecycle or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(ErrStoreUnhealthy).Once()
+
+	// Act: Call Read with an otherwise successful callback; the unhealthy
+	// admission result must stop execution before callback work.
 	_, err := Read(context.Background(), hooks, struct{}{}, ReadConfig{
 		MaxAttempts: 1,
 		BaseDelay:   time.Millisecond,
@@ -93,6 +107,9 @@ func TestReadHealthyCheck(t *testing.T) {
 		func(context.Context, struct{}) (struct{}, error) {
 			return struct{}{}, nil
 		})
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.ErrorIs(t, err, ErrStoreUnhealthy)
 }
 
@@ -100,10 +117,20 @@ func TestReadHealthyCheck(t *testing.T) {
 func TestReadInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	_, err := Read(context.Background(), &fakeStore{}, struct{}{},
+	// Arrange: Reject invalid retry settings before consulting any runtime
+	// hook. Explicit expectations also reject any extra lifecycle or accounting
+	// call.
+	hooks := newRuntimeHooksMock(t)
+
+	// Act: Call Read with zero attempts and a successful callback, so any hook
+	// invocation would expose incorrect validation ordering.
+	_, err := Read(context.Background(), hooks, struct{}{},
 		ReadConfig{}, func(context.Context, struct{}) (struct{}, error) {
 			return struct{}{}, nil
 		})
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.EqualError(t, err,
 		"build read config: read max attempts must be positive")
 }
@@ -113,13 +140,22 @@ func TestReadInvalidConfig(t *testing.T) {
 func TestReadReturnsValue(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{}
+	// Arrange: Admit one successful read with retries disabled. Explicit
+	// expectations also reject any extra lifecycle or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+
+	// Act: Return a value with MaxAttempts=1 and zero delays, exercising the
+	// existing disabled-retry path through Read.
 	result, err := Read(context.Background(), hooks, struct{}{}, ReadConfig{
 		MaxAttempts: 1,
 	},
 		func(context.Context, struct{}) (string, error) {
 			return "ok", nil
 		})
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.NoError(t, err)
 	require.Equal(t, "ok", result)
 }
@@ -128,18 +164,27 @@ func TestReadReturnsValue(t *testing.T) {
 func TestReadNoRowsPassthrough(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{}
+	// Arrange: Return the shared no-row sentinel without classifying or
+	// counting it. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+
+	// Act: Return sql.ErrNoRows from the callback. Read must preserve it
+	// without consulting the backend classifier or retry accounting.
 	result, err := Read(context.Background(), hooks, struct{}{}, ReadConfig{
 		MaxAttempts: 1,
 		BaseDelay:   time.Millisecond,
 		MaxDelay:    time.Millisecond,
 	},
 		func(context.Context, struct{}) (string, error) {
-			return "", sql.ErrNoRows
+			return "", errRuntimeNoRows
 		})
-	require.ErrorIs(t, err, sql.ErrNoRows)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
+	require.ErrorIs(t, err, errRuntimeNoRows)
 	require.Empty(t, result)
-	require.Zero(t, hooks.errorCount)
 }
 
 // TestReadRetriesTransientError verifies that transient read failures retry,
@@ -147,13 +192,24 @@ func TestReadNoRowsPassthrough(t *testing.T) {
 func TestReadRetriesTransientError(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendSQLite, dberr.ReasonBusy, "5", err,
-		)
-	}}
+	// Arrange: Classify the initial busy result, then permit the existing
+	// second attempt. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+
+	classified := dberr.NewSQLError(
+		dberr.BackendSQLite, dberr.ReasonBusy, "5", errRuntimeBusy,
+	)
+	hooks.On("ClassifyError", errRuntimeBusy).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+	hooks.On("RecordRetryAttempt").Return().Once()
+	hooks.On("RecordRetrySuccess").Return().Once()
 
 	attempts := 0
+
+	// Act: Return busy on the first callback and success on the second;
+	// immediateTimer drives the one backoff without a wall-clock delay.
 	result, err := readWithConfig(
 		context.Background(), hooks, struct{}{},
 		func(context.Context, struct{}) (string, error) {
@@ -172,11 +228,11 @@ func TestReadRetriesTransientError(t *testing.T) {
 			timer:    immediateTimer,
 		},
 	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.NoError(t, err)
 	require.Equal(t, "ok", result)
-	require.Equal(t, 1, hooks.retryAttempts)
-	require.Equal(t, 1, hooks.retrySuccesses)
-	require.Equal(t, 1, hooks.errorCount)
 }
 
 // TestReadRetryExhausted verifies that transient reads return the final
@@ -184,13 +240,22 @@ func TestReadRetriesTransientError(t *testing.T) {
 func TestReadRetryExhausted(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendPostgres, dberr.ReasonSerialization,
-			"40001", err,
-		)
-	}}
+	// Arrange: Exhaust the single-attempt budget on a classified transient
+	// error. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
 
+	classified := dberr.NewSQLError(
+		dberr.BackendPostgres, dberr.ReasonSerialization, "40001",
+		errRuntimeRetry,
+	)
+	hooks.On("ClassifyError", errRuntimeRetry).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+	hooks.On("RecordRetryExhausted").Return().Once()
+
+	// Act: Return the transient cause with a one-attempt budget, forcing the
+	// terminal retry path without scheduling another callback.
 	result, err := readWithConfig(
 		context.Background(), hooks, struct{}{},
 		func(context.Context, struct{}) (string, error) {
@@ -207,10 +272,11 @@ func TestReadRetryExhausted(t *testing.T) {
 
 	var sqlErr *dberr.SQLError
 
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorAs(t, err, &sqlErr)
 	require.Equal(t, dberr.ClassTransient, sqlErr.Class())
-	require.Equal(t, 1, hooks.retryExhausted)
 }
 
 // TestReadWrappedContextCancellation verifies that wrapped caller cancellation
@@ -218,9 +284,16 @@ func TestReadRetryExhausted(t *testing.T) {
 func TestReadWrappedContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{}
+	// Arrange: Preserve the wrapped caller cancellation without backend
+	// classification. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+
 	wrappedCanceled := fmt.Errorf("read accounts: %w", context.Canceled)
 
+	// Act: Return the wrapped context cancellation from the read callback after
+	// successful health admission, exercising error passthrough.
 	result, err := Read(context.Background(), hooks, struct{}{}, ReadConfig{
 		MaxAttempts: 1,
 		BaseDelay:   time.Millisecond,
@@ -229,6 +302,9 @@ func TestReadWrappedContextCancellation(t *testing.T) {
 		func(context.Context, struct{}) (string, error) {
 			return "", wrappedCanceled
 		})
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.Same(t, wrappedCanceled, err)
 	require.ErrorIs(t, err, context.Canceled)
@@ -239,15 +315,24 @@ func TestReadWrappedContextCancellation(t *testing.T) {
 func TestReadWaitCancellation(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Cancel before waiting while retaining the first transient
+	// attempt accounting. Explicit expectations also reject any extra lifecycle
+	// or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+
+	classified := dberr.NewSQLError(
+		dberr.BackendSQLite, dberr.ReasonBusy, "5", errRuntimeBusy,
+	)
+	hooks.On("ClassifyError", errRuntimeBusy).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+	hooks.On("RecordRetryAttempt").Return().Once()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	hooks := &fakeStore{classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendSQLite, dberr.ReasonBusy, "5", err,
-		)
-	}}
-
+	// Act: Run the busy callback with an already-canceled context, then let the
+	// first retry wait observe that cancellation.
 	result, err := readWithConfig(
 		ctx, hooks, struct{}{},
 		func(context.Context, struct{}) (string, error) {
@@ -261,6 +346,9 @@ func TestReadWaitCancellation(t *testing.T) {
 			timer:    time.NewTimer,
 		},
 	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, context.Canceled)
 }
@@ -269,16 +357,24 @@ func TestReadWaitCancellation(t *testing.T) {
 func TestReadUtilities(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, 100*time.Millisecond,
-		retryDelay(10, 10*time.Millisecond, 100*time.Millisecond))
-	require.Equal(t, 100*time.Millisecond,
-		retryDelay(63, 10*time.Millisecond, 100*time.Millisecond))
-	require.Equal(t, context.DeadlineExceeded,
-		unwrapContextError(context.DeadlineExceeded))
+	// Arrange: Fix a capped backoff and a wrapped cancellation so the helper
+	// results can be compared without timers or backend access.
+	wrapped := fmt.Errorf("read: %w", context.Canceled)
 
-	wrappedCanceled := fmt.Errorf("read: %w", context.Canceled)
-	require.Same(t, wrappedCanceled, unwrapContextError(wrappedCanceled))
-	require.NoError(t, unwrapContextError(sql.ErrNoRows))
+	// Act: Evaluate both saturating delays and the existing context helpers.
+	delay := retryDelay(10, 10*time.Millisecond, 100*time.Millisecond)
+	overflow := retryDelay(63, 10*time.Millisecond, 100*time.Millisecond)
+	deadline := unwrapContextError(context.DeadlineExceeded)
+	canceled := unwrapContextError(wrapped)
+	ordinary := unwrapContextError(errRuntimeNoRows)
+
+	// Assert: Backoff stays capped and only context causes are extracted,
+	// preserving an existing wrapper rather than synthesizing a new error.
+	require.Equal(t, 100*time.Millisecond, delay)
+	require.Equal(t, 100*time.Millisecond, overflow)
+	require.Equal(t, context.DeadlineExceeded, deadline)
+	require.Same(t, wrapped, canceled)
+	require.NoError(t, ordinary)
 }
 
 // TestWriteHealthyCheck verifies that unhealthy stores fail fast before
@@ -286,10 +382,20 @@ func TestReadUtilities(t *testing.T) {
 func TestWriteHealthyCheck(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{healthyErr: ErrStoreUnhealthy}
-	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
-		return struct{}{}
-	}, func(struct{}) (string, error) { return "", nil })
+	// Arrange: Reject admission before a transaction can begin. Explicit
+	// expectations also reject any extra lifecycle or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(ErrStoreUnhealthy).Once()
+
+	// Act: Invoke Write with no transaction expectations; health rejection must
+	// take precedence without beginning a transaction.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return "", nil },
+	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, ErrStoreUnhealthy)
 }
@@ -299,14 +405,25 @@ func TestWriteHealthyCheck(t *testing.T) {
 func TestWriteReturnsValue(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{})
-	hooks := &fakeStore{db: dbConn}
+	// Arrange: Admit one transaction and expose its value only after commit.
+	// Explicit expectations also reject any extra lifecycle or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "ok", nil
-	})
+	hooks.On("Begin", mock.Anything).Return(1, nil).Once()
+	hooks.On("Bind", 1).Return(struct{}{}).Once()
+	hooks.On("Commit", 1).Return(CommitResult{}).Once()
+	hooks.On("Rollback", 1).Return(nil).Once()
+
+	// Act: Return a callback value through Write; the mock requires exactly one
+	// commit and one deferred cleanup.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return "ok", nil },
+	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.NoError(t, err)
 	require.Equal(t, "ok", result)
 }
@@ -316,23 +433,35 @@ func TestWriteReturnsValue(t *testing.T) {
 func TestWriteBeginFailure(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{err: driver.ErrBadConn})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendPostgres, dberr.ReasonUnavailable, "", err,
-		)
-	}}
+	// Arrange: Classify and count one begin failure without invoking
+	// transactional work. Explicit expectations also reject any extra lifecycle
+	// or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
 
-	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
-		return struct{}{}
-	}, func(struct{}) (string, error) { return "", nil })
+	classified := dberr.NewSQLError(
+		dberr.BackendPostgres, dberr.ReasonUnavailable, "",
+		errRuntimeOther,
+	)
+	hooks.On("ClassifyError", errRuntimeOther).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+
+	hooks.On("Begin", mock.Anything).Return(0, errRuntimeOther).Once()
+
+	// Act: Return the arranged begin failure before invoking callback work and
+	// classify that error through the arranged backend hooks.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return "", nil },
+	)
 
 	var sqlErr *dberr.SQLError
 
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorAs(t, err, &sqlErr)
 	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
-	require.Equal(t, 1, hooks.errorCount)
 }
 
 // TestWriteCallbackErrorPassthrough verifies that non-SQL callback errors pass
@@ -340,18 +469,32 @@ func TestWriteBeginFailure(t *testing.T) {
 func TestWriteCallbackErrorPassthrough(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{})
-	hooks := &fakeStore{db: dbConn}
+	// Arrange: Preserve an ordinary callback error and still clean up the
+	// transaction. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+	hooks.On(
+		"ClassifyError", errRuntimeCallback,
+	).Return(errRuntimeCallback).Once()
+
 	callbackErr := errRuntimeCallback
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "", callbackErr
-	})
+	hooks.On("Begin", mock.Anything).Return(1, nil).Once()
+	hooks.On("Bind", 1).Return(struct{}{}).Once()
+	hooks.On("Rollback", 1).Return(nil).Once()
+
+	// Act: Return an ordinary callback cause after Begin succeeds, so Write
+	// must preserve it while running transaction cleanup.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return "", callbackErr },
+	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, callbackErr)
-	require.Zero(t, hooks.errorCount)
 }
 
 // TestWriteCallbackErrorClassified verifies that SQL-like callback failures are
@@ -359,25 +502,72 @@ func TestWriteCallbackErrorPassthrough(t *testing.T) {
 func TestWriteCallbackErrorClassified(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendPostgres, dberr.ReasonConstraint, "23505", err,
-		)
-	}}
+	// Arrange: Normalize a backend callback failure without returning its
+	// result. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "", errRuntimeCallback
-	})
+	classified := dberr.NewSQLError(
+		dberr.BackendPostgres, dberr.ReasonConstraint, "23505",
+		errRuntimeCallback,
+	)
+	hooks.On("ClassifyError", errRuntimeCallback).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+
+	hooks.On("Begin", mock.Anything).Return(1, nil).Once()
+	hooks.On("Bind", 1).Return(struct{}{}).Once()
+	hooks.On("Rollback", 1).Return(nil).Once()
+
+	// Act: Return the callback failure after Begin and bind; the arranged
+	// classifier supplies the constraint error returned by Write.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return "", errRuntimeCallback },
+	)
 
 	var sqlErr *dberr.SQLError
 
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorAs(t, err, &sqlErr)
 	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
-	require.Equal(t, 1, hooks.errorCount)
+}
+
+// TestWriteCanceledBeforeCommit verifies that caller cancellation after the
+// callback prevents commit and still invokes transaction cleanup.
+func TestWriteCanceledBeforeCommit(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Cancel inside the callback so deferred rollback runs without
+	// commit. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	hooks.On("Begin", mock.Anything).Return(1, nil).Once()
+	hooks.On("Bind", 1).Return(struct{}{}).Once()
+	hooks.On("Rollback", 1).Return(nil).Once()
+
+	// Act: Cancel from the callback after applying its local result; Write must
+	// skip Commit and perform its deferred rollback.
+	result, err := Write(
+		ctx, hooks, hooks.writeOps(),
+		func(struct{}) (string, error) {
+			cancel()
+
+			return runtimeAppliedResult, nil
+		},
+	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
+	require.Empty(t, result)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestWriteCommitAmbiguous verifies that transport failures during commit are
@@ -385,27 +575,42 @@ func TestWriteCallbackErrorClassified(t *testing.T) {
 func TestWriteCommitAmbiguous(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{commitErr: io.EOF})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendPostgres, dberr.ReasonUnavailable,
-			"08006", err,
-		)
-	}}
+	// Arrange: Record the supplied ambiguous commit outcome without retrying
+	// the write. Explicit expectations also reject any extra lifecycle or
+	// accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "applied", nil
-	})
+	classified := dberr.NewSQLError(
+		dberr.BackendPostgres, dberr.ReasonUnavailable, "08006", io.EOF,
+	)
+	hooks.On("ClassifyError", io.EOF).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+	hooks.On("RecordAmbiguousTxCommit").Return().Once()
+
+	hooks.On("Begin", mock.Anything).Return(1, nil).Once()
+	hooks.On("Bind", 1).Return(struct{}{}).Once()
+	hooks.On("Commit", 1).Return(CommitResult{
+		Err:       io.EOF,
+		Ambiguous: true,
+	}).Once()
+	hooks.On("Rollback", 1).Return(nil).Once()
+
+	// Act: Commit the callback result with the supplied ambiguous EOF outcome,
+	// allowing Write to wrap and account for it without retry.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return runtimeAppliedResult, nil },
+	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.ErrorIs(t, err, ErrAmbiguousTxCommit)
 
 	var sqlErr *dberr.SQLError
 	require.ErrorAs(t, err, &sqlErr)
 	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
-	require.Equal(t, 1, hooks.ambiguousCommits)
-	require.Equal(t, 1, hooks.errorCount)
 }
 
 // TestWriteCommitUnavailable verifies that classified availability errors
@@ -413,27 +618,40 @@ func TestWriteCommitAmbiguous(t *testing.T) {
 func TestWriteCommitUnavailable(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{commitErr: errRuntimeOther})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendPostgres, dberr.ReasonUnavailable,
-			"08006", err,
-		)
-	}}
+	// Arrange: Keep a definite commit error distinct from an ambiguous outcome.
+	// Explicit expectations also reject any extra lifecycle or accounting call.
+	hooks := newRuntimeHooksMock(t)
+	hooks.On("CheckHealthy").Return(nil).Once()
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "applied", nil
-	})
+	classified := dberr.NewSQLError(
+		dberr.BackendPostgres, dberr.ReasonUnavailable, "08006",
+		errRuntimeOther,
+	)
+	hooks.On("ClassifyError", errRuntimeOther).Return(classified).Once()
+	hooks.On("RecordError", classified).Once()
+
+	hooks.On("Begin", mock.Anything).Return(1, nil).Once()
+	hooks.On("Bind", 1).Return(struct{}{}).Once()
+	hooks.On("Commit", 1).Return(CommitResult{
+		Err: errRuntimeOther,
+	}).Once()
+	hooks.On("Rollback", 1).Return(nil).Once()
+
+	// Act: Commit with a definite backend failure classified as unavailable,
+	// keeping classification separate from ambiguity.
+	result, err := Write(
+		context.Background(), hooks, hooks.writeOps(),
+		func(struct{}) (string, error) { return runtimeAppliedResult, nil },
+	)
+
+	// Assert: Check the returned value and error identity. Cleanup verifies
+	// each declared hook once and rejects unplanned retries or accounting.
 	require.Empty(t, result)
 	require.NotErrorIs(t, err, ErrAmbiguousTxCommit)
 
 	var sqlErr *dberr.SQLError
 	require.ErrorAs(t, err, &sqlErr)
 	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
-	require.Zero(t, hooks.ambiguousCommits)
-	require.Equal(t, 1, hooks.errorCount)
 }
 
 // immediateTimer returns a timer that fires immediately.
@@ -441,81 +659,42 @@ func immediateTimer(time.Duration) *time.Timer {
 	return time.NewTimer(0)
 }
 
-// beginErrDriver is a test SQL driver that injects begin and commit failures.
-type beginErrDriver struct {
-	err       error
-	commitErr error
+// Begin supplies the transaction token or begin failure arranged by the test.
+func (s *runtimeHooksMock) Begin(ctx context.Context) (int, error) {
+	args := s.Called(ctx)
+
+	return args.Int(0), args.Error(1)
 }
 
-// Open returns a connection that injects the configured failures.
-func (d beginErrDriver) Open(string) (driver.Conn, error) {
-	return beginErrConn(d), nil
+// Bind verifies that Write binds queries to the token returned by Begin.
+func (s *runtimeHooksMock) Bind(tx int) struct{} {
+	args := s.Called(tx)
+	queries, _ := args.Get(0).(struct{})
+
+	return queries
 }
 
-// beginErrConn is a test connection that injects begin and commit failures.
-type beginErrConn struct {
-	err       error
-	commitErr error
+// Commit supplies the backend outcome without inferring ambiguity in Write.
+func (s *runtimeHooksMock) Commit(tx int) CommitResult {
+	args := s.Called(tx)
+	result, _ := args.Get(0).(CommitResult)
+
+	return result
 }
 
-// Prepare returns an unused statement error for the test driver.
-func (c beginErrConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errRuntimeUnused
+// Rollback verifies the sole deferred cleanup even when Commit is skipped.
+func (s *runtimeHooksMock) Rollback(tx int) error {
+	args := s.Called(tx)
+
+	return args.Error(0)
 }
 
-// Close reports success for the test connection close path.
-func (c beginErrConn) Close() error {
-	return nil
-}
-
-// Begin returns the legacy unused error because tests use BeginTx instead.
-func (c beginErrConn) Begin() (driver.Tx, error) {
-	return nil, errRuntimeUnused
-}
-
-// BeginTx returns the configured begin error or a transaction test double.
-func (c beginErrConn) BeginTx(ctx context.Context,
-	_ driver.TxOptions) (driver.Tx, error) {
-
-	_ = ctx
-
-	if c.err != nil {
-		return nil, c.err
+// writeOps binds the lifecycle mock methods to the production callback surface.
+func (s *runtimeHooksMock) writeOps() WriteTxOps[int, struct{}] {
+	return WriteTxOps[int, struct{}]{
+		Begin:    s.Begin,
+		Bind:     s.Bind,
+		Commit:   s.Commit,
+		Rollback: s.Rollback,
 	}
-
-	return beginErrTx{commitErr: c.commitErr}, nil
-}
-
-// beginErrTx is a test transaction that injects a commit failure.
-type beginErrTx struct {
-	commitErr error
-}
-
-// Commit returns the configured commit error.
-func (tx beginErrTx) Commit() error {
-	return tx.commitErr
-}
-
-// Rollback reports success for the test rollback path.
-func (tx beginErrTx) Rollback() error {
-	return nil
-}
-
-// testDriverSeq keeps each registered test driver name unique.
-var testDriverSeq atomic.Uint64
-
-// newTestDB registers one test driver instance and opens a matching database.
-func newTestDB(t *testing.T, drv beginErrDriver) *sql.DB {
-	t.Helper()
-
-	name := fmt.Sprintf("runtime-test-%d", testDriverSeq.Add(1))
-	sql.Register(name, drv)
-
-	dbConn, err := sql.Open(name, "")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, dbConn.Close())
-	})
-
-	return dbConn
 }

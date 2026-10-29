@@ -5,10 +5,8 @@ package runtime
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
-	"io"
 	"sync/atomic"
 	"time"
 
@@ -145,9 +143,6 @@ type WriteHooks interface {
 
 	// RecordAmbiguousTxCommit records a commit failure with unknown outcome.
 	RecordAmbiguousTxCommit()
-
-	// RawDB returns the backend database handle used for transactions.
-	RawDB() *sql.DB
 }
 
 // ReadConfig holds caller-provided retry settings for Read.
@@ -429,23 +424,25 @@ func readAttempt[Q any, T any](ctx context.Context, hooks ReadHooks, queries Q,
 // callback execution, or Commit fails, it returns the zero value of T together
 // with the resulting error.
 //
-// hooks supplies the shared health check, error classification, SQL error
-// recording, ambiguous-commit accounting, and raw database handle used by the
-// helper.
-//
-// bind converts the started *sql.Tx into the caller's transactional query
-// handle, such as a sqlc Queries value bound to that transaction.
+// hooks supplies shared health checks, error classification, SQL error
+// recording, and ambiguous-commit accounting. ops adapts the transaction
+// lifecycle without exposing a driver type here; ops.Commit supplies the
+// CommitResult that decides whether a failed commit is ambiguous.
 //
 // fn performs the transactional work with that bound handle. SQL and backend
 // callback failures are normalized through hooks.ClassifyError, while ordinary
 // domain errors pass through unchanged.
 //
+// If ctx is canceled after fn returns, Write returns the zero value and
+// ctx.Err() without attempting Commit, classifying it, or recording an error.
+// Deferred rollback still cleans up the transaction.
+//
 // If Commit fails after the backend may already have applied the transaction,
 // Write returns an AmbiguousTxCommitError. Callers should detect that case
 // with errors.Is(err, ErrAmbiguousTxCommit) before deciding whether retrying
 // or compensating work is safe.
-func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
-	bind func(*sql.Tx) Q, fn func(Q) (T, error)) (T, error) {
+func Write[Tx any, Q any, T any](ctx context.Context, hooks WriteHooks,
+	ops WriteTxOps[Tx, Q], fn func(Q) (T, error)) (T, error) {
 
 	var zero T
 
@@ -457,7 +454,7 @@ func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
 
 	// Begin the transaction before invoking the callback so begin failures are
 	// still classified and recorded consistently.
-	tx, err := hooks.RawDB().BeginTx(ctx, nil)
+	tx, err := ops.Begin(ctx)
 	if err != nil {
 		classifiedErr := hooks.ClassifyError(err)
 		hooks.RecordError(classifiedErr)
@@ -466,13 +463,13 @@ func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
 	}
 
 	defer func() {
-		_ = tx.Rollback()
+		_ = ops.Rollback(tx)
 	}()
 
 	// Callback errors are normalized through the backend classifier so SQL
 	// driver failures reach callers consistently while non-SQL domain errors
 	// pass through unchanged.
-	result, err := fn(bind(tx))
+	result, err := fn(ops.Bind(tx))
 	if err != nil {
 		classifiedErr := hooks.ClassifyError(err)
 		recordWriteCallbackError(hooks, classifiedErr)
@@ -480,14 +477,22 @@ func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
 		return zero, normalizeWriteCallbackError(err, classifiedErr)
 	}
 
+	// Do not start a commit after the caller has already canceled the
+	// operation. The deferred backend rollback still gets a chance to clean up
+	// the open transaction.
+	err = ctx.Err()
+	if err != nil {
+		return zero, err
+	}
+
 	// Commit transport failures are wrapped so callers know the final
 	// transaction outcome is unknown.
-	err = tx.Commit()
-	if err != nil {
-		classifiedErr := hooks.ClassifyError(err)
+	commitResult := ops.Commit(tx)
+	if commitResult.Err != nil {
+		classifiedErr := hooks.ClassifyError(commitResult.Err)
 		hooks.RecordError(classifiedErr)
 
-		if isCommitTransportError(err) {
+		if commitResult.Ambiguous {
 			hooks.RecordAmbiguousTxCommit()
 
 			return zero, &AmbiguousTxCommitError{
@@ -606,32 +611,4 @@ func unwrapContextError(err error) error {
 	}
 
 	return nil
-}
-
-// isCommitTransportError reports whether commit failed after the request may
-// already have reached the backend.
-func isCommitTransportError(err error) bool {
-	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) ||
-		errors.Is(err, io.EOF) {
-
-		return true
-	}
-
-	return extractNetError(err) != nil
-}
-
-// extractNetError extracts a net.Error used by commit transport checks.
-func extractNetError(err error) netError {
-	var transportErr netError
-	if errors.As(err, &transportErr) {
-		return transportErr
-	}
-
-	return nil
-}
-
-// netError captures the net.Error behavior needed for commit transport checks.
-type netError interface {
-	error
-	Timeout() bool
 }
