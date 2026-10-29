@@ -25,8 +25,14 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	pgschema "github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/docker/go-connections/nat"
+	gomigrate "github.com/golang-migrate/migrate/v4"
+	migratedb "github.com/golang-migrate/migrate/v4/database"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -658,4 +664,99 @@ func rejectBranchRowDelete(t *testing.T, store *pg.Store,
 		),
 	)
 	require.NoError(t, err)
+}
+
+// TestPostgresMigrationConstructorFailureReleasesPool proves metadata startup
+// failure returns its borrowed connection instead of exhausting the only slot.
+func TestPostgresMigrationConstructorFailureReleasesPool(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Leave the wallet schema absent so metadata creation fails only
+	// after the migration driver acquires its dedicated connection.
+	cfg, err := pgxpool.ParseConfig(newPostgresIdentityDSN(t))
+	require.NoError(t, err)
+
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	sqlDB := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+
+	// Act: Enter public migration setup, then require another native borrower
+	// to obtain the same pool slot under a deadline after the failure.
+	migrationErr := pgschema.ApplyMigrations(t.Context(), sqlDB)
+
+	ctx, cancel := context.WithTimeout(t.Context(), db.DefaultConnectionTimeout)
+	defer cancel()
+
+	conn, acquireErr := pool.Acquire(ctx)
+	require.NoError(t, acquireErr)
+
+	defer conn.Release()
+
+	var one int
+
+	err = conn.QueryRow(ctx, "SELECT 1").Scan(&one)
+
+	// Assert: The absent namespace is the intended constructor failure, and
+	// native SQL still works because setup returned the dedicated connection.
+	// golang-migrate stores the driver cause in OrigErr instead of Unwrap.
+	var migrationFailure *migratedb.Error
+	require.ErrorAs(t, migrationErr, &migrationFailure)
+
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, migrationFailure.OrigErr, &pgErr)
+	require.Equal(t, "3F000", pgErr.Code)
+	require.NoError(t, err)
+	require.Equal(t, 1, one)
+}
+
+// TestPostgresMigrationFailureReleasesPool proves an Up failure returns its
+// borrowed one-slot connection after driver construction succeeds.
+func TestPostgresMigrationFailureReleasesPool(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed only dirty migration metadata, allowing driver setup to
+	// succeed while forcing Up to reject state before applying wallet SQL.
+	cfg, err := pgxpool.ParseConfig(newPostgresIdentityDSN(t))
+	require.NoError(t, err)
+
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	sqlDB := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	_, err = sqlDB.ExecContext(t.Context(), `
+		CREATE SCHEMA btcwallet;
+		CREATE TABLE btcwallet.schema_migrations (
+			version BIGINT PRIMARY KEY, dirty BOOLEAN NOT NULL
+		);
+		INSERT INTO btcwallet.schema_migrations VALUES (1, true)
+	`)
+	require.NoError(t, err)
+
+	// Act: Run the public migration API against dirty metadata, then borrow
+	// the sole native slot with a deadline to expose a retained connection.
+	migrationErr := pgschema.ApplyMigrations(t.Context(), sqlDB)
+
+	ctx, cancel := context.WithTimeout(t.Context(), db.DefaultConnectionTimeout)
+	defer cancel()
+
+	conn, acquireErr := pool.Acquire(ctx)
+	require.NoError(t, acquireErr)
+
+	defer conn.Release()
+
+	var one int
+
+	err = conn.QueryRow(ctx, "SELECT 1").Scan(&one)
+
+	// Assert: Up reported its intended dirty-state failure while the caller's
+	// pool remains open and can execute native queries after migration cleanup.
+	var dirtyErr gomigrate.ErrDirty
+	require.ErrorAs(t, migrationErr, &dirtyErr)
+	require.NoError(t, err)
+	require.Equal(t, 1, one)
 }
