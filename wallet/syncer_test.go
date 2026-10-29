@@ -1266,7 +1266,9 @@ func TestHandleChainUpdate(t *testing.T) {
 
 	// Act & Assert: Verify that a BlockConnected notification is
 	// correctly processed.
-	err := s.handleChainUpdate(t.Context(), chain.BlockConnected(meta))
+	err := s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockConnected(meta),
+	})
 	require.NoError(t, err)
 
 	// Case 2: Test handling of a RelevantTx notification, which records the
@@ -4363,33 +4365,6 @@ func expectMatchingRollbackBatch(store *walletmock.Store,
 	).Return(remoteHashes, nil).Once()
 }
 
-// TestProcessChainUpdate_Disconnect verifies rollback on block disconnect.
-func TestProcessChainUpdate_Disconnect(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Initialize a store-backed syncer for handling a block
-	// disconnect.
-	mockChain := &bwmock.Chain{}
-	mockPublisher := &mockTxPublisher{}
-	store := &walletmock.Store{}
-
-	s := newTestSyncer(
-		Config{Chain: mockChain}, nil, nil, mockPublisher,
-		store, uint32(0),
-	)
-
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-	// The store and the remote chain agree across the scanned batch, so the
-	// rollback check finds no reorg.
-	expectMatchingRollbackBatch(store, mockChain)
-
-	// Act & Assert: Process a BlockDisconnected notification and verify
-	// that it triggers a rollback check.
-	err := s.processChainUpdate(t.Context(), chain.BlockDisconnected{})
-	require.NoError(t, err)
-	store.AssertExpectations(t)
-}
-
 // TestBroadcastUnminedTxns_Error verifies error handling.
 func TestBroadcastUnminedTxns_Error(t *testing.T) {
 	t.Parallel()
@@ -4792,40 +4767,6 @@ func TestSyncerRun_InitError(t *testing.T) {
 
 	// Assert: Verify error propagation.
 	require.ErrorContains(t, err, "db error")
-}
-
-// TestHandleChainUpdate_BlockDisconnected verifies handleChainUpdate for
-// BlockDisconnected.
-func TestHandleChainUpdate_BlockDisconnected(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup a store-backed syncer for handling updates.
-	mockChain := &bwmock.Chain{}
-	store := &walletmock.Store{}
-	s := newTestSyncer(
-		Config{
-			Chain:       mockChain,
-			ChainParams: &chainParams,
-		},
-		nil, nil, nil,
-		store, uint32(0),
-	)
-
-	// 1. BlockDisconnected. The store and the remote chain agree across the
-	// scanned batch, so the rollback check finds no reorg.
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-	expectMatchingRollbackBatch(store, mockChain)
-
-	// Act: Handle BlockDisconnected.
-	err := s.handleChainUpdate(
-		t.Context(), chain.BlockDisconnected{
-			Block: wtxmgr.Block{Height: 100},
-		},
-	)
-
-	// Assert: Verify success.
-	require.NoError(t, err)
-	store.AssertExpectations(t)
 }
 
 // TestDispatchScanStrategy_AutoFallback verifies fallback to full blocks
@@ -5813,29 +5754,6 @@ func TestDispatchScanStrategy_AutoFallback_Final(t *testing.T) {
 	require.Len(t, results, 1)
 }
 
-// TestProcessChainUpdate_Disconnected verifies rollback on disconnect.
-func TestProcessChainUpdate_Disconnected(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a store-backed syncer reporting an unsynced tip, so
-	// the rollback check returns without scanning any block ranges.
-	store := &walletmock.Store{}
-	s := newTestSyncer(
-		Config{}, nil, nil, nil, store, uint32(0),
-	)
-
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
-
-	// Act: Process a BlockDisconnected update.
-	err := s.processChainUpdate(
-		t.Context(), chain.BlockDisconnected{},
-	)
-
-	// Assert: Verify success.
-	require.NoError(t, err)
-	store.AssertExpectations(t)
-}
-
 // TestScanWithTargets_Errors verifies error paths in scanWithTargets.
 func TestScanWithTargets_Errors(t *testing.T) {
 	t.Parallel()
@@ -5964,67 +5882,6 @@ func TestScanBatchWithCFilters_InitResultsError(t *testing.T) {
 	// Assert: Verify failure.
 	require.Nil(t, results)
 	require.ErrorContains(t, err, "headers fail")
-}
-
-// TestProcessChainUpdate verifies processChainUpdate for all update types.
-func TestProcessChainUpdate(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		update interface{}
-		setup  func(*walletmock.Store, *bwmock.Chain)
-	}{
-		{
-			name: "BlockConnected",
-			update: chain.BlockConnected{
-				Block: wtxmgr.Block{Height: 100},
-			},
-			setup: func(*walletmock.Store, *bwmock.Chain) {},
-		},
-		{
-			name: "BlockDisconnected",
-			update: chain.BlockDisconnected{
-				Block: wtxmgr.Block{Height: 100, Hash: chainhash.Hash{0x01}},
-			},
-			setup: func(store *walletmock.Store, c *bwmock.Chain) {
-				expectSyncedTip(
-					store, waddrmgr.BlockStamp{Height: 100},
-				)
-				expectMatchingRollbackBatch(store, c)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange: Program the Store/chain outcome for the remaining raw
-			// header and disconnect handlers; transaction payloads are prepared
-			// by Manager and covered through processChainEvent instead.
-			store := &walletmock.Store{}
-			mockChain := &bwmock.Chain{}
-			s := newTestSyncer(
-				Config{
-					Chain:       mockChain,
-					ChainParams: &chainParams,
-				},
-				nil, nil, nil,
-				store, uint32(0),
-			)
-
-			tc.setup(store, mockChain)
-
-			// Act: Send control metadata through its unchanged handler.
-			err := s.processChainUpdate(t.Context(), tc.update)
-
-			// Assert: The header is inert and disconnect performs its
-			// rollback query, with each programmed Store call verified once.
-			require.NoError(t, err)
-			store.AssertExpectations(t)
-		})
-	}
 }
 
 // TestAdvanceChainSyncUsesStoreSyncedTo verifies Store-backed synchronization
@@ -6286,20 +6143,20 @@ func TestHandleChainUpdate_SpecialNotifs(t *testing.T) {
 
 	// 1. RescanProgress
 	// Act: Handle RescanProgress.
-	err := s.handleChainUpdate(
-		t.Context(), &chain.RescanProgress{
+	err := s.processChainEvent(t.Context(), chainEvent{
+		notification: &chain.RescanProgress{
 			Height: 100, Hash: chainhash.Hash{0x01},
 		},
-	)
+	})
 	require.NoError(t, err)
 
 	// 2. RescanFinished
 	// Act: Handle RescanFinished.
-	err = s.handleChainUpdate(
-		t.Context(), &chain.RescanFinished{
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: &chain.RescanFinished{
 			Height: 100, Hash: &chainhash.Hash{0x01},
 		},
-	)
+	})
 	require.NoError(t, err)
 }
 
@@ -6490,36 +6347,6 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 		require.Nil(t, results)
 		require.ErrorContains(t, err, "unknown sync method")
 	})
-}
-
-// TestHandleChainUpdate_Error verifies that handleChainUpdate returns error if
-// processChainUpdate fails.
-func TestHandleChainUpdate_Error(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup a store-backed syncer where chain update processing
-	// fails because the synced-block read errors.
-	mockChain := &bwmock.Chain{}
-	store := &walletmock.Store{}
-	s := newTestSyncer(
-		Config{Chain: mockChain}, nil, nil, nil, store, uint32(0),
-	)
-
-	expectSyncedTip(store, waddrmgr.BlockStamp{
-		Hash:   chainhash.Hash{0x01},
-		Height: 100,
-	})
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		([]db.Block)(nil), errDBFail).Once()
-
-	// Act: Attempt to handle a BlockDisconnected update.
-	err := s.handleChainUpdate(
-		t.Context(), chain.BlockDisconnected{},
-	)
-
-	// Assert: Verify failure.
-	require.ErrorContains(t, err, "failed to process chain update")
-	store.AssertExpectations(t)
 }
 
 // TestRunSyncStep_Success verifies the idle path in runSyncStep.

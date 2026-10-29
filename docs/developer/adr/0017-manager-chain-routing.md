@@ -76,12 +76,17 @@ Each Wallet has a capacity-one mailbox feeding its existing worker. An actual
 filtered block reaches every current Wallet, including those with no matching
 transactions. Header-only block notifications retain their wakeup meaning:
 catch-up scans recovery-window addresses before advancing the checkpoint.
-Disconnect and control events use ordinary Wallet handlers.
+Control events other than disconnects use ordinary Wallet handlers.
 
-Manager snapshots membership under its existing registry lock, releases it,
-then routes and sends in source order. Create joins subsequent snapshots after
-ordinary publication. There is no readiness handoff, acknowledgment, startup
-barrier, pause/resume protocol, or extra per-Wallet worker.
+Manager snapshots membership before routing and sends in source order.
+Create joins subsequent snapshots after publication. Ordinary delivery does
+not promise processing completion or startup readiness.
+
+For every backend, Manager owns live disconnects. It settles earlier Wallet
+writes, rewinds the database once, and then releases processing. Wallet
+creation and Store closure wait until the rewind settles. Historical batches
+fetched before rollback are discarded and refetched; accepted targeted scans
+continue their ranges. Successful rollback resumes dispatch directly.
 
 Manager's reader lifetime is separate from each Wallet's synchronization and
 recovery state. Start and Create do not promise completed watch installation
@@ -90,12 +95,10 @@ successful subscription; it does not promise startup mempool backfill.
 
 Ordinary processing and registration failures retain Wallet retry behavior.
 Loss of the required notification stream terminates the reader and stops
-Manager. Shutdown cancels delivery, drains Wallet calls and workers, and closes
-Store under the admission lock. It releases that lock before joining the
-reader, which can be waiting for a membership snapshot. This order is safe
-because the reader only routes in-memory events; every Store user has already
-joined. Failed startup and creation also join before returning. The borrowed
-backend client remains caller-owned.
+Manager. Any rollback error, including an ambiguous commit, stops all Wallets
+before chain writes resume. No automatic retry or readback is attempted.
+Shutdown drains Wallet work before closing Store and joins the source reader.
+The borrowed backend client remains caller-owned.
 
 ## 4. Rationale
 
@@ -157,10 +160,10 @@ scheduling policy. Bounded backpressure is sufficient for the current contract.
   addresses can receive again. Any bounded retirement policy needs a separate
   decision; this design defines no GC threshold or background worker.
 - A dead required source stops every Wallet served by that Manager.
-- Shared rollback coordination and historical-write safety remain separate
-  follow-up work. This routing change retains existing checkRollback and
-  historical Store boundaries; it does not claim the full coordination design
-  in ADR 0015 or add a frontier, fencing, or reconciliation protocol.
+- Live disconnects use the event height and terminal Manager error policy
+  for every backend, including the single KVDB Wallet. Initialization and
+  historical fork detection retain their existing Wallet recovery policy.
+  KVDB block-identity reconciliation remains a separate storage concern.
 
 ## 7. Implementation Overview
 

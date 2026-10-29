@@ -211,8 +211,8 @@ func (s *chainSyncer) routeChainEvent(n any,
 		records = update.RelevantTxs
 
 	default:
-		// Headers and control events need no transaction matching. Every
-		// processor retains its own catch-up and disconnect handling.
+		// Headers and controls need no matching. Manager intercepts
+		// disconnects for every storage backend before ordinary routing.
 		return events
 	}
 

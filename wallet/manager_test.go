@@ -690,6 +690,15 @@ func (b *managerBackendMock) create(ctx context.Context,
 	return args.Get(0).(*walletData), args.Error(1)
 }
 
+// rollbackToBlock exposes the full block identity to strict expectations,
+// so a height-only Manager handoff cannot satisfy the ordering regression.
+func (b *managerBackendMock) rollbackToBlock(ctx context.Context,
+	block db.Block) error {
+
+	args := b.Called(ctx, block)
+	return args.Error(0)
+}
+
 // close returns the configured backend ownership-release result.
 func (b *managerBackendMock) close() error {
 	args := b.Called()
@@ -2888,16 +2897,16 @@ func TestManagerChainEventMembership(t *testing.T) {
 	<-first.chainEventChan
 	require.NoError(
 		t, manager.dispatchChainEvent(
-			t.Context(), chain.BlockDisconnected{},
+			t.Context(), chain.ClientConnected{},
 		),
 	)
 
-	// Assert: Both current members receive the next disconnect unchanged.
+	// Assert: Both current members receive the next control event unchanged.
 	require.IsType(
-		t, chain.BlockDisconnected{}, (<-first.chainEventChan).notification,
+		t, chain.ClientConnected{}, (<-first.chainEventChan).notification,
 	)
 	require.IsType(
-		t, chain.BlockDisconnected{}, (<-second.chainEventChan).notification,
+		t, chain.ClientConnected{}, (<-second.chainEventChan).notification,
 	)
 }
 

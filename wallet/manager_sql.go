@@ -92,6 +92,14 @@ func (b *sqlManagerBackend) walletData(
 	}, nil
 }
 
+// rollbackToBlock rewinds shared SQL history once all Wallet workers are ready.
+// The existing Store operation uses the first removed height.
+func (b *sqlManagerBackend) rollbackToBlock(ctx context.Context,
+	block db.Block) error {
+
+	return b.store.RollbackToBlock(ctx, block.Height)
+}
+
 // close releases the SQL Store when this backend owns it.
 func (b *sqlManagerBackend) close() error {
 	if b.closeFn == nil {

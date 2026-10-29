@@ -287,21 +287,38 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 
 	log.Infof("Restarting sync loop in %v...", backoff)
 
-	// Wait for the backoff period or a shutdown signal.
-	select {
-	case <-timerFn(backoff):
-		// Increase backoff for the next attempt, capping it.
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+	// Keep the original retry deadline while servicing the same mailbox.
+	// A failed initialization must not prevent rollback from repairing it.
+	retry := timerFn(backoff)
+	for {
+		select {
+		case event := <-w.chainEventChan:
+			err := w.sync.processChainEventBeforeSync(w.lifetimeCtx, event)
+			if w.lifetimeCtx.Err() != nil {
+				return 0, false
+			}
+
+			if err != nil {
+				// Retain the scheduled retry after an observation fails, just
+				// as a failed sync attempt returns here instead of stopping.
+				log.Errorf("Chain event processing failed during retry: %v",
+					err)
+			}
+
+		case <-retry:
+			// Increase backoff for the next attempt, capping it.
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+
+			return backoff, true
+
+		case <-w.lifetimeCtx.Done():
+			log.Debug("Backoff interrupted by wallet shutdown")
+
+			return 0, false
 		}
-
-		return backoff, true
-
-	case <-w.lifetimeCtx.Done():
-		log.Debug("Backoff interrupted by wallet shutdown")
-
-		return 0, false
 	}
 }
 
