@@ -285,8 +285,9 @@ type AccountStore interface {
 		uint32, error)
 
 	// PutDerivedAccountWithKeys persists a derived account row using
-	// the caller-supplied account material. Must run in the same
-	// walletdb.Update transaction as AllocateDerivedAccountNumber.
+	// caller-supplied material and advances lastAccount without consuming
+	// lower holes. Run inside walletdb.Update; sequential callers may first
+	// use AllocateDerivedAccountNumber in that same transaction.
 	PutDerivedAccountWithKeys(ns walletdb.ReadWriteBucket,
 		account uint32, name string, plaintextPubKey []byte,
 		encryptedPrivKey []byte) error
