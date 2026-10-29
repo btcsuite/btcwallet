@@ -22,6 +22,7 @@ import (
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
+	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -3536,4 +3537,128 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	// backend preparation; fixture cleanup alone owns the one Store close.
 	require.ErrorIs(t, err, ErrManagerStopped)
 	require.Nil(t, w)
+}
+
+// TestManagerRollbackKvdbAheadOfTip reproduces mined notifications arriving
+// before the sync stamp and requires immediate, readable replacement history.
+func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange real stores while syncing, with an owned credit persisted by a
+	// mined notification that does not advance the earlier complete sync tip.
+	source := newTestChain(t, true)
+	source.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrTxAlreadyInMempool).Maybe()
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend: DBBackendKVDB, DataSource: testKVDBPath(t),
+		ChainParams: chainParams, ChainSource: source,
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop()) })
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
+
+	params := managerLifecycleCreateParams(testWalletName)
+	params.PubPassphrase = []byte(InsecurePubPassphrase)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		info, readErr := w.Info(t.Context())
+		return readErr == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
+	backend, ok := m.backend.(*kvdbManagerBackend)
+	require.True(t, ok)
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	mgr, conn := backend.addressMgr, backend.db
+
+	s.state.Store(uint32(syncStateSyncing))
+
+	stamp := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		return mgr.SetSyncedTo(tx.ReadWriteBucket(waddrmgrNamespaceKey), &stamp)
+	})
+	require.NoError(t, err)
+
+	old := reorgBlock(2)
+	replacement := old
+	replacement.Hash = chainhash.Hash{22}
+	oldTx, newTx := reorgRecord(t, 80), reorgRecord(t, 81)
+
+	// The configured source must supply the canonical observation. After
+	// it, a lower source tip keeps background catch-up idle, so recovery
+	// and stale replay must preserve history before any rescan can help.
+	source.On("GetBestBlock").Unset()
+	source.On("GetBestBlock").Return(&replacement.Hash, int32(2), nil).Once()
+	source.On("GetBestBlock").Return(chainParams.GenesisHash, int32(0), nil).
+		Maybe()
+	source.On("GetBlockHash", int64(1)).Return(&stamp.Hash, nil).Once()
+	source.On("GetBlockHash", int64(2)).Return(&replacement.Hash, nil).Once()
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{
+			TxRecord: oldTx,
+			Block:    &old,
+		},
+		matches: liveMatches(oldTx),
+	}))
+
+	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		return s.txStore.AddCredit(
+			tx.ReadWriteBucket(wtxmgrNamespaceKey), oldTx, &old, 0, false,
+		)
+	})
+	require.NoError(t, err)
+	require.Equal(t, stamp, mgr.SyncedTo())
+
+	// Act on the disconnect while the manager is still below the orphan.
+	require.NoError(t, m.dispatchChainEvent(
+		t.Context(), chain.BlockDisconnected(old),
+	))
+
+	// Assert the orphan and its credit are already unmined before any
+	// replacement or later rescan; its earlier full sync stamp is unchanged.
+	orphan, err := s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		WalletID: 0,
+		Txid:     oldTx.Hash,
+	})
+	require.NoError(t, err)
+	require.Nil(t, orphan.Block)
+	require.Len(t, orphan.OwnedOutputs, 1)
+	require.Equal(t, stamp, mgr.SyncedTo())
+
+	// Act by accepting the replacement and replaying a delayed old detach.
+	// The stored replacement identity must make that replay harmless.
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.FilteredBlockConnected{
+			Block:       &replacement,
+			RelevantTxs: []*wtxmgr.TxRecord{newTx},
+		},
+		matches: liveMatches(newTx),
+	}))
+	require.NoError(t, m.dispatchChainEvent(
+		t.Context(), chain.BlockDisconnected(old),
+	))
+
+	// Assert one complete history query resolves the replacement, while the
+	// old transaction remains in the unmined pool with its credit intact.
+	history, err := s.store.ListTxns(
+		t.Context(), db.ListTxnsQuery{EndHeight: 2},
+	)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, newTx.Hash, history[0].Hash)
+	require.Equal(t, replacement.Hash, history[0].Block.Hash)
+	orphan, err = s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		Txid: oldTx.Hash,
+	})
+	require.NoError(t, err)
+	require.Nil(t, orphan.Block)
+	require.Len(t, orphan.OwnedOutputs, 1)
 }
