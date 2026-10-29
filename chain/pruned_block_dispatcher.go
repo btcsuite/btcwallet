@@ -647,6 +647,7 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 	blockChans, ok := d.blocksQueried[blockHash]
 	if !ok {
 		d.blockMtx.Unlock()
+
 		return workmanager.Progress{
 			Progressed: false,
 			Finished:   false,
