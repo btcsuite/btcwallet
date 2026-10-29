@@ -1567,8 +1567,8 @@ func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
 	require.Equal(h, wantRenamed, *durable)
 }
 
-// testAccountManagerRejectAccountRename verifies rejected rename requests leave
-// the established source and duplicate target unchanged.
+// testAccountManagerRejectAccountRename verifies rejected rename requests
+// return their public error and leave the account set unchanged across reopen.
 func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
 	const (
 		sourceName      = "account manager rename source"
@@ -1593,37 +1593,49 @@ func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
 	wantAccounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts before rejection")
 
-	// These rejections have no stable public error identity yet, so the
-	// rows assert rejection and unchanged state only.
+	// A self-rename occupies its own target, so it shares the duplicate
+	// target's identity. Reserved names are invalid on either side.
 	testCases := []struct {
 		name    string
 		oldName string
 		newName string
+		wantErr error
 	}{
 		{
 			name:    "duplicate target",
 			oldName: sourceName,
 			newName: duplicateTarget,
+			wantErr: wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:    "self rename",
+			oldName: sourceName,
+			newName: sourceName,
+			wantErr: wallet.ErrAccountAlreadyExists,
 		},
 		{
 			name:    "empty target",
 			oldName: sourceName,
 			newName: "",
+			wantErr: wallet.ErrInvalidParam,
 		},
 		{
 			name:    "reserved target",
 			oldName: sourceName,
 			newName: waddrmgr.ImportedAddrAccountName,
+			wantErr: wallet.ErrInvalidParam,
 		},
 		{
 			name:    "unknown source",
 			oldName: "account manager unknown source",
 			newName: "account manager unknown target",
+			wantErr: wallet.ErrAccountNotFound,
 		},
 		{
 			name:    "reserved source",
 			oldName: waddrmgr.ImportedAddrAccountName,
 			newName: "account manager reserved source target",
+			wantErr: wallet.ErrInvalidParam,
 		},
 	}
 
@@ -1632,7 +1644,7 @@ func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
 			ctx, scope, tc.oldName, tc.newName,
 		)
 
-		require.Error(h, err, "%s was accepted", tc.name)
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
 
 		gotAccounts, err := w.ListAccounts(ctx)
 		require.NoError(h, err, "failed to list accounts after rejection")
@@ -1640,6 +1652,17 @@ func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
 			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
 		)
 	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
 }
 
 // testAccountManagerEnforceAccountRenameLifecycle verifies metadata rename is
@@ -1693,6 +1716,10 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 	durableInfo := *durable
 	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
 	require.Equal(h, wantLockedRename, durableInfo)
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
 	// Retain the stopped pointer for the rejected call; the live replacement
 	// remains registered and provides the next durability boundary.
 	live := h.ReloadWallet(w)
@@ -1700,11 +1727,15 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 	err = w.RenameAccount(ctx, scope, lockedName, stoppedName)
 
 	// The rejected rename must not move the account, so the source keeps
-	// its complete result and the target stays absent across a reopen.
+	// its complete result, the target stays absent and the account set is
+	// unchanged across a reopen.
 	require.ErrorIs(h, err, wallet.ErrWalletStopped)
 	w = h.ReloadWallet(live)
 	_, err = w.GetAccount(ctx, scope, stoppedName)
-	require.Error(h, err, "stopped rename created a target account")
+	require.ErrorIs(
+		h, err, wallet.ErrAccountNotFound,
+		"stopped rename created a target account",
+	)
 	unchanged, err := w.GetAccount(ctx, scope, lockedName)
 	require.NoError(h, err, "failed to read source after stopped rename")
 
@@ -1713,6 +1744,12 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 		h, unchangedInfo.PublicKey,
 	)
 	require.Equal(h, wantLockedRename, unchangedInfo)
+
+	accounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts after rejection")
+	require.ElementsMatch(
+		h, wantAccounts, accounts, "rejection changed the account set",
+	)
 }
 
 // testAccountManagerImportAccount verifies that one XPub import's returned
