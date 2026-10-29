@@ -525,9 +525,8 @@ type CreateDerivedAccountParams struct {
 	// Name is the name of the new account.
 	Name string
 
-	// AccountNumber selects an exact account on SQL stores.
+	// AccountNumber selects an exact account on every maintained store.
 	// Nil allocates the next account; exact creation leaves lower holes free.
-	// The legacy kvdb store does not support exact selection.
 	AccountNumber *uint32
 
 	// NoChainSync requests that automatic chain synchronization skip this
