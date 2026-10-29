@@ -206,6 +206,117 @@ func TestSyncerRollbackTargetedBatch(t *testing.T) {
 	})
 }
 
+// TestSyncerRollbackRetainedPayment keeps an unmatched live observation from
+// skipping the historical scan that discovers a recovery-window payment.
+func TestSyncerRollbackRetainedPayment(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The existing real Store fixture has a recovery account whose
+	// first address has not been registered for live notifications. Its next
+	// block pays that address, so an empty live match set cannot prove absence.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	cfg := w.cfg
+	cfg.RecoveryWindow = 1
+	cfg.SyncMethod = SyncMethodFullBlocks
+	s := newTestSyncer(cfg, nil, nil, w, w.store, w.id)
+	s.state.Store(uint32(syncStateSyncing))
+
+	state, err := s.loadFullScanState(t.Context())
+	require.NoError(t, err)
+
+	name := "funding"
+	info, err := s.store.GetAccount(t.Context(), db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		Name:        &name,
+		SkipBalance: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, info.AccountID)
+	deriver, err := state.recoveryDeriver(waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: *info.AccountID,
+		Branch:  waddrmgr.ExternalBranch,
+	})
+	require.NoError(t, err)
+	addr, _, err := deriver.DeriveAddr(0, waddrmgr.ExternalBranch, 0)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	payment := wire.NewMsgTx(2)
+	payment.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+		Hash: chainhash.Hash{6},
+	}, nil, nil))
+	payment.AddTxOut(wire.NewTxOut(1000, script))
+
+	first := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 1, Hash: chainhash.Hash{1}},
+		Time:  time.Unix(1, 0),
+	}
+	second := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: first.Hash,
+		Timestamp: time.Unix(2, 0),
+	})
+	require.NoError(t, second.AddTransaction(payment))
+
+	hash := second.BlockHash()
+	events := make(chan chainEvent, 1)
+	s.chainEventChan = events
+
+	client.On("GetBestBlock").Unset()
+	client.On("GetBestBlock").Return(&hash, int32(2), nil).Once()
+	client.On("GetBlockHashes", int64(2), int64(2)).
+		Return([]chainhash.Hash{hash}, nil).Once()
+	client.On("GetBlocks", []chainhash.Hash{hash}).
+		Return([]*wire.MsgBlock{second}, nil).Once()
+
+	// Act: Commit the fetched first block while the next filtered block is
+	// retained by rollback polling. Replay must leave that next height for
+	// historical recovery, even though the live event contains no matches.
+	events <- chainEvent{notification: chain.FilteredBlockConnected{
+		Block: &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 2, Hash: hash},
+			Time:  second.Header.Timestamp,
+		},
+	}}
+
+	err = s.putSyncBatch(t.Context(), state, []scanResult{
+		{
+			meta:               first,
+			BlockProcessResult: &BlockProcessResult{},
+		},
+	})
+	require.NoError(t, err)
+
+	tip, err := s.syncedTo(t.Context())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tip.Height)
+
+	finished, err := s.advanceChainSync(t.Context())
+
+	// Assert: The ordinary next sync step fetches block two, discovers the
+	// unwatched payment and persists its confirmation and credit through normal
+	// catch-up. The wallet must not require an explicit rescan to find it.
+	require.NoError(t, err)
+	require.False(t, finished)
+
+	tx, err := s.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     payment.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, tx.Block)
+	require.Equal(t, hash, tx.Block.Hash)
+
+	balance, err := s.store.Balance(t.Context(), db.BalanceParams{
+		WalletID: w.id,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1000, balance.Total)
+}
+
 // TestSyncerRollbackRetainedRequestFailure preserves both historical and live
 // failures while keeping the retained event after the historical attempt.
 func TestSyncerRollbackRetainedRequestFailure(t *testing.T) {
@@ -454,6 +565,131 @@ func TestSyncerRun(t *testing.T) {
 	// Assert: The run loop should exit without error.
 	err := s.run(ctx)
 	require.NoError(t, err)
+}
+
+// TestSyncerRollbackDuringBackendSync keeps rollback admission live before
+// watch registration without skipping an unmatched payment's historical scan.
+func TestSyncerRollbackDuringBackendSync(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Derive an address in the existing real Store fixture, but
+		// leave its live watch unregistered. A filtered observation for its
+		// next block therefore has no matches even though that block pays it.
+		s, mgr, dbConn := newStoreScanSyncer(t)
+		s.cfg.SyncMethod = SyncMethodFullBlocks
+		s.cfg.RecoveryWindow = 1
+		scoped, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+		require.NoError(t, err)
+
+		var payTo address.Address
+
+		err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+			addrs, err := scoped.NextExternalAddresses(
+				tx.ReadWriteBucket(waddrmgrNamespaceKey), 0, 1,
+			)
+			if err != nil {
+				return err
+			}
+
+			payTo = addrs[0].Address()
+
+			return nil
+		})
+		require.NoError(t, err)
+		script, err := txscript.PayToAddrScript(payTo)
+		require.NoError(t, err)
+
+		payment := wire.NewMsgTx(2)
+		payment.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+			Hash: chainhash.Hash{6},
+		}, nil, nil))
+		payment.AddTxOut(wire.NewTxOut(1000, script))
+
+		before, err := s.store.GetWallet(t.Context(), s.cfg.Name)
+		require.NoError(t, err)
+		require.NotNil(t, before.SyncedTo)
+		block := wire.NewMsgBlock(&wire.BlockHeader{
+			PrevBlock: before.SyncedTo.Hash,
+			Timestamp: time.Unix(1, 0),
+		})
+		require.NoError(t, block.AddTransaction(payment))
+		hash := block.BlockHash()
+		client, ok := s.cfg.Chain.(*bwmock.Chain)
+		require.True(t, ok)
+		client.On("IsCurrent").Unset()
+		client.On("IsCurrent").Return(false).Once()
+		client.On("IsCurrent").Return(true).Once()
+		client.On("NotifyBlocks").Return(nil).Once()
+		client.On("GetBestBlock").Unset()
+		client.On("GetBestBlock").Return(&hash, int32(1), nil).Once()
+		client.On("GetBlockHashes", int64(1), int64(1)).
+			Return([]chainhash.Hash{hash}, nil).Once()
+		client.On("GetBlocks", []chainhash.Hash{hash}).
+			Return([]*wire.MsgBlock{block}, nil).Once()
+
+		events := make(chan chainEvent, 1)
+		s.chainEventChan = events
+		ready, done := make(chan struct{}), make(chan struct{})
+		initialized := make(chan error, 1)
+		workerDone := make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		// Join before the fixture closes Store, including assertion failures
+		// while preparation is held and only cancellation can release it.
+		defer func() {
+			cancel()
+			<-workerDone
+		}()
+
+		// Act: Feed the ordinary observation before preparation on the same
+		// mailbox while initialization waits for backend readiness. Receiving
+		// the acknowledgement proves the earlier observation was processed.
+		go func() {
+			defer close(workerDone)
+
+			initialized <- s.initChainSync(ctx)
+		}()
+
+		events <- chainEvent{notification: chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 1, Hash: hash},
+				Time:  block.Header.Timestamp,
+			},
+		}}
+
+		events <- chainEvent{notification: prepareRollbackReq{
+			readyForRollback: ready,
+			rollbackDone:     done,
+		}}
+
+		<-ready
+
+		current, err := s.store.GetWallet(t.Context(), s.cfg.Name)
+		require.NoError(t, err)
+		require.Equal(t, before.SyncedTo, current.SyncedTo)
+		require.Empty(t, initialized)
+		close(done)
+		require.NoError(t, <-initialized)
+		finished, err := s.advanceChainSync(t.Context())
+
+		// Assert: Startup did not checkpoint past an incomplete watch set.
+		// The required height-one fetch then recovers and confirms the payment
+		// through the normal historical scanner rather than losing it forever.
+		require.NoError(t, err)
+		require.False(t, finished)
+		current, err = s.store.GetWallet(t.Context(), s.cfg.Name)
+		require.NoError(t, err)
+		require.Equal(t, hash, current.SyncedTo.Hash)
+		tx, err := s.store.GetTx(t.Context(), db.GetTxQuery{
+			WalletID: s.walletID,
+			Txid:     payment.TxHash(),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, tx.Block)
+		require.Equal(t, hash, tx.Block.Hash)
+	})
 }
 
 // TestWaitUntilBackendSynced verifies polling logic.
