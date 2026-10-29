@@ -1227,7 +1227,12 @@ func managedAddressInfo(
 		}
 	}
 
-	derivation := managedAddressDerivation(managedAddr, keyScope, accountNumber)
+	derivation, err := managedAddressDerivation(
+		ns, managedAddr, keyScope, accountNumber, accountImported,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	isWatchOnly, err := managedAddressIsWatchOnly(
 		walletIsWatchOnly, managedAddr,
@@ -1244,19 +1249,7 @@ func managedAddressInfo(
 		// Native HD rows carry a scalar fingerprint, including their legacy
 		// zero default. Raw imports have no such origin metadata.
 		masterFingerprint = &derivation.fingerprint
-
-		// Retain declared imported paths without treating an ordinary imported
-		// internal ID as an account component. Raw imports have no HD path.
-		if accountImported {
-			_, accountNumberPtr, err = readAccountCreatedAt(
-				ns, waddrmgr.KeyScope(keyScope), accountNumber,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("read account number: %w", err)
-			}
-		} else {
-			accountNumberPtr = &derivation.accountNumber
-		}
+		accountNumberPtr = derivation.accountNumber
 	}
 
 	return &db.AddressInfo{
@@ -1280,7 +1273,7 @@ func managedAddressInfo(
 // managedAddrDerivation holds the optional HD derivation fields from a managed
 // address.
 type managedAddrDerivation struct {
-	accountNumber uint32
+	accountNumber *uint32
 	branch        uint32
 	index         uint32
 	fingerprint   uint32
@@ -1290,18 +1283,20 @@ type managedAddrDerivation struct {
 }
 
 // managedAddressDerivation extracts optional HD derivation fields from a
-// managed address, falling back to the supplied defaults when absent.
-func managedAddressDerivation(managedAddr waddrmgr.ManagedAddress,
-	defaultScope db.KeyScope, defaultAccount uint32) managedAddrDerivation {
+// managed address, using persisted root metadata when native rows lack it.
+func managedAddressDerivation(
+	ns walletdb.ReadBucket, managedAddr waddrmgr.ManagedAddress,
+	defaultScope db.KeyScope, defaultAccount uint32,
+	accountImported bool) (managedAddrDerivation, error) {
 
 	result := managedAddrDerivation{
-		accountNumber: defaultAccount,
+		accountNumber: &defaultAccount,
 		keyScope:      defaultScope,
 	}
 
 	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
-		return result
+		return result, nil
 	}
 
 	result.pubKey = managedAddressPubKey(pubKeyAddr)
@@ -1311,17 +1306,43 @@ func managedAddressDerivation(managedAddr waddrmgr.ManagedAddress,
 	// imports return false because their key has no known chain position.
 	scope, path, ok := pubKeyAddr.DerivationInfo()
 	if !ok {
-		return result
+		return result, nil
 	}
 
-	result.accountNumber = path.InternalAccount
+	result.accountNumber = &path.InternalAccount
 	result.branch = path.Branch
 	result.index = path.Index
 	result.fingerprint = path.MasterKeyFingerprint
 	result.keyScope = db.KeyScope(scope)
 	result.hasPath = true
 
-	return result
+	// A supplied account's internal native slot cannot establish a hardened
+	// account component; only declaration metadata makes that number known.
+	if accountImported {
+		_, number, err := readAccountCreatedAt(
+			ns, scope, defaultAccount,
+		)
+		if err != nil {
+			return result, fmt.Errorf("read account number: %w", err)
+		}
+
+		result.accountNumber = number
+	}
+
+	// Only derived accounts write this side metadata. Imported and legacy
+	// account children retain their native fingerprint when no entry exists.
+	fingerprint, known, err := getAccountMasterFingerprint(
+		ns, scope, defaultAccount,
+	)
+	if err != nil {
+		return result, fmt.Errorf("read child fingerprint: %w", err)
+	}
+
+	if known {
+		result.fingerprint = fingerprint
+	}
+
+	return result, nil
 }
 
 // managedAddressPubKey returns a managed address's public key using its
