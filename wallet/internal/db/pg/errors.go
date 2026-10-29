@@ -2,8 +2,11 @@
 package pg
 
 import (
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -181,4 +184,23 @@ func sqlStateClass(code string) string {
 	}
 
 	return code[:sqlStateClassLen]
+}
+
+// isCommitAmbiguous retains the SQL transport rule when the server may have
+// committed before its connection failed. Ordinary SQL errors remain definite.
+func isCommitAmbiguous(err error) bool {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) ||
+		errors.Is(err, io.EOF) {
+
+		return true
+	}
+
+	// Preserve the existing Timeout-only transport contract rather than
+	// requiring unrelated net.Error methods from wrapped driver errors.
+	var transport interface {
+		error
+		Timeout() bool
+	}
+
+	return errors.As(err, &transport)
 }
