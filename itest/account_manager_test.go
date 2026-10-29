@@ -1419,6 +1419,213 @@ func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 	)
 }
 
+// testAccountManagerRejectExactAccountCreation verifies occupied exact account
+// numbers and custom-scope names keep their public error.
+func testAccountManagerRejectExactAccountCreation(h *bwtest.HarnessTest) {
+	const (
+		excludedName = "account manager excluded source"
+		customName   = "account manager custom source"
+	)
+
+	// Arrange: persist a BIP84 account, requesting the exclusion only SQL
+	// honors, and a custom-scope account at exact numbers, then snapshot the
+	// public inventory.
+	scope := waddrmgr.KeyScopeBIP0084
+	customScope := waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    h.NetParams().HDCoinType,
+	}
+	customSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.WitnessPubKey,
+		InternalAddrType: waddrmgr.WitnessPubKey,
+	}
+	excludedNumber := wallet.AccountNumber(1)
+	customNumber := wallet.AccountNumber(7)
+	vacantNumber := wallet.AccountNumber(8)
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope:         scope,
+		Name:          excludedName,
+		AccountNumber: &excludedNumber,
+		NoChainSync:   true,
+	})
+	require.NoError(h, err, "failed to create excluded source")
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope:         customScope,
+		Name:          customName,
+		AddrSchema:    &customSchema,
+		AccountNumber: &customNumber,
+	})
+	require.NoError(h, err, "failed to create custom source")
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	// An occupied number re-derives its occupant's key, so these rows also
+	// prove number occupancy precedes the identity collision.
+	testCases := []struct {
+		name          string
+		scope         waddrmgr.KeyScope
+		accountName   string
+		addrSchema    *waddrmgr.ScopeAddrSchema
+		accountNumber *wallet.AccountNumber
+		noChainSync   bool
+		wantErr       error
+	}{
+		{
+			name:          "occupied number",
+			scope:         scope,
+			accountName:   "account manager vacant name",
+			accountNumber: &excludedNumber,
+			wantErr:       wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:          "occupied number with chain-sync exclusion",
+			scope:         scope,
+			accountName:   "account manager vacant name",
+			accountNumber: &excludedNumber,
+			noChainSync:   true,
+			wantErr:       wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:          "occupied custom-scope number",
+			scope:         customScope,
+			accountName:   "account manager vacant name",
+			addrSchema:    &customSchema,
+			accountNumber: &customNumber,
+			wantErr:       wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:          "occupied custom-scope name",
+			scope:         customScope,
+			accountName:   customName,
+			addrSchema:    &customSchema,
+			accountNumber: &vacantNumber,
+			wantErr:       wallet.ErrAccountAlreadyExists,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Act: request the exact root-derived account.
+		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope:         tc.scope,
+			Name:          tc.accountName,
+			AddrSchema:    tc.addrSchema,
+			AccountNumber: tc.accountNumber,
+			NoChainSync:   tc.noChainSync,
+		})
+
+		// Assert: the refusal keeps its identity and adds no account.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
+}
+
+// testAccountManagerRejectExcludedAccountIdentity verifies an account excluded
+// from chain sync still owns its XPub identity against later imports.
+func testAccountManagerRejectExcludedAccountIdentity(h *bwtest.HarnessTest) {
+	// Persisted chain-sync exclusion is SQL-only.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("chain-sync exclusion requires SQL")
+	}
+
+	// Arrange: persist an excluded root-derived account and recover its XPub
+	// from the public result, then snapshot the inventory.
+	excludedNumber := wallet.AccountNumber(1)
+	customScope := waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    h.NetParams().HDCoinType,
+	}
+
+	// Corresponding branch types overlap the excluded BIP84 account.
+	overlapSchema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	excluded, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "account manager excluded owner",
+		AccountNumber: &excludedNumber,
+		NoChainSync:   true,
+	})
+	require.NoError(h, err, "failed to create excluded owner")
+
+	excludedKey, err := hdkeychain.NewKeyFromString(
+		string(canonicalAccountKey(h, excluded.PublicKey)),
+	)
+	require.NoError(h, err, "failed to parse excluded account key")
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	// The import's own sync policy must not change the identity result.
+	testCases := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "included import",
+			noChainSync: false,
+		},
+		{
+			name:        "excluded import",
+			noChainSync: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Act: import the excluded account's XPub under a vacant name and
+		// a vacant declared number in another scope.
+		_, err := w.ImportAccount(ctx, wallet.ImportAccountParams{
+			Name:        "account manager excluded candidate",
+			XPub:        excludedKey,
+			Scope:       &customScope,
+			AddrSchema:  &overlapSchema,
+			NoChainSync: tc.noChainSync,
+		}, false)
+
+		// Assert: the excluded owner still claims the identity.
+		require.ErrorIs(h, err, wallet.ErrAccountIdentityCollision, tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
+}
+
 // testAccountManagerEnforceAccountCreationLifecycle verifies NewAccount admits
 // neither locked nor stopped wallets.
 func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
