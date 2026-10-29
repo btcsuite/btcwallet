@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -2611,7 +2612,8 @@ func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
 }
 
 // testAccountManagerRejectAccountImport verifies rejected imports preserve the
-// account set and occupied names retain their public error on retries.
+// account set across reopen, occupied names retain their public error on
+// retries, and invalid scope and schema combinations are invalid input.
 func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	const existingName = "account manager existing import"
 
@@ -2636,10 +2638,30 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 	wantAccounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts before rejection")
 
+	customScope := waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    keys.scope.Coin,
+	}
+	schema := waddrmgr.ScopeAddrMap[keys.scope]
+	scriptSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.TaprootScript,
+		InternalAddrType: waddrmgr.TaprootScript,
+	}
+	externalScriptSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.TaprootScript,
+		InternalAddrType: waddrmgr.TaprootPubKey,
+	}
+	internalScriptSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.TaprootPubKey,
+		InternalAddrType: waddrmgr.TaprootScript,
+	}
+
 	testCases := []struct {
 		name        string
 		accountName string
 		accountKey  *hdkeychain.ExtendedKey
+		scope       *waddrmgr.KeyScope
+		addrSchema  *waddrmgr.ScopeAddrSchema
 		wantErr     error
 		attempts    int
 	}{
@@ -2666,6 +2688,51 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 			wantErr:     wallet.ErrInvalidParam,
 			attempts:    1,
 		},
+		// An inferred scope has no declared path to carry a schema, and a
+		// custom scope has no default schema to fall back on.
+		{
+			name:        "schema without scope",
+			accountName: "account manager schema without scope",
+			accountKey:  keys.otherAccountKey,
+			addrSchema:  &schema,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
+		},
+		{
+			name:        "custom scope without schema",
+			accountName: "account manager custom scope without schema",
+			accountKey:  keys.otherAccountKey,
+			scope:       &customScope,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
+		},
+		{
+			name:        "script-path declared schema",
+			accountName: "account manager script-path schema",
+			accountKey:  keys.otherAccountKey,
+			scope:       &keys.scope,
+			addrSchema:  &scriptSchema,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
+		},
+		{
+			name:        "external script-path declared schema",
+			accountName: "account manager external script-path schema",
+			accountKey:  keys.otherAccountKey,
+			scope:       &keys.scope,
+			addrSchema:  &externalScriptSchema,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
+		},
+		{
+			name:        "internal script-path declared schema",
+			accountName: "account manager internal script-path schema",
+			accountKey:  keys.otherAccountKey,
+			scope:       &keys.scope,
+			addrSchema:  &internalScriptSchema,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
+		},
 	}
 
 	// Act: retry occupied names to prove a previous refusal does not change
@@ -2677,6 +2744,8 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 					Name:                 tc.accountName,
 					XPub:                 tc.accountKey,
 					AddrType:             keys.addrType,
+					Scope:                tc.scope,
+					AddrSchema:           tc.addrSchema,
 					MasterKeyFingerprint: &inputFingerprint,
 				}, false,
 			)
@@ -2695,10 +2764,22 @@ func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
 			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
 		)
 	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
 }
 
-// testAccountManagerRejectInvalidImportKey verifies invalid import keys are
-// rejected without changing the account set.
+// testAccountManagerRejectInvalidImportKey verifies nil, private, malformed,
+// wrong-network, and wrong-path import keys return ErrInvalidAccountKey without
+// changing the account set across reopen.
 func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	const existingName = "account manager existing import"
 
@@ -2721,6 +2802,31 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	wantAccounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts before rejection")
 
+	// Each malformed key changes one field of a valid account XPub.
+	pubKey, err := keys.accountKey.ECPubKey()
+	require.NoError(h, err, "failed to read account public key")
+
+	parentFingerprint := binary.BigEndian.AppendUint32(
+		nil, keys.accountKey.ParentFingerprint(),
+	)
+	missingVersionKey := hdkeychain.NewExtendedKey(
+		nil, pubKey.SerializeCompressed(), keys.accountKey.ChainCode(),
+		parentFingerprint, keys.accountKey.Depth(),
+		keys.accountKey.ChildIndex(), false,
+	)
+	mainNetKey, err := keys.accountKey.CloneWithVersion(
+		chaincfg.MainNetParams.HDPublicKeyID[:],
+	)
+	require.NoError(h, err, "failed to clone mainnet account key")
+	childKey, err := keys.accountKey.Derive(0)
+	require.NoError(h, err, "failed to derive branch key")
+
+	unhardenedKey := hdkeychain.NewExtendedKey(
+		keys.accountKey.Version(), pubKey.SerializeCompressed(),
+		keys.accountKey.ChainCode(), parentFingerprint,
+		keys.accountKey.Depth(), 0, false,
+	)
+
 	testCases := []struct {
 		name        string
 		accountName string
@@ -2736,6 +2842,26 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 			accountName: "account manager private key",
 			accountKey:  keys.accountPrivateKey,
 		},
+		{
+			name:        "missing version",
+			accountName: "account manager missing version key",
+			accountKey:  missingVersionKey,
+		},
+		{
+			name:        "wrong network",
+			accountName: "account manager wrong network key",
+			accountKey:  mainNetKey,
+		},
+		{
+			name:        "branch depth",
+			accountName: "account manager branch depth key",
+			accountKey:  childKey,
+		},
+		{
+			name:        "unhardened account",
+			accountName: "account manager unhardened key",
+			accountKey:  unhardenedKey,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2748,7 +2874,7 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 			}, false,
 		)
 
-		require.ErrorIs(h, err, wallet.ErrInvalidAccountKey)
+		require.ErrorIs(h, err, wallet.ErrInvalidAccountKey, tc.name)
 
 		gotAccounts, err := w.ListAccounts(ctx)
 		require.NoError(
@@ -2758,24 +2884,45 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
 		)
 	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
 }
 
 // testAccountManagerEnforceAccountImportLifecycle verifies that a stopped
 // watch-only wallet rejects an otherwise valid account import.
 func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
-	const accountName = "account manager stopped import"
+	const (
+		existingName = "account manager lifecycle existing"
+		accountName  = "account manager stopped import"
+	)
 
 	keys := deterministicImportedAccountKeys(h)
 
 	// Supply the fixture origin explicitly so zero stays present.
 	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
-	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
 
-	accounts, err := w.ListAccounts(ctx)
+	wantAccounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts before rejection")
-
-	wantCount := len(accounts)
 
 	// Retain the stopped pointer for the rejected call; the live replacement
 	// remains registered and provides the next durability boundary.
@@ -2795,11 +2942,15 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 	require.ErrorIs(h, err, wallet.ErrWalletStopped)
 	w = h.ReloadWallet(live)
 	_, err = w.GetAccount(ctx, keys.scope, accountName)
-	require.Error(h, err, "stopped import created an account")
+	require.ErrorIs(
+		h, err, wallet.ErrAccountNotFound, "stopped import created an account",
+	)
 
-	accounts, err = w.ListAccounts(ctx)
+	accounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts after rejection")
-	require.Len(h, accounts, wantCount, "rejection changed account count")
+	require.ElementsMatch(
+		h, wantAccounts, accounts, "rejection changed the account set",
+	)
 }
 
 // testAccountManagerRejectAccountIdentity verifies a vacant-name XPub
