@@ -8188,3 +8188,435 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	default:
 	}
 }
+
+// TestManagerRollbackKvdbSparseFork resolves a canonical retained header
+// across missing manager hashes and detaches older orphaned history.
+func TestManagerRollbackKvdbSparseFork(t *testing.T) {
+	t.Parallel()
+
+	// Arrange manager hashes only at 1 and 4, with orphaned history
+	// at 2. Only the proven canonical fork's header is available.
+	s, mgr, conn := newStoreScanSyncer(t)
+	fork := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	tip := fork
+	tip.Height, tip.Hash = 4, chainhash.Hash{4}
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := mgr.SetSyncedTo(ns, &fork)
+		if err != nil {
+			return err
+		}
+
+		return mgr.SetSyncedTo(ns, &tip)
+	})
+	require.NoError(t, err)
+
+	old := reorgBlock(2)
+	record := reorgRecord(t, 82)
+	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		return s.txStore.InsertTx(
+			tx.ReadWriteBucket(wtxmgrNamespaceKey), record, &old,
+		)
+	})
+	require.NoError(t, err)
+
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+
+	backend := &kvdbManagerBackend{
+		store:       kvdb.NewStore(conn, s.txStore, mgr),
+		addressMgr:  mgr,
+		chainSource: client,
+	}
+	client.On("GetBestBlock").Return(&tip.Hash, int32(4), nil).Once()
+	client.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+	client.On("GetBlockHeader", &fork.Hash).Return(
+		&wire.BlockHeader{Timestamp: fork.Timestamp}, nil,
+	).Once()
+	client.On("GetBlockHash", int64(2)).Return(
+		&chainhash.Hash{22}, nil,
+	).Once()
+
+	// Act on a known empty disconnected tip. Missing hashes must not hide
+	// the older mined orphan or require any discarded orphan header.
+	err = backend.rollbackToBlock(t.Context(), db.Block{
+		Height: 4, Hash: tip.Hash,
+	})
+
+	// Assert the full canonical fork stamp is retained and the older mined
+	// notification is already unmined before the wallet scans replacements.
+	require.NoError(t, err)
+	require.Equal(t, fork, mgr.SyncedTo())
+	info, err := s.store.GetTx(
+		t.Context(), db.GetTxQuery{Txid: record.Hash},
+	)
+	require.NoError(t, err)
+	require.Nil(t, info.Block)
+}
+
+// TestManagerRollbackKvdbHeaderFailure leaves history and the live manager
+// unchanged when the backend cannot supply the proven canonical fork header.
+func TestManagerRollbackKvdbHeaderFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange the same sparse real history with a required header lookup
+	// that fails before canonical history can be classified or written.
+	s, mgr, conn := newStoreScanSyncer(t)
+	fork := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	tip := fork
+	tip.Height, tip.Hash = 4, chainhash.Hash{4}
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := mgr.SetSyncedTo(ns, &fork)
+		if err != nil {
+			return err
+		}
+
+		return mgr.SetSyncedTo(ns, &tip)
+	})
+	require.NoError(t, err)
+
+	old := reorgBlock(2)
+	record := reorgRecord(t, 82)
+	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		return s.txStore.InsertTx(
+			tx.ReadWriteBucket(wtxmgrNamespaceKey), record, &old,
+		)
+	})
+	require.NoError(t, err)
+
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+
+	backend := &kvdbManagerBackend{
+		store:       kvdb.NewStore(conn, s.txStore, mgr),
+		addressMgr:  mgr,
+		chainSource: client,
+	}
+	client.On("GetBestBlock").Return(&tip.Hash, int32(4), nil).Once()
+	client.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+
+	headerFailure := errors.New("fork header unavailable")
+	client.On("GetBlockHeader", &fork.Hash).Return(
+		&wire.BlockHeader{Timestamp: fork.Timestamp}, headerFailure,
+	).Once()
+
+	// Act on a known empty disconnected tip. Missing hashes must not hide
+	// the older mined orphan or require any discarded orphan header.
+	err = backend.rollbackToBlock(t.Context(), db.Block{
+		Height: 4, Hash: tip.Hash,
+	})
+
+	// Assert the original causal error escapes and neither persistence nor
+	// the complete live stamp changes when classification fails.
+	require.ErrorIs(t, err, headerFailure)
+	require.Equal(t, tip, mgr.SyncedTo())
+	info, err := s.store.GetTx(
+		t.Context(), db.GetTxQuery{Txid: record.Hash},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, info.Block)
+	require.Equal(t, old.Hash, info.Block.Hash)
+}
+
+// TestManagerRollbackKvdbEmptyAboveTip requires the later correct identity
+// when the highest abandoned block has no mined or manager record.
+func TestManagerRollbackKvdbEmptyAboveTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a tip at 1 and wallet history at 2, with an empty orphan at 3.
+	// The separate producer regression proves these descending hashes arrive.
+	s, mgr, conn := newStoreScanSyncer(t)
+	stamp := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	old := reorgBlock(2)
+	record := reorgRecord(t, 83)
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		err := mgr.SetSyncedTo(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey), &stamp,
+		)
+		if err != nil {
+			return err
+		}
+
+		return s.txStore.InsertTx(
+			tx.ReadWriteBucket(wtxmgrNamespaceKey), record, &old,
+		)
+	})
+	require.NoError(t, err)
+
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+
+	backend := &kvdbManagerBackend{
+		store:       kvdb.NewStore(conn, s.txStore, mgr),
+		addressMgr:  mgr,
+		chainSource: client,
+	}
+	client.On("GetBestBlock").Return(&chainhash.Hash{33}, int32(3), nil).Twice()
+	client.On("GetBlockHash", int64(1)).Return(&stamp.Hash, nil).Twice()
+	client.On("GetBlockHash", int64(2)).Return(&chainhash.Hash{22}, nil).Twice()
+
+	// Act on the unknown empty block first, then on the actual mined orphan.
+	require.NoError(t, backend.rollbackToBlock(t.Context(), db.Block{
+		Height: 3, Hash: reorgBlock(3).Hash,
+	}))
+	require.NoError(t, backend.rollbackToBlock(t.Context(), db.Block{
+		Height: uint32(old.Height), Hash: old.Hash, Timestamp: old.Time,
+	}))
+
+	// Assert the lower matching notification detached its history without
+	// inventing any manager history or changing the earlier full stamp.
+	info, err := s.store.GetTx(
+		t.Context(), db.GetTxQuery{Txid: record.Hash},
+	)
+	require.NoError(t, err)
+	require.Nil(t, info.Block)
+	require.Equal(t, stamp, mgr.SyncedTo())
+}
+
+// TestManagerRollbackKvdbCoinbaseDescendants preserves canonical coinbase
+// credits and their valid pending spend chains during mixed-history recovery.
+func TestManagerRollbackKvdbCoinbaseDescendants(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an orphan at 1 beneath a canonical credited coinbase at 2.
+	// Its pending descendants are absent from the chain, so rescan alone
+	// cannot recover them if a broad Rollback deletes them recursively.
+	s, mgr, conn := newStoreScanSyncer(t)
+	old, canonical := reorgBlock(1), reorgBlock(2)
+	coinbase := reorgCoinbase(t, 84)
+	parent := reorgSpend(t, coinbase, 900)
+	child := reorgSpend(t, parent, 800)
+	orphan := reorgRecord(t, 85)
+	stamp := waddrmgr.BlockStamp{
+		Height: 2, Hash: canonical.Hash, Timestamp: canonical.Time.UTC(),
+	}
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		err := mgr.SetSyncedTo(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey), &stamp,
+		)
+		if err != nil {
+			return err
+		}
+
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		err = s.txStore.InsertTx(ns, orphan, &old)
+		if err != nil {
+			return err
+		}
+
+		err = s.txStore.InsertTx(ns, coinbase, &canonical)
+		if err != nil {
+			return err
+		}
+
+		err = s.txStore.AddCredit(ns, coinbase, &canonical, 0, false)
+		if err != nil {
+			return err
+		}
+
+		for _, rec := range []*wtxmgr.TxRecord{parent, child} {
+			err := s.txStore.InsertTx(ns, rec, nil)
+			if err != nil {
+				return err
+			}
+
+			err = s.txStore.AddCredit(ns, rec, nil, 0, false)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+
+	backend := &kvdbManagerBackend{
+		store:       kvdb.NewStore(conn, s.txStore, mgr),
+		addressMgr:  mgr,
+		chainSource: client,
+	}
+	client.On("GetBestBlock").Return(&canonical.Hash, int32(2), nil).Once()
+	client.On("GetBlockHash", int64(0)).Return(
+		chaincfg.SimNetParams.GenesisHash, nil,
+	).Once()
+	client.On("GetBlockHeader", chaincfg.SimNetParams.GenesisHash).Return(
+		&chaincfg.SimNetParams.GenesisBlock.Header, nil,
+	).Once()
+	client.On("GetBlockHash", int64(1)).Return(&chainhash.Hash{11}, nil).Once()
+	client.On("GetBlockHash", int64(2)).Return(&canonical.Hash, nil).Once()
+
+	// Act through the backend operation used while Manager holds workers ready.
+	require.NoError(t, backend.rollbackToBlock(t.Context(), db.Block{
+		Height: uint32(old.Height), Hash: old.Hash, Timestamp: old.Time,
+	}))
+
+	// Assert pending records and credits survive immediately, the canonical
+	// manager stamp stays put, and one history query still resolves its block.
+	require.Equal(t, stamp, mgr.SyncedTo())
+
+	for _, rec := range []*wtxmgr.TxRecord{coinbase, parent, child} {
+		info, err := s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+			Txid: rec.Hash,
+		})
+		require.NoError(t, err)
+		require.Len(t, info.OwnedOutputs, 1)
+
+		if rec == coinbase {
+			require.NotNil(t, info.Block)
+			require.Equal(t, canonical.Hash, info.Block.Hash)
+		} else {
+			require.Nil(t, info.Block)
+		}
+	}
+
+	history, err := s.store.ListTxns(
+		t.Context(), db.ListTxnsQuery{EndHeight: 2},
+	)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, coinbase.Hash, history[0].Hash)
+}
+
+// TestManagerRollbackKvdbOrphanCoinbaseSpends preserves a detached spend of
+// a canonical coinbase while removing the orphaned coinbase's pending graph.
+func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
+	t.Parallel()
+
+	// Arrange two coinbase branches with owned credits. The valid spend was
+	// mined at maturity on the abandoned chain; both branches have pending
+	// children that a rescan cannot reconstruct after removing their parents.
+	s, mgr, conn := newStoreScanSyncer(t)
+	old, canonical, mined := reorgBlock(1), reorgBlock(2), reorgBlock(102)
+	orphan, coinbase := reorgCoinbase(t, 86), reorgCoinbase(t, 87)
+	spend, invalid := reorgSpend(t, coinbase, 900), reorgSpend(t, orphan, 700)
+	child := reorgSpend(t, spend, 800)
+	invalidChild := reorgSpend(t, invalid, 600)
+	stamp := waddrmgr.BlockStamp{
+		Height:    2,
+		Hash:      canonical.Hash,
+		Timestamp: canonical.Time.UTC(),
+	}
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		err := mgr.SetSyncedTo(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey), &stamp,
+		)
+		if err != nil {
+			return err
+		}
+
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		// Insert parents before children; only the canonical branch's first
+		// spend was mined, so the replay must save it from orphan history.
+		for _, rec := range []*wtxmgr.TxRecord{
+			orphan, coinbase, spend, child, invalid, invalidChild,
+		} {
+			var block *wtxmgr.BlockMeta
+			switch rec {
+			case orphan:
+				block = &old
+			case coinbase:
+				block = &canonical
+			case spend:
+				block = &mined
+			}
+
+			err := s.txStore.InsertTx(ns, rec, block)
+			if err != nil {
+				return err
+			}
+
+			err = s.txStore.AddCredit(ns, rec, block, 0, false)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+
+	backend := &kvdbManagerBackend{
+		store:       kvdb.NewStore(conn, s.txStore, mgr),
+		addressMgr:  mgr,
+		chainSource: client,
+	}
+	client.On("GetBestBlock").Return(
+		&chainhash.Hash{99}, int32(102), nil,
+	).Once()
+	client.On("GetBlockHash", int64(0)).Return(
+		chaincfg.SimNetParams.GenesisHash, nil,
+	).Once()
+	client.On("GetBlockHeader", chaincfg.SimNetParams.GenesisHash).Return(
+		&chaincfg.SimNetParams.GenesisBlock.Header, nil,
+	).Once()
+	client.On("GetBlockHash", int64(1)).Return(&chainhash.Hash{11}, nil).Once()
+	client.On("GetBlockHash", int64(2)).Return(&canonical.Hash, nil).Once()
+	client.On("GetBlockHash", int64(102)).Return(
+		&chainhash.Hash{99}, nil,
+	).Once()
+
+	// Act through the Manager backend operation so partitioning and replay
+	// must distinguish the two branches within the same atomic recovery.
+	err = backend.rollbackToBlock(t.Context(), db.Block{
+		Height: uint32(old.Height), Hash: old.Hash, Timestamp: old.Time,
+	})
+
+	// Assert the full manager stamp survives, the canonical coinbase stays
+	// mined, and its detached spend/child retain owned credits as unmined.
+	require.NoError(t, err)
+	require.Equal(t, stamp, mgr.SyncedTo())
+	info, err := s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		Txid: coinbase.Hash,
+	})
+	require.NoError(t, err)
+	require.Len(t, info.OwnedOutputs, 1)
+	require.NotNil(t, info.Block)
+	require.Equal(t, canonical.Hash, info.Block.Hash)
+
+	for _, rec := range []*wtxmgr.TxRecord{spend, child} {
+		info, err := s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+			Txid: rec.Hash,
+		})
+		require.NoError(t, err)
+		require.Len(t, info.OwnedOutputs, 1)
+		require.Nil(t, info.Block)
+	}
+
+	// An orphaned coinbase cannot fund a valid pending branch. Neither its
+	// spend nor its child may be resurrected while saving the canonical one.
+	for _, rec := range []*wtxmgr.TxRecord{orphan, invalid, invalidChild} {
+		_, err := s.store.GetTx(t.Context(), db.GetTxQuery{
+			Txid: rec.Hash,
+		})
+		require.ErrorIs(t, err, db.ErrTxNotFound)
+	}
+
+	history, err := s.store.ListTxns(t.Context(), db.ListTxnsQuery{
+		EndHeight: 102,
+	})
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, coinbase.Hash, history[0].Hash)
+}
