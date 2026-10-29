@@ -2,139 +2,119 @@ package pg
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
 	"errors"
-	"fmt"
 	"io"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-// mockWalletSecretsSQL drives Store through its production database/sql path
-// while retaining strict mock.Mock call expectations.
-type mockWalletSecretsSQL struct {
+// mockWalletSecretsPool verifies the public Store's transaction admission and
+// ownership while the generated read queries use the existing DBTX mock.
+type mockWalletSecretsPool struct {
 	mock.Mock
 }
 
-// Compile-time assertions cover every database/sql driver seam used here.
-var (
-	_ driver.Driver         = (*mockWalletSecretsSQL)(nil)
-	_ driver.Conn           = (*mockWalletSecretsSQL)(nil)
-	_ driver.ConnBeginTx    = (*mockWalletSecretsSQL)(nil)
-	_ driver.ExecerContext  = (*mockWalletSecretsSQL)(nil)
-	_ driver.QueryerContext = (*mockWalletSecretsSQL)(nil)
-	_ driver.Tx             = (*mockWalletSecretsSQL)(nil)
-)
+var _ transactionPool = (*mockWalletSecretsPool)(nil)
 
-// Open returns the one connection registered for this isolated test.
-func (m *mockWalletSecretsSQL) Open(name string) (driver.Conn, error) {
-	args := m.Called(name)
-	conn, _ := args.Get(0).(driver.Conn)
+// Begin supplies the configured native transaction without a second pool.
+func (m *mockWalletSecretsPool) Begin(ctx context.Context) (pgx.Tx, error) {
+	args := m.Called(ctx)
+	tx, _ := args.Get(0).(pgx.Tx)
 
-	return conn, args.Error(1)
+	return tx, args.Error(1)
 }
 
-// Prepare rejects unused statements so tests cannot bypass context
+// Close verifies that Store lifecycle releases the configured native pool.
+func (m *mockWalletSecretsPool) Close() {
+	m.Called()
+}
+
+// mockWalletSecretsTx reuses native DBTX forwarding for generated queries.
+// Every other pgx.Tx method also rejects unconfigured calls through mock.Mock.
+type mockWalletSecretsTx struct {
+	mockDBTX
+}
+
+var _ pgx.Tx = (*mockWalletSecretsTx)(nil)
+
+// Begin records any unexpected nested transaction requested by the subject.
+func (m *mockWalletSecretsTx) Begin(ctx context.Context) (pgx.Tx, error) {
+	args := m.Called(ctx)
+	tx, _ := args.Get(0).(pgx.Tx)
+
+	return tx, args.Error(1)
+}
+
+// Commit supplies the native reply whose ambiguity the Store must resolve.
+func (m *mockWalletSecretsTx) Commit(ctx context.Context) error {
+	args := m.Called(ctx)
+
+	return args.Error(0)
+}
+
+// Rollback records deferred cleanup after native transaction completion.
+func (m *mockWalletSecretsTx) Rollback(ctx context.Context) error {
+	args := m.Called(ctx)
+
+	return args.Error(0)
+}
+
+// CopyFrom records any unexpected bulk operation outside the update contract.
+func (m *mockWalletSecretsTx) CopyFrom(ctx context.Context,
+	table pgx.Identifier, columns []string,
+	source pgx.CopyFromSource) (int64, error) {
+
+	args := m.Called(ctx, table, columns, source)
+
+	count, _ := args.Get(0).(int64)
+
+	return count, args.Error(1)
+}
+
+// SendBatch records any unexpected batch instead of bypassing call
 // expectations.
-func (m *mockWalletSecretsSQL) Prepare(query string) (driver.Stmt, error) {
-	args := m.Called(query)
-	stmt, _ := args.Get(0).(driver.Stmt)
+func (m *mockWalletSecretsTx) SendBatch(ctx context.Context,
+	batch *pgx.Batch) pgx.BatchResults {
 
-	return stmt, args.Error(1)
+	args := m.Called(ctx, batch)
+	result, _ := args.Get(0).(pgx.BatchResults)
+
+	return result
 }
 
-// Close succeeds because database/sql owns the mock connection lifecycle.
-func (m *mockWalletSecretsSQL) Close() error {
+// LargeObjects records access outside the wallet-secret query contract.
+func (m *mockWalletSecretsTx) LargeObjects() pgx.LargeObjects {
 	args := m.Called()
+	objects, _ := args.Get(0).(pgx.LargeObjects)
 
-	return args.Error(0)
+	return objects
 }
 
-// Begin supplies the legacy interface; database/sql selects BeginTx instead.
-func (m *mockWalletSecretsSQL) Begin() (driver.Tx, error) {
+// Prepare records any unexpected manual preparation of generated native
+// queries.
+func (m *mockWalletSecretsTx) Prepare(ctx context.Context, name,
+	query string) (*pgconn.StatementDescription, error) {
+
+	args := m.Called(ctx, name, query)
+	description, _ := args.Get(0).(*pgconn.StatementDescription)
+
+	return description, args.Error(1)
+}
+
+// Conn records direct connection access outside the normal Store query path.
+func (m *mockWalletSecretsTx) Conn() *pgx.Conn {
 	args := m.Called()
-	tx, _ := args.Get(0).(driver.Tx)
+	conn, _ := args.Get(0).(*pgx.Conn)
 
-	return tx, args.Error(1)
-}
-
-// BeginTx records the sole transaction and returns this mock for Commit.
-func (m *mockWalletSecretsSQL) BeginTx(ctx context.Context,
-	opts driver.TxOptions) (driver.Tx, error) {
-
-	args := m.Called(ctx, opts)
-	tx, _ := args.Get(0).(driver.Tx)
-
-	return tx, args.Error(1)
-}
-
-// ExecContext records the generated update through the real SQL transaction.
-func (m *mockWalletSecretsSQL) ExecContext(ctx context.Context, query string,
-	args []driver.NamedValue) (driver.Result, error) {
-
-	result := m.Called(ctx, query, args)
-	rows, _ := result.Get(0).(driver.Result)
-
-	return rows, result.Error(1)
-}
-
-// QueryContext records either the wallet lookup or verification read.
-func (m *mockWalletSecretsSQL) QueryContext(ctx context.Context, query string,
-	args []driver.NamedValue) (driver.Rows, error) {
-
-	result := m.Called(ctx, query, args)
-	rows, _ := result.Get(0).(driver.Rows)
-
-	return rows, result.Error(1)
-}
-
-// Commit exposes its configured result to the shared runtime classifier.
-func (m *mockWalletSecretsSQL) Commit() error {
-	args := m.Called()
-
-	return args.Error(0)
-}
-
-// Rollback permits defensive cleanup without another behavioral expectation.
-func (m *mockWalletSecretsSQL) Rollback() error {
-	args := m.Called()
-
-	return args.Error(0)
-}
-
-// mockWalletSecretsRows supplies one generated-query row and then EOF.
-type mockWalletSecretsRows struct {
-	mock.Mock
-}
-
-// Columns returns the scanner shape associated with the configured SQL query.
-func (r *mockWalletSecretsRows) Columns() []string {
-	args := r.Called()
-	columns, _ := args.Get(0).([]string)
-
-	return columns
-}
-
-// Close succeeds because the single in-memory row owns no external resource.
-func (r *mockWalletSecretsRows) Close() error {
-	args := r.Called()
-
-	return args.Error(0)
-}
-
-// Next copies the configured row once and then reports EOF.
-func (r *mockWalletSecretsRows) Next(dest []driver.Value) error {
-	args := r.Called(dest)
-
-	return args.Error(0)
+	return conn
 }
 
 // testWalletSecretsUpdate builds distinct field values so mismatch tests prove
@@ -149,207 +129,163 @@ func testWalletSecretsUpdate() db.UpdateWalletSecretsParams {
 	}
 }
 
-// walletSecretsDriverSeq keeps database/sql registration names unique across
-// parallel subtests and repeated -count runs because drivers cannot be removed.
-var walletSecretsDriverSeq atomic.Uint64
+// newMockWalletSecretsStore binds native transaction and read paths separately
+// and verifies each mock once after the Store releases its owned pool.
+func newMockWalletSecretsStore(t *testing.T) (*Store,
+	*mockWalletSecretsPool, *mockWalletSecretsTx, *mockDBTX) {
 
-// newMockWalletSecretsStore binds both Store SQL paths to one test driver.
-func newMockWalletSecretsStore(t *testing.T) (*Store, *mockWalletSecretsSQL) {
 	t.Helper()
 
-	sqlMock := &mockWalletSecretsSQL{}
-	driverName := fmt.Sprintf(
-		"wallet-secrets-%s-%d", t.Name(), walletSecretsDriverSeq.Add(1),
-	)
-	sql.Register(driverName, sqlMock)
+	pool := &mockWalletSecretsPool{}
+	tx := &mockWalletSecretsTx{}
+	queries := &mockDBTX{}
 
-	dbConn, err := sql.Open(driverName, "")
-	require.NoError(t, err)
+	pool.Test(t)
+	tx.Test(t)
+	queries.Test(t)
+	store := &Store{pool: pool, queries: sqlc.New(queries)}
 	t.Cleanup(func() {
-		require.NoError(t, dbConn.Close())
+		require.NoError(t, store.Close())
+		pool.AssertExpectations(t)
+		tx.AssertExpectations(t)
+		queries.AssertExpectations(t)
 	})
 
-	return &Store{
-		db:      dbConn,
-		queries: sqlc.New(dbConn),
-	}, sqlMock
+	return store, pool, tx, queries
 }
 
-// newMockWalletSecretsRows configures one scanner row entirely through
-// mock.Mock so its lifecycle and returned values remain explicit expectations.
-func newMockWalletSecretsRows(t *testing.T,
-	values []driver.Value) *mockWalletSecretsRows {
-
+// newMockWalletSecretsRow configures a single native Scan from explicit fixture
+// values, reusing the same SQL nullable conversions as the backend row tests.
+func newMockWalletSecretsRow(t *testing.T, values []any) *mockRow {
 	t.Helper()
 
-	rows := &mockWalletSecretsRows{}
-	rows.On("Columns").Return(make([]string, len(values))).Once()
-	rows.On("Next", mock.Anything).Run(func(args mock.Arguments) {
-		// Populate database/sql's destination inside the declared mock action
-		// so the mock remains the sole authority for scanner behavior.
-		dest, ok := args.Get(0).([]driver.Value)
+	row := &mockRow{}
+	row.Test(t)
+	row.On("Scan", mock.Anything).Run(func(args mock.Arguments) {
+		// Populate only the destinations generated for this query; unexpected
+		// row shapes fail rather than manufacturing a successful result.
+		dest, ok := args.Get(0).([]any)
 		require.True(t, ok)
-		copy(dest, values)
+		require.NoError(t, scanValues(values, dest))
 	}).Return(nil).Once()
-	rows.On("Close").Return(nil).Once()
+	t.Cleanup(func() { row.AssertExpectations(t) })
 
-	return rows
+	return row
 }
 
-// testWalletRow returns one non-watch-only generated-query row.
-func testWalletRow(t *testing.T, walletID uint32) *mockWalletSecretsRows {
+// testWalletRow returns the existing non-watch-only generated wallet shape.
+func testWalletRow(t *testing.T, walletID uint32) *mockRow {
 	t.Helper()
 
-	return newMockWalletSecretsRows(t, []driver.Value{
+	return newMockWalletSecretsRow(t, []any{
 		int64(walletID), "wallet", false, int64(1), false, []byte{1},
 		nil, nil, nil, nil, nil, nil, nil, nil,
 	})
 }
 
-// testWalletSecretsRow returns the exact persisted scanner tuple.
+// testWalletSecretsRow returns the persisted tuple used for exact verification.
 func testWalletSecretsRow(t *testing.T,
-	params db.UpdateWalletSecretsParams) *mockWalletSecretsRows {
+	params db.UpdateWalletSecretsParams) *mockRow {
 
 	t.Helper()
 
-	return newMockWalletSecretsRows(t, []driver.Value{
+	return newMockWalletSecretsRow(t, []any{
 		int64(params.WalletID), params.MasterPrivParams,
-		params.EncryptedCryptoPrivKey,
-		params.EncryptedCryptoScriptKey,
+		params.EncryptedCryptoPrivKey, params.EncryptedCryptoScriptKey,
 		params.EncryptedMasterHdPrivKey,
 	})
 }
 
-// TestStoreUpdateWalletSecretsBypassesRead verifies the public Store method
-// performs one authoritative transaction and no verification read for ordinary
-// binary results.
+// TestStoreUpdateWalletSecretsBypassesRead preserves the ordinary commit
+// contract: one update, with no verification read on success or definite error.
 func TestStoreUpdateWalletSecretsBypassesRead(t *testing.T) {
 	t.Parallel()
 
-	errDefinite := errors.New("definite commit failure")
 	tests := []struct {
 		name      string
 		commitErr error
 	}{
-		{name: "successful commit"},
-		{name: "definite commit failure", commitErr: errDefinite},
+		{
+			name: "successful commit",
+		},
+		{
+			name:      "definite commit failure",
+			commitErr: errors.New("definite commit failure"),
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Bind the public Store to a mock.Mock-backed SQL driver.
-			// Every required connection, transaction, query, row, and cleanup
-			// call is declared once; no secret-read expectation is present, so
-			// verification would fail immediately as an unexpected call.
+			// Arrange: Require one native transaction with the wallet lookup
+			// and generated update. The read handle has no expectations, so any
+			// verification read on these outcomes fails immediately.
 			params := testWalletSecretsUpdate()
-			store, sqlMock := newMockWalletSecretsStore(t)
+			store, pool, tx, _ := newMockWalletSecretsStore(t)
 			walletRow := testWalletRow(t, params.WalletID)
 
-			sqlMock.On("Open", "").Return(sqlMock, nil).Once()
-			sqlMock.On(
-				"BeginTx", mock.Anything, driver.TxOptions{},
-			).Return(sqlMock, nil).Once()
-			sqlMock.On(
-				"QueryContext", mock.Anything, sqlc.GetWalletByID,
-				[]driver.NamedValue{{
-					Ordinal: 1, Value: int64(params.WalletID),
-				}},
-			).Return(walletRow, nil).Once()
-			sqlMock.On(
-				"ExecContext", mock.Anything, sqlc.UpdateWalletSecrets,
-				[]driver.NamedValue{
-					{Ordinal: 1, Value: params.MasterPrivParams},
-					{Ordinal: 2, Value: params.EncryptedCryptoPrivKey},
-					{Ordinal: 3, Value: params.EncryptedCryptoScriptKey},
-					{Ordinal: 4, Value: params.EncryptedMasterHdPrivKey},
-					{Ordinal: 5, Value: int64(params.WalletID)},
-				},
-			).Return(driver.RowsAffected(1), nil).Once()
-			sqlMock.On("Commit").Return(test.commitErr).Once()
-			sqlMock.On("Close").Return(nil).Once()
+			pool.On("Begin", mock.Anything).Return(tx, nil).Once()
+			pool.On("Close").Return().Once()
+			tx.On("QueryRow", mock.Anything, sqlc.GetWalletByID,
+				[]any{int64(params.WalletID)}).Return(walletRow).Once()
+			tx.On("Exec", mock.Anything, sqlc.UpdateWalletSecrets, []any{
+				params.MasterPrivParams, params.EncryptedCryptoPrivKey,
+				params.EncryptedCryptoScriptKey,
+				params.EncryptedMasterHdPrivKey,
+				int64(params.WalletID),
+			}).Return(pgconn.NewCommandTag("UPDATE 1"), nil).Once()
+			tx.On("Commit", mock.Anything).Return(test.commitErr).Once()
+			tx.On("Rollback", mock.Anything).Return(pgx.ErrTxClosed).Once()
 
-			// Act: Call the public API so transaction construction, generated
-			// queries, runtime commit classification, and result policy all run
-			// through their production authorities.
+			// Act: Let the public Store classify the configured commit result
+			// after its real shared runtime has executed the sole mutation.
 			err := store.UpdateWalletSecrets(t.Context(), params)
 
-			// Assert: A successful commit remains success and a definite
-			// commit failure remains an error. Closing the Store completes its
-			// lifecycle; the two direct expectation checks then prove every SQL
-			// and row call occurred exactly once with no retry or extra read.
-			if test.commitErr == nil {
-				require.NoError(t, err)
-			} else {
-				require.ErrorIs(t, err, test.commitErr)
-			}
-
-			require.NoError(t, store.Close())
-			sqlMock.AssertExpectations(t)
-			walletRow.AssertExpectations(t)
+			// Assert: Success stays nil, definite failure retains its cause,
+			// and neither outcome records ambiguity. Cleanup verifies each
+			// native call and the absence of a verification read exactly once.
+			require.ErrorIs(t, err, test.commitErr)
+			require.Zero(t, store.StatsSnapshot().AmbiguousTxCommits)
 		})
 	}
 }
 
-// TestStoreUpdateWalletSecretsVerifiesAmbiguousCommit verifies the public Store
-// method performs one durable read after the runtime classifies one lost commit
-// acknowledgement, without retrying the mutation.
+// TestStoreUpdateWalletSecretsVerifiesAmbiguousCommit covers the actual native
+// receive error: PostgreSQL may commit before pgx reports UnexpectedEOF.
 func TestStoreUpdateWalletSecretsVerifiesAmbiguousCommit(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Drive an exact wallet update through database/sql, make the real
-	// transaction Commit return EOF, and expose the matching tuple only through
-	// the Store's generated read query. Strict expectations establish the sole
-	// write and sole verification-read budget at the authoritative boundary.
+	// Arrange: Commit the sole generated update with pgx's actual lost reply
+	// error, then expose the matching durable tuple through one Store read.
+	// Strict native expectations prohibit a second transaction or mutation.
 	params := testWalletSecretsUpdate()
-	store, sqlMock := newMockWalletSecretsStore(t)
+	store, pool, tx, queries := newMockWalletSecretsStore(t)
 	walletRow := testWalletRow(t, params.WalletID)
 	secretsRow := testWalletSecretsRow(t, params)
 
-	sqlMock.On("Open", "").Return(sqlMock, nil).Once()
-	sqlMock.On(
-		"BeginTx", mock.Anything, driver.TxOptions{},
-	).Return(sqlMock, nil).Once()
-	sqlMock.On(
-		"QueryContext", mock.Anything, sqlc.GetWalletByID,
-		[]driver.NamedValue{{
-			Ordinal: 1, Value: int64(params.WalletID),
-		}},
-	).Return(walletRow, nil).Once()
-	sqlMock.On(
-		"ExecContext", mock.Anything, sqlc.UpdateWalletSecrets,
-		[]driver.NamedValue{
-			{Ordinal: 1, Value: params.MasterPrivParams},
-			{Ordinal: 2, Value: params.EncryptedCryptoPrivKey},
-			{Ordinal: 3, Value: params.EncryptedCryptoScriptKey},
-			{Ordinal: 4, Value: params.EncryptedMasterHdPrivKey},
-			{Ordinal: 5, Value: int64(params.WalletID)},
-		},
-	).Return(driver.RowsAffected(1), nil).Once()
-	sqlMock.On("Commit").Return(io.EOF).Once()
-	sqlMock.On(
-		"QueryContext", mock.Anything, sqlc.GetWalletSecrets,
-		[]driver.NamedValue{{
-			Ordinal: 1, Value: int64(params.WalletID),
-		}},
-	).Return(secretsRow, nil).Once()
-	sqlMock.On("Close").Return(nil).Once()
+	pool.On("Begin", mock.Anything).Return(tx, nil).Once()
+	pool.On("Close").Return().Once()
+	tx.On("QueryRow", mock.Anything, sqlc.GetWalletByID,
+		[]any{int64(params.WalletID)}).Return(walletRow).Once()
+	tx.On("Exec", mock.Anything, sqlc.UpdateWalletSecrets, []any{
+		params.MasterPrivParams, params.EncryptedCryptoPrivKey,
+		params.EncryptedCryptoScriptKey, params.EncryptedMasterHdPrivKey,
+		int64(params.WalletID),
+	}).Return(pgconn.NewCommandTag("UPDATE 1"), nil).Once()
+	tx.On("Commit", mock.Anything).Return(io.ErrUnexpectedEOF).Once()
+	tx.On("Rollback", mock.Anything).Return(pgx.ErrTxClosed).Once()
+	queries.On("QueryRow", mock.Anything, sqlc.GetWalletSecrets,
+		[]any{int64(params.WalletID)}).Return(secretsRow).Once()
 
-	// Act: Invoke the public Store method so the shared runtime discovers the
-	// ambiguous commit and the Store resolves it with its real read path.
+	// Act: Run the public Store update so native classification decides whether
+	// durable verification is required; the test supplies no ambiguity flag.
 	err := store.UpdateWalletSecrets(t.Context(), params)
 
-	// Assert: The exact durable tuple converts the lost acknowledgement to the
-	// binary success result. Closing the Store completes its expected
-	// lifecycle; direct SQL and row expectation checks prove one transaction,
-	// no mutation retry, and one verification read through production wiring.
+	// Assert: One matching durable observation turns the unknown outcome into
+	// success without retrying the update. Cleanup verifies all call budgets.
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), store.StatsSnapshot().AmbiguousTxCommits)
-	require.NoError(t, store.Close())
-	sqlMock.AssertExpectations(t)
-	walletRow.AssertExpectations(t)
-	secretsRow.AssertExpectations(t)
 }
 
 // mockWalletSecretsReader controls verifier-only reads while using mock.Mock

@@ -150,7 +150,7 @@ type BalanceRow struct {
 //   - Uses the address/account/scope joins to keep ownership validation and
 //     account filtering in one pass.
 func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, error) {
-	row := q.queryRow(ctx, q.balanceStmt, Balance,
+	row := q.db.QueryRow(ctx, Balance,
 		arg.NowUtc,
 		arg.WalletID,
 		arg.Purpose,
@@ -195,11 +195,11 @@ type ClearUtxosSpentByTxIDParams struct {
 //   - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
 //     ownership through the creating transaction.
 func (q *Queries) ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error) {
-	result, err := q.exec(ctx, q.clearUtxosSpentByTxIDStmt, ClearUtxosSpentByTxID, arg.WalletID, arg.SpentByTxID)
+	result, err := q.db.Exec(ctx, ClearUtxosSpentByTxID, arg.WalletID, arg.SpentByTxID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const DeleteUtxosByTxID = `-- name: DeleteUtxosByTxID :execrows
@@ -228,11 +228,11 @@ type DeleteUtxosByTxIDParams struct {
 //   - Uses the `(tx_id)` index to keep the delete bounded to one transaction's
 //     outputs, then rechecks wallet ownership through the parent transaction.
 func (q *Queries) DeleteUtxosByTxID(ctx context.Context, arg DeleteUtxosByTxIDParams) (int64, error) {
-	result, err := q.exec(ctx, q.deleteUtxosByTxIDStmt, DeleteUtxosByTxID, arg.WalletID, arg.TxID)
+	result, err := q.db.Exec(ctx, DeleteUtxosByTxID, arg.WalletID, arg.TxID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const GetUtxoByOutpoint = `-- name: GetUtxoByOutpoint :one
@@ -336,7 +336,7 @@ type GetUtxoByOutpointRow struct {
 //   - The wallet-scoped tx hash lookup and unique outpoint constraint keep the
 //     join fanout to at most one candidate output.
 func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointParams) (GetUtxoByOutpointRow, error) {
-	row := q.queryRow(ctx, q.getUtxoByOutpointStmt, GetUtxoByOutpoint,
+	row := q.db.QueryRow(ctx, GetUtxoByOutpoint,
 		arg.NowUtc,
 		arg.WalletID,
 		arg.TxHash,
@@ -404,7 +404,7 @@ type GetUtxoIDByOutpointParams struct {
 //   - Uses the wallet-scoped transaction hash lookup first, then narrows to the
 //     unique `(tx_id, output_index)` outpoint.
 func (q *Queries) GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpointParams) (int64, error) {
-	row := q.queryRow(ctx, q.getUtxoIDByOutpointStmt, GetUtxoIDByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.db.QueryRow(ctx, GetUtxoIDByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
@@ -449,7 +449,7 @@ type GetUtxoSpendByOutpointRow struct {
 //   - Targets one wallet-scoped outpoint through the unique `(tx_id,
 //     output_index)` key after the parent hash lookup.
 func (q *Queries) GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error) {
-	row := q.queryRow(ctx, q.getUtxoSpendByOutpointStmt, GetUtxoSpendByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.db.QueryRow(ctx, GetUtxoSpendByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
 	var i GetUtxoSpendByOutpointRow
 	err := row.Scan(&i.SpentByTxID, &i.ScriptPubKey)
 	return i, err
@@ -488,7 +488,7 @@ type HasInvalidWalletUtxoByOutpointParams struct {
 //   - Targets one wallet-scoped outpoint through the parent tx lookup plus the
 //     unique `(tx_id, output_index)` key.
 func (q *Queries) HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error) {
-	row := q.queryRow(ctx, q.hasInvalidWalletUtxoByOutpointStmt, HasInvalidWalletUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.db.QueryRow(ctx, HasInvalidWalletUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
 	var has_invalid bool
 	err := row.Scan(&has_invalid)
 	return has_invalid, err
@@ -537,7 +537,7 @@ type InsertUtxoParams struct {
 //   - Single-row insert. The main cost is the wallet-ownership validation join
 //     plus FK and uniqueness checks.
 func (q *Queries) InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error) {
-	row := q.queryRow(ctx, q.insertUtxoStmt, InsertUtxo,
+	row := q.db.QueryRow(ctx, InsertUtxo,
 		arg.OutputIndex,
 		arg.Amount,
 		arg.TxID,
@@ -602,7 +602,7 @@ type ListOutputsToWatchRow struct {
 //   - Excludes credited accounts that opt out of chain synchronization while
 //     retaining accountless imports through nullable account joins.
 func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error) {
-	rows, err := q.query(ctx, q.listOutputsToWatchStmt, ListOutputsToWatch, walletID)
+	rows, err := q.db.Query(ctx, ListOutputsToWatch, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -614,9 +614,6 @@ func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]Lis
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -655,7 +652,7 @@ type ListSpendingTxIDsByParentTxIDParams struct {
 //   - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
 //     to one wallet-scoped parent.
 func (q *Queries) ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]sql.NullInt64, error) {
-	rows, err := q.query(ctx, q.listSpendingTxIDsByParentTxIDStmt, ListSpendingTxIDsByParentTxID, arg.WalletID, arg.TxID)
+	rows, err := q.db.Query(ctx, ListSpendingTxIDsByParentTxID, arg.WalletID, arg.TxID)
 	if err != nil {
 		return nil, err
 	}
@@ -667,9 +664,6 @@ func (q *Queries) ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpe
 			return nil, err
 		}
 		items = append(items, spent_by_tx_id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -829,7 +823,7 @@ type ListUtxosRow struct {
 //   - Treats min/max confirmations as optional filters so callers can
 //     distinguish "not set" from an explicit zero-conf request.
 func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error) {
-	rows, err := q.query(ctx, q.listUtxosStmt, ListUtxos,
+	rows, err := q.db.Query(ctx, ListUtxos,
 		arg.NowUtc,
 		arg.WalletID,
 		arg.Purpose,
@@ -870,9 +864,6 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -924,7 +915,7 @@ type MarkUtxoSpentParams struct {
 //   - Targets one outpoint in one wallet; the subquery uses the unique
 //     wallet-scoped tx hash lookup.
 func (q *Queries) MarkUtxoSpent(ctx context.Context, arg MarkUtxoSpentParams) (int64, error) {
-	result, err := q.exec(ctx, q.markUtxoSpentStmt, MarkUtxoSpent,
+	result, err := q.db.Exec(ctx, MarkUtxoSpent,
 		arg.WalletID,
 		arg.TxHash,
 		arg.OutputIndex,
@@ -934,5 +925,5 @@ func (q *Queries) MarkUtxoSpent(ctx context.Context, arg MarkUtxoSpentParams) (i
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }

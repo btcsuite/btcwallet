@@ -19,7 +19,7 @@ WHERE id = $1
 
 // Returns a single address type by its ID.
 func (q *Queries) GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error) {
-	row := q.queryRow(ctx, q.getAddressTypeByIDStmt, GetAddressTypeByID, id)
+	row := q.db.QueryRow(ctx, GetAddressTypeByID, id)
 	var i AddressType
 	err := row.Scan(&i.ID, &i.Description)
 	return i, err
@@ -35,7 +35,7 @@ ORDER BY id
 
 // Returns all address types ordered by ID.
 func (q *Queries) ListAddressTypes(ctx context.Context) ([]AddressType, error) {
-	rows, err := q.query(ctx, q.listAddressTypesStmt, ListAddressTypes)
+	rows, err := q.db.Query(ctx, ListAddressTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -47,9 +47,6 @@ func (q *Queries) ListAddressTypes(ctx context.Context) ([]AddressType, error) {
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

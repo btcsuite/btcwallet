@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,7 +9,9 @@ import (
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -168,6 +171,114 @@ func TestMapErrAccountNameConflict(t *testing.T) {
 			require.Equal(t, test.wantNumber, errors.Is(
 				err, db.ErrAccountNumberConflict,
 			))
+		})
+	}
+}
+
+// TestIsCommitAmbiguous verifies sent cancellation and EOF remain ambiguous
+// while an explicit server rollback is definite.
+func TestIsCommitAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use plain native errors for sent cancellation, explicit
+	// rollback, and EOF. The public Store test covers UnexpectedEOF.
+	tests := []struct {
+		name      string
+		err       error
+		ambiguous bool
+	}{
+		{
+			name:      "canceled after send",
+			err:       context.Canceled,
+			ambiguous: true,
+		},
+		{
+			name:      "deadline after send",
+			err:       context.DeadlineExceeded,
+			ambiguous: true,
+		},
+		{
+			name: "commit rollback",
+			err:  pgx.ErrTxCommitRollback,
+		},
+		{
+			name:      "end of file",
+			err:       io.EOF,
+			ambiguous: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Classify the native commit evidence for this outcome.
+			ambiguous := isCommitAmbiguous(test.err)
+
+			// Assert: A lost reply or sent cancellation leaves the outcome
+			// unknown, while the explicit rollback guarantees no commit.
+			require.Equal(t, test.ambiguous, ambiguous)
+		})
+	}
+}
+
+// safeRetryError models pgconn's positive before-send evidence with explicit
+// expectations; ordinary error traversal remains visible to the test.
+type safeRetryError struct {
+	mock.Mock
+}
+
+// Error forwards any requested printable error text to the configured mock.
+func (e *safeRetryError) Error() string {
+	args := e.Called()
+
+	return args.String(0)
+}
+
+// Unwrap supplies the configured cancellation cause during errors.Is traversal.
+func (e *safeRetryError) Unwrap() error {
+	args := e.Called()
+
+	return args.Error(0)
+}
+
+// SafeToRetry supplies the transport's configured before-send guarantee.
+func (e *safeRetryError) SafeToRetry() bool {
+	args := e.Called()
+
+	return args.Bool(0)
+}
+
+// TestIsCommitAmbiguousBeforeSend verifies native proof of an unsent commit
+// keeps cancellation definite regardless of error traversal order.
+func TestIsCommitAmbiguousBeforeSend(t *testing.T) {
+	t.Parallel()
+
+	causes := []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+	}
+	for _, cause := range causes {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Wrap cancellation with positive before-send proof.
+			// Error traversal is optional because the classifier may ask
+			// SafeToRetry before inspecting the wrapped cause.
+			unsent := &safeRetryError{}
+			unsent.Test(t)
+			unsent.On("Error").Return(cause.Error()).Maybe()
+			unsent.On("Unwrap").Return(cause).Maybe()
+			unsent.On("SafeToRetry").Return(true).Once()
+			t.Cleanup(func() { unsent.AssertExpectations(t) })
+
+			// Act: Classify the commit error using its native unsent proof.
+			ambiguous := isCommitAmbiguous(unsent)
+
+			// Assert: No commit bytes reached the server, so cancellation
+			// cannot represent an unknown commit outcome. Cleanup verifies
+			// the required proof once without fixing traversal order.
+			require.False(t, ambiguous)
 		})
 	}
 }
