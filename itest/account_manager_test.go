@@ -2845,6 +2845,108 @@ func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
 	)
 }
 
+// testAccountManagerRejectDeclaredAccountImport verifies a declared import's
+// occupied number precedes its XPub identity, which otherwise collides.
+func testAccountManagerRejectDeclaredAccountImport(h *bwtest.HarnessTest) {
+	// Arrange: requesting an address creates BIP84's default account at
+	// zero, and the next local account takes one. The fixture's account-one
+	// XPub is then imported at one in a custom scope, so it owns that
+	// identity while BIP84's number one belongs to an unrelated local key.
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ownerScope := waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    keys.scope.Coin,
+	}
+	vacantScope := waddrmgr.KeyScope{
+		Purpose: 1018,
+		Coin:    keys.scope.Coin,
+	}
+
+	// Every import shares BIP84's branch types, so equal XPubs overlap.
+	schema := waddrmgr.ScopeAddrMap[keys.scope]
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: keys.scope,
+		Name:  "account manager local account",
+	})
+	require.NoError(h, err, "failed to create local account")
+	_, err = w.ImportAccount(ctx, wallet.ImportAccountParams{
+		Name:                 "account manager declared owner",
+		XPub:                 keys.otherAccountKey,
+		Scope:                &ownerScope,
+		AddrSchema:           &schema,
+		MasterKeyFingerprint: &inputFingerprint,
+	}, false)
+	require.NoError(h, err, "failed to import identity owner")
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	// A declared import takes its number from the XPub's hardened child.
+	testCases := []struct {
+		name       string
+		accountKey *hdkeychain.ExtendedKey
+		scope      waddrmgr.KeyScope
+		wantErr    error
+	}{
+		{
+			name:       "occupied number",
+			accountKey: keys.accountKey,
+			scope:      keys.scope,
+			wantErr:    wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:       "occupied number with collision",
+			accountKey: keys.otherAccountKey,
+			scope:      keys.scope,
+			wantErr:    wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:       "vacant number with collision",
+			accountKey: keys.otherAccountKey,
+			scope:      vacantScope,
+			wantErr:    wallet.ErrAccountIdentityCollision,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Act: import under a vacant name at the key's declared path.
+		_, err := w.ImportAccount(ctx, wallet.ImportAccountParams{
+			Name:                 "account manager declared candidate",
+			XPub:                 tc.accountKey,
+			Scope:                &tc.scope,
+			AddrSchema:           &schema,
+			MasterKeyFingerprint: &inputFingerprint,
+		}, false)
+
+		// Assert: the refusal keeps its identity and adds no account.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
+}
+
 // testAccountManagerEnforceAccountImportLifecycle verifies that a stopped
 // watch-only wallet rejects an otherwise valid account import.
 func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
