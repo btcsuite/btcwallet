@@ -1346,10 +1346,8 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 
-	accounts, err := w.ListAccounts(ctx)
+	wantAccounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts before rejections")
-
-	wantCount := len(accounts)
 
 	require.NoError(h, w.Lock(ctx), "failed to lock wallet")
 
@@ -1358,7 +1356,17 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 		Name:  lockedName,
 	})
 
-	require.Error(h, err, "locked wallet created an account")
+	// Derivation needs the unlocked root, so a locked wallet is a state
+	// refusal rather than an unsupported operation.
+	require.ErrorIs(h, err, wallet.ErrStateForbidden)
+
+	lockedAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts after locked rejection")
+	require.ElementsMatch(
+		h, wantAccounts, lockedAccounts,
+		"locked rejection changed the account set",
+	)
+
 	// Retain the stopped pointer for the rejected call; the live replacement
 	// remains registered and provides the next durability boundary.
 	live := h.ReloadWallet(w)
@@ -1374,32 +1382,90 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 	require.ErrorIs(h, err, wallet.ErrWalletStopped)
 	w = h.ReloadWallet(live)
 	_, err = w.GetAccount(ctx, scope, lockedName)
-	require.Error(h, err, "locked rejection created an account")
+	require.ErrorIs(h, err, wallet.ErrAccountNotFound)
 	_, err = w.GetAccount(ctx, scope, stoppedName)
-	require.Error(h, err, "stopped rejection created an account")
+	require.ErrorIs(h, err, wallet.ErrAccountNotFound)
 
-	accounts, err = w.ListAccounts(ctx)
+	accounts, err := w.ListAccounts(ctx)
 	require.NoError(h, err, "failed to list accounts after rejections")
-	require.Len(h, accounts, wantCount, "rejection changed account count")
+	require.ElementsMatch(
+		h, wantAccounts, accounts, "rejections changed the account set",
+	)
 }
 
 // testAccountManagerRejectWatchOnlyAccountCreation verifies a rootless wallet
-// cannot derive account key material.
+// refuses account derivation, reporting an occupied name first.
 func testAccountManagerRejectWatchOnlyAccountCreation(h *bwtest.HarnessTest) {
-	const accountName = "watch-only"
+	const existingName = "account manager watch-only existing"
 
+	// Arrange: seed an imported account so one name is occupied in the scope
+	// NewAccount would derive into, then snapshot the public inventory.
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
 	ctx := h.Context()
-	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
 	require.True(h, w.IsWatchOnly(), "watch-only fixture is not watch-only")
 
-	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
-		Scope: waddrmgr.KeyScopeBIP0084,
-		Name:  accountName,
-	})
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
 
-	require.Error(h, err, "watch-only wallet created an account")
-	_, err = w.GetAccount(ctx, waddrmgr.KeyScopeBIP0084, accountName)
-	require.Error(h, err, "rejected watch-only account name resolves")
+	// A rootless wallet cannot derive, but an occupied name takes
+	// precedence over that mode refusal.
+	testCases := []struct {
+		name        string
+		accountName string
+		wantErr     error
+	}{
+		{
+			name:        "vacant name",
+			accountName: "account manager watch-only vacant",
+			wantErr:     wallet.ErrAccountOperationUnsupported,
+		},
+		{
+			name:        "occupied name",
+			accountName: existingName,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Act: request root derivation in the seeded account's scope.
+		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope: keys.scope,
+			Name:  tc.accountName,
+		})
+
+		// Assert: the refusal keeps its identity and adds no account.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+
+	// Reopen so a rejection cannot hide a write behind cached state.
+	w = h.ReloadWallet(w)
+
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	require.NoError(h, err, "failed to list accounts after reload")
+	require.ElementsMatch(
+		h, wantAccounts, durableAccounts,
+		"rejections changed the reopened account set",
+	)
 }
 
 // testAccountManagerRenameDerivedAccount verifies that renaming a derived
