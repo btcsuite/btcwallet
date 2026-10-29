@@ -263,15 +263,9 @@ func createTestAddressInfo(h *bwtest.HarnessTest,
 	}
 }
 
-// testAddressManagerAllocateKey verifies an excluded account's allocated keys
+// testAddressManagerAllocateKey verifies an exact account's allocated keys
 // match its XPub and retain complete point/list visibility after reopening.
 func testAddressManagerAllocateKey(h *bwtest.HarnessTest) {
-	// Modern kvdb cannot persist NoChainSync, so it cannot supply this fixture.
-	//nolint:staticcheck // This guard excludes the deprecated backend.
-	if *dbBackend == string(wallet.DBBackendKVDB) {
-		h.Skip("NoChainSync key allocation requires SQL")
-	}
-
 	// Arrange: leave both branches unfunded so lookup balances remain zero
 	// and no chain observation can stand in for persisted key ownership.
 	ctx := h.Context()
@@ -292,8 +286,8 @@ func testAddressManagerAllocateKey(h *bwtest.HarnessTest) {
 	wantList := make([]wallet.AddressProperty, 0, 2)
 
 	for branch := range uint32(2) {
-		// Act: use the public key-only operation on each branch, rather
-		// than a receiving call that cannot serve excluded accounts.
+		// Act: allocate on each branch through the public key-only operation
+		// to verify native progress independently of receiving admission.
 		key, err := manager.AllocateNextKey(ctx, selector, branch == 1)
 
 		// Assert: the fixture's XPub and requested branch define the key
@@ -351,12 +345,6 @@ func testAddressManagerAllocateKey(h *bwtest.HarnessTest) {
 // testAddressManagerAllocateKeyConcurrent verifies unused custom-scope keys
 // have distinct durable locators across concurrent requests and wallet reopen.
 func testAddressManagerAllocateKeyConcurrent(h *bwtest.HarnessTest) {
-	// Exclusion is a persisted SQL account property that kvdb cannot express.
-	//nolint:staticcheck // This guard excludes the deprecated backend.
-	if *dbBackend == string(wallet.DBBackendKVDB) {
-		h.Skip("NoChainSync key allocation requires SQL")
-	}
-
 	// Arrange: a numbered key-family account has no chain history; allocating
 	// a later child must depend on persisted progress, not observed usage.
 	ctx := h.Context()
@@ -1217,8 +1205,8 @@ func testAddressManagerForceNextAddress(h *bwtest.HarnessTest) {
 		// children stay unused.
 		info, err := w.NewAddress(ctx, selector, false)
 
-		// Assert: Each call must give the next correct child. The test does
-		// not compare the fingerprint because kvdb gives zero.
+		// Assert: Each call gives the next correct child. The dedicated
+		// fingerprint case separately checks the account's root metadata.
 		require.NoError(h, err)
 		require.Equal(
 			h, withoutFingerprint(expected), withoutFingerprint(info),
@@ -1455,16 +1443,9 @@ func testAddressManagerLookupUnknownAddress(h *bwtest.HarnessTest) {
 	}
 }
 
-// testAddressManagerNewAddressFingerprint proves SQL receiving results carry
+// testAddressManagerNewAddressFingerprint proves receiving results carry
 // the account's root fingerprint, the field the shared cases leave out.
 func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
-	// Modern kvdb deliberately reports a zero fingerprint for derived address
-	// metadata, so only SQL can supply the account's value here.
-	//nolint:staticcheck // This guard excludes the deprecated backend.
-	if *dbBackend == string(wallet.DBBackendKVDB) {
-		h.Skip("derived address fingerprints require SQL")
-	}
-
 	// Arrange: the oracle takes the fingerprint from the account read, so
 	// address metadata must agree with the account it was derived from.
 	const accountName = "fingerprint account"
@@ -1489,9 +1470,9 @@ func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 }
 
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
-// Modern kvdb deliberately reports zero for derived address metadata while
-// SQL reports the account's fingerprint, so a backend-neutral comparison must
-// leave that one field out; every other field remains part of the contract.
+// Shared selection cases omit this field independently of legacy KVDB rows
+// that lack root metadata; the dedicated fingerprint case checks new accounts.
+// Every other address field remains part of the shared selection contract.
 //
 // TODO: remove this helper once the kvdb backend is removed.
 func withoutFingerprint(info wallet.AddressInfo) wallet.AddressInfo {

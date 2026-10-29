@@ -295,15 +295,14 @@ type NewAccountParams struct {
 	// Name must be valid and unique within Scope.
 	Name string
 
-	// AccountNumber requests this exact root-derived SQL account, leaving
+	// AccountNumber requests this exact root-derived account, leaving
 	// lower holes available. Nil selects the next account in an existing or
-	// canonical scope.
-	// Modern kvdb rejects exact selection with ErrAccountOperationUnsupported.
+	// canonical SQL scope; KVDB sequential creation requires an existing scope.
 	AccountNumber *AccountNumber
 
-	// NoChainSync requests exclusion from automatic chain synchronization.
-	// True requires exact SQL selection; other requests return
-	// ErrAccountOperationUnsupported.
+	// NoChainSync requests exclusion from automatic chain synchronization
+	// on SQL. KVDB ignores it and reports false. True requires an exact
+	// AccountNumber; sequential requests return ErrAccountOperationUnsupported.
 	NoChainSync bool
 }
 
@@ -345,9 +344,9 @@ type NewAccountParams struct {
 type AccountManager interface {
 	// NewAccount creates the next or requested exact root-derived account. The
 	// provided name must be unique within that key scope. A new custom scope
-	// requires AddrSchema and AccountNumber. NoChainSync=true
-	// is supported only for exact SQL selection; other requests return
-	// ErrAccountOperationUnsupported.
+	// requires AddrSchema and AccountNumber. NoChainSync=true excludes only
+	// exact SQL accounts; KVDB ignores it and reports false. Sequential true
+	// requests return ErrAccountOperationUnsupported.
 	// ErrIndeterminateCommit means persistence may have succeeded; callers
 	// must inspect stored state before retrying, never blindly repeat it.
 	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
@@ -514,11 +513,13 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 
 // NewAccount creates the next or requested exact root-derived account and
 // returns its persisted info. The name and number must be unused in the scope.
-// A new custom SQL scope requires AddrSchema and an exact AccountNumber.
+// A new custom scope requires AddrSchema and an exact AccountNumber.
 // Exact selection leaves lower holes free; existing schemas must match.
-// NoChainSync=true excludes automatic synchronization and recovery only with
-// exact SQL selection. Sequential exclusion and exact kvdb requests return
+// SQL honors NoChainSync=true only for exact selection; KVDB ignores the flag
+// and reports false. Sequential exclusion returns
 // ErrAccountOperationUnsupported before preparing secrets.
+// KVDB native scope creation retains its default account zero, reusing it
+// when zero is the account requested by the same creation operation.
 // Overlapping XPub identities return ErrAccountIdentityCollision.
 // Failures return no account; ErrIndeterminateCommit means persistence may
 // have succeeded. Once admitted, the call waits for the Store outcome even
@@ -621,22 +622,9 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 
 	// When an account does not watch for on-chain synchronization, its
 	// account number must be specified; sequential allocation is unsupported.
-	switch {
-	case req.params.AccountNumber == nil:
-		if req.params.NoChainSync {
-			req.resp <- accountResp{
-				err: fmt.Errorf("no-chain-sync account creation: %w",
-					ErrAccountOperationUnsupported),
-			}
-
-			return
-		}
-
-	// Wallet assembly supplies addrStore only for the sequential kvdb subset.
-	// Reject exact selection after admission but before root preparation.
-	case w.addrStore != nil:
+	if req.params.AccountNumber == nil && req.params.NoChainSync {
 		req.resp <- accountResp{
-			err: fmt.Errorf("kvdb exact account creation: %w",
+			err: fmt.Errorf("no-chain-sync account creation: %w",
 				ErrAccountOperationUnsupported),
 		}
 
