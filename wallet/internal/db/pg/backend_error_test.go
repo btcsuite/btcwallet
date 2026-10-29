@@ -1,7 +1,6 @@
 package pg
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"testing"
@@ -11,44 +10,12 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
 var errDummy = errors.New("dummy")
-
-// errorDBTX forces sqlc exec/query calls down their wrapped error paths.
-type errorDBTX struct {
-	execErr  error
-	queryErr error
-}
-
-// ExecContext implements the sqlc DBTX interface.
-func (e errorDBTX) ExecContext(context.Context, string,
-	...any) (sql.Result, error) {
-
-	return nil, e.execErr
-}
-
-// PrepareContext implements the sqlc DBTX interface.
-func (e errorDBTX) PrepareContext(context.Context,
-	string) (*sql.Stmt, error) {
-
-	return nil, errDummy
-}
-
-// QueryContext implements the sqlc DBTX interface.
-func (e errorDBTX) QueryContext(context.Context, string,
-	...any) (*sql.Rows, error) {
-
-	return nil, e.queryErr
-}
-
-// QueryRowContext implements the sqlc DBTX interface.
-func (e errorDBTX) QueryRowContext(context.Context, string,
-	...any) *sql.Row {
-
-	return &sql.Row{}
-}
 
 // TestPgDeleteAndRollbackOpsWrapBackendErrors verifies that the postgres delete
 // and rollback adapters preserve their step-specific error context when sqlc
@@ -56,14 +23,25 @@ func (e errorDBTX) QueryRowContext(context.Context, string,
 func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
-	qtx := sqlc.New(errorDBTX{
-		execErr:  errDummy,
-		queryErr: errDummy,
-	})
+	// Arrange: Fail each existing generated query through one native DBTX mock,
+	// with exact call budgets for these adapter error paths.
+	dbtx := &mockDBTX{}
+	dbtx.On(
+		"Exec", mock.Anything, mock.Anything, mock.Anything,
+	).Return(pgconn.CommandTag{}, errDummy).Times(5)
+	dbtx.On(
+		"Query", mock.Anything, mock.Anything, mock.Anything,
+	).Return(nil, errDummy).Once()
+	qtx := sqlc.New(dbtx)
 	deleteOps := deleteTxOps{qtx: qtx}
 	rollbackOps := rollbackToBlockOps{qtx: qtx}
 
+	// Act: Invoke the existing adapter operations in order, using the
+	// configured driver failure to exercise their contextual error returns.
 	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
+
+	// Assert: Check each operation's specific error context immediately; the
+	// final expectation check verifies all query budgets once.
 	require.ErrorContains(t, err, "clear spent utxo rows")
 
 	err = deleteOps.DeleteCreatedUtxos(t.Context(), 1, 2)
@@ -82,6 +60,7 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 
 	err = rollbackOps.MarkDescendantsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark descendants failed")
+	dbtx.AssertExpectations(t)
 }
 
 // TestPgTxStoreOpsWrapBackendErrors verifies that the postgres tx-store helper
@@ -90,7 +69,16 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
-	qtx := sqlc.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
+	// Arrange: Fail each existing generated query through one native DBTX mock,
+	// with exact call budgets for these adapter error paths.
+	dbtx := &mockDBTX{}
+	dbtx.On(
+		"Exec", mock.Anything, mock.Anything, mock.Anything,
+	).Return(pgconn.CommandTag{}, errDummy).Times(11)
+	dbtx.On(
+		"Query", mock.Anything, mock.Anything, mock.Anything,
+	).Return(nil, errDummy).Times(2)
+	qtx := sqlc.New(dbtx)
 	createOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}
@@ -99,9 +87,14 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	updateOps := &updateTxOps{qtx: qtx}
 	releaseOps := releaseOutputOps{qtx: qtx}
 
+	// Act: Invoke the existing adapter operations in order, using the
+	// configured driver failure to exercise their contextual error returns.
 	err := createOps.MarkTxnsReplaced(
 		t.Context(), 1, []int64{2},
 	)
+
+	// Assert: Check each operation's specific error context immediately; the
+	// final expectation check verifies all query budgets once.
 	require.ErrorContains(t, err, "mark txns replaced")
 
 	err = createOps.InsertReplacementEdges(
@@ -151,6 +144,7 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 
 	_, err = releaseOps.Release(t.Context(), 1, 2, [32]byte{1})
 	require.ErrorContains(t, err, "release lease row")
+	dbtx.AssertExpectations(t)
 }
 
 // TestPgBackendHelpersRejectOverflow verifies the remaining postgres helper
