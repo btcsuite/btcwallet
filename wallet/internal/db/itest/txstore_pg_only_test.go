@@ -11,7 +11,6 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
 
@@ -246,7 +245,7 @@ func TestTxGraphConflictBeforeChildPostgres(t *testing.T) {
 // newTxGraphConflict records funding and unmined A, then builds B and W.
 // Both tests share this graph. Each caller controls its barrier and call order.
 // Setup uses the test context; callers start operation deadlines afterwards.
-func newTxGraphConflict(t *testing.T) (*pg.Store, db.CreateTxParams,
+func newTxGraphConflict(t *testing.T) (*pgTestStore, db.CreateTxParams,
 	db.CreateTxParams) {
 
 	t.Helper()

@@ -85,7 +85,7 @@ type AcquireUtxoLeaseParams struct {
 //   - Locks the target utxo row during resolution so concurrent spend updates on
 //     that row serialize with lease acquisition.
 func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (sql.NullTime, error) {
-	row := q.queryRow(ctx, q.acquireUtxoLeaseStmt, AcquireUtxoLease,
+	row := q.db.QueryRow(ctx, AcquireUtxoLease,
 		arg.WalletID,
 		arg.LockID,
 		arg.ExpiresAt,
@@ -122,11 +122,11 @@ type DeleteExpiredUtxoLeasesParams struct {
 //   - Uses the expiration predicate together with wallet scoping to bound the
 //     cleanup pass.
 func (q *Queries) DeleteExpiredUtxoLeases(ctx context.Context, arg DeleteExpiredUtxoLeasesParams) (int64, error) {
-	result, err := q.exec(ctx, q.deleteExpiredUtxoLeasesStmt, DeleteExpiredUtxoLeases, arg.WalletID, arg.NowUtc)
+	result, err := q.db.Exec(ctx, DeleteExpiredUtxoLeases, arg.WalletID, arg.NowUtc)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const DeleteUtxoLeasesSpentByConfirmedTx = `-- name: DeleteUtxoLeasesSpentByConfirmedTx :execrows
@@ -160,11 +160,11 @@ type DeleteUtxoLeasesSpentByConfirmedTxParams struct {
 //   - Resolves the spender through its unique hash and reaches its inputs
 //     through the spent_by index.
 func (q *Queries) DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error) {
-	result, err := q.exec(ctx, q.deleteUtxoLeasesSpentByConfirmedTxStmt, DeleteUtxoLeasesSpentByConfirmedTx, arg.WalletID, arg.TxHash)
+	result, err := q.db.Exec(ctx, DeleteUtxoLeasesSpentByConfirmedTx, arg.WalletID, arg.TxHash)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const GetActiveUtxoLeaseLockID = `-- name: GetActiveUtxoLeaseLockID :one
@@ -191,7 +191,7 @@ type GetActiveUtxoLeaseLockIDParams struct {
 // Performance:
 // - Targets at most one row through the unique lease key.
 func (q *Queries) GetActiveUtxoLeaseLockID(ctx context.Context, arg GetActiveUtxoLeaseLockIDParams) ([]byte, error) {
-	row := q.queryRow(ctx, q.getActiveUtxoLeaseLockIDStmt, GetActiveUtxoLeaseLockID, arg.WalletID, arg.UtxoID, arg.NowUtc)
+	row := q.db.QueryRow(ctx, GetActiveUtxoLeaseLockID, arg.WalletID, arg.UtxoID, arg.NowUtc)
 	var lock_id []byte
 	err := row.Scan(&lock_id)
 	return lock_id, err
@@ -240,7 +240,7 @@ type ListActiveUtxoLeasesRow struct {
 //   - Restricts first by wallet and expiration, then joins only the surviving
 //     lease rows back to utxos/transactions.
 func (q *Queries) ListActiveUtxoLeases(ctx context.Context, arg ListActiveUtxoLeasesParams) ([]ListActiveUtxoLeasesRow, error) {
-	rows, err := q.query(ctx, q.listActiveUtxoLeasesStmt, ListActiveUtxoLeases, arg.WalletID, arg.NowUtc)
+	rows, err := q.db.Query(ctx, ListActiveUtxoLeases, arg.WalletID, arg.NowUtc)
 	if err != nil {
 		return nil, err
 	}
@@ -257,9 +257,6 @@ func (q *Queries) ListActiveUtxoLeases(ctx context.Context, arg ListActiveUtxoLe
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -290,9 +287,9 @@ type ReleaseUtxoLeaseParams struct {
 // Performance:
 // - Targets at most one row through the unique lease key.
 func (q *Queries) ReleaseUtxoLease(ctx context.Context, arg ReleaseUtxoLeaseParams) (int64, error) {
-	result, err := q.exec(ctx, q.releaseUtxoLeaseStmt, ReleaseUtxoLease, arg.WalletID, arg.UtxoID, arg.LockID)
+	result, err := q.db.Exec(ctx, ReleaseUtxoLease, arg.WalletID, arg.UtxoID, arg.LockID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }

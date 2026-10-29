@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -54,25 +56,27 @@ func (s *Store) execRead(ctx context.Context,
 func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
-	// Bind one transaction to the existing runtime so outcome accounting
-	// and deferred cleanup stay identical for both SQL drivers.
+	// Keep all native transaction outcomes in the shared runtime; cleanup
+	// uses an independent deadline even when the request was canceled.
 	// Commit marks unknown outcomes before shared error classification.
 	_, err := dbruntime.Write(
-		ctx, s, dbruntime.WriteTxOps[*sql.Tx, *sqlc.Queries]{
-			Begin: func(ctx context.Context) (*sql.Tx, error) {
-				return s.db.BeginTx(ctx, nil)
+		ctx, s, dbruntime.WriteTxOps[pgx.Tx, *sqlc.Queries]{
+			Begin: func(ctx context.Context) (pgx.Tx, error) {
+				return s.pool.Begin(ctx)
 			},
-			Bind: s.queries.WithTx,
-			Commit: func(tx *sql.Tx) error {
-				err := tx.Commit()
+			Bind: func(tx pgx.Tx) *sqlc.Queries {
+				return s.queries.WithTx(tx)
+			},
+			Commit: func(tx pgx.Tx) error {
+				err := tx.Commit(ctx)
 				if isCommitAmbiguous(err) {
 					return &dbruntime.AmbiguousTxCommitError{Err: err}
 				}
 
 				return err
 			},
-			Rollback: func(tx *sql.Tx) error {
-				return tx.Rollback()
+			Rollback: func(tx pgx.Tx) error {
+				return rollbackTx(ctx, tx.Rollback)
 			},
 		},
 		func(qtx *sqlc.Queries) (struct{}, error) {
@@ -96,6 +100,19 @@ func lockTxGraph(ctx context.Context, qtx *sqlc.Queries, walletID int64) error {
 	// If the Wallet does not exist, let the caller's normal checks report
 	// the error. There is no graph to lock.
 	return nil
+}
+
+// rollbackTx rolls back a PostgreSQL transaction with a fresh bounded context
+// so caller cancellation cannot prevent cleanup.
+func rollbackTx(ctx context.Context,
+	rollback func(context.Context) error) error {
+
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), db.DefaultConnectionTimeout,
+	)
+	defer cancel()
+
+	return rollback(ctx)
 }
 
 // defaultReadConfig returns the PostgreSQL read retry policy.

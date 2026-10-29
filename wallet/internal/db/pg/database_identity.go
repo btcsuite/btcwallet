@@ -2,32 +2,32 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	pgschema "github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // initializeDatabaseIdentity atomically claims or verifies before migrations.
-func initializeDatabaseIdentity(ctx context.Context, dbConn *sql.DB,
+func initializeDatabaseIdentity(ctx context.Context, pool *pgxpool.Pool,
 	identity db.DatabaseIdentity) error {
 
-	tx, err := dbConn.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin identity transaction: %w", err)
 	}
 
 	// Default rollback keeps every rejected or failed startup non-mutating.
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = rollbackTx(ctx, tx.Rollback) }()
 
 	namespace, err := sqlc.New(tx).InspectDatabaseIdentityNamespace(ctx)
 	if err == nil {
 		switch {
 		case !namespace.SchemaExists:
 			// Create the schema and singleton together as one atomic claim.
-			_, err = tx.ExecContext(ctx, pgschema.DatabaseIdentitySchema)
+			_, err = tx.Exec(ctx, pgschema.DatabaseIdentitySchema)
 			if err == nil {
 				genesisHash, networkMagic, signetDigest := identity.Values()
 				err = sqlc.New(tx).InsertDatabaseIdentity(
@@ -69,7 +69,7 @@ func initializeDatabaseIdentity(ctx context.Context, dbConn *sql.DB,
 		return fmt.Errorf("initialize or verify identity: %w", err)
 	}
 
-	err = tx.Commit()
+	err = tx.Commit(ctx)
 	if err != nil {
 		return fmt.Errorf("commit identity transaction: %w", err)
 	}
