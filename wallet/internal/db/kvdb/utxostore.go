@@ -973,7 +973,18 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 	// so let address-level key material decide spendability there. Ordinary
 	// imported xpub accounts are account-level watch-only rows and must stay
 	// non-spendable when adapted through the new db UTXO contract.
-	accountWatchOnly := props.IsWatchOnly &&
+	//
+	// Custody comes from the stored account type rather than
+	// props.IsWatchOnly, which also reports a derived account as watch-only
+	// while the manager is locked.
+	accountImported, err := accountIsImported(
+		addrmgrNs, binding.acctStore, binding.acctNum,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	accountWatchOnly := accountImported &&
 		binding.acctNum != waddrmgr.ImportedAddrAccount
 	spendable := !addrWatchOnly && !accountWatchOnly
 	info.Spendable = &spendable
