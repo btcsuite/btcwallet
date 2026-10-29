@@ -233,6 +233,14 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerRejectAccountCreation,
 	},
 	{
+		Name:     "account manager reject exact account creation",
+		TestFunc: testAccountManagerRejectExactAccountCreation,
+	},
+	{
+		Name:     "account manager reject excluded account identity",
+		TestFunc: testAccountManagerRejectExcludedAccountIdentity,
+	},
+	{
 		Name:     "account manager enforce account creation lifecycle",
 		TestFunc: testAccountManagerEnforceAccountCreationLifecycle,
 	},
