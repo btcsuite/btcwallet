@@ -39,6 +39,42 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// pgTestStore owns integration-only adapters around a PostgreSQL Store.
+type pgTestStore struct {
+	*pg.Store
+
+	sqlDB *sql.DB
+}
+
+var _ db.Store = (*pgTestStore)(nil)
+
+// DB returns the shared-pool database/sql adapter used by integration tests.
+func (s *pgTestStore) DB() *sql.DB {
+	return s.sqlDB
+}
+
+// RollbackAllMigrations rolls back all PostgreSQL migrations.
+func (s *pgTestStore) RollbackAllMigrations() error {
+	return pgschema.RollbackMigrations(context.Background(), s.sqlDB)
+}
+
+// ApplyAllMigrations reapplies all PostgreSQL migrations.
+func (s *pgTestStore) ApplyAllMigrations() error {
+	return pgschema.ApplyMigrations(context.Background(), s.sqlDB)
+}
+
+// Close closes the integration adapter and native PostgreSQL Store.
+func (s *pgTestStore) Close() error {
+	err := s.sqlDB.Close()
+	storeErr := s.Store.Close()
+
+	if err != nil {
+		return fmt.Errorf("close integration database: %w", err)
+	}
+
+	return storeErr
+}
+
 const (
 	// pgMaxIdentifierLen is the PostgreSQL maximum identifier length
 	// (NAMEDATALEN - 1).
@@ -257,7 +293,7 @@ func sanitizedPgDBName(t *testing.T) string {
 // limit allows, exhausting the PostgreSQL connection pool. Avoid this by
 // creating NewTestStore inside each parallel subtest so its lifecycle is tied
 // to the subtest's parallel slot.
-func NewTestStore(t *testing.T) *pg.Store {
+func NewTestStore(t *testing.T) *pgTestStore {
 	t.Helper()
 
 	return NewTestStoreWithDerive(t, mockDeriveFunc())
@@ -266,7 +302,7 @@ func NewTestStore(t *testing.T) *pg.Store {
 // NewTestStoreWithDerive creates a new PostgreSQL database for testing with the
 // provided address derivation function.
 func NewTestStoreWithDerive(t *testing.T,
-	deriveAddress db.AddressDerivationFunc) *pg.Store {
+	deriveAddress db.AddressDerivationFunc) *pgTestStore {
 
 	t.Helper()
 
@@ -278,7 +314,8 @@ func NewTestStoreWithDerive(t *testing.T,
 // newReopenableTestStore retains the same database configuration across opens
 // so batch tests can prove progress survives a closed connection pool.
 func newReopenableTestStore(t *testing.T,
-	deriveAddress db.AddressDerivationFunc) (*pg.Store, func() *pg.Store) {
+	deriveAddress db.AddressDerivationFunc) (*pgTestStore,
+	func() *pgTestStore) {
 
 	t.Helper()
 
@@ -293,9 +330,16 @@ func newReopenableTestStore(t *testing.T,
 		Identity:       identity,
 	}
 
-	open := func() *pg.Store {
-		store, err := pg.NewStore(t.Context(), cfg)
+	open := func() *pgTestStore {
+		native, err := pg.NewStore(t.Context(), cfg)
 		require.NoError(t, err, "failed to create postgres store")
+
+		// Keep the administration adapter in the harness, sharing the exact
+		// native pool that normal Store operations use.
+		store := &pgTestStore{
+			Store: native,
+			sqlDB: stdlib.OpenDBFromPool(native.Pool()),
+		}
 
 		t.Cleanup(func() {
 			_ = store.Close()
@@ -437,7 +481,7 @@ func TestPostgresDatabaseIdentityRejectsPopulatedSchema(t *testing.T) {
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the
 // provided parent transaction hash.
-func childSpendingTxIDs(t *testing.T, store *pg.Store,
+func childSpendingTxIDs(t *testing.T, store *pgTestStore,
 	walletID uint32,
 	txHash chainhash.Hash) []int64 {
 
@@ -470,7 +514,7 @@ func childSpendingTxIDs(t *testing.T, store *pg.Store,
 
 // txIDByHash returns the database row ID for the given wallet-scoped
 // transaction hash and reports whether the row exists.
-func txIDByHash(t *testing.T, store *pg.Store, walletID uint32,
+func txIDByHash(t *testing.T, store *pgTestStore, walletID uint32,
 	txHash chainhash.Hash) (int64, bool) {
 
 	t.Helper()
@@ -494,7 +538,7 @@ func txIDByHash(t *testing.T, store *pg.Store, walletID uint32,
 
 // setTxStatus rewrites one wallet-scoped transaction row to the provided
 // status using the internal status-update query.
-func setTxStatus(t *testing.T, store *pg.Store, walletID uint32,
+func setTxStatus(t *testing.T, store *pgTestStore, walletID uint32,
 	txHash chainhash.Hash, status db.TxStatus) {
 
 	t.Helper()
@@ -515,7 +559,7 @@ func setTxStatus(t *testing.T, store *pg.Store, walletID uint32,
 
 // walletUtxoExists reports whether one wallet-scoped outpoint is currently
 // present in the UTXO set.
-func walletUtxoExists(t *testing.T, store *pg.Store,
+func walletUtxoExists(t *testing.T, store *pgTestStore,
 	walletID uint32,
 	outPoint wire.OutPoint) bool {
 
@@ -541,7 +585,7 @@ func walletUtxoExists(t *testing.T, store *pg.Store,
 
 // walletUtxoSpent reports whether one wallet-scoped outpoint exists and is
 // recorded as spent, i.e. its spend edge points at a spending transaction.
-func walletUtxoSpent(t *testing.T, store *pg.Store,
+func walletUtxoSpent(t *testing.T, store *pgTestStore,
 	walletID uint32,
 	outPoint wire.OutPoint) bool {
 
@@ -566,7 +610,7 @@ func walletUtxoSpent(t *testing.T, store *pg.Store,
 }
 
 // clearUtxosSpentByTxID clears all UTXO spend edges claimed by one transaction.
-func clearUtxosSpentByTxID(t *testing.T, store *pg.Store,
+func clearUtxosSpentByTxID(t *testing.T, store *pgTestStore,
 	walletID uint32, txHash chainhash.Hash) {
 
 	t.Helper()
@@ -589,7 +633,7 @@ func clearUtxosSpentByTxID(t *testing.T, store *pg.Store,
 
 // insertReplacementEdge records one replacement edge between two wallet-scoped
 // transaction rows.
-func insertReplacementEdge(t *testing.T, store *pg.Store, walletID uint32,
+func insertReplacementEdge(t *testing.T, store *pgTestStore, walletID uint32,
 	replacedID, replacementID int64) {
 
 	t.Helper()
@@ -604,7 +648,7 @@ func insertReplacementEdge(t *testing.T, store *pg.Store, walletID uint32,
 }
 
 // leaseRows returns the number of lease rows the wallet holds.
-func leaseRows(t *testing.T, store *pg.Store, walletID uint32) int {
+func leaseRows(t *testing.T, store *pgTestStore, walletID uint32) int {
 	t.Helper()
 
 	var count int
@@ -620,7 +664,7 @@ func leaseRows(t *testing.T, store *pg.Store, walletID uint32) int {
 }
 
 // replacementRows returns the number of replacement edges the wallet holds.
-func replacementRows(t *testing.T, store *pg.Store, walletID uint32) int {
+func replacementRows(t *testing.T, store *pgTestStore, walletID uint32) int {
 	t.Helper()
 
 	var count int
@@ -638,7 +682,7 @@ func replacementRows(t *testing.T, store *pg.Store, walletID uint32) int {
 // rejectBranchRowDelete installs a trigger that aborts the removal of one
 // transaction row, so a test can prove the whole write rolls back. The hash is
 // inlined because CREATE TRIGGER takes no bind parameters.
-func rejectBranchRowDelete(t *testing.T, store *pg.Store,
+func rejectBranchRowDelete(t *testing.T, store *pgTestStore,
 	txHash chainhash.Hash) {
 
 	t.Helper()
@@ -759,4 +803,43 @@ func TestPostgresMigrationFailureReleasesPool(t *testing.T) {
 	require.ErrorAs(t, migrationErr, &dirtyErr)
 	require.NoError(t, err)
 	require.Equal(t, 1, one)
+}
+
+// TestPostgresStoreReusesSingleConnection verifies migration and administration
+// return the only pool slot for a subsequent public Store read.
+func TestPostgresStoreReusesSingleConnection(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Open the normal Store with a one-slot pool and its harness-only
+	// administration adapter. Startup already claims identity before migration.
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
+	native, err := pg.NewStore(t.Context(), pg.Config{
+		Dsn:            newPostgresIdentityDSN(t),
+		Identity:       identity,
+		MaxConnections: 1,
+	})
+	require.NoError(t, err)
+
+	store := &pgTestStore{
+		Store: native,
+		sqlDB: stdlib.OpenDBFromPool(native.Pool()),
+	}
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), db.DefaultConnectionTimeout)
+	defer cancel()
+
+	// Act: Borrow through the administration adapter, then read through the
+	// public Store while that adapter remains open. Both need the only slot.
+	pingErr := store.DB().PingContext(ctx)
+	wallets, readErr := store.ListWallets(ctx, db.ListWalletsQuery{
+		Page: newTestReq[uint32](t, 1),
+	})
+
+	// Assert: Successful operations and an empty result prove the borrowed
+	// slot was returned before the Store or administration adapter was closed.
+	require.NoError(t, pingErr)
+	require.NoError(t, readErr)
+	require.Empty(t, wallets.Items)
 }

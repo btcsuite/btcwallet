@@ -2,14 +2,15 @@
 package pg
 
 import (
-	"database/sql"
-	"database/sql/driver"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -186,21 +187,30 @@ func sqlStateClass(code string) string {
 	return code[:sqlStateClassLen]
 }
 
-// isCommitAmbiguous retains the SQL transport rule when the server may have
-// committed before its connection failed. Ordinary SQL errors remain definite.
+// isCommitAmbiguous reports whether a PostgreSQL commit failed on the
+// transport path after its final outcome may have been decided.
 func isCommitAmbiguous(err error) bool {
-	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) ||
-		errors.Is(err, io.EOF) {
+	if errors.Is(err, pgx.ErrTxCommitRollback) {
+		return false
+	}
+
+	// A pgconn error marked safe to retry is guaranteed to have happened
+	// before any commit bytes reached PostgreSQL.
+	if pgconn.SafeToRetry(err) {
+		return false
+	}
+
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
 
 		return true
 	}
 
-	// Preserve the existing Timeout-only transport contract rather than
-	// requiring unrelated net.Error methods from wrapped driver errors.
-	var transport interface {
-		error
-		Timeout() bool
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
 	}
 
-	return errors.As(err, &transport)
+	var netErr net.Error
+
+	return errors.As(err, &netErr)
 }

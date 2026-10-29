@@ -3,29 +3,23 @@
 package pg
 
 import (
-	"context"
-	"database/sql"
-
-	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// DB returns the underlying *sql.DB connection for integration testing.
-func (s *Store) DB() *sql.DB {
-	return s.db
+// Pool returns the native PostgreSQL pool for integration test adapters.
+func (s *Store) Pool() *pgxpool.Pool {
+	// Integration fixtures use NewStore's concrete pool. Reject a fixture
+	// wired with another implementation rather than returning a nil adapter.
+	pool, ok := s.pool.(*pgxpool.Pool)
+	if !ok {
+		panic("PostgreSQL integration store has no native pool")
+	}
+
+	return pool
 }
 
 // Queries returns the underlying sqlc queries for integration testing.
 func (s *Store) Queries() *sqlc.Queries {
 	return s.queries
-}
-
-// RollbackAllMigrations rolls back all PostgreSQL migrations.
-func (s *Store) RollbackAllMigrations() error {
-	return pg.RollbackMigrations(context.Background(), s.db)
-}
-
-// ApplyAllMigrations reapplies all PostgreSQL migrations.
-func (s *Store) ApplyAllMigrations() error {
-	return pg.ApplyMigrations(context.Background(), s.db)
 }

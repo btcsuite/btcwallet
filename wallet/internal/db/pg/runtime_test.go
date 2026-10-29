@@ -1,7 +1,7 @@
 package pg
 
 import (
-	"database/sql"
+	"context"
 	"io"
 	"math"
 	"testing"
@@ -11,7 +11,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,28 +22,47 @@ import (
 func TestClassifyErrorReturnsOriginalErrors(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Include an already classified native transaction error among
+	// domain errors that must keep their original identity.
 	store := &Store{}
 	errDup := dberr.NewSQLError(
 		dberr.BackendPostgres,
 		dberr.ReasonConstraint,
 		codeUniqueViolation,
-		sql.ErrTxDone,
+		pgx.ErrTxClosed,
 	)
 	tests := []struct {
 		name string
 		err  error
 	}{
-		{name: "wallet not found", err: db.ErrWalletNotFound},
-		{name: "tx not found", err: db.ErrTxNotFound},
-		{name: "generic error", err: io.ErrClosedPipe},
-		{name: "existing sql error", err: errDup},
+		{
+			name: "wallet not found",
+			err:  db.ErrWalletNotFound,
+		},
+		{
+			name: "tx not found",
+			err:  db.ErrTxNotFound,
+		},
+		{
+			name: "generic error",
+			err:  io.ErrClosedPipe,
+		},
+		{
+			name: "existing sql error",
+			err:  errDup,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Same(t, test.err, store.ClassifyError(test.err))
+			// Act: Classify each existing passthrough input.
+			classifiedErr := store.ClassifyError(test.err)
+
+			// Assert: Callers retain the same domain or classified
+			// error rather than receiving another wrapper.
+			require.Same(t, test.err, classifiedErr)
 		})
 	}
 }
@@ -57,6 +78,43 @@ func TestClassifyErrorTransportError(t *testing.T) {
 	var sqlErr *dberr.SQLError
 	require.ErrorAs(t, classifiedErr, &sqlErr)
 	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
+}
+
+// TestRollbackTxUsesFreshContext verifies that PostgreSQL rollback cleanup is
+// bounded independently of the caller's context.
+func TestRollbackTxUsesFreshContext(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Cancel the caller before cleanup and capture the context
+	// received by the rollback operation without contacting a database.
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	cancelCaller()
+	require.ErrorIs(t, callerCtx.Err(), context.Canceled)
+
+	var (
+		cleanupErr  error
+		deadline    time.Time
+		hasDeadline bool
+	)
+
+	// Act: Clean up using that canceled caller context, observing whether
+	// rollback receives an independent deadline and a usable context.
+	err := rollbackTx(callerCtx, func(ctx context.Context) error {
+		cleanupErr = ctx.Err()
+		deadline, hasDeadline = ctx.Deadline()
+
+		return nil
+	})
+
+	// Assert: Cancellation cannot prevent rollback, and cleanup remains
+	// bounded by the existing connection timeout instead of running forever.
+	require.NoError(t, err)
+	require.NoError(t, cleanupErr)
+	require.True(t, hasDeadline)
+	require.WithinDuration(
+		t, time.Now().Add(db.DefaultConnectionTimeout), deadline,
+		time.Second,
+	)
 }
 
 // TestClassifyErrorBackendErrors verifies that PostgreSQL backend-native
@@ -107,26 +165,45 @@ func TestClassifyErrorBackendErrors(t *testing.T) {
 func TestListSyncedBlocksBuildsBlock(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return one block row with a known hash, height and timestamp
+	// so generated native scans must populate the shared Block correctly.
 	blockHash := chainhash.Hash{11, 12, 13}
 	timestamp := time.Unix(1710003600, 0)
 
 	// A single-row range result drives the :many GetBlocksInRange scan path
 	// without standing up a real postgres store.
-	rows := newSQLiteRows(
-		t, "SELECT ?, ?, ?", int32(144), blockHash[:], timestamp.Unix(),
-	)
-	require.NoError(t, rows.Err())
+	rows := &mockRows{}
+	rows.On("Next").Return(true).Once()
+	rows.On("Scan", mock.Anything).Run(func(args mock.Arguments) {
+		dest, ok := args.Get(0).([]any)
+		require.True(t, ok)
+		require.NoError(t, scanValues([]any{
+			int32(144), blockHash[:], timestamp.Unix(),
+		}, dest))
+	}).Return(nil).Once()
+	rows.On("Next").Return(false).Once()
+	rows.On("Err").Return(nil).Once()
+	rows.On("Close").Return().Once()
+
+	queryDB := &mockDBTX{}
+	queryDB.On(
+		"Query", mock.Anything, mock.Anything, mock.Anything,
+	).Return(rows, nil).Once()
 
 	store := &Store{
-		queries: sqlc.New(rowDBTX{queryRows: rows}),
+		queries: sqlc.New(queryDB),
 	}
 
+	// Act: Read the single-height sync range through the public Store method.
 	blocks, err := store.ListSyncedBlocks(
 		t.Context(), db.ListSyncedBlocksQuery{
 			StartHeight: 144,
 			EndHeight:   144,
 		},
 	)
+
+	// Assert: The returned block preserves each stored field and exhausts the
+	// native result set with exactly the arranged scan and query calls.
 	require.NoError(t, err)
 	require.Len(t, blocks, 1)
 	require.Equal(t, db.Block{
@@ -134,6 +211,8 @@ func TestListSyncedBlocksBuildsBlock(t *testing.T) {
 		Height:    144,
 		Timestamp: timestamp,
 	}, blocks[0])
+	rows.AssertExpectations(t)
+	queryDB.AssertExpectations(t)
 }
 
 // TestEnsureBlockExistsRejectsConflictingBlock verifies that insert-or-ignore
@@ -141,21 +220,41 @@ func TestListSyncedBlocksBuildsBlock(t *testing.T) {
 func TestEnsureBlockExistsRejectsConflictingBlock(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Make insert-if-absent find a stored block at the same height
+	// whose hash differs, requiring validation of the existing row.
 	block := &db.Block{
 		Hash:      chainhash.Hash{8, 9, 10},
 		Height:    144,
 		Timestamp: time.Unix(1710003500, 0),
 	}
 	conflictingHash := chainhash.Hash{10, 9, 8}
-	qtx := sqlc.New(rowDBTX{
-		row: newSQLiteRow(
-			t, "SELECT ?, ?, ?", int32(block.Height),
-			conflictingHash[:], block.Timestamp.Unix(),
-		),
-	})
+	row := &mockRow{}
+	row.On("Scan", mock.Anything).Run(func(args mock.Arguments) {
+		dest, ok := args.Get(0).([]any)
+		require.True(t, ok)
+		require.NoError(t, scanValues([]any{
+			int32(block.Height), conflictingHash[:],
+			block.Timestamp.Unix(),
+		}, dest))
+	}).Return(nil).Once()
 
+	dbtx := &mockDBTX{}
+	dbtx.On(
+		"Exec", mock.Anything, mock.Anything, mock.Anything,
+	).Return(pgconn.NewCommandTag("INSERT 0 0"), nil).Once()
+	dbtx.On(
+		"QueryRow", mock.Anything, mock.Anything, mock.Anything,
+	).Return(row).Once()
+	qtx := sqlc.New(dbtx)
+
+	// Act: Ensure the requested block exists after the insert affects no row.
 	err := ensureBlockExists(t.Context(), qtx, block)
+
+	// Assert: Conflicting persisted metadata returns the block-mismatch
+	// sentinel after one insert and one verification read.
 	require.ErrorIs(t, err, db.ErrBlockMismatch)
+	row.AssertExpectations(t)
+	dbtx.AssertExpectations(t)
 }
 
 // TestListSyncedBlocksRejectsHugeRange verifies that a span that overflows the
