@@ -1901,15 +1901,9 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	return s.putSyncBatch(ctx, scanState, results)
 }
 
-// handleChainUpdate processes a notification immediately.
-// It returns an error if processing fails or if the wallet is shutting down.
-func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
-	// For a single update, we process it and commit immediately.
-	err := s.processChainUpdate(ctx, n)
-	if err != nil {
-		return fmt.Errorf("failed to process chain update: %w", err)
-	}
-
+// handleChainUpdate logs legacy rescan progress notifications. Manager owns
+// disconnects, while prepared transaction events use their Store handlers.
+func (s *syncer) handleChainUpdate(n any) {
 	switch msg := n.(type) {
 	case *chain.RescanProgress:
 		log.Debugf("Rescanned through block %v (height %d)",
@@ -1923,24 +1917,6 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 			"block %v (height %d). No wallet state updates "+
 			"performed.", msg.Hash, msg.Height)
 	}
-
-	return nil
-}
-
-// processChainUpdate writes a single chain update to the database.
-func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
-	switch update.(type) {
-	case chain.BlockConnected:
-		return nil
-
-	// A block was disconnected. We use checkRollback to safely verify our
-	// chain state against the backend and rewind if necessary. This
-	// handles both single block disconnects and deeper reorgs robustly.
-	case chain.BlockDisconnected:
-		return s.checkRollback(ctx)
-	}
-
-	return nil
 }
 
 // processChainEventBeforeSync handles initialization, retry and scan-time
@@ -1986,7 +1962,9 @@ func (s *syncer) processChainEvent(ctx context.Context,
 		return s.putBlockNotifications(ctx, event.matches, n.Block)
 
 	default:
-		return s.handleChainUpdate(ctx, event.notification)
+		s.handleChainUpdate(event.notification)
+
+		return nil
 	}
 }
 
