@@ -331,6 +331,11 @@ var allTestCases = []*testCase{
 		Name:     "controller info",
 		TestFunc: testControllerInfo,
 	},
+	// All public chain views must agree through rollback and durable reload.
+	{
+		Name:     "wallet sync rollback",
+		TestFunc: testWalletSyncRollback,
+	},
 	// Keep the public Signer request in the integration matrix so callers
 	// cannot accidentally depend on wallet-internal database types.
 	{

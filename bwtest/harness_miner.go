@@ -44,8 +44,8 @@ var (
 	// ErrNilBlock is returned when a nil block is provided.
 	ErrNilBlock = errors.New("nil block")
 
-	// ErrMinerNotSynced is returned when a temporary miner is not synced to the
-	// harness miner.
+	// ErrMinerNotSynced is returned when a miner has not reached the expected
+	// best block.
 	ErrMinerNotSynced = errors.New("miner not synced")
 )
 
@@ -371,26 +371,35 @@ func (h *HarnessTest) SpawnTempMiner() *HarnessTest {
 	// Connect the miners and wait for the temp miner to sync.
 	h.ConnectToMiner(th)
 
-	_, mainHeight := h.GetBestBlock()
-	err := wait.NoError(func() error {
-		_, tempHeight, err := tempMiner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("get best block: %w", err)
-		}
-
-		if tempHeight != mainHeight {
-			return fmt.Errorf("%w: main=%d temp=%d", ErrMinerNotSynced,
-				mainHeight, tempHeight)
-		}
-
-		return nil
-	}, defaultTestTimeout)
-	require.NoError(h, err, "timeout waiting for temp miner to sync")
+	mainHash, mainHeight := h.GetBestBlock()
+	th.WaitForMinerTip(*mainHash, mainHeight)
 
 	// Disconnect the temp miner so it can mine an alternative chain.
 	h.DisconnectFromMiner(th)
 
 	return th
+}
+
+// WaitForMinerTip waits for this miner to adopt the expected best block.
+// Call it after reconnecting competing miners, before AssertWalletSynced, so
+// the Wallet boundary cannot succeed against the miner's old losing tip.
+func (h *HarnessTest) WaitForMinerTip(hash chainhash.Hash, height int32) {
+	h.Helper()
+
+	err := wait.NoError(func() error {
+		bestHash, bestHeight, err := h.miner.Client.GetBestBlock()
+		if err != nil {
+			return fmt.Errorf("get miner best block: %w", err)
+		}
+
+		if bestHeight != height || *bestHash != hash {
+			return fmt.Errorf("%w: want=%v:%d got=%v:%d",
+				ErrMinerNotSynced, hash, height, bestHash, bestHeight)
+		}
+
+		return nil
+	}, defaultTestTimeout)
+	require.NoError(h, err, "timeout waiting for miner tip")
 }
 
 // ConnectToMiner connects the harness miner to tempMiner.
