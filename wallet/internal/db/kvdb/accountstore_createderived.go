@@ -20,12 +20,6 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
-	// waddrmgr owns sequential allocation in the legacy store. Refuse exact
-	// selection before a transaction can allocate or derive any account.
-	if params.AccountNumber != nil {
-		return nil, fmt.Errorf("kvdb exact account: %w", db.ErrInvalidParam)
-	}
-
 	// The legacy format has no per-account synchronization policy. Normalize
 	// the by-value request so the shared workflow also returns the stored false
 	// value while kvdb silently retains its historical behavior.
@@ -140,14 +134,19 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	return 0, addrSchema, nil
 }
 
-// AllocateAccountNumber implements db.CreateDerivedAccountOps. The selector
-// is unused because CreateDerivedAccount rejects exact requests before opening
-// the transaction; this adapter retains sequential allocation.
+// AllocateAccountNumber implements db.CreateDerivedAccountOps. Exact writes
+// use the requested slot; the native writer advances its cursor on persistence.
 func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
-	_ int64, _ *uint32) (int64, error) {
+	_ int64, number *uint32) (int64, error) {
 
 	if o.scopedMgr == nil {
 		return 0, errScopedMgrUninitialized
+	}
+
+	// Keep sparse requests independent of sequential allocation. Existing
+	// identity admission below rejects occupied slots before any key write.
+	if number != nil {
+		return int64(*number), nil
 	}
 
 	account, err := o.scopedMgr.AllocateDerivedAccountNumber(o.ns)
@@ -176,20 +175,29 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 		return db.CreateDerivedAccountRow{}, err
 	}
 
-	err = checkAccountIdentity(o.ns, o.mgr, db.AccountInfo{
-		KeyScope:    db.KeyScope(o.scope),
-		AccountName: name,
-		PublicKey:   derived.PublicKey,
-		AddrSchema:  schema,
-	})
+	// Use the existing checked conversion for the native uint32 slot; the
+	// shared workflow has already enforced the narrower derived-account limit.
+	number, err := db.Int64ToUint32(accountNumber)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, err
 	}
 
-	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
+	candidate := db.AccountInfo{
+		KeyScope:      db.KeyScope(o.scope),
+		AccountNumber: &number,
+		AccountName:   name,
+		PublicKey:     derived.PublicKey,
+		AddrSchema:    schema,
+	}
+
+	err = checkAccountIdentity(o.ns, o.mgr, candidate)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, err
+	}
+
+	// Persist the admitted exact key through the existing native writer.
 	err = o.scopedMgr.PutDerivedAccountWithKeys(
-		o.ns, uint32(accountNumber), name,
-		derived.PublicKey, derived.EncryptedPrivateKey,
+		o.ns, number, name, derived.PublicKey, derived.EncryptedPrivateKey,
 	)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, fmt.Errorf(
@@ -197,16 +205,12 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 		)
 	}
 
-	// Persist the creation timestamp into the kvdb-owned side
-	// bucket. Returning the same value to the caller keeps the
-	// create return and the next read in sync.
+	// Store the creation time in the same write as the keys, so creation and
+	// later reads describe the same committed account.
 	now := time.Now().UTC()
 	scope := o.scopedMgr.Scope()
 
-	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
-	err = putAccountCreatedAt(
-		o.ns, scope, uint32(accountNumber), now, nil,
-	)
+	err = putAccountCreatedAt(o.ns, scope, number, now, nil)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, fmt.Errorf(
 			"persist created-at: %w", err,
@@ -222,9 +226,8 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 	// this path round-trip the value natively; legacy rows
 	// (created before this side bucket existed) still rely on the
 	// wallet-layer override as the canonical compatibility fallback.
-	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
 	err = putAccountMasterFingerprint(
-		o.ns, scope, uint32(accountNumber),
+		o.ns, scope, number,
 		derived.MasterKeyFingerprint,
 	)
 	if err != nil {
