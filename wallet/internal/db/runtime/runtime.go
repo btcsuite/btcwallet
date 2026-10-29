@@ -41,9 +41,9 @@ var (
 	errReadDelayOrder  = errors.New("read base delay exceeds max delay")
 )
 
-// AmbiguousTxCommitError wraps a classified commit error returned by Write when
-// Commit fails after the final database outcome may already be decided by the
-// backend.
+// AmbiguousTxCommitError marks a commit failure whose outcome is unknown.
+// Backend adapters wrap the raw cause; Write classifies that cause before
+// returning this type to callers.
 //
 // This lets callers ask two independent questions about the same failure:
 //
@@ -52,7 +52,7 @@ var (
 //   - errors.As / errors.Unwrap expose the classified backend error for
 //     logging, metrics, or backend-specific handling.
 type AmbiguousTxCommitError struct {
-	// Err is the classified backend error observed during commit.
+	// Err is the raw adapter error, or the classified cause returned by Write.
 	Err error
 }
 
@@ -65,7 +65,7 @@ func (e *AmbiguousTxCommitError) Error() string {
 	return e.Err.Error()
 }
 
-// Unwrap returns the wrapped classified commit error.
+// Unwrap returns the underlying commit error.
 func (e *AmbiguousTxCommitError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -105,6 +105,22 @@ type ReadHooks interface {
 
 	// RecordRetryExhausted records that retry budget was exhausted.
 	RecordRetryExhausted()
+}
+
+// WriteTxOps adapts one backend transaction to the shared Write helper.
+type WriteTxOps[Tx any, Q any] struct {
+	// Begin starts a backend transaction using the caller's context.
+	Begin func(context.Context) (Tx, error)
+
+	// Bind returns the query handle bound to a backend transaction.
+	Bind func(Tx) Q
+
+	// Commit returns the raw backend error, or nil on success. An
+	// AmbiguousTxCommitError marks an unknown outcome for Write to classify.
+	Commit func(Tx) error
+
+	// Rollback performs best-effort cleanup of a backend transaction.
+	Rollback func(Tx) error
 }
 
 // WriteHooks defines the runtime hooks needed by the shared transaction helper.
