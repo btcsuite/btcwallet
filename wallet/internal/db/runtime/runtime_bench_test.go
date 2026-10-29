@@ -10,7 +10,8 @@ import (
 
 // BenchmarkReadSuccess measures a successful read with no retries.
 func BenchmarkReadSuccess(b *testing.B) {
-	hooks := &fakeStore{}
+	hooks := &benchmarkReadHooks{}
+
 	for range b.N {
 		_, _ = readWithConfig(
 			context.Background(), hooks, struct{}{},
@@ -32,11 +33,7 @@ func BenchmarkReadSuccess(b *testing.B) {
 
 // BenchmarkReadTransientRetry measures one retry before success.
 func BenchmarkReadTransientRetry(b *testing.B) {
-	hooks := &fakeStore{classifyFn: func(err error) error {
-		return dberr.NewSQLError(
-			dberr.BackendSQLite, dberr.ReasonBusy, "5", err,
-		)
-	}}
+	hooks := &benchmarkReadHooks{}
 
 	for range b.N {
 		attempts := 0
@@ -61,4 +58,20 @@ func BenchmarkReadTransientRetry(b *testing.B) {
 			},
 		)
 	}
+}
+
+// benchmarkReadHooks keeps the real runtime counters without retaining one
+// mock invocation per iteration, so measurements exercise the read path.
+type benchmarkReadHooks struct {
+	Stats
+}
+
+var _ ReadHooks = (*benchmarkReadHooks)(nil)
+
+// ClassifyError supplies the busy outcome used by the retry benchmark, with
+// the same SQL error allocation as its original backend-classifier fixture.
+func (*benchmarkReadHooks) ClassifyError(err error) error {
+	return dberr.NewSQLError(
+		dberr.BackendSQLite, dberr.ReasonBusy, "5", err,
+	)
 }
