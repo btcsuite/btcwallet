@@ -464,7 +464,8 @@ func testGetTxConfirmations(h *bwtest.HarnessTest) {
 
 // txReaderHistory is the transaction history the range, agreement and reload
 // cases all read: the transaction that funded the wallet, one spend confirmed
-// in a block of its own, and one spend left waiting in the mempool.
+// in a block of its own, one payment received into a newly created account in
+// a block of its own, and one spend left waiting in the mempool.
 //
 // It holds only what newTxReaderHistory arranged. Every read under test, and
 // every assertion about it, stays in the case.
@@ -478,9 +479,21 @@ type txReaderHistory struct {
 	fundHeight int32
 
 	// minedTx spends the first coin and was confirmed on its own at
-	// minedHeight, which is the chain tip.
+	// minedHeight.
 	minedTx     *wire.MsgTx
 	minedHeight int32
+
+	// account was created after the wallet was funded, and receiveAddr is
+	// the address NewAddress returned for it.
+	account     *wallet.AccountInfo
+	receiveAddr wallet.AddressInfo
+
+	// receiptTx is the miner's payment to receiveAddr, creating
+	// receiptOutpoint. It was confirmed on its own at receiptHeight, which
+	// is the chain tip.
+	receiptTx       *wire.MsgTx
+	receiptOutpoint wire.OutPoint
+	receiptHeight   int32
 
 	// unminedTx spends the second coin and is still in the mempool. A case
 	// that finishes with the history has to confirm it, because the
@@ -495,16 +508,17 @@ func (hist txReaderHistory) txids() []chainhash.Hash {
 	return []chainhash.Hash{
 		hist.fundingTx.TxHash(),
 		hist.minedTx.TxHash(),
+		hist.receiptTx.TxHash(),
 		hist.unminedTx.TxHash(),
 	}
 }
 
-// newTxReaderHistory funds a wallet and leaves it holding one confirmed spend
-// and one unconfirmed one.
+// newTxReaderHistory funds a wallet and leaves it holding one confirmed spend,
+// one confirmed payment into a new account, and one unconfirmed spend.
 //
-// Each spend is confirmed in a block of its own, so every block holds exactly
-// one wallet transaction and the order a reader reports does not depend on how
-// a backend arranges transactions within a block.
+// Each confirmed transaction is in a block of its own, so every block holds
+// exactly one wallet transaction and the order a reader reports does not
+// depend on how a backend arranges transactions within a block.
 func newTxReaderHistory(h *bwtest.HarnessTest) txReaderHistory {
 	h.Helper()
 
@@ -536,6 +550,45 @@ func newTxReaderHistory(h *bwtest.HarnessTest) txReaderHistory {
 
 	_, minedHeight := h.GetBestBlock()
 
+	// The miner pays an account the wallet did not have when it was created
+	// or funded, so the history also holds a payment the wallet only
+	// received. It is confirmed before the unmined spend is broadcast,
+	// because mining it later would confirm that spend as well.
+	scope, err := txReaderFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve the funding scope")
+
+	account := h.CreateTestAccount(w, scope, "txreader receiving")
+
+	receiveAddr, err := w.NewAddress(
+		h.Context(), wallet.NewAccountSelectorByName(
+			scope, account.AccountName,
+		), false,
+	)
+	require.NoError(h, err, "failed to create the receiving address")
+
+	receiptScript, err := txscript.PayToAddrScript(receiveAddr.Addr)
+	require.NoError(h, err, "failed to create receipt pkscript")
+
+	receiptTxid := h.SendOutput(&wire.TxOut{
+		Value:    int64(oneBTC),
+		PkScript: receiptScript,
+	}, bwtest.MinerFeeRate)
+	receiptTx := h.AssertTxInMempool(*receiptTxid)
+	h.MineBlockWithTx(receiptTx)
+
+	_, receiptHeight := h.GetBestBlock()
+
+	receiptIndex := -1
+	for i, txOut := range receiptTx.TxOut {
+		if bytes.Equal(txOut.PkScript, receiptScript) {
+			receiptIndex = i
+
+			break
+		}
+	}
+
+	require.NotEqual(h, -1, receiptIndex, "receipt pays no wallet output")
+
 	// The second coin stays in the mempool, so the unmined leg of a range
 	// has something to report.
 	unminedTx := h.SignSpend(w, bwtest.SpendFixture{
@@ -555,7 +608,15 @@ func newTxReaderHistory(h *bwtest.HarnessTest) txReaderHistory {
 		fundHeight:  funding.BlockHeight,
 		minedTx:     minedTx,
 		minedHeight: minedHeight,
-		unminedTx:   unminedTx,
+		account:     account,
+		receiveAddr: receiveAddr,
+		receiptTx:   receiptTx,
+		receiptOutpoint: wire.OutPoint{
+			Hash:  *receiptTxid,
+			Index: uint32(receiptIndex),
+		},
+		receiptHeight: receiptHeight,
+		unminedTx:     unminedTx,
 	}
 }
 
@@ -566,10 +627,12 @@ func testListTxnsBoundaries(h *bwtest.HarnessTest) {
 	hist := newTxReaderHistory(h)
 
 	w := hist.wallet
-	fundHeight, spendHeight := hist.fundHeight, hist.minedHeight
+	fundHeight, minedHeight := hist.fundHeight, hist.minedHeight
+	tipHeight := hist.receiptHeight
 
 	txids := hist.txids()
-	fundingTxid, minedTxid, unminedTxid := txids[0], txids[1], txids[2]
+	fundingTxid, minedTxid := txids[0], txids[1]
+	receiptTxid, unminedTxid := txids[2], txids[3]
 
 	// The row below the funded block subtracts one from its height, and a
 	// negative height is the unmined sentinel rather than a block. The
@@ -596,14 +659,14 @@ func testListTxnsBoundaries(h *bwtest.HarnessTest) {
 		startHeight: 0,
 		endHeight:   unminedHeight,
 		want: []chainhash.Hash{
-			fundingTxid, minedTxid, unminedTxid,
+			fundingTxid, minedTxid, receiptTxid, unminedTxid,
 		},
 	}, {
 		name:        "unmined then confirmed in reverse",
 		startHeight: unminedHeight,
 		endHeight:   0,
 		want: []chainhash.Hash{
-			unminedTxid, minedTxid, fundingTxid,
+			unminedTxid, receiptTxid, minedTxid, fundingTxid,
 		},
 	}, {
 		name:        "block below the first transaction",
@@ -616,25 +679,34 @@ func testListTxnsBoundaries(h *bwtest.HarnessTest) {
 		endHeight:   fundHeight,
 		want:        []chainhash.Hash{fundingTxid},
 	}, {
-		name:        "chain tip",
-		startHeight: spendHeight,
-		endHeight:   spendHeight,
+		name:        "block between the first and the tip",
+		startHeight: minedHeight,
+		endHeight:   minedHeight,
 		want:        []chainhash.Hash{minedTxid},
 	}, {
+		name:        "chain tip",
+		startHeight: tipHeight,
+		endHeight:   tipHeight,
+		want:        []chainhash.Hash{receiptTxid},
+	}, {
 		name:        "block above the chain tip",
-		startHeight: spendHeight + 1,
-		endHeight:   spendHeight + 1,
+		startHeight: tipHeight + 1,
+		endHeight:   tipHeight + 1,
 		want:        []chainhash.Hash{},
 	}, {
 		name:        "whole confirmed history",
 		startHeight: fundHeight,
-		endHeight:   spendHeight,
-		want:        []chainhash.Hash{fundingTxid, minedTxid},
+		endHeight:   tipHeight,
+		want: []chainhash.Hash{
+			fundingTxid, minedTxid, receiptTxid,
+		},
 	}, {
 		name:        "whole confirmed history reversed",
-		startHeight: spendHeight,
+		startHeight: tipHeight,
 		endHeight:   fundHeight,
-		want:        []chainhash.Hash{minedTxid, fundingTxid},
+		want: []chainhash.Hash{
+			receiptTxid, minedTxid, fundingTxid,
+		},
 	}}
 
 	for _, tc := range testCases {
@@ -687,15 +759,20 @@ func testListTxnsAgreesWithGetTx(h *bwtest.HarnessTest) {
 }
 
 // testTxReaderDurableReopen verifies that the transaction view a wallet
-// reports survives closing it and opening the same durable wallet again, which
-// is the lifecycle a stored history has to cross to be worth storing.
+// reports, and the account, address and coin a received payment left behind,
+// survive stopping the Manager and starting a fresh one over the same database,
+// which is the lifecycle a stored history has to cross to be worth storing.
 func testTxReaderDurableReopen(h *bwtest.HarnessTest) {
 	// The history includes a transaction still in the mempool because that
 	// is the state a reopen could most easily lose: it is held by the
-	// wallet alone, with no block to recover it from.
+	// wallet alone, with no block to recover it from. It also includes a
+	// payment into an account created after the wallet was, so the views
+	// that payment joins are read from a store that had to add them.
 	hist := newTxReaderHistory(h)
 
 	w := hist.wallet
+	id := w.ID()
+	account, receiveAddr := hist.account, hist.receiveAddr
 
 	// Compare whole results rather than chosen fields, so nothing the
 	// reopen lost can hide in a field the comparison skipped.
@@ -718,12 +795,103 @@ func testTxReaderDurableReopen(h *bwtest.HarnessTest) {
 		points = append(points, point)
 	}
 
+	accountBefore, err := w.GetAccount(
+		h.Context(), account.KeyScope, account.AccountName,
+	)
+	require.NoError(h, err, "failed to get the receiving account")
+
+	addrBefore, err := w.GetAddressInfo(h.Context(), receiveAddr.Addr)
+	require.NoError(h, err, "failed to get the receiving address")
+
+	utxoQuery := wallet.UtxoQuery{
+		Account:  account.AccountName,
+		MaxConfs: maxConfsLimit,
+	}
+	utxosBefore, err := w.ListUnspent(h.Context(), utxoQuery)
+	require.NoError(h, err, "failed to list the receiving account's coins")
+
+	receipt, err := w.GetTx(h.Context(), hist.receiptOutpoint.Hash)
+	require.NoError(h, err, "failed to get the receipt")
+
+	// The reads above are compared with their reopened selves below, which
+	// proves only that they survived. These join them to the payment the
+	// fixture made, so a view that was wrong before the reopen fails here.
+	require.Equal(
+		h, account.AccountNumber, accountBefore.AccountNumber,
+		"receiving account has a different number",
+	)
+	require.Equal(
+		h, receiveAddr, addrBefore, "receiving address reads differently",
+	)
+	// Only the account path is joined here: kvdb reports a zero root
+	// fingerprint for derived addresses, which the SQL-only address manager
+	// fingerprint case covers.
+	require.Equal(
+		h, account.KeyScope, addrBefore.Derivation.KeyScope,
+		"receiving address is in another scope",
+	)
+	require.Equal(
+		h, uint32(*account.AccountNumber), addrBefore.Derivation.Account,
+		"receiving address belongs to another account",
+	)
+	require.Len(h, utxosBefore, 1, "unexpected receiving account coins")
+	require.Equal(
+		h, hist.receiptOutpoint, utxosBefore[0].OutPoint,
+		"receiving account holds another coin",
+	)
+	require.Equal(
+		h, btcutil.Amount(oneBTC), utxosBefore[0].Amount,
+		"unexpected received amount",
+	)
+	require.Equal(
+		h, receiveAddr.Addr.String(), utxosBefore[0].Address.String(),
+		"received coin pays another address",
+	)
+	require.Equal(
+		h, account.AccountName, utxosBefore[0].Account,
+		"received coin belongs to another account",
+	)
+	require.Equal(
+		h, int32(1), utxosBefore[0].Confirmations,
+		"received coin is not confirmed at the tip",
+	)
+	require.Equal(
+		h, int32(1), receipt.Confirmations,
+		"receipt is not confirmed at the tip",
+	)
+	require.Equal(
+		h, hist.receiptHeight, receipt.Block.Height,
+		"receipt is in another block",
+	)
+	require.True(
+		h, receipt.Outputs[hist.receiptOutpoint.Index].IsOurs,
+		"receipt output is not the wallet's",
+	)
+
+	// No wallet-wide balance call exists, so the account's confirmed
+	// balance is the balance view, and it has to agree with the coins.
+	var utxoTotal btcutil.Amount
+	for _, utxo := range utxosBefore {
+		utxoTotal += utxo.Amount
+	}
+
+	require.Equal(
+		h, utxoTotal, accountBefore.ConfirmedBalance,
+		"account balance disagrees with its coins",
+	)
+	require.Zero(
+		h, accountBefore.UnconfirmedBalance,
+		"account reports an unconfirmed balance",
+	)
+
 	w = h.ReloadWallet(w)
 
 	// No readiness check follows the reopen on purpose. Nothing is mined
 	// across it and the synced tip is durable, so a wallet that has
 	// finished starting already reports the same tip and the same
 	// confirmations. Waiting here would hide it if that were ever untrue.
+	require.Equal(h, id, w.ID(), "the reopened wallet has another identity")
+
 	after, err := w.ListTxns(h.Context(), unminedHeight, 0)
 	require.NoError(h, err, "failed to list transactions after reopen")
 	require.Equal(
@@ -739,6 +907,29 @@ func testTxReaderDurableReopen(h *bwtest.HarnessTest) {
 			"the reopened wallet describes %v differently", point.Hash,
 		)
 	}
+
+	accountAfter, err := w.GetAccount(
+		h.Context(), account.KeyScope, account.AccountName,
+	)
+	require.NoError(h, err, "failed to get the account after reopen")
+	require.Equal(
+		h, accountBefore, accountAfter,
+		"the reopened wallet describes the account differently",
+	)
+
+	addrAfter, err := w.GetAddressInfo(h.Context(), receiveAddr.Addr)
+	require.NoError(h, err, "failed to get the address after reopen")
+	require.Equal(
+		h, addrBefore, addrAfter,
+		"the reopened wallet describes the address differently",
+	)
+
+	utxosAfter, err := w.ListUnspent(h.Context(), utxoQuery)
+	require.NoError(h, err, "failed to list coins after reopen")
+	require.Equal(
+		h, utxosBefore, utxosAfter,
+		"the reopened wallet lists different coins",
+	)
 
 	// The harness requires an empty mempool once a case succeeds.
 	h.MineBlockWithTx(hist.unminedTx)
