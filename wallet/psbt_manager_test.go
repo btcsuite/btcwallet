@@ -5563,19 +5563,24 @@ func expectManualFundingSources(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 	)
 	require.NoError(t, err)
 
+	// This caller decorates a known-origin input; the shared funding
+	// fixture leaves that address metadata to each scenario.
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, inputAddr, db.WitnessPubKey, inputKey.PubKey(),
+	)
+
 	return expectFundingSourcesForAddress(
-		t, w, mocks, outPoint, inputAddr, db.WitnessPubKey,
-		inputKey.PubKey(),
+		t, w, mocks, outPoint, inputAddr,
 	)
 }
 
 // expectFundingSourcesForAddress registers the store and sync-tip reads a
 // completion-mode funding run performs against a single caller-selected UTXO
-// paying to the given address.
+// paying to the given address. Callers configure its address lookup separately
+// so complete and unknown input origins use the same funding machinery.
 func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	mocks *mockWalletDeps, outPoint wire.OutPoint,
-	inputAddr address.Address, addrType db.AddressType,
-	inputPubKey *btcec.PublicKey) *wire.TxOut {
+	inputAddr address.Address) *wire.TxOut {
 
 	t.Helper()
 
@@ -5584,7 +5589,7 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	).Once()
 
 	utxo := expectFundingInputForAddress(
-		t, w, mocks, outPoint, inputAddr, addrType, inputPubKey,
+		t, w, mocks, outPoint, inputAddr,
 	)
 
 	// The change source, which is derived under the default account.
@@ -5655,13 +5660,12 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 
 // expectFundingInputForAddress registers the reads a completion-mode funding
 // run performs against one caller-selected UTXO paying to the given address:
-// its eligibility and decoration UTXO lookup, its parent transaction, and the
-// address lookup decoration resolves it through. It returns the output the
-// UTXO pays to.
+// its eligibility and decoration UTXO lookup and its parent transaction.
+// Callers supply address metadata separately so unknown origins can reuse
+// these reads. It returns the output the UTXO pays to.
 func expectFundingInputForAddress(t *testing.T, w *Wallet,
 	mocks *mockWalletDeps, outPoint wire.OutPoint,
-	inputAddr address.Address, addrType db.AddressType,
-	inputPubKey *btcec.PublicKey) *wire.TxOut {
+	inputAddr address.Address) *wire.TxOut {
 
 	t.Helper()
 
@@ -5682,10 +5686,6 @@ func expectFundingInputForAddress(t *testing.T, w *Wallet,
 	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
 		WalletID: w.id, Txid: outPoint.Hash,
 	}).Return(testStoreTxDetail(outPoint.Hash, utxo), nil)
-
-	expectSignerDerivedAddressInfo(
-		t, w, mocks, inputAddr, addrType, inputPubKey,
-	)
 
 	return utxo
 }
@@ -6196,9 +6196,12 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	outPoint := wire.OutPoint{Hash: parent.TxHash(), Index: 0}
 
 	expectFundingSourcesForAddress(
-		t, w, mocks, outPoint, inputAddr, db.TaprootPubKey,
-		inputKey.PubKey(),
+		t, w, mocks, outPoint, inputAddr,
 	)
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, inputAddr, db.TaprootPubKey, inputKey.PubKey(),
+	)
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Once()
 	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
@@ -6216,6 +6219,8 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
+	// Act: Fund the caller-selected Taproot input while it carries its
+	// parent, exercising preservation across input decoration and sorting.
 	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
@@ -6245,7 +6250,6 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	// records no parent for one, so this is the caller's record and not a
 	// copy of anything the wallet wrote.
 	require.Len(t, fundedInput.TaprootBip32Derivation, 1)
-	mocks.store.AssertExpectations(t)
 }
 
 // TestFundPsbtInputLeasedBeforeDecoration verifies that a caller-selected
@@ -6431,7 +6435,13 @@ func expectCallerInputsFundingSources(t *testing.T, w *Wallet,
 		require.NoError(t, err)
 
 		expectFundingInputForAddress(
-			t, w, mocks, outPoint, inputAddr, db.WitnessPubKey,
+			t, w, mocks, outPoint, inputAddr,
+		)
+
+		// These reservation scenarios use known origins; the shared
+		// input reads leave address metadata to their caller.
+		expectSignerDerivedAddressInfo(
+			t, w, mocks, inputAddr, db.WitnessPubKey,
 			inputKey.PubKey(),
 		)
 	}
