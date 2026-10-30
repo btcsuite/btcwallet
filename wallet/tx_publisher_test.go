@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -1537,4 +1538,132 @@ func TestBroadcastRetryLiveDuplicateIdempotent(t *testing.T) {
 
 	err = w.Broadcast(t.Context(), tx, label)
 	require.NoError(t, err)
+}
+
+// TestBroadcastReorgPublishFailureRetainsSpend verifies a failed retry keeps
+// disconnected published history and its claimed input out of the UTXO set.
+func TestBroadcastReorgPublishFailureRetainsSpend(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse a real SQLite wallet with a non-current mock chain so
+	// this test owns the state transitions. Confirm funding below the fork,
+	// lease one output, then confirm and disconnect its published spender.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	_, input, untouched := storeFundingCredits(t, w)
+	fundingBlock := db.Block{
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+	}
+
+	// SyncedTo creates the block row needed by funding confirmation.
+	err := w.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: w.id,
+		SyncedTo: &fundingBlock,
+	})
+	require.NoError(t, err)
+	err = w.store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     input.Hash,
+		State: &db.UpdateTxState{
+			Block:  &fundingBlock,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+
+	// Give confirmation a lease to remove before the rollback.
+	_, err = w.store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: w.id,
+		ID:       db.LockID{1},
+		OutPoint: input,
+		NoExpiry: true,
+	})
+	require.NoError(t, err)
+
+	// Spend the leased input and leave the other output as a UTXO control.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(19_000, []byte{txscript.OP_TRUE}))
+	txid := tx.TxHash()
+	err = w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	spendBlock := db.Block{
+		Hash:      chainhash.Hash{1},
+		Height:    fundingBlock.Height + 1,
+		Timestamp: fundingBlock.Timestamp.Add(time.Second),
+	}
+
+	// SyncedTo also creates the block row used to confirm the spender.
+	err = w.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: w.id,
+		SyncedTo: &spendBlock,
+	})
+	require.NoError(t, err)
+
+	// Confirmation deletes the lease, so after rollback only the retained
+	// spend link can keep the input reserved.
+	err = w.store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     txid,
+		State: &db.UpdateTxState{
+			Block:  &spendBlock,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, w.store.RollbackToBlock(
+		t.Context(), spendBlock.Height,
+	))
+
+	// Pin the unmined row and input claim before retrying; lease listings
+	// hide spent outputs and cannot establish this precondition.
+	query := db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     txid,
+	}
+	before, err := w.store.GetTx(t.Context(), query)
+	require.NoError(t, err)
+	require.Nil(t, before.Block)
+	require.Equal(t, db.TxStatusPublished, before.Status)
+	_, err = w.store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: input,
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+
+	// Allow preflight so only the subsequent network send fails.
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return([]*btcjson.TestMempoolAcceptResult{
+			{
+				Allowed: true,
+			},
+		}, nil).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("SendRawTransaction", mock.Anything, false).
+		Return(nil, errPublish).Once()
+
+	// Act: Retry the disconnected transaction and fail only its network
+	// send, after the Store has already preserved its live unmined state.
+	err = w.Broadcast(t.Context(), tx, "")
+
+	// Assert: Preserve the published row and its input exclusion. The
+	// untouched funding output proves UTXO reads still work.
+	require.ErrorIs(t, err, errPublish)
+	after, err := w.store.GetTx(t.Context(), query)
+	require.NoError(t, err)
+	require.Nil(t, after.Block)
+	require.Equal(t, db.TxStatusPublished, after.Status)
+	utxos, err := w.store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: w.id,
+	})
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, untouched, utxos[0].OutPoint)
 }
