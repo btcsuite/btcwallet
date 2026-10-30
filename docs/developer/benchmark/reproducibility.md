@@ -813,6 +813,40 @@ changing fixture identity, storage settings, resources or timer boundaries.
 Go dependencies resolve through `go.mod` and `go.sum`; no local btcd workspace
 or replacement supplies reported results. The chain daemon remains pinned Core.
 
+### RPC batch replay and repair
+
+The first matched-mode pilot at
+`855720690fd31e40e9567950e68ecc74127f5404` used the original 12 GiB Core
+limit. SQLite CFilters completed correctly. Its paired full-block timing was
+excluded for overlapping integration work; a quiet replacement recorded a
+Core OOM and supplied no sync metric. A later 16 GiB capacity candidate at
+`b972aca18a27dc6b5a2a04ef7f4bdbc91cc2bbc4` also recorded a Core OOM during
+another contended attempt. The matching kernel trace identifies memory-cgroup
+exhaustion, including 16,741,224 KiB of anonymous RSS. That capacity increase
+is withdrawn from the benchmark branch; its source is retained separately
+for the `task-417-core16-pilot-source` provenance tag.
+
+A quiet, instrumented diagnostic at the latter source captured 1,972 exact
+getblock executions for one 1,000-block request. Logging began after 28 calls:
+the remaining 972 were followed by another 1,000 starting 59.590565 seconds
+later. Both retained historical and current RPC client constructors use the
+same one-minute HTTP timeout. The second burst demonstrates replay of the
+large batch. Repeated reply work supports memory amplification; this does
+not establish an exclusive cause for the earlier OOMs.
+
+The diagnostic stopped intentionally after replay detection. Its client exit
+137 was cleanup, with no OOM event or accepted timing in that run. Earlier
+diagnostic setups interrupted by container-inspection errors remain excluded.
+Raw evidence is retained under the task-local `runs/cfilters-current/` tree;
+saved chain and Wallet manifests are unchanged.
+
+The repaired `BitcoindClient.GetBlocks` sends at most 100 blocks per RPC batch,
+using the same client and ordered result/error contract. The logical scan,
+dataset and module pins are unchanged. Core returns to its original 12 GiB
+limit, with the 16 GiB Wallet client and separate 1 GiB PostgreSQL quota. Any
+new matched collection must name the repaired source, pass a fresh full-window
+pair and keep all previous profiles, failures and diagnostic timings separate.
+
 A matched collection has seven configurations for each existing full case:
 legacy rescan plus full-block/compact-filter modes for maintained kvdb,
 SQLite and PostgreSQL. Use eight independent unprofiled 1x observations per

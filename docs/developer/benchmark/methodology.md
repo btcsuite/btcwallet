@@ -105,11 +105,14 @@ and Lightning contract timing/witnesses remain disclosed simplifications.
 Inspect real pilot blocks before scaling; never silently substitute lighter
 blocks, synthetic Store ingestion, mocks or the legacy stress dataset.
 
-The maintained full-block scanner requests the whole 1,000-block window in one
-getblock batch, implying about 2.8 GB of reply hex at this payload before copies
-and decoded objects. This requires the explicit startup capacity budget in the
-[environment table](reproducibility.md#docker-environment). Keep those fixed
-settings across implementations and record them with the measured cohort.
+The maintained scanner keeps the 1,000-block logical window. Its Core adapter
+bounds each getblock RPC batch to 100 blocks, consuming a response before
+queuing the next. The earlier single-batch sender built about 2.8 GB of reply
+hex at this payload and replayed that work after an HTTP timeout; see the
+[diagnostic evidence](reproducibility.md#rpc-batch-replay-and-repair).
+Keep the original fixed startup settings in the
+[environment table](reproducibility.md#docker-environment) across modes and
+record the repaired source explicitly with any subsequent matched cohort.
 The small pilot establishes validity/reuse, not full-window memory feasibility.
 
 Use 1x for each restored lifecycle. CPU and heap captures are separate 1x runs;
