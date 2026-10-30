@@ -916,6 +916,89 @@ func TestDecorateInputsInternalKey(t *testing.T) {
 	require.Nil(t, result)
 }
 
+// TestDecorateInputsRejectsNilDerivation guards the public admission boundary
+// against nil origin records that originless decoration would dereference.
+func TestDecorateInputsRejectsNilDerivation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Both derivation families are pointer-bearing caller lists;
+	// malformed entries must fail before consulting any Wallet dependency.
+	tests := []struct {
+		name  string
+		input psbt.PInput
+	}{
+		{
+			name: "nil native derivation",
+			input: psbt.PInput{
+				Bip32Derivation: []*psbt.Bip32Derivation{nil},
+			},
+		},
+		{
+			name: "nil taproot derivation",
+			input: psbt.PInput{
+				TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{nil},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Leave Store calls unconfigured so reaching input
+			// lookup instead of rejecting the shape fails the mock contract.
+			w, _ := createStartedWalletWithMocks(t)
+			packet := testFundingPacket(validUTXO)
+			packet.Inputs[0] = test.input
+
+			// Act: Submit the malformed list through public decoration,
+			// without relying on funding's separate packet validation.
+			result, err := w.DecorateInputs(t.Context(), packet, false)
+
+			// Assert: The caller receives the stable malformed-packet
+			// error and no result, rather than crashing the Wallet worker.
+			require.ErrorIs(t, err, ErrPacketMalformed)
+			require.Nil(t, result)
+		})
+	}
+}
+
+// TestDecorateInputsOriginlessKey refuses a foreign key through decoration,
+// which has no later funding reconciliation to reject the caller record.
+func TestDecorateInputsOriginlessKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The owned native output has a public key but no Wallet
+	// origin, and the caller names another key in a native derivation record.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	inputAddr, stored := storeChild(
+		t, storeDerivationAccountPubKey(t), db.WitnessPubKey, false, 0,
+	)
+	stored.AccountNumber = nil
+	stored.MasterKeyFingerprint = nil
+	utxo := wire.NewTxOut(1_000_000, stored.ScriptPubKey)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: validUTXO,
+	}).Return(testStoreUtxoInfo(validUTXO, utxo), nil).Once()
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     validUTXO.Hash,
+	}).Return(testStoreTxDetail(validUTXO.Hash, utxo), nil).Once()
+	expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+
+	packet := testFundingPacket(validUTXO)
+	packet.Inputs[0].Bip32Derivation = testWalletDerivation()
+
+	// Act: Use the public decoration API without funding's restoration
+	// step, so decoration itself must enforce the known spending key.
+	result, err := w.DecorateInputs(t.Context(), packet, false)
+
+	// Assert: An absent origin cannot make a foreign key applicable to
+	// this input, even on the standalone decoration path.
+	require.ErrorIs(t, err, ErrConflictingInputMetadata)
+	require.Nil(t, result)
+}
+
 // TestDecorateInputsSuccess tests that DecorateInputs correctly decorates
 // known inputs and skips unknown inputs when skipUnknown is true.
 func TestDecorateInputsSuccess(t *testing.T) {
@@ -5754,27 +5837,47 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 
 	// Arrange: A numberless XPub child still has a known public key, but
 	// neither an account number nor a root fingerprint to put in a PSBT.
-	inputAddr, stored := storeChild(
-		t, storeDerivationAccountPubKey(t), db.WitnessPubKey, false, 0,
+	accountPubKey := storeDerivationAccountPubKey(t)
+	_, stored := storeChild(
+		t, accountPubKey, db.WitnessPubKey, false, 0,
 	)
-	stored.AccountNumber = nil
-	stored.MasterKeyFingerprint = nil
 	// The caller can supply the owned key's origin without the Wallet
 	// authenticating a root fingerprint or path it does not know.
 	origin := testWalletDerivation()
 	origin[0].PubKey = stored.PubKey
+	taprootOrigin := testWalletTaprootDerivation()
+	taprootOrigin[0].XOnlyPubKey = stored.PubKey[1:]
+	taprootOrigin[0].LeafHashes = [][]byte{}
 
 	tests := []struct {
-		name   string
-		origin []*psbt.Bip32Derivation
+		name          string
+		addrType      db.AddressType
+		origin        []*psbt.Bip32Derivation
+		taprootOrigin []*psbt.TaprootBip32Derivation
+		internalKey   []byte
+		parent        bool
 	}{
 		{
-			name:   "omit unknown origin",
-			origin: nil,
+			name:     "omit unknown origin",
+			addrType: db.WitnessPubKey,
+			parent:   true,
 		},
 		{
-			name:   "retain matching native origin",
-			origin: origin,
+			name:     "retain matching native origin",
+			addrType: db.WitnessPubKey,
+			origin:   origin,
+			parent:   true,
+		},
+		{
+			name:        "omit unknown taproot origin",
+			addrType:    db.TaprootPubKey,
+			internalKey: stored.PubKey[1:],
+		},
+		{
+			name:          "retain matching taproot origin",
+			addrType:      db.TaprootPubKey,
+			taprootOrigin: taprootOrigin,
+			internalKey:   stored.PubKey[1:],
 		},
 	}
 	for _, test := range tests {
@@ -5785,6 +5888,12 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 			// only the input's Store metadata with the originless child.
 			w, mocks := createStartedSQLWalletWithMocks(t)
 			mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+			inputAddr, stored := storeChild(
+				t, accountPubKey, test.addrType, false, 0,
+			)
+			stored.AccountNumber = nil
+			stored.MasterKeyFingerprint = nil
 			utxo := expectFundingSourcesForAddress(
 				t, w, mocks, validUTXO, inputAddr,
 			)
@@ -5796,6 +5905,7 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 			)
 			packet.Outputs = make([]psbt.POutput, 1)
 			packet.Inputs[0].Bip32Derivation = test.origin
+			packet.Inputs[0].TaprootBip32Derivation = test.taprootOrigin
 			before := packetSnapshot(t, packet)
 
 			// Act: Fund the owned input through the public API while its
@@ -5813,48 +5923,133 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 			input := result.Packet.Inputs[0]
 
 			require.Equal(t, utxo, input.WitnessUtxo)
-			require.NotNil(t, input.NonWitnessUtxo)
+			require.Equal(t, test.parent, input.NonWitnessUtxo != nil)
 			require.Equal(t, test.origin, input.Bip32Derivation)
-			require.Empty(t, input.TaprootBip32Derivation)
+			require.Equal(
+				t, test.taprootOrigin, input.TaprootBip32Derivation,
+			)
+			require.Equal(t, test.internalKey, input.TaprootInternalKey)
 		})
 	}
 }
 
 // TestFundPsbtRejectsImportedInputKey checks that omitting an unknown origin
-// does not allow a conflicting script family or known Taproot internal key.
+// does not allow a foreign key, conflicting family or Taproot script claim.
 func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The originless child pays a native witness output, whose
-	// script family cannot carry a Taproot internal-key claim.
-	inputAddr, stored := storeChild(
-		t, storeDerivationAccountPubKey(t), db.WitnessPubKey, false, 0,
+	// Arrange: Keep the real child key available to distinguish key
+	// contradictions from records in the wrong derivation family.
+	accountPubKey := storeDerivationAccountPubKey(t)
+	_, stored := storeChild(
+		t, accountPubKey, db.WitnessPubKey, false, 0,
 	)
-	stored.AccountNumber = nil
-	stored.MasterKeyFingerprint = nil
-	w, mocks := createStartedSQLWalletWithMocks(t)
-	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
-	utxo := expectFundingSourcesForAddress(t, w, mocks, validUTXO, inputAddr)
-	expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+	origin := testWalletDerivation()
+	origin[0].PubKey = stored.PubKey
+	taprootOrigin := testWalletTaprootDerivation()
+	taprootOrigin[0].XOnlyPubKey = stored.PubKey[1:]
+	// A matching key still cannot claim a script-path spend for this
+	// key-path output, matching upstream's complete-origin restriction.
+	leafOrigin := testWalletTaprootDerivation()
+	leafOrigin[0].XOnlyPubKey = stored.PubKey[1:]
+	leafOrigin[0].LeafHashes = [][]byte{bytes.Repeat([]byte{1}, 32)}
 
-	packet := testFundingPacket(validUTXO)
-	packet.UnsignedTx.AddTxOut(wire.NewTxOut(400_000, utxo.PkScript))
-	packet.Outputs = make([]psbt.POutput, 1)
-	packet.Inputs[0].TaprootInternalKey = stored.PubKey[1:]
-	before := packetSnapshot(t, packet)
+	tests := []struct {
+		name     string
+		addrType db.AddressType
+		caller   psbt.PInput
+	}{
+		{
+			name:     "contradict taproot internal key",
+			addrType: db.TaprootPubKey,
+			caller: psbt.PInput{
+				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
+			},
+		},
+		{
+			name:     "taproot derivation on native input",
+			addrType: db.WitnessPubKey,
+			caller: psbt.PInput{
+				TaprootBip32Derivation: taprootOrigin,
+			},
+		},
+		{
+			name:     "taproot internal key on native input",
+			addrType: db.WitnessPubKey,
+			caller: psbt.PInput{
+				TaprootInternalKey: stored.PubKey[1:],
+			},
+		},
+		{
+			name:     "bip32 derivation on taproot input",
+			addrType: db.TaprootPubKey,
+			caller: psbt.PInput{
+				Bip32Derivation: origin,
+			},
+		},
+		{
+			name:     "foreign native derivation",
+			addrType: db.WitnessPubKey,
+			caller: psbt.PInput{
+				Bip32Derivation: testWalletDerivation(),
+			},
+		},
+		{
+			name:     "foreign taproot derivation",
+			addrType: db.TaprootPubKey,
+			caller: psbt.PInput{
+				TaprootBip32Derivation: testWalletTaprootDerivation(),
+			},
+		},
+		{
+			name:     "taproot script-path derivation",
+			addrType: db.TaprootPubKey,
+			caller: psbt.PInput{
+				TaprootBip32Derivation: leafOrigin,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Act: Fund the contradictory packet without registering a lease
-	// expectation, so reserving a rejected input would fail the mock.
-	result, err := w.FundPsbt(t.Context(), &FundIntent{
-		Packet:  packet,
-		FeeRate: defaultFeeRate,
-	})
+			// Arrange: Fund an originless child with the row's caller
+			// records. No lease is expected for these rejected packets.
+			w, mocks := createStartedSQLWalletWithMocks(t)
+			mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
-	// Assert: Funding refuses the script-family contradiction and returns no
-	// packet, leaving the caller's transaction and metadata untouched.
-	require.ErrorIs(t, err, ErrConflictingInputMetadata)
-	require.Nil(t, result)
-	require.Equal(t, before, packetSnapshot(t, packet))
+			inputAddr, stored := storeChild(
+				t, accountPubKey, test.addrType, false, 0,
+			)
+			stored.AccountNumber = nil
+			stored.MasterKeyFingerprint = nil
+			utxo := expectFundingSourcesForAddress(
+				t, w, mocks, validUTXO, inputAddr,
+			)
+			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+
+			packet := testFundingPacket(validUTXO)
+			packet.UnsignedTx.AddTxOut(
+				wire.NewTxOut(400_000, utxo.PkScript),
+			)
+			packet.Outputs = make([]psbt.POutput, 1)
+			packet.Inputs[0] = test.caller
+			before := packetSnapshot(t, packet)
+
+			// Act: Fund the packet whose records contradict a known key
+			// or the input's actual script family and key-path spend.
+			result, err := w.FundPsbt(t.Context(), &FundIntent{
+				Packet:  packet,
+				FeeRate: defaultFeeRate,
+			})
+
+			// Assert: The conflict returns no funded packet and leaves
+			// the original transaction and caller records untouched.
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+			require.Nil(t, result)
+			require.Equal(t, before, packetSnapshot(t, packet))
+		})
+	}
 }
 
 // TestFundPsbtKnownInputMetadata refuses caller claims that contradict a
