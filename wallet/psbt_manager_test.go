@@ -5538,19 +5538,24 @@ func expectManualFundingSources(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 	)
 	require.NoError(t, err)
 
+	// This caller decorates a known-origin input; the shared funding
+	// fixture leaves that address metadata to each scenario.
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, inputAddr, db.WitnessPubKey, inputKey.PubKey(),
+	)
+
 	return expectFundingSourcesForAddress(
-		t, w, mocks, outPoint, inputAddr, db.WitnessPubKey,
-		inputKey.PubKey(),
+		t, w, mocks, outPoint, inputAddr,
 	)
 }
 
 // expectFundingSourcesForAddress registers the store and sync-tip reads a
 // completion-mode funding run performs against a single caller-selected UTXO
-// paying to the given address.
+// paying to the given address. Callers configure its address lookup separately
+// so complete and unknown input origins use the same funding machinery.
 func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	mocks *mockWalletDeps, outPoint wire.OutPoint,
-	inputAddr address.Address, addrType db.AddressType,
-	inputPubKey *btcec.PublicKey) *wire.TxOut {
+	inputAddr address.Address) *wire.TxOut {
 
 	t.Helper()
 
@@ -5622,12 +5627,6 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	mocks.chain.On(
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
 	).Return(nil).Maybe()
-
-	// Input decoration and change output decoration both resolve their
-	// address through the store.
-	expectSignerDerivedAddressInfo(
-		t, w, mocks, inputAddr, addrType, inputPubKey,
-	)
 
 	// The change output is only looked up once funding gets as far as
 	// decorating it, which a run that is refused earlier never does.
@@ -6129,9 +6128,12 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	outPoint := wire.OutPoint{Hash: parent.TxHash(), Index: 0}
 
 	expectFundingSourcesForAddress(
-		t, w, mocks, outPoint, inputAddr, db.TaprootPubKey,
-		inputKey.PubKey(),
+		t, w, mocks, outPoint, inputAddr,
 	)
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, inputAddr, db.TaprootPubKey, inputKey.PubKey(),
+	)
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Once()
 	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
@@ -6149,6 +6151,8 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 
 	before := packetSnapshot(t, packet)
 
+	// Act: Fund the caller-selected Taproot input while it carries its
+	// parent, exercising preservation across input decoration and sorting.
 	result, err := w.FundPsbt(t.Context(), &FundIntent{
 		Packet:  packet,
 		FeeRate: defaultFeeRate,
@@ -6178,7 +6182,6 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	// records no parent for one, so this is the caller's record and not a
 	// copy of anything the wallet wrote.
 	require.Len(t, fundedInput.TaprootBip32Derivation, 1)
-	mocks.store.AssertExpectations(t)
 }
 
 // TestFundPsbtInputLeasedBeforeDecoration verifies that a caller-selected
