@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
@@ -34,6 +35,20 @@ import (
 // inventory. Each sample restores metadata at the base and discovers history
 // from the same fixed daemon target, without the old stress suite's lookahead.
 func BenchmarkStartToSynced(b *testing.B) {
+	benchmarkStartToSynced(b, SyncMethodFullBlocks)
+}
+
+// BenchmarkStartToSyncedCFilters measures the same restored native Wallet with
+// forced compact filters; unavailable filters fail instead of selecting Auto.
+func BenchmarkStartToSyncedCFilters(b *testing.B) {
+	benchmarkStartToSynced(b, SyncMethodCFilters)
+}
+
+// benchmarkStartToSynced shares fixtures and timer boundaries between the two
+// maintained strategies, retaining legacy rescan only as the baseline leaf.
+func benchmarkStartToSynced(b *testing.B, method SyncMethod) {
+	b.Helper()
+
 	for _, scenario := range bwtest.SyncBenchmarkCases() {
 		b.Run(scenario.ID, func(b *testing.B) {
 			fixture, target := prepareSyncBenchmarkKVDB(b, scenario)
@@ -51,22 +66,25 @@ func BenchmarkStartToSynced(b *testing.B) {
 
 			// Separate leaves keep native API ownership and exclude fixture
 			// preparation from each reported startup lifecycle.
-			b.Run("Legacy", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ResetTimer()
-				b.StopTimer()
+			if method == SyncMethodFullBlocks {
+				b.Run("Legacy", func(b *testing.B) {
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.StopTimer()
 
-				for range b.N {
-					runLegacyStartToSynced(b, fixture, node, tip)
-				}
-			})
+					for range b.N {
+						runLegacyStartToSynced(b, fixture, node, tip)
+					}
+				})
+			}
+
 			b.Run("KVDB", func(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				b.StopTimer()
 
 				for range b.N {
-					runMaintainedStartToSynced(b, fixture, node, tip)
+					runMaintainedStartToSynced(b, fixture, node, tip, method)
 				}
 			})
 		})
@@ -135,12 +153,31 @@ func runLegacyStartToSynced(b *testing.B, fixture string,
 
 	b.StopTimer()
 	finishProfile()
+
+	// Preserve a public result census after measurement so external receipts
+	// can reject a completed scan that omitted or changed wallet funds.
+	utxos, err := w.ListUnspentDeprecated(0, 999999, "")
+	require.NoError(b, err)
+	b.Logf("startup outputs: %d", len(utxos))
+
+	outputs := make([]string, 0, len(utxos))
+	for _, utxo := range utxos {
+		amount, err := btcutil.NewAmount(utxo.Amount)
+		require.NoError(b, err)
+
+		outputs = append(outputs, fmt.Sprintf(
+			"%s:%d=%d", utxo.TxID, utxo.Vout, amount,
+		))
+	}
+	// One log line preserves the full census under Go's benchmark log limit.
+	b.Logf("startup output set: %s", strings.Join(outputs, ","))
 }
 
 // runMaintainedStartToSynced times Start through exact public Info readiness;
 // physical storage opening and all teardown remain outside the sample.
 func runMaintainedStartToSynced(b *testing.B, fixture string,
-	node *testcontainers.DockerContainer, tip waddrmgr.BlockStamp) {
+	node *testcontainers.DockerContainer, tip waddrmgr.BlockStamp,
+	method SyncMethod) {
 
 	b.Helper()
 	// Go reports leaf logs; retain the actual endpoint with each sample.
@@ -155,7 +192,7 @@ func runMaintainedStartToSynced(b *testing.B, fixture string,
 	manager, err := NewManager(ctx, ManagerConfig{
 		Backend: DBBackendKVDB, DataSource: syncBenchmarkKVDBPath(b, fixture),
 		ChainParams: chaincfg.RegressionNetParams, ChainSource: source,
-		SyncMethod:              SyncMethodFullBlocks,
+		SyncMethod:              method,
 		WalletSyncRetryInterval: 10 * time.Millisecond,
 		KVDBPubPassphrase:       []byte(InsecurePubPassphrase),
 	})
@@ -191,6 +228,24 @@ func runMaintainedStartToSynced(b *testing.B, fixture string,
 
 	b.StopTimer()
 	finishProfile()
+
+	// Read only after timer/profile capture; the same canonical outpoints and
+	// satoshi values must be discovered by both forced strategies.
+	utxos, err := wallets[0].ListUnspent(ctx, UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: 999999,
+	})
+	require.NoError(b, err)
+	b.Logf("startup outputs: %d", len(utxos))
+
+	outputs := make([]string, 0, len(utxos))
+	for _, utxo := range utxos {
+		outputs = append(outputs, fmt.Sprintf(
+			"%s=%d", utxo.OutPoint.String(), utxo.Amount,
+		))
+	}
+	// One log line preserves the full census under Go's benchmark log limit.
+	b.Logf("startup output set: %s", strings.Join(outputs, ","))
 }
 
 const (

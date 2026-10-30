@@ -74,8 +74,13 @@ through its equivalent persisted-tip/ChainSynced condition plus live-tip RPC.
 The live RPC matches Info's observation work and lets network polling progress
 on one processor. Unsuccessful observations yield; they add no completion sleep.
 
-Legacy uses native rescan; maintained kvdb, SQLite and PostgreSQL use full-block
-sync. Both kvdb leaves restore the same closed baseline and persist freelists.
+Legacy uses native rescan. Maintained kvdb, SQLite and PostgreSQL expose
+separate forced full-block and compact-filter entrypoints. Both modes restore
+the same native baseline and chain target. Forced compact filters return an
+error when unavailable; Auto selection and its watchlist threshold are not
+part of this comparison. Compact-filter positives may include false positives
+and do not redefine the dataset's actual Wallet-hit block ratios.
+Both kvdb runtimes restore the same closed baseline and persist freelists.
 The SQL suite owns its usual native lifecycle independently. These paths need
 not have artificial structural symmetry. Report only this explicit workload
 and mode comparison; do not infer a general ranking of storage backends.
@@ -109,7 +114,11 @@ The small pilot establishes validity/reuse, not full-window memory feasibility.
 
 Use 1x for each restored lifecycle. CPU and heap captures are separate 1x runs;
 finish capture before Wallet/source teardown. Keep usual database and matched
-chain I/O measured. Fixture correctness belongs in tests and separate inspection,
-not benchmark assertions. Whole-command duration includes setup; a timeout or
-OOM supplies no startup timing or usable profile. Keep failed/excluded attempts
-with their actual source revision and never relabel old dense or biased runs.
+chain I/O measured. Fixture correctness belongs in tests and separate
+inspection. After both timer and profile capture stop, each lifecycle logs its
+public unspent-output count, outpoints and satoshi values. External receipt
+validation compares that census across implementations and modes, without
+adding expected result assertions, waits or queries to the measured operation.
+Whole-command duration includes setup; a timeout or OOM supplies no startup
+timing or usable profile. Keep failed/excluded attempts with their actual
+source revision and never relabel old dense or biased runs.

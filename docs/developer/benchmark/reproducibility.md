@@ -802,3 +802,44 @@ docker run --rm --cpus=1 --memory=16g --memory-swap=16g \
       /artifacts/BenchmarkSyncData_UTXODensity-0.010_Legacy.prof \
       > /artifacts/cpu-top.txt'
 ```
+
+## Matched sync-mode protocol
+
+The forced compact-filter entrypoint is `BenchmarkStartToSyncedCFilters`.
+The existing `BenchmarkStartToSynced` entrypoint retains full-block mode and
+the native legacy baseline. Both use the scalar `start-to-synced` runner and
+its v3 closed fixtures. Separate output roots distinguish modes without
+changing fixture identity, storage settings, resources or timer boundaries.
+Go dependencies resolve through `go.mod` and `go.sum`; no local btcd workspace
+or replacement supplies reported results. The chain daemon remains pinned Core.
+
+A matched collection has seven configurations for each existing full case:
+legacy rescan plus full-block/compact-filter modes for maintained kvdb,
+SQLite and PostgreSQL. Use eight independent unprofiled 1x observations per
+configuration for `empty`, `hits-0`, `hits-1`, `small-node` and `hits-100`.
+The resulting 280 observations are separate from the historical collections.
+Record the actual source, executable hashes, commands, targets and collection
+membership before reporting their medians. This protocol is not a result claim.
+
+Rotate the four backend groups using the existing eight-sample schedule.
+Within each maintained group, run its two modes adjacently and alternate which
+mode leads by sample. This balances backend-group positions and within-backend
+mode order; it does not balance all seven individual execution positions.
+Record actual chronology, ambient services and any excluded/replacement run.
+
+Each sample restores a private chain and Wallet. After timing and profiling
+stop, public ListUnspent results are logged as an output count and individual
+outpoint/satoshi-value records. Canonicalize the records externally and require
+all seven configurations for a case to agree. Zero-history cases have no
+outputs; nonzero cases have 101 outputs totaling 89,636,054 sat. These checks
+are outside timing and introduce no new performance metric. The initial
+real-daemon smoke and repeated compact-filter smoke must pass before scaling.
+
+The matched collection must distinguish measured code from fixture preparation
+code. When reusing historical v2 targets or cloning current v3 smoke metadata,
+record original preparation receipts, copied source/destination paths, common
+base hash, ordinary-script-set compatibility, smoke-target identity and exact
+staged full target hashes. Do not attribute copied targets to the measured
+revision's mining path. A fresh regenerate-on-miss reproduction must match
+those target hashes before claiming the same dataset. Actual staging identities
+and results belong in the completed collection record.
