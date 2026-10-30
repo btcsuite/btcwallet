@@ -154,8 +154,8 @@ github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf h1:HZKvJUHlcXI
 github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf/go.mod h1:vxmQPeIQxPf6Jf9rM8R+B4rKBqLA2AjttNxkFBL2Plk=
 github.com/lightninglabs/migrate/v4 v4.18.2-9023d66a-fork-pr-2.0.20251211093704-71c1eef09789 h1:7kX7vUgHUazAHcCJ6uzBDa4/2MEGEbMEfa01GtfqmTQ=
 github.com/lightninglabs/migrate/v4 v4.18.2-9023d66a-fork-pr-2.0.20251211093704-71c1eef09789/go.mod h1:99BKpIi6ruaaXRM1A77eqZ+FWPQ3cfRa+ZVy5bmWMaY=
-github.com/lightninglabs/neutrino v0.18.1-0.20261029225123-91b71d964579 h1:qSSFEK6Rqw7/2fC3RVpcfzsBdXzUZY0ywrjyxe1L+5M=
-github.com/lightninglabs/neutrino v0.18.1-0.20261029225123-91b71d964579/go.mod h1:X/FufkyTPZQ03LmG7TkHZbih7BlP3EgHHelGBuxsD2A=
+github.com/lightninglabs/neutrino v0.18.1-0.20261030000508-af3416b2e235 h1:p1Yg6Vi6Iw40pTm+vLn+Kb2K8QWXvRQCWqze1hmMYA4=
+github.com/lightninglabs/neutrino v0.18.1-0.20261030000508-af3416b2e235/go.mod h1:X/FufkyTPZQ03LmG7TkHZbih7BlP3EgHHelGBuxsD2A=
 github.com/lightninglabs/neutrino/cache v1.1.4 h1:KVtvUmBwYr7eKtjfjHG/q6/cQlcrjHl23Gag+VdxF2g=
 github.com/lightninglabs/neutrino/cache v1.1.4/go.mod h1:ZqLzxghPggIRfNXeAZN1VtTKofMyK/ALI6niYsPH6OE=
 github.com/lightningnetwork/lnd/actor v0.0.5 h1:2u4VnqarPrsBCrvKWwi0F38IXZH3duM9HtE6Gcw+d1E=
