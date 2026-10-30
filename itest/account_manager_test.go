@@ -2598,7 +2598,7 @@ func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
 }
 
 // testAccountManagerDerivePathBoundAddress preserves imported BIP49 paths,
-// received balance and account identity through reopening.
+// received balance and public UTXO account identity through reopening.
 func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
 	// Arrange: import the fixture's account-one XPub with BIP49's mixed schema
 	// and a present-zero fingerprint, using only the declared scope and key.
@@ -2655,7 +2655,8 @@ func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
 		Value:    int64(amount),
 		PkScript: script,
 	}, bwtest.MinerFeeRate)
-	h.MineBlockWithTx(h.AssertTxInMempool(*txid))
+	funding := h.AssertTxInMempool(*txid)
+	h.MineBlockWithTx(funding)
 	before, err := w.GetAccount(h.Context(), scope, params.Name)
 	require.NoError(h, err)
 	require.Equal(h, &number, before.AccountNumber)
@@ -2664,9 +2665,85 @@ func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
 	require.Equal(h, scope, before.KeyScope)
 	require.True(h, before.IsImported)
 
-	// Reopen through the harness so persisted identity, branch children and
-	// credited membership are read by a replacement Wallet instance.
+	// Arrange: locate the actual receiving output independently of wallet
+	// queries, so agreeing point/list results cannot hide a wrong outpoint.
+	outputIndex := -1
+	for index, output := range funding.TxOut {
+		if bytes.Equal(output.PkScript, script) {
+			outputIndex = index
+
+			break
+		}
+	}
+
+	require.NotEqual(h, -1, outputIndex, "receiving output missing")
+
+	// The funding and managed address supply the complete public oracle;
+	// watch-only ownership must retain the named account without spendability.
+	expected := &wallet.Utxo{
+		OutPoint: wire.OutPoint{
+			Hash:  *txid,
+			Index: uint32(outputIndex),
+		},
+		Amount:        amount,
+		PkScript:      script,
+		Confirmations: 1,
+		Spendable:     false,
+		Address:       external.Addr,
+		Account:       created.AccountName,
+		AddressType:   external.AddrType,
+		Locked:        false,
+	}
+
+	// Act: query the funded outpoint and confirmed inventory, then select
+	// coins by the declared owner and by the generic imported bucket.
+	query := wallet.UtxoQuery{MinConfs: 1, MaxConfs: maxConfsLimit}
+	utxo, pointErr := w.GetUtxo(h.Context(), expected.OutPoint)
+	utxos, listErr := w.ListUnspent(h.Context(), query)
+	query.Account = created.AccountName
+	owned, ownerErr := w.ListUnspent(h.Context(), query)
+	query.Account = waddrmgr.ImportedAddrAccountName
+	imported, importedErr := w.ListUnspent(h.Context(), query)
+
+	// Assert: point and list reads agree with the independent funding facts.
+	// Only the declared account's filter may return this path-bound output.
+	require.NoError(h, pointErr)
+	require.Equal(h, expected, utxo)
+	require.NoError(h, listErr)
+	require.Equal(h, []*wallet.Utxo{expected}, utxos)
+	require.NoError(h, ownerErr)
+	require.Equal(h, []*wallet.Utxo{expected}, owned)
+	require.NoError(h, importedErr)
+	require.Empty(h, imported)
+
+	// Act: reopen the same store and wait for the replacement Wallet to
+	// reach the unchanged tip, making confirmation comparisons meaningful.
 	w = h.ReloadWallet(w)
+	h.AssertWalletSynced(w)
+
+	// Act: repeat the public point, inventory and account-filter reads on the
+	// replacement Wallet to observe the persisted output's account identity.
+	query.Account = ""
+	utxo, pointErr = w.GetUtxo(h.Context(), expected.OutPoint)
+	utxos, listErr = w.ListUnspent(h.Context(), query)
+	query.Account = created.AccountName
+	owned, ownerErr = w.ListUnspent(h.Context(), query)
+	query.Account = waddrmgr.ImportedAddrAccountName
+	imported, importedErr = w.ListUnspent(h.Context(), query)
+
+	// Assert: reopening preserves all output metadata and owner selection;
+	// the generic imported bucket still cannot claim the numbered account.
+	require.NoError(h, pointErr)
+	require.Equal(h, expected, utxo)
+	require.NoError(h, listErr)
+	require.Equal(h, []*wallet.Utxo{expected}, utxos)
+	require.NoError(h, ownerErr)
+	require.Equal(h, []*wallet.Utxo{expected}, owned)
+	require.NoError(h, importedErr)
+	require.Empty(h, imported)
+
+	// Assert: account identity, both branch children and the credited balance
+	// survive the same reopen observed by the UTXO queries above.
 	after, err := w.GetAccount(h.Context(), scope, params.Name)
 	require.NoError(h, err)
 	require.Equal(h, before, after)
