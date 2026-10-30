@@ -2,8 +2,10 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,18 @@ import (
 // each sample. Only Manager.Start through exact public readiness is timed,
 // including observation, with native SQLite and PostgreSQL fixtures.
 func BenchmarkStartToSynced(b *testing.B) {
+	benchmarkStartToSynced(b, wallet.SyncMethodFullBlocks)
+}
+
+// BenchmarkStartToSyncedCFilters forces compact filters on the same native SQL
+// fixtures, making an unavailable filter source a failure rather than Auto.
+func BenchmarkStartToSyncedCFilters(b *testing.B) {
+	benchmarkStartToSynced(b, wallet.SyncMethodCFilters)
+}
+
+// benchmarkStartToSynced keeps both strategies on the existing closed restore
+// and public readiness boundary; preparation remains independent of the mode.
+func benchmarkStartToSynced(b *testing.B, method wallet.SyncMethod) {
 	b.Helper()
 
 	for _, scenario := range bwtest.SyncBenchmarkCases() {
@@ -24,6 +38,7 @@ func BenchmarkStartToSynced(b *testing.B) {
 				b, scenario,
 			)
 			config := native.config
+			config.SyncMethod = method
 			_, node, rpc, _ := bwtest.RestoreSyncBenchmarkNode(
 				b.Context(), b, target,
 			)
@@ -94,6 +109,24 @@ func BenchmarkStartToSynced(b *testing.B) {
 
 					b.StopTimer()
 					finishProfile()
+
+					// A public output census after time/profile capture lets
+					// receipts verify equivalent discovery across native modes.
+					utxos, err := wallets[0].ListUnspent(ctx, wallet.UtxoQuery{
+						MinConfs: 0,
+						MaxConfs: 999999,
+					})
+					require.NoError(b, err)
+					b.Logf("startup outputs: %d", len(utxos))
+
+					outputs := make([]string, 0, len(utxos))
+					for _, utxo := range utxos {
+						outputs = append(outputs, fmt.Sprintf(
+							"%s=%d", utxo.OutPoint.String(), utxo.Amount,
+						))
+					}
+					// Keep the complete census within Go's log-line limit.
+					b.Logf("startup output set: %s", strings.Join(outputs, ","))
 				}()
 			}
 		})
