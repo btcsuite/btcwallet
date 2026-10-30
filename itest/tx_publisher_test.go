@@ -480,10 +480,12 @@ func testBroadcastAlreadyKnown(h *bwtest.HarnessTest) {
 	h.MineBlockWithTx(tx)
 }
 
-// testBroadcastRejected verifies that a transaction the network refuses is
-// reported with a stable identity and claims no coin: neither of its outputs
-// becomes spendable, and the coin it named is still there afterwards.
+// testBroadcastRejected verifies a stable refusal error and wallet state at
+// the rejection boundary: preflight creates no row, while a send-time refusal
+// preserves the recorded transaction and its input spend links.
 func testBroadcastRejected(h *bwtest.HarnessTest) {
+	// Arrange: Fund one owned input and create a dust payment back to the
+	// wallet so both its input claim and credited outputs are observable.
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txPublisherFundingType,
 		Amounts:  []btcutil.Amount{oneBTC},
@@ -501,8 +503,7 @@ func testBroadcastRejected(h *bwtest.HarnessTest) {
 	// relay, which is what this case needs: the wallet has every reason to
 	// record it and only the backend's answer to stop it. The second output
 	// absorbs the rest of the coin so dust is the only rule it breaks, and
-	// both outputs pay the wallet, so a refusal that still left the wallet
-	// holding coins would be visible below.
+	// both outputs pay the wallet, making recording visible below.
 	//
 	// A double spend of an unconfirmed transaction was tried as the subject
 	// here and dropped: bitcoind enables full replace-by-fee by default, so
@@ -526,8 +527,12 @@ func testBroadcastRejected(h *bwtest.HarnessTest) {
 		},
 	})
 
+	// Act: Attempt publication; a capable backend can refuse at preflight,
+	// while a light client records before its peer refuses the send.
 	err = w.Broadcast(h.Context(), tx, "")
 
+	// Assert: Preserve the public refusal identity and check the wallet
+	// state promised at the backend's documented rejection boundary.
 	require.ErrorIs(
 		h, err, chain.ErrDust, "dust transaction was not refused",
 	)
@@ -535,10 +540,31 @@ func testBroadcastRejected(h *bwtest.HarnessTest) {
 	// The refusal published nothing.
 	h.AssertTxNotInMempool(tx.TxHash())
 
-	// It left no record either. A backend that answers the acceptance check
-	// refuses before Broadcast records anything, while neutrino has no
-	// answer to refuse with, so it records, publishes, and removes the
-	// branch once its peer rejects. Both end with the wallet holding no row.
+	// Without preflight, recording commits before peer refusal. Retain the
+	// row and its spend links because that refusal cannot prove invalidity.
+	if !h.Backend.SupportsMempoolAcceptance() {
+		_, err = w.GetTx(h.Context(), tx.TxHash())
+		require.NoError(h, err, "send refusal removed the recorded tx")
+
+		for i, output := range tx.TxOut {
+			utxo, err := w.GetUtxo(h.Context(), wire.OutPoint{
+				Hash:  tx.TxHash(),
+				Index: uint32(i),
+			})
+			require.NoError(h, err, "recorded output %d was removed", i)
+			require.Equal(h, btcutil.Amount(output.Value), utxo.Amount)
+		}
+
+		_, err = w.GetUtxo(h.Context(), spent)
+		require.ErrorIs(
+			h, err, wallet.ErrUnknownOutput,
+			"send refusal released the claimed input",
+		)
+
+		return
+	}
+
+	// Preflight refuses before recording, leaving the wallet untouched.
 	_, err = w.GetTx(h.Context(), tx.TxHash())
 	require.ErrorIs(
 		h, err, wallet.ErrTxNotFound,
