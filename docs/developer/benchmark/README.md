@@ -67,3 +67,25 @@ BENCH_CASE='^BenchmarkStartToSynced$/^small-node$' \
 
 Use profile=mem in another invocation for the heap capture. Do not combine
 profiling with timing samples or interpret the pilot as a full result table.
+
+### Forced compact-filter comparison
+
+`BenchmarkStartToSynced` retains the full-block selectors above.
+`BenchmarkStartToSyncedCFilters` uses the same fixtures and forces compact
+filters. Select `./wallet` with
+`^BenchmarkStartToSyncedCFilters$/^smoke$/^KVDB$`, or `./wallet/bench` with
+`^BenchmarkStartToSyncedCFilters$/^smoke$` and the matching SQL backend.
+Legacy rescan remains a single baseline under the original entrypoint.
+
+```sh
+# Give this forced-filter lifecycle its own output root while reusing the chain.
+BENCH_PACKAGE=./wallet/bench \
+BENCH_CASE='^BenchmarkStartToSyncedCFilters$/^smoke$' \
+  make bench method=start-to-synced db=sqlite case=smoke duration=1x \
+  out=/tmp/btcwallet-bench/startup-cfilters
+```
+
+Use separate output roots for each mode, sample and backend. Both modes keep
+`method=start-to-synced`, the same closed fixture keys and the same resources.
+The [matched-mode protocol](reproducibility.md#matched-sync-mode-protocol)
+defines collection and completed-Wallet verification.
