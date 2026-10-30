@@ -14,6 +14,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -395,6 +397,14 @@ type PsbtManager interface {
 	// If `skipUnknown` is true, the wallet will skip inputs it does not
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
+	//
+	// Owned Taproot inputs receive the Wallet's internal key. A conflicting
+	// caller internal key, or one on a non-Taproot input, returns
+	// ErrConflictingInputMetadata.
+	//
+	// When the origin is unknown, no new derivation records are added.
+	// Caller origins for the spending key are retained without authenticating
+	// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
 	DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		skipUnknown bool) (*psbt.Packet, error)
 
@@ -511,12 +521,27 @@ type finalizePsbtReq struct {
 //     references a UTXO owned by the wallet.
 //  2. Enriches: If owned, calls `decorateInput` to add the full previous
 //     transaction (`NonWitnessUtxo`) or output (`WitnessUtxo`), along with
-//     BIP32 derivation paths (`Bip32Derivation` or `TaprootBip32Derivation`)
+//     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
+//
+// Owned Taproot inputs receive the Wallet's internal key. A conflicting
+// caller internal key, or one on a non-Taproot input, returns
+// ErrConflictingInputMetadata.
+//
+// When the origin is unknown, no new derivation records are added.
+// Caller origins for the spending key are retained without authenticating
+// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
 	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	// Reject unreadable caller records before admission: originless
+	// decoration reads derivation entries without further pointer checks.
+	err = validatePacketShape(packet)
 	if err != nil {
 		return nil, err
 	}
@@ -619,6 +644,16 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	// With the managed address, we can now get the derivation information
 	// for the address.
 	derivation, err := derivationForAddressInfo(scriptInfo.AddressInfo)
+	// A known public key can describe a coin without a root origin, while
+	// a present but unusable origin must still fail.
+	if errors.Is(err, ErrDerivationPathNotFound) &&
+		scriptInfo.Derivation == nil && scriptInfo.PubKey != nil {
+
+		err = checkOriginlessInputDerivations(
+			pInput, scriptInfo.PubKey, taproot,
+		)
+	}
+
 	if err != nil {
 		return waddrmgr.SpendTypeUnknown, err
 	}
@@ -657,6 +692,35 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	}
 
 	return scriptInfo.AddrType.SpendType(), nil
+}
+
+// checkOriginlessInputDerivations checks the key and spent-script family the
+// Wallet knows without claiming knowledge of a caller's root origin. Taproot
+// inputs here are key-path spends, so their derivations cannot name leaves.
+func checkOriginlessInputDerivations(input *psbt.PInput,
+	pubKey *btcec.PublicKey, taproot bool) error {
+
+	// Check every caller record before preserving it: the missing origin
+	// does not make another public key applicable to this single-key input.
+	for _, derivation := range input.Bip32Derivation {
+		if taproot || !bytes.Equal(
+			derivation.PubKey, pubKey.SerializeCompressed(),
+		) {
+
+			return ErrConflictingInputMetadata
+		}
+	}
+
+	for _, derivation := range input.TaprootBip32Derivation {
+		if !taproot || len(derivation.LeafHashes) > 0 || !bytes.Equal(
+			derivation.XOnlyPubKey, schnorr.SerializePubKey(pubKey),
+		) {
+
+			return ErrConflictingInputMetadata
+		}
+	}
+
+	return nil
 }
 
 // fetchAndValidateUtxo fetches the wallet-owned UTXO and transaction details
@@ -2756,7 +2820,8 @@ func mergeOutputScripts(dest, src *psbt.POutput) error {
 	return nil
 }
 
-// addInputInfoSegWitV0Common adds the common PSBT fields for SegWit v0 inputs.
+// addInputInfoSegWitV0Common adds common SegWit v0 fields. A nil derivation
+// retains caller origin records without inventing Wallet origin metadata.
 func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
 	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
 	isNestedWitness bool, redeemScript []byte) {
@@ -2803,7 +2868,7 @@ func addInputInfoSegWitV0FromAddressInfo(in *psbt.PInput, prevTx *wire.MsgTx,
 }
 
 // addInputInfoSegWitV1 adds the UTXO and BIP32 derivation info for a SegWit v1
-// PSBT input (p2tr) from the given wallet information.
+// PSBT input (p2tr). A nil derivation retains the caller's origin, if supplied.
 func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	derivationInfo *psbt.Bip32Derivation) {
 
@@ -2813,6 +2878,11 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 		PkScript: utxo.PkScript,
 	}
 	in.SighashType = txscript.SigHashDefault
+
+	// An unknown root must not become a zero fingerprint or an empty path.
+	if derivationInfo == nil {
+		return
+	}
 
 	// Taproot inputs carry only the taproot-specific derivation. Emitting a
 	// parallel Bip32Derivation would make the input ambiguous for the
