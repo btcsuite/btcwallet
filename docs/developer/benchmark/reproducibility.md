@@ -131,6 +131,32 @@ Both builds use one `Benchmark<API>` entrypoint and
 `bwtest.NodeBenchmarkWorkload`, `NodeBenchmarkAddressBatch` and
 `NodeBenchmarkCases`; method consumers own native requests and read callbacks.
 
+### Different-item and not-found reads
+
+Use `Different` or `NotFound` for GetAddressInfo, GetTx, GetUtxo and GetAccount.
+Each measured call uses a different input. The untimed first call uses a
+separate extra input. Inputs are prepared before timing; the benchmark does
+not cycle through them or generate them during measured calls.
+
+These cases require a fixed call count. For example, `duration=10x` makes ten
+measured calls and needs eleven inputs, including warmup. Existing-item runs
+fail before timing if there are not enough items. A time target such as `3s`
+is rejected because it can request more items than the saved Wallet contains.
+Repeated-item and List benchmarks still support time targets.
+
+```sh
+# Read ten different existing transactions from the saved SQLite smoke data.
+BENCH_PACKAGE=./wallet/bench \
+  BENCH_CASE='^BenchmarkGetTxDifferent$/^smoke$' \
+  make bench method=get-tx-different db=sqlite case=smoke duration=10x
+```
+
+For a missing transaction, replace `Different` with `NotFound`. For the kvdb
+suite, use `BENCH_PACKAGE=./wallet` and the
+`^BenchmarkGetTxDifferentAPI$/^matched$/^smoke$/^0-Before$` pattern for legacy,
+or `1-After` for maintained kvdb. Use the same fixed count on every backend.
+The other Get APIs use the corresponding method name in these selectors.
+
 ### Collect timing results
 
 Select full cases explicitly and preserve raw output with the run evidence.
