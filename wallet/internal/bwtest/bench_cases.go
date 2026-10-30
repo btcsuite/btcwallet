@@ -3,12 +3,16 @@ package bwtest
 import (
 	"fmt"
 	"math"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -30,32 +34,137 @@ const NodeBenchmarkPointValue = 398_070
 func SelectNodeBenchmarkTarget[T any](outputs []T,
 	project func(T) (btcutil.Amount, string, uint32)) (T, bool) {
 
-	var (
-		target      T
-		targetTxID  string
-		targetIndex uint32
-		found       bool
-	)
+	// One-item and different-item reads use the same outputs and order.
+	targets := selectNodeBenchmarkTargets(outputs, project, 1)
+	if len(targets) == 0 {
+		var zero T
 
+		return zero, false
+	}
+
+	return targets[0], true
+}
+
+// SelectNodeBenchmarkTargets selects count cooperative returns in transaction
+// hash/output order. Include one extra item for the untimed first call.
+// project reads native fields without importing Wallet or legacy JSON types.
+// A request for more items than are available fails before measurement.
+func SelectNodeBenchmarkTargets[T any](tb testing.TB, outputs []T, count int,
+	project func(T) (btcutil.Amount, string, uint32)) []T {
+
+	tb.Helper()
+
+	// Select enough different items for warmup and every measured call.
+	targets := selectNodeBenchmarkTargets(outputs, project, count)
+	if len(targets) < count {
+		tb.Fatalf("prepare different reads: need %d items including warmup, "+
+			"have %d", count, len(targets))
+	}
+
+	return targets
+}
+
+// selectNodeBenchmarkTargets selects matching cooperative outputs in the same
+// order for each backend. It returns only the selected items' backing storage.
+func selectNodeBenchmarkTargets[T any](outputs []T,
+	project func(T) (btcutil.Amount, string, uint32), count int) []T {
+
+	// Enumerations remain native; select requests by their common data fields.
+	var targets []T
 	for _, output := range outputs {
-		amount, txid, index := project(output)
-		if amount != NodeBenchmarkPointValue {
-			continue
-		}
-
-		// The first match initializes the minimum; later matches use the
-		// same display-order key for every backend's point-read request.
-		if !found || txid < targetTxID ||
-			(txid == targetTxID && index < targetIndex) {
-
-			target = output
-			targetTxID = txid
-			targetIndex = index
-			found = true
+		amount, _, _ := project(output)
+		if amount == NodeBenchmarkPointValue {
+			targets = append(targets, output)
 		}
 	}
 
-	return target, found
+	// Displayed txid/index order keeps every backend's request sequence equal.
+	sort.Slice(targets, func(i, j int) bool {
+		_, leftTxID, leftIndex := project(targets[i])
+		_, rightTxID, rightIndex := project(targets[j])
+
+		if leftTxID != rightTxID {
+			return leftTxID < rightTxID
+		}
+
+		return leftIndex < rightIndex
+	})
+
+	if len(targets) > count {
+		targets = targets[:count]
+	}
+
+	return append([]T(nil), targets...)
+}
+
+// NodeBenchmarkMissingReadTargets prepares count different missing items.
+// Include one extra for the untimed first call. build constructs the caller's
+// native request type without importing Wallet or adding fixture data.
+func NodeBenchmarkMissingReadTargets[T any](tb testing.TB, count int,
+	build func(wire.OutPoint, address.Address) T) []T {
+
+	tb.Helper()
+
+	targets := make([]T, count)
+	for i := range targets {
+		// A real curve point makes absence, rather than invalid input, the
+		// operation measured by address readers. The txid is also absent.
+		hash := chainhash.DoubleHashH([]byte(fmt.Sprintf(
+			"btcwallet/bench/not-found/%d", i,
+		)))
+		_, pubKey := btcec.PrivKeyFromBytes(hash[:])
+		addr, err := address.NewAddressTaproot(
+			schnorr.SerializePubKey(pubKey), &chaincfg.RegressionNetParams,
+		)
+		require.NoError(tb, err)
+
+		targets[i] = build(wire.OutPoint{Hash: hash, Index: 1}, addr)
+	}
+
+	return targets
+}
+
+// NodeBenchmarkAccountReadTargets prepares count different scope/name pairs
+// from the shared Wallet model. Include one extra for the untimed first call.
+// Missing names use valid scopes and do not add accounts to the fixture.
+func NodeBenchmarkAccountReadTargets(tb testing.TB,
+	workload NodeBenchmarkWorkload, count int,
+	missing bool) ([]waddrmgr.KeyScope, []string) {
+
+	tb.Helper()
+
+	// Existing reads must fit the accounts already stored by the seeders.
+	if !missing && count > int(workload.NumAccounts) {
+		tb.Fatalf("prepare different accounts: need %d including warmup, "+
+			"have %d", count, workload.NumAccounts)
+	}
+
+	scopes := make([]waddrmgr.KeyScope, count)
+	names := make([]string, count)
+
+	for i := range names {
+		// Match the seeders: ordinary defaults precede channel families,
+		// whose family zero also has the name "default".
+		if i < len(waddrmgr.DefaultKeyScopes) {
+			scopes[i] = waddrmgr.DefaultKeyScopes[i]
+			names[i] = "default"
+		} else {
+			scopes[i] = NodeBenchmarkChannelScope()
+			family := i - len(waddrmgr.DefaultKeyScopes)
+			names[i] = "default"
+
+			if family != 0 {
+				names[i] = fmt.Sprintf("act:%d", family)
+			}
+		}
+
+		// Keep the same valid scopes while each missing name is different.
+		if missing {
+			names[i] = fmt.Sprintf("missing-bench-%d", i)
+		}
+	}
+
+	return scopes, names
 }
 
 // NodeBenchmarkWorkload describes node data shared by native read benchmarks.
