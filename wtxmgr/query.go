@@ -7,6 +7,7 @@ package wtxmgr
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -565,4 +566,34 @@ func (s *Store) GetUtxo(ns walletdb.ReadBucket,
 
 	// If not found in either bucket, it's not a known UTXO.
 	return nil, ErrUtxoNotFound
+}
+
+// PartitionBlockHistory snapshots mined history at height and above using the
+// caller's canonical-chain predicate. Canonical records before the first orphan
+// are omitted because they need no rollback. Returned slices retain block and
+// transaction order and must be used in the same database transaction.
+func (s *Store) PartitionBlockHistory(ns walletdb.ReadBucket, height int32,
+	isCanonical func(Block) (bool, error)) ([]TxDetails, []TxDetails, error) {
+
+	var canonical, orphaned []TxDetails
+
+	err := s.RangeTransactions(ns, height, math.MaxInt32,
+		func(details []TxDetails) (bool, error) {
+			keep, err := isCanonical(details[0].Block.Block)
+			if err != nil {
+				return false, err
+			}
+
+			// RangeTransactions reuses its slice, so copy every entry
+			// needed after the query finishes, including later survivors.
+			if !keep {
+				orphaned = append(orphaned, details...)
+			} else if len(orphaned) != 0 {
+				canonical = append(canonical, details...)
+			}
+
+			return false, nil
+		})
+
+	return canonical, orphaned, err
 }
