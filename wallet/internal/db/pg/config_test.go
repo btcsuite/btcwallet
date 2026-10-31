@@ -2,11 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,19 +19,18 @@ func TestDatabaseIdentityCancellationPreservesCause(t *testing.T) {
 	// Arrange: Cancel before BeginTx so no identity state can be inspected.
 	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
 	require.NoError(t, err)
-	dbConn, err := sql.Open("pgx", "postgres://localhost/unused")
+	pool, err := pgxpool.New(t.Context(), "postgres://localhost/unused")
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	// Act: Attempt initialization and close the unused database handle.
-	initErr := initializeDatabaseIdentity(ctx, dbConn, identity)
-	closeErr := dbConn.Close()
+	initErr := initializeDatabaseIdentity(ctx, pool, identity)
+	pool.Close()
 
 	// Assert: Cancellation remains detectable without the mismatch sentinel.
 	require.ErrorIs(t, initErr, context.Canceled)
 	require.NotErrorIs(t, initErr, db.ErrDatabaseIdentityMismatch)
-	require.NoError(t, closeErr)
 }
 
 // TestConfigValidateSuccess isolates DSN and pool rules with fixed identity.
@@ -80,12 +80,22 @@ func TestConfigValidateSuccess(t *testing.T) {
 func TestConfigValidateErrors(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Isolate DSN and pool-limit failures before identity validation,
+	// including limits that cannot fit the native pool's int32 field.
 	tests := []struct {
 		name           string
 		config         Config
 		expectedErr    error
 		expectAnyError bool
 	}{
+		{
+			name: "max connections exceeds native limit",
+			config: Config{
+				Dsn:            "postgres://localhost/db",
+				MaxConnections: math.MaxInt32 + 1,
+			},
+			expectedErr: db.ErrCastingOverflow,
+		},
 		{
 			name: "empty DSN",
 			config: Config{
@@ -116,7 +126,11 @@ func TestConfigValidateErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Act: Validate the configuration before opening any pool.
 			err := tc.config.Validate()
+
+			// Assert: Malformed DSNs fail, while known configuration
+			// violations retain their specific caller-visible sentinel.
 			if tc.expectAnyError {
 				require.Error(t, err)
 			} else {

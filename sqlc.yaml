@@ -15,7 +15,46 @@ sql:
         package: "sqlc"
 
         # This is the driver package that sqlc will use in the generated code.
-        sql_package: database/sql
+        sql_package: pgx/v5
+
+        # Keep the established shared row/parameter types. pgx supports these
+        # Scanner/Valuer types directly, so no handwritten value adapter is needed.
+        overrides:
+          - db_type: "pg_catalog.int8"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullInt64"
+          - db_type: "pg_catalog.int4"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullInt32"
+          - db_type: "pg_catalog.int2"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullInt16"
+          - db_type: "text"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullString"
+          - db_type: "pg_catalog.bool"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullBool"
+          - db_type: "pg_catalog.timestamp"
+            nullable: false
+            go_type:
+              import: "time"
+              type: "Time"
+          - db_type: "pg_catalog.timestamp"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "NullTime"
 
         # Generate a `Querier` interface of all query methods. It's useful for
         # mocking in tests.

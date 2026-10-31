@@ -2,6 +2,7 @@ package pg
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/jackc/pgx/v5"
@@ -38,6 +39,12 @@ func (c *Config) Validate() error {
 
 	if c.MaxConnections < 0 {
 		return db.ErrNegativeMaxConns
+	}
+
+	// pgxpool stores this limit in int32, while Config uses the public int
+	// type.
+	if c.MaxConnections > math.MaxInt32 {
+		return fmt.Errorf("max connections: %w", db.ErrCastingOverflow)
 	}
 
 	return c.Identity.Validate()

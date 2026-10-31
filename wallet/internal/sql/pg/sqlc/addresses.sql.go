@@ -9,8 +9,6 @@ import (
 	"context"
 	"database/sql"
 	"time"
-
-	"github.com/lib/pq"
 )
 
 const CreateDerivedAddress = `-- name: CreateDerivedAddress :one
@@ -51,7 +49,7 @@ type CreateDerivedAddressRow struct {
 // Creates the parent address row for an HD-derived address. The caller inserts
 // the path and account ownership into derived_addresses in the same transaction.
 func (q *Queries) CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error) {
-	row := q.queryRow(ctx, q.createDerivedAddressStmt, CreateDerivedAddress,
+	row := q.db.QueryRow(ctx, CreateDerivedAddress,
 		arg.ScriptPubKey,
 		arg.ScriptTypeID,
 		arg.PubKey,
@@ -90,7 +88,7 @@ type CreateDerivedAddressPathParams struct {
 
 // Stores account ownership and BIP44 path data for an HD-derived address.
 func (q *Queries) CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error {
-	_, err := q.exec(ctx, q.createDerivedAddressPathStmt, CreateDerivedAddressPath,
+	_, err := q.db.Exec(ctx, CreateDerivedAddressPath,
 		arg.AccountID,
 		arg.AddressBranch,
 		arg.AddressIndex,
@@ -130,7 +128,7 @@ type CreateImportedAddressRow struct {
 
 // Creates a raw imported address with no account or derivation path.
 func (q *Queries) CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error) {
-	row := q.queryRow(ctx, q.createImportedAddressStmt, CreateImportedAddress,
+	row := q.db.QueryRow(ctx, CreateImportedAddress,
 		arg.WalletID,
 		arg.ScriptPubKey,
 		arg.ScriptTypeID,
@@ -211,7 +209,7 @@ type GetAddressByScriptPubKeyRow struct {
 
 // Retrieves an address by its script pubkey and wallet.
 func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressByScriptPubKeyParams) (GetAddressByScriptPubKeyRow, error) {
-	row := q.queryRow(ctx, q.getAddressByScriptPubKeyStmt, GetAddressByScriptPubKey, arg.ScriptPubKey, arg.WalletID)
+	row := q.db.QueryRow(ctx, GetAddressByScriptPubKey, arg.ScriptPubKey, arg.WalletID)
 	var i GetAddressByScriptPubKeyRow
 	err := row.Scan(
 		&i.ID,
@@ -263,7 +261,7 @@ type GetAddressSecretRow struct {
 // - Address exists without secret row: returns row with NULL secret fields
 // - Address does not exist: returns no rows (sql.ErrNoRows)
 func (q *Queries) GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error) {
-	row := q.queryRow(ctx, q.getAddressSecretStmt, GetAddressSecret, arg.WalletID, arg.ScriptPubKey)
+	row := q.db.QueryRow(ctx, GetAddressSecret, arg.WalletID, arg.ScriptPubKey)
 	var i GetAddressSecretRow
 	err := row.Scan(&i.AddressID, &i.EncryptedPrivKey, &i.EncryptedScript)
 	return i, err
@@ -292,7 +290,7 @@ type GetAddressSecretByIDRow struct {
 
 // Retrieves secret information for an address using its durable SQL row ID.
 func (q *Queries) GetAddressSecretByID(ctx context.Context, arg GetAddressSecretByIDParams) (GetAddressSecretByIDRow, error) {
-	row := q.queryRow(ctx, q.getAddressSecretByIDStmt, GetAddressSecretByID, arg.WalletID, arg.ID)
+	row := q.db.QueryRow(ctx, GetAddressSecretByID, arg.WalletID, arg.ID)
 	var i GetAddressSecretByIDRow
 	err := row.Scan(&i.AddressID, &i.EncryptedPrivKey, &i.EncryptedScript)
 	return i, err
@@ -371,7 +369,7 @@ type GetOldestUnusedAddressRow struct {
 // the first unused child. Reuse-aware allocation runs it in the transaction
 // that resolved the account, so it sees the row the index counter belongs to.
 func (q *Queries) GetOldestUnusedAddress(ctx context.Context, arg GetOldestUnusedAddressParams) (GetOldestUnusedAddressRow, error) {
-	row := q.queryRow(ctx, q.getOldestUnusedAddressStmt, GetOldestUnusedAddress, arg.AccountID, arg.AddressBranch)
+	row := q.db.QueryRow(ctx, GetOldestUnusedAddress, arg.AccountID, arg.AddressBranch)
 	var i GetOldestUnusedAddressRow
 	err := row.Scan(
 		&i.ID,
@@ -417,7 +415,7 @@ type InsertAddressSecretParams struct {
 // addresses.
 // Not used for derived addresses (their keys are derived from account key).
 func (q *Queries) InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error {
-	_, err := q.exec(ctx, q.insertAddressSecretStmt, InsertAddressSecret, arg.AddressID, arg.EncryptedPrivKey, arg.EncryptedScript)
+	_, err := q.db.Exec(ctx, InsertAddressSecret, arg.AddressID, arg.EncryptedPrivKey, arg.EncryptedScript)
 	return err
 }
 
@@ -506,7 +504,7 @@ type ListAddressesByAccountRow struct {
 // Lists HD-derived addresses for an account identified by wallet_id, key scope
 // (purpose/coin_type), and account name, ordered by address ID.
 func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error) {
-	rows, err := q.query(ctx, q.listAddressesByAccountStmt, ListAddressesByAccount,
+	rows, err := q.db.Query(ctx, ListAddressesByAccount,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -546,9 +544,6 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -631,7 +626,7 @@ type ListAddressesByScriptPubKeysRow struct {
 // address are simply absent from the result. The Go caller is responsible for
 // short-circuiting an empty script set before issuing this query.
 func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddressesByScriptPubKeysParams) ([]ListAddressesByScriptPubKeysRow, error) {
-	rows, err := q.query(ctx, q.listAddressesByScriptPubKeysStmt, ListAddressesByScriptPubKeys, arg.WalletID, pq.Array(arg.ScriptPubKeys))
+	rows, err := q.db.Query(ctx, ListAddressesByScriptPubKeys, arg.WalletID, arg.ScriptPubKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -663,9 +658,6 @@ func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddr
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -749,7 +741,7 @@ type ListRawImportedAddressesRow struct {
 
 // Lists raw imported addresses in a wallet, ordered by address ID.
 func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImportedAddressesParams) ([]ListRawImportedAddressesRow, error) {
-	rows, err := q.query(ctx, q.listRawImportedAddressesStmt, ListRawImportedAddresses, arg.WalletID, arg.CursorID, arg.PageLimit)
+	rows, err := q.db.Query(ctx, ListRawImportedAddresses, arg.WalletID, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -781,9 +773,6 @@ func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImpor
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

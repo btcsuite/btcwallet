@@ -2,7 +2,6 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -10,16 +9,30 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 )
+
+// transactionPool is the lifecycle surface used after Store construction.
+// The concrete pool stays owned by NewStore; tests can verify public commits
+// without maintaining an additional connection or transaction-state field.
+type transactionPool interface {
+	// Begin starts the native transaction used by the shared runtime.
+	Begin(ctx context.Context) (pgx.Tx, error)
+
+	// Close releases the pool owned by Store after its users have stopped.
+	Close()
+}
+
+var _ transactionPool = (*pgxpool.Pool)(nil)
 
 // Store is the PostgreSQL implementation of the
 // WalletStore interface.
 type Store struct {
-	// db is the shared PostgreSQL connection pool.
-	db *sql.DB
+	// pool is the native PostgreSQL connection pool used by Store queries.
+	pool transactionPool
 
-	// queries executes PostgreSQL statements on db.
+	// queries executes native PostgreSQL statements on the owned pool.
 	queries *sqlc.Queries
 
 	// deriveAddress derives address data for SQL-derived address rows.
@@ -40,63 +53,77 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	connConfig, err := pgx.ParseConfig(cfg.Dsn)
+	poolConfig, err := pgxpool.ParseConfig(cfg.Dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parse database config: %w", err)
+		return nil, fmt.Errorf("parse pool config: %w", err)
 	}
 
-	// Put btcwallet first to pin unqualified wallet objects, then pg_temp
-	// last so temporary objects cannot shadow them.
-	connConfig.RuntimeParams["search_path"] = pg.WalletSchemaName + ", pg_temp"
-
-	dbConn := stdlib.OpenDB(*connConfig)
-
-	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
-	defer cancel()
-
-	err = dbConn.PingContext(connCtx)
-	if err != nil {
-		_ = dbConn.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
-	}
+	// Pin wallet objects ahead of temporary objects on every connection.
+	poolConfig.ConnConfig.RuntimeParams["search_path"] =
+		pg.WalletSchemaName + ", pg_temp"
 
 	maxConns := db.DefaultMaxConnections
 	if cfg.MaxConnections > 0 {
 		maxConns = cfg.MaxConnections
 	}
 
-	dbConn.SetMaxOpenConns(maxConns)
-	dbConn.SetMaxIdleConns(maxConns)
-	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
-
-	err = initializeDatabaseIdentity(ctx, dbConn, cfg.Identity)
+	// Use the shared checked conversion for the native pool's int32 limit.
+	poolConfig.MaxConns, err = db.Int64ToInt32(int64(maxConns))
 	if err != nil {
-		_ = dbConn.Close()
+		return nil, fmt.Errorf("max connections: %w", err)
+	}
+	// TODO(yy): make the idle connection lifetime configurable.
+	poolConfig.MaxConnIdleTime = db.DefaultConnIdleLifetime
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
+	defer cancel()
+
+	err = pool.Ping(connCtx)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	// Claim or verify durable identity before applying numbered migrations.
+	err = initializeDatabaseIdentity(ctx, pool, cfg.Identity)
+	if err != nil {
+		pool.Close()
 
 		return nil, fmt.Errorf("initialize database identity: %w", err)
 	}
 
-	err = pg.ApplyMigrations(dbConn)
+	// Migrations borrow the same pool through their required SQL adapter.
+	migrationDB := stdlib.OpenDBFromPool(pool)
+
+	err = pg.ApplyMigrations(ctx, migrationDB)
 	if err != nil {
-		_ = dbConn.Close()
+		_ = migrationDB.Close()
+		pool.Close()
+
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 
-	queries := sqlc.New(dbConn)
+	err = migrationDB.Close()
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("close migration database: %w", err)
+	}
 
 	return &Store{
-		db:            dbConn,
-		queries:       queries,
+		pool:          pool,
+		queries:       sqlc.New(pool),
 		deriveAddress: cfg.DeriveAddress,
 	}, nil
 }
 
 // Close closes the database connection.
 func (s *Store) Close() error {
-	err := s.db.Close()
-	if err != nil {
-		return fmt.Errorf("close database: %w", err)
-	}
+	s.pool.Close()
 
 	return nil
 }

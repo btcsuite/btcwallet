@@ -2,11 +2,15 @@
 package pg
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -181,4 +185,32 @@ func sqlStateClass(code string) string {
 	}
 
 	return code[:sqlStateClassLen]
+}
+
+// isCommitAmbiguous reports whether a PostgreSQL commit failed on the
+// transport path after its final outcome may have been decided.
+func isCommitAmbiguous(err error) bool {
+	if errors.Is(err, pgx.ErrTxCommitRollback) {
+		return false
+	}
+
+	// A pgconn error marked safe to retry is guaranteed to have happened
+	// before any commit bytes reached PostgreSQL.
+	if pgconn.SafeToRetry(err) {
+		return false
+	}
+
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
+
+		return true
+	}
+
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr)
 }

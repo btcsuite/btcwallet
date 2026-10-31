@@ -17,7 +17,7 @@ FROM btcwallet.database_identity
 // CountDatabaseIdentities verifies the singleton invariant before any stored
 // values are trusted by startup.
 func (q *Queries) CountDatabaseIdentities(ctx context.Context) (int64, error) {
-	row := q.queryRow(ctx, q.countDatabaseIdentitiesStmt, CountDatabaseIdentities)
+	row := q.db.QueryRow(ctx, CountDatabaseIdentities)
 	var row_count int64
 	err := row.Scan(&row_count)
 	return row_count, err
@@ -41,7 +41,7 @@ type GetDatabaseIdentityRow struct {
 // GetDatabaseIdentity reads the canonical row only after startup has proved
 // that exactly one row exists.
 func (q *Queries) GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error) {
-	row := q.queryRow(ctx, q.getDatabaseIdentityStmt, GetDatabaseIdentity)
+	row := q.db.QueryRow(ctx, GetDatabaseIdentity)
 	var i GetDatabaseIdentityRow
 	err := row.Scan(&i.GenesisHash, &i.NetworkMagic, &i.SignetChallengeDigest)
 	return i, err
@@ -70,7 +70,7 @@ type InsertDatabaseIdentityParams struct {
 // InsertDatabaseIdentity writes the only permitted row after the namespace
 // probe proves the fixed schema is absent and safe to claim.
 func (q *Queries) InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error {
-	_, err := q.exec(ctx, q.insertDatabaseIdentityStmt, InsertDatabaseIdentity, arg.GenesisHash, arg.NetworkMagic, arg.SignetChallengeDigest)
+	_, err := q.db.Exec(ctx, InsertDatabaseIdentity, arg.GenesisHash, arg.NetworkMagic, arg.SignetChallengeDigest)
 	return err
 }
 
@@ -129,7 +129,7 @@ type InspectDatabaseIdentityNamespaceRow struct {
 // InspectDatabaseIdentityNamespace permits first adoption only when the fixed
 // schema is absent and validates that a marker has the readable column shape.
 func (q *Queries) InspectDatabaseIdentityNamespace(ctx context.Context) (InspectDatabaseIdentityNamespaceRow, error) {
-	row := q.queryRow(ctx, q.inspectDatabaseIdentityNamespaceStmt, InspectDatabaseIdentityNamespace)
+	row := q.db.QueryRow(ctx, InspectDatabaseIdentityNamespace)
 	var i InspectDatabaseIdentityNamespaceRow
 	err := row.Scan(&i.SchemaExists, &i.IdentityExists, &i.IdentityReadable)
 	return i, err
