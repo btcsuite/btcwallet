@@ -25,6 +25,10 @@ import (
 	"github.com/davecgh/go-spew/spew"
 )
 
+// maxGetBlocksRPCBatchSize bounds response construction and transfer work per
+// HTTP request so recovery scans avoid multi-gigabyte batch replies.
+const maxGetBlocksRPCBatchSize = 100
+
 var (
 	// ErrBitcoindClientShuttingDown is an error returned when we attempt
 	// to receive a notification for a specific item and the bitcoind client
@@ -1606,33 +1610,44 @@ func (c *BitcoindClient) GetCFilters(hashes []chainhash.Hash,
 	return filters, nil
 }
 
-// GetBlocks returns a slice of full blocks for the given block hashes.
+// GetBlocks returns full blocks in the order of the given hashes. Each RPC
+// batch is bounded to avoid replaying large responses after an HTTP timeout.
 func (c *BitcoindClient) GetBlocks(hashes []chainhash.Hash) (
 	[]*wire.MsgBlock, error) {
 
 	client := c.batchClient
 	blocks := make([]*wire.MsgBlock, 0, len(hashes))
-	futures := make([]rpcclient.FutureGetBlockResult, 0, len(hashes))
 
-	for _, hash := range hashes {
-		futures = append(futures, client.GetBlockAsync(&hash))
-	}
+	// Consume each bounded response before queuing the next. Enter once for
+	// empty input so Send retains its existing empty-batch error behavior.
+	for {
+		count := min(len(hashes), maxGetBlocksRPCBatchSize)
+		futures := make([]rpcclient.FutureGetBlockResult, 0, count)
 
-	err := client.Send()
-	if err != nil {
-		return nil, fmt.Errorf("batch send: %w", err)
-	}
-
-	for _, f := range futures {
-		block, err := f.Receive()
-		if err != nil {
-			return nil, fmt.Errorf("receive block: %w", err)
+		for _, hash := range hashes[:count] {
+			futures = append(futures, client.GetBlockAsync(&hash))
 		}
 
-		blocks = append(blocks, block)
-	}
+		err := client.Send()
+		if err != nil {
+			return nil, fmt.Errorf("batch send: %w", err)
+		}
 
-	return blocks, nil
+		for _, f := range futures {
+			block, err := f.Receive()
+			if err != nil {
+				return nil, fmt.Errorf("receive block: %w", err)
+			}
+
+			blocks = append(blocks, block)
+		}
+
+		if count == len(hashes) {
+			return blocks, nil
+		}
+
+		hashes = hashes[count:]
+	}
 }
 
 // GetBlockHeaders returns a slice of block headers for the given block hashes.
