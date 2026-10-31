@@ -3533,3 +3533,59 @@ func TestNewScopedKeyManagerCommit(t *testing.T) {
 		})
 	}
 }
+
+// TestForEachActiveAddressSkipsPrivateWork verifies both active address walks
+// return a persisted taproot address without encrypting its private child key.
+func TestForEachActiveAddressSkipsPrivateWork(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	defer teardown()
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		return mgr.Unlock(tx.ReadBucket(waddrmgrNamespaceKey), privPassphrase)
+	})
+	require.NoError(t, err)
+
+	store, err := mgr.FetchScopedKeyManager(KeyScopeBIP0086)
+	require.NoError(t, err)
+	scoped := store.(*ScopedKeyManager)
+
+	var generated []ManagedAddress
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		var err error
+		generated, err = scoped.NextInternalAddresses(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey), DefaultAccountNum, 1,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	// Generation warms the account cache. Any private encryption during
+	// enumeration now comes from loading the individual child address.
+	savedKey := mgr.cryptoKeyPriv
+	mgr.cryptoKeyPriv = &failingCryptoKey{}
+	defer func() { mgr.cryptoKeyPriv = savedKey }()
+
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		var got []string
+		collect := func(addr address.Address) error {
+			got = append(got, addr.String())
+
+			return nil
+		}
+		want := []string{generated[0].Address().String()}
+
+		require.NoError(t, scoped.ForEachActiveAddress(ns, collect))
+		require.Equal(t, want, got)
+
+		got = nil
+		require.NoError(t, scoped.ForEachInternalActiveAddress(ns, collect))
+		require.Equal(t, want, got)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
