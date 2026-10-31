@@ -22,6 +22,13 @@ func (s *Store) DeleteTx(ctx context.Context,
 	params db.DeleteTxParams) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Lock before the leaf check so a concurrent child cannot commit
+		// between that check and removal of its parent.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		return db.DeleteTxWithOps(ctx, params, deleteTxOps{qtx: qtx})
 	})
 }
