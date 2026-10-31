@@ -35,7 +35,10 @@ LINT_WORKERS = --concurrency=$(workers)
 
 GOLANGCI_LINT = golangci-lint run -v --config .golangci.yml $(LINT_WORKERS)
 LINT_DB_SQLITE_PKGS = ./wallet/internal/db/sqlite ./wallet/internal/db/itest
-LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg ./wallet/internal/db/itest
+
+# Tagged benchmark fixtures need the PostgreSQL CI type and lint checks too.
+LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg \
+	./wallet/internal/db/itest ./wallet/bench
 
 define lint_targets
 	@$(call print, "Linting source.")
@@ -141,6 +144,14 @@ unit-debug:
 unit-bench:
 	@$(call print, "Running benchmark tests.")
 	$(UNIT_BENCH)
+
+#? bench: Run Docker benchmarks (method=<read>, or set BENCH_PACKAGE/BENCH_CASE)
+#? bench (vars): db=legacy|kvdb|sqlite|postgres|all case="smoke|small-node|medium-node|large-node ..." profile=cpu|mem|all duration=<value> out=<path>
+# Default to one tiny smoke iteration; full cases require explicit selection.
+# The script owns Docker settings so new methods do not need new Make targets.
+bench:
+	@./scripts/benchmark.sh "$(method)" "$(db)" "$(case)" \
+		"$(profile)" "$(duration)" "$(out)"
 
 #? itest-db: Run integration tests for wallet database
 itest-db:
