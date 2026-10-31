@@ -44,6 +44,14 @@ total deployment costs. See the
 [environment](reproducibility.md#docker-environment) for the client and server
 limits.
 
+## Get queries
+
+Get benchmarks cover a repeated existing item, different existing items and
+items that are not found. In the last two cases, each measured call uses a
+different input. Prepare one separate input for the untimed first call.
+Use a fixed number of calls that fits the saved data, with no cycling through
+items. See the [run instructions](reproducibility.md#different-item-and-not-found-reads).
+
 ## Serial comparisons
 
 Run implementations serially so they do not compete for CPU, memory and
