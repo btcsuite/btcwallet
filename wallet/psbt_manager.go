@@ -382,6 +382,10 @@ type PsbtManager interface {
 	// If `skipUnknown` is true, the wallet will skip inputs it does not
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
+	//
+	// Unknown origins are omitted for owned public-key inputs. Matching
+	// caller origins are kept without authenticating their root metadata;
+	// ErrConflictingInputMetadata rejects a contradictory known key.
 	DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		skipUnknown bool) (*psbt.Packet, error)
 
@@ -498,8 +502,12 @@ type finalizePsbtReq struct {
 //     references a UTXO owned by the wallet.
 //  2. Enriches: If owned, calls `decorateInput` to add the full previous
 //     transaction (`NonWitnessUtxo`) or output (`WitnessUtxo`), along with
-//     BIP32 derivation paths (`Bip32Derivation` or `TaprootBip32Derivation`)
+//     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
+//
+// Owned public-key inputs with unknown origin omit new derivation records.
+// Matching caller origins are retained without authenticating their root;
+// a contradictory known key returns ErrConflictingInputMetadata.
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
@@ -592,6 +600,17 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	// With the managed address, we can now get the derivation information
 	// for the address.
 	derivation, err := derivationForAddressInfo(scriptInfo.AddressInfo)
+	// A known public key can describe a coin without a root origin, while
+	// a present but unusable origin must still fail.
+	if errors.Is(err, ErrDerivationPathNotFound) &&
+		scriptInfo.Derivation == nil && scriptInfo.PubKey != nil {
+
+		err = checkOriginlessInputKeys(
+			pInput, scriptInfo.PubKey.SerializeCompressed(),
+			txscript.IsPayToTaproot(utxo.PkScript),
+		)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -602,6 +621,12 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	switch {
 	// For SegWit v1 (Taproot) inputs, we'll use the SegWit v1 helper.
 	case txscript.IsPayToTaproot(utxo.PkScript):
+		// The internal key is known independently of its absent origin.
+		if derivation == nil {
+			pInput.TaprootInternalKey =
+				scriptInfo.PubKey.SerializeCompressed()[1:]
+		}
+
 		addInputInfoSegWitV1(pInput, utxo, derivation)
 
 	// For SegWit v0 inputs, we'll use the SegWit v0 helper.
@@ -613,6 +638,42 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 				waddrmgr.SpendTypeNestedWitnessKey,
 			scriptInfo.RedeemScript,
 		)
+	}
+
+	return nil
+}
+
+// checkOriginlessInputKeys compares caller records with the Wallet's known
+// compressed key without asserting its missing root origin.
+func checkOriginlessInputKeys(in *psbt.PInput, key []byte, taproot bool) error {
+	// Each family admits only its known key, retaining the caller's
+	// fingerprint and path without claiming to authenticate them.
+	if slices.ContainsFunc(
+		in.Bip32Derivation, func(d *psbt.Bip32Derivation) bool {
+			return taproot || d == nil || !bytes.Equal(d.PubKey, key)
+		},
+	) {
+
+		return ErrConflictingInputMetadata
+	}
+
+	// Taproot derivations identify that same key in x-only form.
+	if slices.ContainsFunc(
+		in.TaprootBip32Derivation,
+		func(d *psbt.TaprootBip32Derivation) bool {
+			return !taproot || d == nil ||
+				!bytes.Equal(d.XOnlyPubKey, key[1:])
+		},
+	) {
+
+		return ErrConflictingInputMetadata
+	}
+
+	// The internal key remains a known fact even without a derivation.
+	if internal := in.TaprootInternalKey; len(internal) > 0 &&
+		(!taproot || !bytes.Equal(internal, key[1:])) {
+
+		return ErrConflictingInputMetadata
 	}
 
 	return nil
@@ -982,7 +1043,7 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	packet.UnsignedTx = tx
 	packet.Inputs = make([]psbt.PInput, len(tx.TxIn))
 
-	for _, txIn := range tx.TxIn {
+	for i, txIn := range tx.TxIn {
 		caller, ok := callerInputs[txIn.PreviousOutPoint]
 		if !ok {
 			// An input the wallet selected itself, which keeps
@@ -991,6 +1052,11 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 		}
 
 		txIn.Sequence = caller.sequence
+
+		// Let originless decoration check caller keys against the known
+		// address. UTXO and known-origin facts are still overwritten and
+		// reconciled against the original indexed records below.
+		packet.Inputs[i] = caller.pInput
 	}
 
 	// Authoring leaves the caller's outputs in their own order and swaps
@@ -2664,7 +2730,8 @@ func mergeOutputScripts(dest, src *psbt.POutput) error {
 	return nil
 }
 
-// addInputInfoSegWitV0Common adds the common PSBT fields for SegWit v0 inputs.
+// addInputInfoSegWitV0Common adds common SegWit v0 fields. A nil derivation
+// retains caller origin records without inventing Wallet origin metadata.
 func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
 	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
 	isNestedWitness bool, redeemScript []byte) {
@@ -2681,9 +2748,9 @@ func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
 	}
 	in.SighashType = txscript.SigHashAll
 
-	// Include the derivation path for each input.
-	in.Bip32Derivation = []*psbt.Bip32Derivation{
-		derivationInfo,
+	// Only state an origin when the Wallet knows the complete path.
+	if derivationInfo != nil {
+		in.Bip32Derivation = []*psbt.Bip32Derivation{derivationInfo}
 	}
 
 	// For nested P2WKH we need to add the redeem script to the input,
@@ -2709,7 +2776,7 @@ func addInputInfoSegWitV0FromAddressInfo(in *psbt.PInput, prevTx *wire.MsgTx,
 }
 
 // addInputInfoSegWitV1 adds the UTXO and BIP32 derivation info for a SegWit v1
-// PSBT input (p2tr) from the given wallet information.
+// PSBT input (p2tr). A nil derivation retains the caller's origin, if supplied.
 func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	derivationInfo *psbt.Bip32Derivation) {
 
@@ -2719,6 +2786,11 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 		PkScript: utxo.PkScript,
 	}
 	in.SighashType = txscript.SigHashDefault
+
+	// An unknown root must not become a zero fingerprint or an empty path.
+	if derivationInfo == nil {
+		return
+	}
 
 	// Taproot inputs carry only the taproot-specific derivation. Emitting a
 	// parallel Bip32Derivation would make the input ambiguous for the
