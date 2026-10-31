@@ -27,6 +27,11 @@ type managerBackend interface {
 	create(ctx context.Context, params CreateWalletParams,
 		rootKey *hdkeychain.ExtendedKey) (*walletData, error)
 
+	// rollbackToBlock removes history starting at the disconnected block.
+	// Manager holds its lock and keeps Wallet workers ready for rollback.
+	// Retain the block identity so storage can distinguish same-height forks.
+	rollbackToBlock(ctx context.Context, block db.Block) error
+
 	// close releases the database and any live managers owned by the backend.
 	close() error
 }

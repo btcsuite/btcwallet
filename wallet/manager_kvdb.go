@@ -172,6 +172,19 @@ func (b *kvdbManagerBackend) open(ctx context.Context, walletName string,
 	return data, nil
 }
 
+// rollbackToBlock reuses the single Wallet's atomic Store rewind.
+func (b *kvdbManagerBackend) rollbackToBlock(ctx context.Context,
+	block db.Block) error {
+
+	// The Store is opened lazily with its Wallet. An empty Manager has no
+	// Wallet history to rewind even though its source reader is running.
+	if b.store == nil {
+		return nil
+	}
+
+	return b.store.RollbackToBlock(ctx, block.Height)
+}
+
 // close releases the legacy address manager before its physical database.
 func (b *kvdbManagerBackend) close() error {
 	if b.addressMgr != nil {

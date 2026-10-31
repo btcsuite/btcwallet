@@ -224,11 +224,23 @@ type scanResult struct {
 	parentHash chainhash.Hash
 }
 
+// prepareRollbackReq asks the worker to finish earlier chain writes before
+// Manager rewinds shared storage. The worker closes readyForRollback and waits
+// for rollbackDone, which Manager closes after success or terminal cleanup.
+type prepareRollbackReq struct {
+	readyForRollback chan struct{}
+	rollbackDone     <-chan struct{}
+}
+
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
+
+	// processChainEventBeforeSync services ordered observations and rollback
+	// preparation without advancing a checkpoint before watches are ready.
+	processChainEventBeforeSync(ctx context.Context, event chainEvent) error
 
 	// requestScan submits a rescan job to the syncer.
 	requestScan(ctx context.Context, req *scanReq) error
@@ -447,6 +459,14 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 
 	for {
 		select {
+		case event := <-s.chainEventChan:
+			// Initialization cannot depend on a rollback that is itself
+			// waiting for this worker. Preserve mailbox order on this owner.
+			err := s.processChainEventBeforeSync(ctx, event)
+			if err != nil {
+				return err
+			}
+
 		case <-t.C:
 			if s.cfg.Chain.IsCurrent() {
 				return nil
@@ -1005,7 +1025,25 @@ func (s *syncer) txNotificationState(ctx context.Context,
 // putSyncBatch records recovery scan results and synced blocks through the
 // store.
 func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
-	results []scanResult) error {
+	results []scanResult) (resultErr error) {
+
+	// Rollback invalidates fetched facts before persistence. Ordinary work
+	// stays behind this attempt, including conversion or Store failures.
+	pending, err := s.checkForRollbackBeforeCommit(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Retained observations must not checkpoint an unfetched next block:
+	// live matches can omit recovery addresses until historical scanning.
+	// An empty mailbox returns a zero event and needs no deferred handler.
+	if pending.notification != nil {
+		defer func() {
+			resultErr = errors.Join(
+				resultErr, s.processChainEventBeforeSync(ctx, pending),
+			)
+		}()
+	}
 
 	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
@@ -1863,15 +1901,9 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	return s.putSyncBatch(ctx, scanState, results)
 }
 
-// handleChainUpdate processes a notification immediately.
-// It returns an error if processing fails or if the wallet is shutting down.
-func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
-	// For a single update, we process it and commit immediately.
-	err := s.processChainUpdate(ctx, n)
-	if err != nil {
-		return fmt.Errorf("failed to process chain update: %w", err)
-	}
-
+// handleChainUpdate logs legacy rescan progress notifications. Manager owns
+// disconnects, while prepared transaction events use their Store handlers.
+func (s *syncer) handleChainUpdate(n any) {
 	switch msg := n.(type) {
 	case *chain.RescanProgress:
 		log.Debugf("Rescanned through block %v (height %d)",
@@ -1885,32 +1917,44 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 			"block %v (height %d). No wallet state updates "+
 			"performed.", msg.Hash, msg.Height)
 	}
-
-	return nil
 }
 
-// processChainUpdate writes a single chain update to the database.
-func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
-	switch update.(type) {
-	case chain.BlockConnected:
-		return nil
+// processChainEventBeforeSync handles initialization, retry and scan-time
+// observations without checkpointing past payments omitted by live watches.
+func (s *syncer) processChainEventBeforeSync(ctx context.Context,
+	event chainEvent) error {
 
-	// A block was disconnected. We use checkRollback to safely verify our
-	// chain state against the backend and rewind if necessary. This
-	// handles both single block disconnects and deeper reorgs robustly.
-	case chain.BlockDisconnected:
-		return s.checkRollback(ctx)
+	// Known matches are safe to record, but historical scanning must still
+	// visit this height after recovery and watch registration finish. Leave
+	// malformed metadata to the ordinary handler's existing validation.
+	if block, ok := event.notification.(chain.FilteredBlockConnected); ok &&
+		block.Block != nil {
+
+		return s.putTxNotifications(ctx, event.matches, block.Block)
 	}
 
-	return nil
+	return s.processChainEvent(ctx, event)
 }
 
 // processChainEvent applies Manager-prepared matches without parsing them
-// again. Control and disconnect notifications keep their existing handlers.
+// again. Rollback preparation waits for Manager to settle shared persistence.
 func (s *syncer) processChainEvent(ctx context.Context,
 	event chainEvent) error {
 
 	switch n := event.notification.(type) {
+	case prepareRollbackReq:
+		// Acknowledge only from the worker so historical and live writes
+		// are both quiescent until Manager releases this operation.
+		close(n.readyForRollback)
+
+		select {
+		case <-n.rollbackDone:
+			return nil
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
 	case chain.RelevantTx:
 		return s.putTxNotifications(ctx, event.matches, n.Block)
 
@@ -1918,7 +1962,9 @@ func (s *syncer) processChainEvent(ctx context.Context,
 		return s.putBlockNotifications(ctx, event.matches, n.Block)
 
 	default:
-		return s.handleChainUpdate(ctx, event.notification)
+		s.handleChainUpdate(event.notification)
+
+		return nil
 	}
 }
 
@@ -1938,6 +1984,34 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	}
 
 	return s.scanWithRewind(ctx, req)
+}
+
+// checkForRollbackBeforeCommit handles pending rollback preparation before a
+// scan commits. It returns ordinary queued events unprocessed; callers apply
+// them after the batch attempt, preserving prepared matches and result order.
+func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
+	chainEvent, error) {
+
+	select {
+	case event := <-s.chainEventChan:
+		if _, ok := event.notification.(prepareRollbackReq); !ok {
+			return event, nil
+		}
+
+		err := s.processChainEvent(ctx, event)
+		if err != nil {
+			return chainEvent{}, err
+		}
+
+		// Rollback has completed, invalidating this batch's fetched history.
+		// ErrStateChanged makes targeted scans reload and refetch their range;
+		// normal catch-up restarts through its existing retry/backoff loop.
+		return chainEvent{}, ErrStateChanged
+
+	default:
+		// No live event was queued, so there is no ordinary work to retain.
+		return chainEvent{}, nil
+	}
 }
 
 // waitForEvent blocks until a notification, rescan job, or context
@@ -2023,26 +2097,53 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	return nil
 }
 
-// scanWithTargets performs a targeted rescan for specific accounts without
-// rewinding the global sync state.
-func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
-	scanState, err := s.loadTargetedScanState(ctx, req.targets)
+// loadTargetedScanTip rebuilds the requested horizons and reads their scan
+// bound on initial entry and after rollback, using the same readiness policy.
+func (s *syncer) loadTargetedScanTip(ctx context.Context,
+	targets []waddrmgr.AccountScope) (*RecoveryState, int32, error) {
+
+	state, err := s.loadTargetedScanState(ctx, targets)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 
 	s.state.Store(uint32(syncStateRescanning))
+
+	_, height, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return nil, 0, fmt.Errorf("get best block: %w", err)
+	}
+
+	return state, height, nil
+}
+
+// scanWithTargets performs a targeted rescan for specific accounts without
+// rewinding the global sync state.
+func (s *syncer) scanWithTargets(ctx context.Context,
+	req *scanReq) (resultErr error) {
+
+	// A retained live-event failure must reach the ordinary worker retry
+	// policy, but only after this accepted account range has finished.
+	var eventErr error
+	defer func() {
+		if eventErr != nil {
+			s.state.Store(uint32(syncStateSyncing))
+
+			resultErr = errors.Join(resultErr, eventErr)
+		}
+	}()
+
 	// Failed registration keeps readiness revoked until initialization retries.
 	defer s.state.CompareAndSwap(
 		uint32(syncStateRescanning), uint32(syncStateSynced),
 	)
 
-	startHeight := req.startBlock.Height
-
-	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	scanState, bestHeight, err := s.loadTargetedScanTip(ctx, req.targets)
 	if err != nil {
-		return fmt.Errorf("get best block: %w", err)
+		return err
 	}
+
+	startHeight := req.startBlock.Height
 
 	log.Infof("Starting targeted rescan from height %d to %d for %d "+
 		"accounts", startHeight, bestHeight, len(req.targets))
@@ -2071,8 +2172,32 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 				"0 results", ErrScanBatchEmpty)
 		}
 
-		// Persist the scan while rescanning still blocks transaction creation.
-		err = s.putTargetedBatch(ctx, scanState, results)
+		// Keep the range's own result separate from retained live work:
+		// a failed observation must not discard the remaining account scan.
+		pending, err := s.checkForRollbackBeforeCommit(ctx)
+		if err == nil {
+			err = s.putTargetedBatch(ctx, scanState, results)
+		}
+
+		// The selected accounts cannot prove full-wallet historical coverage.
+		// Replay known matches without a checkpoint; preserve any error until
+		// this accepted range finishes. An empty event remains a no-op.
+		pendingErr := s.processChainEventBeforeSync(ctx, pending)
+		eventErr = errors.Join(eventErr, pendingErr)
+
+		if errors.Is(err, ErrStateChanged) {
+			// A rollback discards this attempt, not the accepted request.
+			// Reload horizons and refetch its original range on the new tip.
+			scanState, bestHeight, err = s.loadTargetedScanTip(ctx, req.targets)
+			if err != nil {
+				return err
+			}
+
+			startHeight = req.startBlock.Height
+
+			continue
+		}
+
 		if err != nil {
 			return err
 		}
