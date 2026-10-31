@@ -145,3 +145,13 @@ sides of the split rather than skipping a backend.
 an `init()` function. Any package that imports `bwtest` (including `itest`)
 automatically benefits from faster key derivation, avoiding CPU exhaustion and
 timeouts — especially when running with `-race`.
+
+## Competing Miner Branches
+
+`SpawnTempMiner` returns a temporary miner synchronized to the harness miner's
+exact best hash and height, then disconnected for isolated branch mining.
+`ConnectToMiner` reconnects it. After reconnecting a longer competing branch,
+call `WaitForMinerTip` with that branch's known winning hash and height before
+`AssertWalletSynced`. This prevents the Wallet boundary from succeeding while
+the harness miner still reports the losing tip. Wallet-owned reads after the
+synchronization boundary are asserted directly without retries.
