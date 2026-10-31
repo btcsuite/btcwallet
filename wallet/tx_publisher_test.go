@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -28,7 +29,6 @@ var (
 	errInsufficientFee = errors.New("insufficient fee")
 	errRpc             = errors.New("rpc error")
 	errPublish         = errors.New("publish error")
-	errRemove          = errors.New("remove error")
 )
 
 const testTxLabel = "test-tx"
@@ -140,14 +140,6 @@ func ownedAddrsResult(scripts ...[]byte) map[string]*db.AddressInfo {
 	}
 
 	return owned
-}
-
-// matchDeleteUnminedTxParams returns a matcher for Store removal
-// requests.
-func matchDeleteUnminedTxParams(walletID uint32, txid chainhash.Hash) any {
-	return mock.MatchedBy(func(params db.DeleteUnminedTxParams) bool {
-		return params.WalletID == walletID && params.Txid == txid
-	})
 }
 
 // TestCheckMempoolAcceptance tests the CheckMempoolAcceptance method.
@@ -988,32 +980,6 @@ func mustPayToAddrScript(addr address.Address) []byte {
 	return pkScript
 }
 
-// TestDeleteUnminedTx tests the deleteUnminedTx method to ensure it
-// correctly marks a transaction failed in the unconfirmed store.
-func TestDeleteUnminedTx(t *testing.T) {
-	t.Parallel()
-
-	w, mocks := createStartedWalletWithMocks(t)
-
-	// Create a sample transaction with one input and one output.
-	tx := &wire.MsgTx{
-		TxIn: []*wire.TxIn{{}},
-		TxOut: []*wire.TxOut{{
-			Value: 10000,
-		}},
-	}
-
-	txid := tx.TxHash()
-	mocks.store.On(
-		"DeleteUnminedTx", mock.Anything,
-		matchDeleteUnminedTxParams(w.id, txid),
-	).Return(nil).Once()
-
-	// Call the method under test.
-	err := w.deleteUnminedTx(t.Context(), tx)
-	require.NoError(t, err)
-}
-
 // TestCheckMempool tests the checkMempool helper function.
 func TestCheckMempool(t *testing.T) {
 	t.Parallel()
@@ -1327,11 +1293,13 @@ func TestBroadcastAlreadyBroadcasted(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestBroadcastPublishFailsRemoveSucceeds tests the Broadcast method when
-// publishing fails but removing the transaction from the wallet succeeds.
-func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
+// TestBroadcastPublishFailsRetainsTx verifies a failed first publication
+// preserves the recorded transaction instead of deleting its history.
+func TestBroadcastPublishFailsRetainsTx(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Record a fresh wallet-owned transaction, then have the chain
+	// fail its send. No deletion is expected for this retained attempt.
 	label := testTxLabel
 	w, m := createStartedWalletWithMocks(t)
 
@@ -1353,7 +1321,8 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 	// Mock checkMempool to succeed.
 	m.chain.On("TestMempoolAccept",
 		mock.Anything, mock.Anything,
-	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil).
+		Once()
 
 	m.store.On("ResolveOwnedAddresses", mock.Anything,
 		matchResolveOwnedAddressesQuery(w.id, pkScript),
@@ -1365,80 +1334,16 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 	).Return(nil).Once()
 
 	// Mock publishTx to fail.
-	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	m.chain.On("SendRawTransaction",
 		mock.Anything, mock.Anything,
-	).Return(nil, errPublish)
+	).Return(nil, errPublish).Once()
 
-	m.store.On("DeleteUnminedTx", mock.Anything,
-		matchDeleteUnminedTxParams(w.id, tx.TxHash()),
-	).Return(nil).Once()
-
+	// Act: Fail the publication after the wallet has recorded the spend.
 	err = w.Broadcast(t.Context(), tx, label)
-	require.ErrorIs(t, err, errPublish)
-}
 
-// TestBroadcastSweepPublishFailsRemoveSucceeds tests that a sweep tx (no
-// owned outputs but an owned input) is recorded, and that when publishing fails
-// the recorded tx is removed rather than hitting ErrTxNotFound.
-func TestBroadcastSweepPublishFailsRemoveSucceeds(t *testing.T) {
-	t.Parallel()
-
-	label := testTxLabel
-	w, m := createStartedWalletWithMocks(t)
-
-	// Create a tx whose only output pays an address the wallet does not
-	// own, so it has no owned outputs.
-	unownedPrivKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-	unownedAddr, err := address.NewAddressPubKey(
-		unownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
-	)
-	require.NoError(t, err)
-	pkScript, err := txscript.PayToAddrScript(unownedAddr)
-	require.NoError(t, err)
-
-	prevOut := wire.OutPoint{Hash: chainhash.Hash{0xaa}, Index: 0}
-	tx := &wire.MsgTx{
-		TxIn:  []*wire.TxIn{{PreviousOutPoint: prevOut}},
-		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
-	}
-
-	// Mock checkMempool to succeed.
-	m.chain.On("TestMempoolAccept",
-		mock.Anything, mock.Anything,
-	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
-
-	// The output is unowned.
-	m.store.On("ResolveOwnedAddresses", mock.Anything,
-		matchResolveOwnedAddressesQuery(w.id, pkScript),
-	).Return(ownedAddrsResult(), nil).Once()
-
-	// The input spends a wallet UTXO, marking the tx as ours.
-	m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
-		WalletID: w.id,
-		OutPoint: prevOut,
-	}).Return(&db.UtxoInfo{OutPoint: prevOut}, nil).Once()
-
-	// The sweep is recorded with no credits.
-	m.store.On("CreateTx", mock.Anything,
-		matchCreateTxParams(
-			w.id, tx, label, map[uint32]address.Address{},
-		),
-	).Return(nil).Once()
-
-	// Mock publishTx to fail.
-	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
-	m.chain.On("SendRawTransaction",
-		mock.Anything, mock.Anything,
-	).Return(nil, errPublish)
-
-	// The recorded sweep can be removed because a row exists.
-	m.store.On("DeleteUnminedTx", mock.Anything,
-		matchDeleteUnminedTxParams(w.id, tx.TxHash()),
-	).Return(nil).Once()
-
-	err = w.Broadcast(t.Context(), tx, label)
+	// Assert: Preserve the original error. Fixture-owned mock verification
+	// rejects any deletion of the recorded transaction.
 	require.ErrorIs(t, err, errPublish)
 }
 
@@ -1514,59 +1419,6 @@ func TestBroadcastUnrelatedPublishFailsNoRemove(t *testing.T) {
 	// No removal must have been attempted for the unrecorded tx.
 	m.store.AssertNotCalled(t, "DeleteUnminedTx", mock.Anything,
 		mock.Anything)
-}
-
-// TestBroadcastPublishFailsRemoveFails tests the Broadcast method when both
-// publishing and removing the transaction from the wallet fail.
-func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
-	t.Parallel()
-
-	label := testTxLabel
-	w, m := createStartedWalletWithMocks(t)
-
-	// Create a transaction with an owned output.
-	ownedPrivKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-	ownedAddr, err := address.NewAddressPubKey(
-		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
-	)
-	require.NoError(t, err)
-	pkScript, err := txscript.PayToAddrScript(ownedAddr)
-	require.NoError(t, err)
-
-	tx := &wire.MsgTx{
-		TxIn:  []*wire.TxIn{{}},
-		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
-	}
-
-	// Mock checkMempool to succeed.
-	m.chain.On("TestMempoolAccept",
-		mock.Anything, mock.Anything,
-	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
-
-	m.store.On("ResolveOwnedAddresses", mock.Anything,
-		matchResolveOwnedAddressesQuery(w.id, pkScript),
-	).Return(ownedAddrsResult(pkScript), nil).Once()
-	m.store.On("CreateTx", mock.Anything,
-		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
-			0: ownedAddr,
-		}),
-	).Return(nil).Once()
-
-	// Mock publishTx to fail.
-	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
-	m.chain.On("SendRawTransaction",
-		mock.Anything, mock.Anything,
-	).Return(nil, errPublish)
-
-	m.store.On("DeleteUnminedTx", mock.Anything,
-		matchDeleteUnminedTxParams(w.id, tx.TxHash()),
-	).Return(errRemove).Once()
-
-	err = w.Broadcast(t.Context(), tx, label)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), errPublish.Error())
-	require.Contains(t, err.Error(), errRemove.Error())
 }
 
 // TestBroadcastNilTx tests that the Broadcast method returns an error when a
@@ -1697,4 +1549,132 @@ func TestBroadcastRetryLiveDuplicateIdempotent(t *testing.T) {
 
 	err = w.Broadcast(t.Context(), tx, label)
 	require.NoError(t, err)
+}
+
+// TestBroadcastReorgPublishFailureRetainsSpend verifies a failed retry keeps
+// disconnected published history and its claimed input out of the UTXO set.
+func TestBroadcastReorgPublishFailureRetainsSpend(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse a real SQLite wallet with a non-current mock chain so
+	// this test owns the state transitions. Confirm funding below the fork,
+	// lease one output, then confirm and disconnect its published spender.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	_, input, untouched := storeFundingCredits(t, w)
+	fundingBlock := db.Block{
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+	}
+
+	// SyncedTo creates the block row needed by funding confirmation.
+	err := w.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: w.id,
+		SyncedTo: &fundingBlock,
+	})
+	require.NoError(t, err)
+	err = w.store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     input.Hash,
+		State: &db.UpdateTxState{
+			Block:  &fundingBlock,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+
+	// Give confirmation a lease to remove before the rollback.
+	_, err = w.store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: w.id,
+		ID:       db.LockID{1},
+		OutPoint: input,
+		NoExpiry: true,
+	})
+	require.NoError(t, err)
+
+	// Spend the leased input and leave the other output as a UTXO control.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(19_000, []byte{txscript.OP_TRUE}))
+	txid := tx.TxHash()
+	err = w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	spendBlock := db.Block{
+		Hash:      chainhash.Hash{1},
+		Height:    fundingBlock.Height + 1,
+		Timestamp: fundingBlock.Timestamp.Add(time.Second),
+	}
+
+	// SyncedTo also creates the block row used to confirm the spender.
+	err = w.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: w.id,
+		SyncedTo: &spendBlock,
+	})
+	require.NoError(t, err)
+
+	// Confirmation deletes the lease, so after rollback only the retained
+	// spend link can keep the input reserved.
+	err = w.store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     txid,
+		State: &db.UpdateTxState{
+			Block:  &spendBlock,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, w.store.RollbackToBlock(
+		t.Context(), spendBlock.Height,
+	))
+
+	// Pin the unmined row and input claim before retrying; lease listings
+	// hide spent outputs and cannot establish this precondition.
+	query := db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     txid,
+	}
+	before, err := w.store.GetTx(t.Context(), query)
+	require.NoError(t, err)
+	require.Nil(t, before.Block)
+	require.Equal(t, db.TxStatusPublished, before.Status)
+	_, err = w.store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: input,
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+
+	// Allow preflight so only the subsequent network send fails.
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return([]*btcjson.TestMempoolAcceptResult{
+			{
+				Allowed: true,
+			},
+		}, nil).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("SendRawTransaction", mock.Anything, false).
+		Return(nil, errPublish).Once()
+
+	// Act: Retry the disconnected transaction and fail only its network
+	// send, after the Store has already preserved its live unmined state.
+	err = w.Broadcast(t.Context(), tx, "")
+
+	// Assert: Preserve the published row and its input exclusion. The
+	// untouched funding output proves UTXO reads still work.
+	require.ErrorIs(t, err, errPublish)
+	after, err := w.store.GetTx(t.Context(), query)
+	require.NoError(t, err)
+	require.Nil(t, after.Block)
+	require.Equal(t, db.TxStatusPublished, after.Status)
+	utxos, err := w.store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: w.id,
+	})
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, untouched, utxos[0].OutPoint)
 }

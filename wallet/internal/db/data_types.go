@@ -978,22 +978,20 @@ type ListAddressesQuery struct {
 type TxStatus uint8
 
 const (
-	// TxStatusPending indicates a locally-created transaction that has not yet
-	// been broadcast.
+	// TxStatusPending indicates a locally-created transaction retained before
+	// the wallet records it for publication.
 	//
 	// Callers use this state when they need the store to retain a locally
 	// authored transaction before network publication.
 	TxStatusPending TxStatus = iota
 
-	// TxStatusPublished indicates a transaction that is still considered
-	// valid by the wallet and is either unconfirmed in the mempool or
-	// confirmed in the current best chain.
+	// TxStatusPublished indicates active wallet history observed from the
+	// chain or recorded for publication and rebroadcast. It includes retained
+	// failed attempts, even when publication fails before a network send, and
+	// does not prove mempool acceptance.
 	//
-	// The two cases share one validity status because Block already tells the
-	// caller whether the transaction is mined. Keeping both under
-	// TxStatusPublished avoids contradictory combinations such as
-	// "confirmed but not published" and keeps this field focused on whether the
-	// wallet still treats the transaction as valid.
+	// Block distinguishes confirmed from unconfirmed history. Unconfirmed
+	// published rows participate in automatic rebroadcast; pending rows do not.
 	TxStatusPublished
 
 	// TxStatusReplaced indicates a transaction that was invalidated by a

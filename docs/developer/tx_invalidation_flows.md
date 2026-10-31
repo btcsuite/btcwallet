@@ -20,11 +20,16 @@ From the wallet's point of view, a small set of events can change tx history:
   block/status fields without rewriting graph edges.
 - invalidation of an unmined branch, e.g. when a confirmed conflict or a reorg
   invalidates one local spend and its dependent descendants.
-- removal of an unmined branch, e.g. when a caller drops a local spend, or
-  publication cleanup drops one it could not publish, with its dependent
-  descendants.
+- removal of an unmined branch when a caller explicitly drops a local spend
+  with its dependent descendants.
 - rollback of confirmed history at a block boundary, e.g. when a reorg
   disconnects blocks and rewinds formerly confirmed wallet history.
+
+A publication error alone does not invalidate or remove a recorded tx. The
+wallet retains its history and input spend links, including after a failed
+first publication. Its `published` status tracks publication and rebroadcast,
+not a successful send or mempool acceptance. Recording precedes notification
+registration, so even an error before any network send retains this status.
 
 The first two events place invalidation in the broader tx-store model. The
 branch-mutating workflows described here are the ones that discover dependent
@@ -121,7 +126,7 @@ depends on which wallet event started the flow.
 | Wallet event | Root outcome | Descendant outcome | Example |
 | --- | --- | --- | --- |
 | `InvalidateUnminedTx` | `failed` | `failed` | The wallet has evidence one local unmined branch is invalid. |
-| `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed tx, or publication cleanup drops one it could not publish. |
+| `DeleteUnminedTx` | removed | removed | A caller explicitly removes an unconfirmed tx and its recorded descendants. |
 | `CreateTx` conflict handling | direct conflict roots become `replaced` | dependent descendants become `failed` | A newly confirmed winner claims wallet-owned inputs already spent by an unmined branch. |
 | `RollbackToBlock` | disconnected coinbase roots become `orphaned` | dependent descendants become `failed` | A reorg disconnects the confirming block for the root branch. |
 

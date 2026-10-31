@@ -112,12 +112,14 @@ const (
 	// status. Wallet readers do not return this status for a valid store row.
 	TxStatusUnknown TxStatus = iota
 
-	// TxStatusPending identifies a locally-authored transaction that the
-	// wallet has not published successfully.
+	// TxStatusPending identifies a locally-authored transaction retained
+	// before the wallet records it for publication.
 	TxStatusPending
 
-	// TxStatusPublished identifies a valid transaction observed by the
-	// wallet. Block distinguishes confirmed from unconfirmed transactions.
+	// TxStatusPublished identifies active wallet history observed from the
+	// chain or recorded for publication and rebroadcast. It includes retained
+	// failed attempts and does not prove a network send or mempool acceptance.
+	// Block distinguishes confirmed from unconfirmed transactions.
 	TxStatusPublished
 
 	// TxStatusReplaced identifies a transaction invalidated by an RBF

@@ -96,9 +96,10 @@ A Transaction represents an event that *moves* value. Its lifecycle tracks the j
 ```mermaid
 stateDiagram-v2
     [*] --> Pending : User Creates
-    [*] --> Published : P2P/Mempool
+    [*] --> Published : Publication / Chain Observation
     
-    Pending --> Published : Broadcast
+    %% Publication tracking begins before registration or sending can fail.
+    Pending --> Published : Publication / Chain Observation
     
     %% Confirmation is orthogonal (BlockHeight != NULL)
     
@@ -128,11 +129,16 @@ We distinguish between a transaction's **Validity** (Status) and its **Confirmat
 
 | Status Code | Meaning | Affects Balance? |
 | :--- | :--- | :--- |
-| `0` (`pending`) | Created locally, not yet broadcast. | **Yes** (Factual) |
-| `1` (`published`) | Active in mempool or blockchain. | **Yes** (If valid) |
+| `0` (`pending`) | Created locally, before publication tracking. | **Yes** (Factual) |
+| `1` (`published`) | Active wallet history recorded for publication or observed from the chain. | **Yes** (If valid) |
 | `2` (`replaced`) | Replaced by a higher-fee transaction (RBF). | **No** |
 | `3` (`failed`) | Invalidated by a conflicting transaction (Double-Spend). | **No** |
 | `4` (`orphaned`) | Coinbase tx that was reorged out (Invalid). | **No** |
+
+The wallet records `published` before notification registration or sending.
+Retained failed attempts keep this status even if no network send occurred;
+it does not prove mempool acceptance. Unconfirmed `published` rows participate
+in automatic rebroadcast, while `pending` rows do not.
 
 *Additional invariant: Coinbase transactions cannot exist in the mempool. A coinbase transaction is either confirmed (`BlockHeight IS NOT NULL` and `Status = 1`, `published`) or orphaned (`Status = 4`, `orphaned`, and `BlockHeight IS NULL`).*
 
