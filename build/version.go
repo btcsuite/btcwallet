@@ -11,7 +11,7 @@ import (
 )
 
 // semanticAlphabet
-const semanticAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-"
+const semanticAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-."
 
 // These constants define the application version and follow the semantic
 // versioning 2.0.0 spec (http://semver.org/).
@@ -21,13 +21,19 @@ const (
 	appPatch uint = 1
 
 	// appPreRelease MUST only contain characters from semanticAlphabet
-	// per the semantic versioning spec.
+	// per the semantic versioning spec.  That is necessary but not
+	// sufficient: semanticAlphabet is a per-character filter and cannot
+	// reject a malformed arrangement of valid characters, such as a
+	// trailing or doubled '.', so the value must also be a well-formed
+	// dot-separated list of non-empty identifiers.
 	appPreRelease = "alpha"
 )
 
 // appBuild is defined as a variable so it can be overridden during the build
 // process with '-ldflags "-X main.appBuild foo' if needed.  It MUST only
-// contain characters from semanticAlphabet per the semantic versioning spec.
+// contain characters from semanticAlphabet per the semantic versioning spec,
+// and like appPreRelease must also be a well-formed dot-separated list of
+// non-empty identifiers, which the per-character filter cannot enforce.
 var appBuild string
 
 // Version returns the application version as a properly formed string per the
