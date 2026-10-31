@@ -208,6 +208,14 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 		return
 	}
 
+	details, err := s.wallet.TxStore.UniqueTxDetails(ns, &txHash, nil)
+	if err != nil {
+		log.Errorf("Cannot query transaction details for "+
+			"notification: %v", err)
+
+		return
+	}
+
 	// It's possible that the transaction was not found within the wallet's
 	// set of unconfirmed transactions due to it already being confirmed,
 	// so we'll avoid notifying it.
@@ -215,10 +223,9 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 	// TODO(wilmer): ideally we should find the culprit to why we're
 	// receiving an additional unconfirmed chain.RelevantTx notification
 	// from the chain backend.
-	details, err := s.wallet.TxStore.UniqueTxDetails(ns, &txHash, nil)
-	if err != nil {
-		log.Errorf("Cannot query transaction details for "+
-			"notification: %v", err)
+	if details == nil {
+		log.Debugf("Skipping unmined transaction notification for %v: "+
+			"transaction details not found", txHash)
 
 		return
 	}
@@ -282,14 +289,22 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx,
 		return
 	}
 
-	// We'll only notify the transaction if it was found within the
-	// wallet's set of confirmed transactions.
 	details, err := s.wallet.TxStore.UniqueTxDetails(
 		ns, &txHash, &block.Block,
 	)
 	if err != nil {
 		log.Errorf("Cannot query transaction details for "+
 			"notification: %v", err)
+
+		return
+	}
+
+	// We'll only notify the transaction if it was found within the
+	// wallet's set of confirmed transactions.
+	if details == nil {
+		log.Warnf("Skipping mined transaction notification for %v "+
+			"in block %v: transaction details not found",
+			txHash, block.Hash)
 
 		return
 	}
