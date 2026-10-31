@@ -59,10 +59,11 @@ type UnlockRequest struct {
 	// Passphrase is the private passphrase to unlock the wallet.
 	Passphrase []byte
 
-	// Timeout defines the duration after which the wallet should
-	// automatically lock. If zero, it defaults to the wallet's configured
-	// AutoLockDuration. If negative, the wallet remains unlocked until
-	// explicitly locked or stopped.
+	// Timeout defines the auto-lock duration after a successful Unlock. If
+	// zero, it defaults to the wallet's configured AutoLockDuration. If
+	// negative, the wallet remains unlocked until explicitly locked or
+	// stopped. A rejected repeated Unlock ignores Timeout and preserves the
+	// original deadline or disabled auto-lock schedule.
 	Timeout time.Duration
 }
 
@@ -131,9 +132,11 @@ type ChangePassphraseRequest struct {
 
 // Controller provides an interface for querying and changing Wallet state.
 type Controller interface {
-	// Unlock unlocks the wallet with a passphrase. The wallet will remain
-	// unlocked until explicitly locked or the provided lock duration
-	// expires.
+	// Unlock unlocks the wallet with a passphrase and applies req.Timeout's
+	// auto-lock policy. While already unlocked, it returns an already-unlocked
+	// error without validating the supplied passphrase. A rejected repeat
+	// leaves the original auto-lock deadline or disabled schedule unchanged,
+	// regardless of the requested timeout.
 	Unlock(ctx context.Context, req UnlockRequest) error
 
 	// Lock locks the wallet, clearing any cached private key material.
@@ -395,6 +398,11 @@ func (w *Wallet) stop() error {
 }
 
 // Unlock unlocks the wallet with a passphrase.
+//
+// While already unlocked, it returns an already-unlocked error without
+// validating the supplied passphrase. Rejection preserves the original
+// auto-lock deadline or disabled schedule regardless of req.Timeout; only a
+// successful Unlock applies the requested auto-lock policy.
 //
 // This is part of the Controller interface.
 func (w *Wallet) Unlock(ctx context.Context, req UnlockRequest) error {

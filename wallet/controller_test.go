@@ -1146,6 +1146,150 @@ func TestControllerUnlock(t *testing.T) {
 	w.wg.Wait()
 }
 
+// TestControllerUnlockRepeatedPreservesSchedule verifies that repeated Unlock
+// rejects both passphrases without changing an active or disabled schedule on
+// either maintained Vault backend.
+func TestControllerUnlockRepeatedPreservesSchedule(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Reuse real fixtures inside the fake-time bubble so
+		// request loops and timers share its clock. The fixtures own
+		// shutdown and chain-mock assertions; no new mocks are needed.
+		birthday := chainParams.GenesisBlock.Header.Timestamp
+		wantErr := keyvault.ErrVaultUnlocked
+
+		for _, manager := range []*Manager{
+			testKVDBManager(t),
+			testSQLiteManager(t),
+		} {
+			pass := []byte("private")
+			w, err := manager.Create(CreateWalletParams{
+				Name: testWalletName,
+				Mode: ModeImportSeed,
+				Seed: fixedTestSeed(),
+				PubPassphrase: []byte(
+					InsecurePubPassphrase,
+				),
+				PrivatePassphrase: pass,
+				Birthday:          birthday,
+			})
+			require.NoError(t, err)
+
+			// A disabled schedule must outlive the defaulted
+			// repeat's deadline. Negative repeats add coverage only
+			// when they could disable an active schedule.
+			schedules := []struct {
+				name           string
+				timeout        time.Duration
+				repeatTimeouts []time.Duration
+				finalDelay     time.Duration
+				wantLocked     bool
+			}{
+				{
+					name:    "active",
+					timeout: time.Minute,
+					repeatTimeouts: []time.Duration{
+						10 * time.Second,
+						2 * time.Minute,
+						0,
+						-1,
+					},
+					finalDelay: time.Second,
+					wantLocked: true,
+				},
+				{
+					name:    "disabled",
+					timeout: -1,
+					repeatTimeouts: []time.Duration{
+						10 * time.Second,
+						2 * time.Minute,
+						0,
+					},
+					finalDelay: w.cfg.AutoLockDuration +
+						time.Minute,
+					wantLocked: false,
+				},
+			}
+
+			// Reset cases only through Lock, keeping timer changes
+			// under the real Controller's ownership.
+			for _, s := range schedules {
+				for _, repeatPass := range [][]byte{
+					pass, []byte("wrong-passphrase"),
+				} {
+					for _, delay := range s.repeatTimeouts {
+						t.Logf(
+							"backend=%s "+
+								"schedule=%s "+
+								"pass=%s "+
+								"repeat=%v",
+							manager.config.Backend,
+							s.name,
+							repeatPass, delay,
+						)
+
+						// Arrange: Set the first
+						// successful schedule, then
+						// distinguish a later reset.
+						err = w.Lock(t.Context())
+						require.NoError(t, err)
+
+						req := UnlockRequest{
+							Passphrase: pass,
+							Timeout:    s.timeout,
+						}
+						err = w.Unlock(t.Context(), req)
+						require.NoError(t, err)
+						time.Sleep(15 * time.Second)
+
+						// Act: Submit a repeat through
+						// public serialized dispatch
+						// with either credential.
+						req = UnlockRequest{
+							Passphrase: repeatPass,
+							Timeout:    delay,
+						}
+						err = w.Unlock(t.Context(), req)
+
+						// Assert: Require the same
+						// rejection for every repeat.
+						// At 59 seconds a shortened
+						// timer would have fired, but
+						// the original is still live.
+						require.ErrorIs(
+							t, err, wantErr,
+						)
+						time.Sleep(44 * time.Second)
+						synctest.Wait()
+
+						info, err := w.Info(t.Context())
+						require.NoError(t, err)
+						require.False(t, info.Locked)
+
+						// Drain the original expiry at
+						// exactly 60 seconds, or wait
+						// past all repeats when off.
+						// This detects extension,
+						// disabling, or rearming.
+						time.Sleep(s.finalDelay)
+						synctest.Wait()
+
+						info, err = w.Info(t.Context())
+						require.NoError(t, err)
+						require.Equal(
+							t, s.wantLocked,
+							info.Locked,
+						)
+					}
+				}
+			}
+		}
+	})
+}
+
 // TestControllerChangePassphrase verifies the ChangePassphrase method. It
 // ensures that the wallet forwards the request to the address manager to
 // update the passphrases.
