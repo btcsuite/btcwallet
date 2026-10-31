@@ -18,7 +18,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightningnetwork/lnd/ticker"
 )
 
@@ -69,14 +69,14 @@ func (p *queryPeer) signalUponDisconnect(f func()) {
 // received from this peer will be sent on the returned channel. A closure is
 // also returned, that should be called to cancel the subscription.
 //
-// NOTE: This method exists to satisfy the query.Peer interface.
+// NOTE: This method exists to satisfy the workmanager.Peer interface.
 func (p *queryPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	return p.msgsRecvd, func() {}
 }
 
 // OnDisconnect returns a channel that will be closed once the peer disconnects.
 //
-// NOTE: This method exists to satisfy the query.Peer interface.
+// NOTE: This method exists to satisfy the workmanager.Peer interface.
 func (p *queryPeer) OnDisconnect() <-chan struct{} {
 	return p.quit
 }
@@ -135,7 +135,7 @@ type PrunedBlockDispatcher struct {
 
 	// workManager handles satisfying all of our incoming pruned block
 	// requests.
-	workManager query.WorkManager
+	workManager workmanager.WorkManager
 
 	// blocksQueried represents the set of pruned blocks we've been
 	// requested to query. Each block maps to a list of clients waiting to
@@ -172,7 +172,7 @@ type PrunedBlockDispatcher struct {
 
 	// peersConnected is the channel through which we'll send new peers
 	// we've established connections to.
-	peersConnected chan query.Peer
+	peersConnected chan workmanager.Peer
 
 	// timeSource provides a mechanism to add several time samples which are
 	// used to determine a median time which is then used as an offset to
@@ -196,15 +196,17 @@ func NewPrunedBlockDispatcher(cfg *PrunedBlockDispatcherConfig) (
 			"<= %v", wire.MaxInvPerMsg)
 	}
 
-	peersConnected := make(chan query.Peer)
+	peersConnected := make(chan workmanager.Peer)
 	return &PrunedBlockDispatcher{
 		cfg: *cfg,
-		workManager: query.NewWorkManager(&query.Config{
-			ConnectedPeers: func() (<-chan query.Peer, func(), error) {
+		workManager: workmanager.NewWorkManager(&workmanager.Config{
+			ConnectedPeers: func() (<-chan workmanager.Peer, func(),
+				error) {
+
 				return peersConnected, func() {}, nil
 			},
-			NewWorker: query.NewWorker,
-			Ranking:   query.NewPeerRanking(),
+			NewWorker: workmanager.NewWorker,
+			Ranking:   workmanager.NewPeerRanking(),
 		}),
 		blocksQueried:    make(map[chainhash.Hash][]chan *wire.MsgBlock),
 		blockQueryCancel: make(map[chainhash.Hash][]chan<- error),
@@ -530,7 +532,7 @@ func (d *PrunedBlockDispatcher) banPeer(peer string) {
 // Query submits a request to query the information of the given blocks.
 func (d *PrunedBlockDispatcher) Query(blocks []*chainhash.Hash,
 	cancelChan chan<- error,
-	opts ...query.QueryOption) (<-chan *wire.MsgBlock, <-chan error) {
+	opts ...workmanager.QueryOption) (<-chan *wire.MsgBlock, <-chan error) {
 
 	reqs, blockChan, err := d.newRequest(blocks, cancelChan)
 	if err != nil {
@@ -553,7 +555,7 @@ func (d *PrunedBlockDispatcher) Query(blocks []*chainhash.Hash,
 //
 // NOTE: The cancelChan must be buffered.
 func (d *PrunedBlockDispatcher) newRequest(blocks []*chainhash.Hash,
-	cancelChan chan<- error) ([]*query.Request, <-chan *wire.MsgBlock,
+	cancelChan chan<- error) ([]*workmanager.Request, <-chan *wire.MsgBlock,
 	error) {
 
 	// Make sure the channel is buffered enough to handle all blocks.
@@ -565,7 +567,7 @@ func (d *PrunedBlockDispatcher) newRequest(blocks []*chainhash.Hash,
 	// Each GetData message can only include up to MaxRequestInvs invs,
 	// and each block consumes a single inv.
 	var (
-		reqs    []*query.Request
+		reqs    []*workmanager.Request
 		getData *wire.MsgGetData
 	)
 	for i, block := range blocks {
@@ -598,7 +600,7 @@ func (d *PrunedBlockDispatcher) newRequest(blocks []*chainhash.Hash,
 		if (len(getData.InvList) > 0 && i == len(blocks)-1) ||
 			len(getData.InvList) == d.cfg.MaxRequestInvs {
 
-			reqs = append(reqs, &query.Request{
+			reqs = append(reqs, &workmanager.Request{
 				Req:        getData,
 				HandleResp: d.handleResp,
 			})
@@ -619,12 +621,12 @@ func (d *PrunedBlockDispatcher) newRequest(blocks []*chainhash.Hash,
 // the response and immediately return the progress. The response should be
 // handed off to another goroutine for processing.
 func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
-	peer string) query.Progress {
+	peer string) workmanager.Progress {
 
 	// We only expect MsgBlock as replies.
 	block, ok := resp.(*wire.MsgBlock)
 	if !ok {
-		return query.Progress{
+		return workmanager.Progress{
 			Progressed: false,
 			Finished:   false,
 		}
@@ -633,7 +635,7 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 	// We only serve MsgGetData requests.
 	getData, ok := req.(*wire.MsgGetData)
 	if !ok {
-		return query.Progress{
+		return workmanager.Progress{
 			Progressed: false,
 			Finished:   false,
 		}
@@ -645,7 +647,8 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 	blockChans, ok := d.blocksQueried[blockHash]
 	if !ok {
 		d.blockMtx.Unlock()
-		return query.Progress{
+
+		return workmanager.Progress{
 			Progressed: false,
 			Finished:   false,
 		}
@@ -664,7 +667,7 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 			blockHash, peer, err)
 		d.banPeer(peer)
 
-		return query.Progress{
+		return workmanager.Progress{
 			Progressed: false,
 			Finished:   false,
 		}
@@ -678,7 +681,7 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 			blockHash, peer, err)
 		d.banPeer(peer)
 
-		return query.Progress{
+		return workmanager.Progress{
 			Progressed: false,
 			Finished:   false,
 		}
@@ -690,7 +693,7 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 	// Check whether we have any other pending blocks we've yet to receive.
 	// If we do, we'll mark the response as progressing our query, but not
 	// completing it yet.
-	progress := query.Progress{Progressed: true, Finished: true}
+	progress := workmanager.Progress{Progressed: true, Finished: true}
 	for _, inv := range getData.InvList {
 		if _, ok := d.blocksQueried[inv.Hash]; ok {
 			progress.Finished = false

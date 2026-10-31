@@ -15,7 +15,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/stretchr/testify/require"
 )
@@ -260,7 +260,7 @@ func (h *prunedBlockDispatcherHarness) newPeer() *peer.Peer {
 
 // query requests the given blocks from the PrunedBlockDispatcher.
 func (h *prunedBlockDispatcherHarness) query(blocks []*chainhash.Hash,
-	opts ...query.QueryOption) (
+	opts ...workmanager.QueryOption) (
 	<-chan *wire.MsgBlock, <-chan error, <-chan error) {
 
 	h.t.Helper()
@@ -548,7 +548,7 @@ func TestPrunedBlockDispatcherQueryFailSameBlock(t *testing.T) {
 		// and currently not configurable so we have to make sure when
 		// asserting not not timeout before.
 		blockChan, errChan, cancelChan := h.query(
-			h.hashes, query.NumRetries(1),
+			h.hashes, workmanager.NumRetries(1),
 		)
 		blockChans = append(blockChans, blockChan)
 		errChans = append(errChans, errChan)
@@ -559,7 +559,7 @@ func TestPrunedBlockDispatcherQueryFailSameBlock(t *testing.T) {
 	h.assertPeerQueried()
 	for i := 0; i < numRequests; i++ {
 		h.assertPeerFailed(blockChans[i], errChans[i], cancelChans[i],
-			query.ErrQueryTimeout)
+			workmanager.ErrQueryTimeout)
 	}
 }
 
