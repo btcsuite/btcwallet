@@ -65,12 +65,17 @@ This is the default background process that ensures the wallet maintains consens
 *   **Mechanism**: Sequential forward scanning of block batches.
 *   **Persistence**: Upon successful completion of a batch, the wallet updates its global "sync tip" in the database.
 
-### 3.2 Targeted Rescan (Import Scanning)
-Triggered by user actions like importing a new account, a private key, or an XPUB.
+### 3.2 Targeted Rescan
+Targeted rescans start only from an explicit caller request. Imports do not
+start them, as decided by ADR 0005.
 
-*   **Goal**: Discover historical transactions for the *newly added* keys without affecting the synchronization status of existing keys.
-*   **Mechanism**: Ad-hoc scanning of a specific block range (typically from the birthday of the imported key to the current tip).
-*   **Persistence**: Found transactions are inserted into the database, but the global `SyncedTo` watermark is **not** altered. This allows the wallet to remain "Synced" for the rest of its keys while processing the import in the background.
+*   **Goal**: Scan a requested historical range without rewinding the global
+    `SyncedTo` watermark.
+*   **Targets**: Requested account scopes limit derivation horizons and
+    lookahead expansion. Recovery-relevant active addresses and watched UTXOs
+    are currently loaded wallet-wide, so matching is not account-exclusive.
+*   **Persistence**: Found transactions are inserted while `SyncedTo` remains
+    unchanged.
 
 ---
 
@@ -88,10 +93,11 @@ When performing the standard chain sync, the wallet loads **all** active data fr
 The `RecoveryState` is initialized with this data and immediately derives `N` new lookahead addresses (based on the `RecoveryWindow`) for every account branch.
 
 ### 4.2 Loading for Targeted Rescan
-When performing a targeted rescan (e.g., after `ImportAccount`), the caller provides specific targets. The wallet constructs a **Partial Recovery State**:
-1.  **Targets**: Only the specific accounts or addresses requested by the caller are loaded.
-2.  **Isolation**: Existing, fully-synced accounts are **excluded** from this state.
-3.  **Efficiency**: This ensures the scanner only spends CPU cycles matching the new keys, ignoring the thousands of keys that are already up-to-date.
+For an explicit targeted request, the Syncer filters derivation horizons to
+the requested account scopes, then loads recovery-relevant active addresses
+and watched UTXOs wallet-wide. This includes accountless raw imports. The scan
+does not rewind `SyncedTo`, but it can match wallet state outside the requested
+account scopes.
 
 ---
 

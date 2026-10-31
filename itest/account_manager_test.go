@@ -1,0 +1,2752 @@
+//go:build itest
+
+package itest
+
+import (
+	"bytes"
+	"encoding/binary"
+	"testing"
+
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/stretchr/testify/require"
+)
+
+// accountManagerFundingType is the address type whose key scope the
+// default-account case operates in. Funding it materializes that scope on
+// every backend.
+const accountManagerFundingType = waddrmgr.WitnessPubKey
+
+// canonicalAccountKey returns a derived account key under the network default
+// public version so backend-specific serialized versions compare consistently.
+func canonicalAccountKey(h *bwtest.HarnessTest, key []byte) []byte {
+	h.Helper()
+
+	parsed, err := hdkeychain.NewKeyFromString(string(key))
+	require.NoError(h, err, "failed to decode account public key")
+	normalized, err := parsed.CloneWithVersion(
+		h.NetParams().HDPublicKeyID[:],
+	)
+	require.NoError(
+		h, err, "failed to normalize account public key version",
+	)
+
+	return []byte(normalized.String())
+}
+
+// prepareQueryDefaults materializes all canonical defaults after funding.
+// Call it before creating named accounts. Each test reads its expectations
+// separately through a method other than the query under test.
+func prepareQueryDefaults(h *bwtest.HarnessTest, w *wallet.Wallet) {
+	h.Helper()
+
+	fundedScope, err := accountManagerFundingType.KeyScope()
+	require.NoError(h, err)
+
+	// Funding already materialized its scope. Request an address in every
+	// other scope so lazy defaults exist before capturing the fixture.
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		if scope != fundedScope {
+			h.NewWalletAddressOfType(
+				w, waddrmgr.ScopeAddrMap[scope].ExternalAddrType,
+			)
+		}
+	}
+}
+
+// spendableQueryAccounts names the creation responses used by query tests.
+type spendableQueryAccounts struct {
+	bip84Shared wallet.AccountInfo
+	bip44Shared wallet.AccountInfo
+	bip84Suffix wallet.AccountInfo
+}
+
+// createSpendableQueryAccounts creates overlapping names across scopes and a
+// near-matching name so callers can check scope and exact-name filtering.
+func createSpendableQueryAccounts(h *bwtest.HarnessTest,
+	w *wallet.Wallet) spendableQueryAccounts {
+
+	h.Helper()
+
+	ctx := h.Context()
+	bip84Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip44Shared, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0044,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	bip84Suffix, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  "query shared suffix",
+	})
+	require.NoError(h, err)
+
+	return spendableQueryAccounts{
+		bip84Shared: *bip84Shared,
+		bip44Shared: *bip44Shared,
+		bip84Suffix: *bip84Suffix,
+	}
+}
+
+// watchOnlyQueryAccounts names the import responses used by query tests.
+type watchOnlyQueryAccounts struct {
+	bip84Shared wallet.AccountInfo
+	bip84Suffix wallet.AccountInfo
+	bip49Shared wallet.AccountInfo
+}
+
+// importWatchOnlyQueryAccounts imports accounts with shared and similar names.
+// One account has a zero fingerprint.
+// Both BIP49 branches use nested witness.
+// With noChainSync=true, each import declares its scope and keeps its account
+// number. With noChainSync=false, the imports have no account number.
+func importWatchOnlyQueryAccounts(h *bwtest.HarnessTest, w *wallet.Wallet,
+	keys importedAccountKeys, noChainSync bool) watchOnlyQueryAccounts {
+
+	h.Helper()
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	account := wallet.ImportAccountParams{
+		Name:                 "query shared",
+		XPub:                 keys.accountKey,
+		AddrType:             waddrmgr.WitnessPubKey,
+		MasterKeyFingerprint: &inputFingerprint,
+		NoChainSync:          noChainSync,
+	}
+
+	// Declare the scope so the import keeps the account number in the XPub.
+	if noChainSync {
+		account.Scope = &keys.scope
+	}
+
+	bip84Shared, err := w.ImportAccount(ctx, account, false)
+	require.NoError(h, err)
+
+	// Copy the common import options so the suffix keeps a zero fingerprint.
+	suffix := account
+	suffix.Name = "query shared suffix"
+	suffix.XPub = keys.otherAccountKey
+	zeroFingerprint := wallet.MasterFingerprint(0)
+	suffix.MasterKeyFingerprint = &zeroFingerprint
+	bip84Suffix, err := w.ImportAccount(ctx, suffix, false)
+	require.NoError(h, err)
+
+	account.AddrType = waddrmgr.NestedWitnessPubKey
+
+	// Declared imports use AddrSchema, not AddrType. Both BIP49 branches must
+	// use nested witness to avoid the BIP84 scripts from the same XPub.
+	if noChainSync {
+		scope := waddrmgr.KeyScopeBIP0049Plus
+		account.Scope = &scope
+		account.AddrSchema = &waddrmgr.KeyScopeBIP0049AddrSchema
+	}
+
+	bip49Shared, err := w.ImportAccount(ctx, account, false)
+	require.NoError(h, err)
+
+	return watchOnlyQueryAccounts{
+		bip84Shared: *bip84Shared,
+		bip84Suffix: *bip84Suffix,
+		bip49Shared: *bip49Shared,
+	}
+}
+
+// testAccountManagerQueryListSpendable checks ListAccounts against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryListSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	prepareQueryDefaults(h, w)
+
+	defaults := make(map[waddrmgr.KeyScope]wallet.AccountInfo)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+		require.NoError(h, err)
+
+		defaults[scope] = *account
+	}
+
+	named := createSpendableQueryAccounts(h, w)
+
+	want := []wallet.AccountInfo{
+		named.bip84Shared, named.bip44Shared, named.bip84Suffix,
+	}
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		want = append(want, defaults[scope])
+	}
+
+	// Act: list the complete spendable inventory.
+	got, err := w.ListAccounts(ctx)
+
+	// Assert: match the full raw setup and creation responses.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, got)
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	// Act: list the reopened inventory.
+	durable, err := w.ListAccounts(ctx)
+
+	// Assert: the complete expected inventory survives.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, durable)
+}
+
+// testAccountManagerQueryScopeSpendable checks ListAccountsByScope against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryScopeSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	prepareQueryDefaults(h, w)
+
+	defaults := make(map[waddrmgr.KeyScope]wallet.AccountInfo)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+		require.NoError(h, err)
+
+		defaults[scope] = *account
+	}
+
+	named := createSpendableQueryAccounts(h, w)
+
+	wantByScope := make(map[waddrmgr.KeyScope][]wallet.AccountInfo)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		wantByScope[scope] = []wallet.AccountInfo{defaults[scope]}
+	}
+
+	wantByScope[waddrmgr.KeyScopeBIP0044] = append(
+		wantByScope[waddrmgr.KeyScopeBIP0044], named.bip44Shared,
+	)
+	wantByScope[waddrmgr.KeyScopeBIP0084] = append(
+		wantByScope[waddrmgr.KeyScopeBIP0084],
+		named.bip84Shared, named.bip84Suffix,
+	)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: select the explicit scope inventory.
+		accounts, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: only the expected scope members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: repeat scope selection after reopening.
+		durable, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: expected membership and account facts survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], durable)
+	}
+}
+
+// testAccountManagerQueryNameSpendable checks ListAccountsByName against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryNameSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	prepareQueryDefaults(h, w)
+
+	defaults := make(map[waddrmgr.KeyScope]wallet.AccountInfo)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+		require.NoError(h, err)
+
+		defaults[scope] = *account
+	}
+
+	named := createSpendableQueryAccounts(h, w)
+
+	defaultAccounts := make(
+		[]wallet.AccountInfo, 0, len(waddrmgr.DefaultKeyScopes),
+	)
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		defaultAccounts = append(defaultAccounts, defaults[scope])
+	}
+
+	nameQueries := []struct {
+		name string
+		want []wallet.AccountInfo
+	}{
+		{waddrmgr.DefaultAccountName, defaultAccounts},
+		{
+			"query shared",
+			[]wallet.AccountInfo{named.bip84Shared, named.bip44Shared},
+		},
+		{"query shared suffix", []wallet.AccountInfo{named.bip84Suffix}},
+	}
+
+	for _, query := range nameQueries {
+		// Act: select the explicit name inventory.
+		accounts, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: only the expected name members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, query := range nameQueries {
+		// Act: repeat name selection after reopening.
+		durable, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: expected membership and account facts survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, durable)
+	}
+}
+
+// testAccountManagerQueryGetSpendable checks GetAccount against
+// the explicit spendable fixture before and after a locked reopen.
+func testAccountManagerQueryGetSpendable(h *bwtest.HarnessTest) {
+	// Arrange: capture default views, then create overlapping scope names.
+	// Use the setup and creation responses as the expected account facts.
+	seed := h.SeedFromTestName()
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: accountManagerFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+		Seed:     seed,
+	})
+	ctx := h.Context()
+	prepareQueryDefaults(h, w)
+
+	accounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+
+	defaults := make(map[waddrmgr.KeyScope]wallet.AccountInfo, len(accounts))
+	for _, account := range accounts {
+		defaults[account.KeyScope] = account
+	}
+
+	named := createSpendableQueryAccounts(h, w)
+
+	fundedScope, err := accountManagerFundingType.KeyScope()
+	require.NoError(h, err)
+
+	balances := map[waddrmgr.KeyScope]btcutil.Amount{fundedScope: oneBTC}
+	defaultNumber := wallet.AccountNumber(waddrmgr.DefaultAccountNum)
+
+	// List and point reads share conversion code. These fixture facts must
+	// remain independent of both reads so a shared projection bug fails.
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		result, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+
+		require.NoError(h, err)
+		require.Equal(h, defaults[scope], *result)
+		require.Equal(h, scope, result.KeyScope)
+		require.Equal(h, waddrmgr.DefaultAccountName, result.AccountName)
+		require.Equal(h, &defaultNumber, result.AccountNumber)
+		require.Equal(h, uint32(1), result.ExternalKeyCount)
+		require.Zero(h, result.InternalKeyCount)
+		require.Zero(h, result.ImportedKeyCount)
+		require.Equal(h, balances[scope], result.ConfirmedBalance)
+		require.Zero(h, result.UnconfirmedBalance)
+	}
+
+	want := []wallet.AccountInfo{
+		named.bip84Shared, named.bip44Shared, named.bip84Suffix,
+	}
+	for _, account := range want {
+		// Act: look up each scope/name pair individually.
+		result, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: match the full raw setup or creation response.
+		require.NoError(h, err)
+		require.Equal(h, account, *result)
+	}
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		want = append(want, defaults[scope])
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, account := range want {
+		// Act: repeat each point lookup after reopening.
+		durable, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: named creations and default expectations survive.
+		require.NoError(h, err)
+		require.Equal(h, account, *durable)
+	}
+}
+
+// testAccountManagerQueryListWatchOnly checks ListAccounts against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryListWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
+
+	want := []wallet.AccountInfo{
+		named.bip84Shared, named.bip84Suffix, named.bip49Shared,
+	}
+
+	// Act: list the complete watch-only inventory.
+	got, err := w.ListAccounts(ctx)
+
+	// Assert: match the full raw import responses.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, got)
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	// Act: list the reopened inventory.
+	durable, err := w.ListAccounts(ctx)
+
+	// Assert: the complete import responses survive.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, durable)
+}
+
+// testAccountManagerQueryScopeWatchOnly checks ListAccountsByScope against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryScopeWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
+
+	wantByScope := map[waddrmgr.KeyScope][]wallet.AccountInfo{
+		waddrmgr.KeyScopeBIP0049Plus: {named.bip49Shared},
+		waddrmgr.KeyScopeBIP0084:     {named.bip84Shared, named.bip84Suffix},
+	}
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: select the explicit scope inventory.
+		accounts, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: only the expected scope members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		// Act: repeat scope selection after reopening.
+		durable, err := w.ListAccountsByScope(ctx, scope)
+
+		// Assert: membership and full raw import responses survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, wantByScope[scope], durable)
+	}
+}
+
+// testAccountManagerQueryNameWatchOnly checks ListAccountsByName against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryNameWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
+
+	nameQueries := []struct {
+		name string
+		want []wallet.AccountInfo
+	}{
+		{
+			"query shared",
+			[]wallet.AccountInfo{named.bip84Shared, named.bip49Shared},
+		},
+		{"query shared suffix", []wallet.AccountInfo{named.bip84Suffix}},
+	}
+
+	for _, query := range nameQueries {
+		// Act: select the explicit name inventory.
+		accounts, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: only the expected name members appear.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, accounts)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, query := range nameQueries {
+		// Act: repeat name selection after reopening.
+		durable, err := w.ListAccountsByName(ctx, query.name)
+
+		// Assert: membership and full raw import responses survive.
+		require.NoError(h, err)
+		require.ElementsMatch(h, query.want, durable)
+	}
+}
+
+// testAccountManagerQueryGetWatchOnly checks GetAccount against
+// the explicit watch-only fixture before and after a locked reopen.
+func testAccountManagerQueryGetWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: import shared and near-matching names across two scopes,
+	// including a present-zero fingerprint and a schema override.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys, false)
+
+	want := []wallet.AccountInfo{
+		named.bip84Shared, named.bip84Suffix, named.bip49Shared,
+	}
+
+	for _, account := range want {
+		// Act: look up each scope/name pair individually.
+		result, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: match the complete raw import response.
+		require.NoError(h, err)
+		require.Equal(h, account, *result)
+	}
+
+	// Arrange: reopen without unlocking to exercise durable public reads.
+	w = h.ReloadWallet(w)
+
+	for _, account := range want {
+		// Act: repeat each point lookup after reopening.
+		durable, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: import responses and raw serialization survive.
+		require.NoError(h, err)
+		require.Equal(h, account, *durable)
+	}
+}
+
+// testAccountManagerQueryNoChainSyncImported checks all account queries before
+// and after ReloadWallet. Each result must keep the imported account data and
+// NoChainSync=true.
+func testAccountManagerQueryNoChainSyncImported(h *bwtest.HarnessTest) {
+	// Kvdb ignores NoChainSync on import and returns false. Skip this case
+	// because its account queries require true.
+	//nolint:staticcheck // SA1019: identify the legacy backend.
+	if *dbBackend == string(wallet.DBBackendKVDB) {
+		h.Skip("kvdb ignores NoChainSync")
+	}
+
+	// Arrange: use the existing query accounts with NoChainSync=true. Declare
+	// their scopes so each import keeps the account number from its XPub.
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	ctx := h.Context()
+	named := importWatchOnlyQueryAccounts(h, w, keys, true)
+	zero, one := wallet.AccountNumber(0), wallet.AccountNumber(1)
+	require.Equal(h, &zero, named.bip84Shared.AccountNumber)
+	require.Equal(h, &one, named.bip84Suffix.AccountNumber)
+	require.Equal(h, &zero, named.bip49Shared.AccountNumber)
+
+	want := []wallet.AccountInfo{
+		named.bip84Shared, named.bip84Suffix, named.bip49Shared,
+	}
+	for _, account := range want {
+		require.True(h, account.NoChainSync)
+	}
+
+	// Act: list all accounts before the wallet is opened again.
+	accounts, err := w.ListAccounts(ctx)
+
+	// Assert: compare all public account fields with the import results.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, accounts)
+
+	for _, account := range want {
+		// Act: list accounts in the imported account's scope.
+		scoped, err := w.ListAccountsByScope(ctx, account.KeyScope)
+
+		// Assert: the result must include the complete imported account.
+		require.NoError(h, err)
+		require.Contains(h, scoped, account)
+
+		// Act: list accounts with the imported account's name.
+		byName, err := w.ListAccountsByName(ctx, account.AccountName)
+
+		// Assert: the name query must return the same account data.
+		require.NoError(h, err)
+		require.Contains(h, byName, account)
+
+		// Act: read the account by its scope and name.
+		got, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: the single-account query must match the import result.
+		require.NoError(h, err)
+		require.Equal(h, account, *got)
+	}
+
+	// Arrange: open the same stored wallet again. The locked replacement
+	// wallet must read the account data without the original wallet's cache.
+	w = h.ReloadWallet(w)
+
+	// Act: list all accounts from the replacement wallet.
+	durableAccounts, err := w.ListAccounts(ctx)
+
+	// Assert: all account data and NoChainSync=true must survive ReloadWallet.
+	require.NoError(h, err)
+	require.ElementsMatch(h, want, durableAccounts)
+
+	for _, account := range want {
+		// Act: repeat the scope query after ReloadWallet.
+		scoped, err := w.ListAccountsByScope(ctx, account.KeyScope)
+
+		// Assert: stored scope results must include the complete account.
+		require.NoError(h, err)
+		require.Contains(h, scoped, account)
+
+		// Act: repeat the name query after ReloadWallet.
+		byName, err := w.ListAccountsByName(ctx, account.AccountName)
+
+		// Assert: stored name results must keep the same account data.
+		require.NoError(h, err)
+		require.Contains(h, byName, account)
+
+		// Act: repeat the single-account query after ReloadWallet.
+		got, err := w.GetAccount(
+			ctx, account.KeyScope, account.AccountName,
+		)
+
+		// Assert: compare the full stored result with the original import.
+		require.NoError(h, err)
+		require.Equal(h, account, *got)
+	}
+}
+
+// testAccountManagerQueryListEmpty checks a rootless wallet with no imports
+// reports a successful empty inventory rather than a not-found error.
+func testAccountManagerQueryListEmpty(h *bwtest.HarnessTest) {
+	// Arrange: create a rootless wallet with no imported accounts.
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+
+	// Act: list the empty inventory.
+	got, err := w.ListAccounts(h.Context())
+
+	// Assert: an empty wallet returns a successful empty result.
+	require.NoError(h, err)
+	require.Empty(h, got)
+}
+
+// testAccountManagerQueryMissingName checks empty and absent names return no
+// accounts. An empty name must remain a filter, not select every account.
+// A name-only control rules out an empty fixture.
+func testAccountManagerQueryMissingName(h *bwtest.HarnessTest) {
+	// Arrange: populate the same name in two scopes so misses cannot pass
+	// merely because the wallet contains no accounts.
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	account := wallet.ImportAccountParams{
+		Name:                 "query shared",
+		XPub:                 keys.accountKey,
+		AddrType:             waddrmgr.WitnessPubKey,
+		MasterKeyFingerprint: &inputFingerprint,
+	}
+	_, err := w.ImportAccount(ctx, account, false)
+	require.NoError(h, err)
+
+	account.AddrType = waddrmgr.NestedWitnessPubKey
+	_, err = w.ImportAccount(ctx, account, false)
+	require.NoError(h, err)
+
+	control, err := w.ListAccountsByName(ctx, "query shared")
+	require.NoError(h, err)
+	require.Len(h, control, 2)
+
+	for _, account := range control {
+		require.Equal(h, "query shared", account.AccountName)
+	}
+
+	missingNames := []string{"", "query absent"}
+
+	for _, name := range missingNames {
+		// Act: query an empty or absent name.
+		got, err := w.ListAccountsByName(ctx, name)
+
+		// Assert: neither miss is treated as an unfiltered query.
+		require.NoError(h, err, "name %q", name)
+		require.Empty(h, got, "name %q", name)
+	}
+}
+
+// testAccountManagerQueryMissingScope checks both purpose and coin participate
+// in scope selection, even when a populated purpose or coin matches alone.
+func testAccountManagerQueryMissingScope(h *bwtest.HarnessTest) {
+	// Arrange: populate one scope and vary purpose and coin independently.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	scope := waddrmgr.KeyScopeBIP0084
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  "query shared",
+	})
+	require.NoError(h, err)
+
+	control, err := w.ListAccountsByScope(ctx, scope)
+	require.NoError(h, err)
+	require.NotEmpty(h, control)
+
+	missingScopes := []waddrmgr.KeyScope{
+		{Purpose: 1017, Coin: scope.Coin},
+		{Purpose: scope.Purpose, Coin: scope.Coin + 1},
+	}
+
+	for _, missing := range missingScopes {
+		// Act: query a scope that does not exist.
+		got, err := w.ListAccountsByScope(ctx, missing)
+
+		// Assert: a partial scope match must not return accounts.
+		require.NoError(h, err, "scope %v", missing)
+		require.Empty(h, got, "scope %v", missing)
+	}
+}
+
+// testAccountManagerQueryMissingAccount distinguishes missing names, missing
+// scopes, and an existing name in the wrong existing scope. All must expose
+// the same wallet-owned not-found identity, never a Store sentinel.
+func testAccountManagerQueryMissingAccount(h *bwtest.HarnessTest) {
+	// Arrange: populate distinct scope/name pairs to distinguish missing
+	// identities from existing names requested in the wrong scope.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	accounts := []wallet.NewAccountParams{
+		{Scope: waddrmgr.KeyScopeBIP0084, Name: "query shared"},
+		{Scope: waddrmgr.KeyScopeBIP0044, Name: "query other"},
+	}
+	for _, account := range accounts {
+		_, err := w.NewAccount(ctx, account)
+		require.NoError(h, err)
+	}
+
+	control, err := w.GetAccount(
+		ctx, waddrmgr.KeyScopeBIP0084, "query shared",
+	)
+	require.NoError(h, err)
+	require.Equal(h, "query shared", control.AccountName)
+
+	missingQueries := []struct {
+		scope waddrmgr.KeyScope
+		name  string
+	}{
+		{waddrmgr.KeyScopeBIP0084, "query absent"},
+		{waddrmgr.KeyScopeBIP0084, ""},
+		{waddrmgr.KeyScopeBIP0084, "QUERY SHARED"},
+		{waddrmgr.KeyScopeBIP0044, "query shared"},
+		{waddrmgr.KeyScope{Purpose: 1017, Coin: 0}, "query shared"},
+		{waddrmgr.KeyScope{Purpose: 84, Coin: 1}, "query shared"},
+	}
+
+	for _, query := range missingQueries {
+		// Act: look up a missing scope/name pair.
+		got, err := w.GetAccount(ctx, query.scope, query.name)
+
+		// Assert: every miss exposes the same public not-found error.
+		require.ErrorIs(
+			h, err, wallet.ErrAccountNotFound, "scope %v name %q",
+			query.scope, query.name,
+		)
+		require.Nil(h, got)
+	}
+}
+
+// testAccountManagerCreateAccount verifies that a new derived account's
+// returned view matches an immediate read and survives a wallet reload.
+func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
+	// Arrange: create an unlocked wallet with the harness so this ordinary
+	// sequential request exercises the same contract on every backend.
+	const accountName = "account manager created"
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	// Act: create one root-derived account through the public operation.
+	created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  accountName,
+	})
+
+	// Assert: compare returned key facts and the complete account view with
+	// immediate and reopened reads to prove durable sequential creation.
+	require.NoError(h, err, "failed to create derived account")
+	require.Equal(h, accountName, created.AccountName)
+	require.NotNil(
+		h, created.AccountNumber, "derived account has no number",
+	)
+	require.Zero(h, created.ExternalKeyCount)
+	require.Zero(h, created.InternalKeyCount)
+	require.Zero(h, created.ImportedKeyCount)
+	require.Zero(h, created.ConfirmedBalance)
+	require.Zero(h, created.UnconfirmedBalance)
+	require.False(h, created.IsImported, "derived account is imported")
+	require.False(h, created.IsWatchOnly, "derived account is watch-only")
+	require.NotZero(
+		h, created.CreatedAt, "derived account has no creation time",
+	)
+	require.Equal(h, scope, created.KeyScope)
+	require.Equal(
+		h, waddrmgr.WitnessPubKey, created.AddrSchema.ExternalAddrType,
+	)
+	require.Equal(
+		h, waddrmgr.WitnessPubKey, created.AddrSchema.InternalAddrType,
+	)
+	normalizedPublicKey := canonicalAccountKey(h, created.PublicKey)
+	require.NotEmpty(
+		h, normalizedPublicKey, "derived account has no public key",
+	)
+	require.NotNil(
+		h, created.MasterKeyFingerprint,
+		"derived account has no master key fingerprint",
+	)
+	require.NotZero(
+		h, *created.MasterKeyFingerprint,
+		"derived account has no master key fingerprint",
+	)
+	want := *created
+	want.PublicKey = normalizedPublicKey
+	got, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err, "failed to read created account")
+
+	gotInfo := *got
+	gotInfo.PublicKey = canonicalAccountKey(h, gotInfo.PublicKey)
+	require.Equal(h, want, gotInfo)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err, "failed to read account after reload")
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, want, durableInfo)
+}
+
+// testAccountManagerCreateExactAccount verifies an exact account's disabled
+// chain synchronization and complete account facts survive reopening.
+func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
+	// Exact selection is SQL-only; the sequential case covers kvdb.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("exact account creation requires SQL")
+	}
+
+	// Arrange: a sparse, excluded account exercises exact activation; the
+	// harness owns the unlocked wallet and its cleanup.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	number := wallet.AccountNumber(7)
+	params := wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "sparse exact",
+		AccountNumber: &number,
+		NoChainSync:   true,
+	}
+
+	// Act: create publicly through both derivation and storage.
+	created, err := w.NewAccount(h.Context(), params)
+
+	// Assert: compare exact identity and full facts after reopen,
+	// normalizing key prefixes with the existing comparison helper.
+	require.NoError(h, err)
+	require.Equal(h, number, *created.AccountNumber)
+	require.True(h, created.NoChainSync)
+	require.Zero(h, created.ExternalKeyCount)
+	require.Zero(h, created.InternalKeyCount)
+
+	// Account creation alone must leave child addresses unallocated.
+	addresses, err := w.ListAddresses(
+		h.Context(), params.Name, waddrmgr.WitnessPubKey,
+	)
+	require.NoError(h, err)
+	require.Empty(h, addresses)
+
+	want := *created
+
+	// Act: list all accounts before the wallet is opened again.
+	accounts, err := w.ListAccounts(h.Context())
+
+	// Assert: the list must contain the complete created account.
+	require.NoError(h, err)
+	require.Contains(h, accounts, want)
+
+	// Act: list accounts in the exact account's scope.
+	scoped, err := w.ListAccountsByScope(h.Context(), params.Scope)
+
+	// Assert: the scope query must return the same account data.
+	require.NoError(h, err)
+	require.Contains(h, scoped, want)
+
+	// Act: list accounts with the exact account's name.
+	byName, err := w.ListAccountsByName(h.Context(), params.Name)
+
+	// Assert: the unique name must return only the created account.
+	require.NoError(h, err)
+	require.Equal(h, []wallet.AccountInfo{want}, byName)
+
+	// Arrange: open the same stored wallet again. Keep the replacement wallet
+	// locked so the queries use stored public data without an unlock.
+	w = h.ReloadWallet(w)
+
+	// Act: list all accounts after ReloadWallet.
+	durableAccounts, err := w.ListAccounts(h.Context())
+
+	// Assert: all fields, including NoChainSync=true, must survive the reload.
+	require.NoError(h, err)
+	require.Contains(h, durableAccounts, want)
+
+	// Act: repeat the scope query on the replacement wallet.
+	durableScoped, err := w.ListAccountsByScope(h.Context(), params.Scope)
+
+	// Assert: the stored scope result must match the created account.
+	require.NoError(h, err)
+	require.Contains(h, durableScoped, want)
+
+	// Act: repeat the name query on the replacement wallet.
+	durableByName, err := w.ListAccountsByName(h.Context(), params.Name)
+
+	// Assert: the stored name result must keep the complete account data.
+	require.NoError(h, err)
+	require.Equal(h, []wallet.AccountInfo{want}, durableByName)
+
+	want.PublicKey = canonicalAccountKey(h, want.PublicKey)
+	durable, err := w.GetAccount(
+		h.Context(), params.Scope, params.Name,
+	)
+	require.NoError(h, err)
+	durable.PublicKey = canonicalAccountKey(h, durable.PublicKey)
+	require.Equal(h, want, *durable)
+}
+
+// testAccountManagerFillAccountHole verifies that reopening after sparse
+// allocation leaves lower exact account numbers available.
+func testAccountManagerFillAccountHole(h *bwtest.HarnessTest) {
+	// Exact lower-hole creation is unavailable on kvdb.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("exact account creation requires SQL")
+	}
+
+	// Arrange: persist sparse seven and reopen before requesting lower two,
+	// so the hole must remain available in durable allocation state.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	number := wallet.AccountNumber(7)
+	params := wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "sparse before hole",
+		AccountNumber: &number,
+	}
+	_, err := w.NewAccount(h.Context(), params)
+	require.NoError(h, err)
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	hole := wallet.AccountNumber(2)
+	params.Name = "lower hole"
+	params.AccountNumber = &hole
+
+	// Act: fill the lower hole through public creation after reopening.
+	filled, err := w.NewAccount(h.Context(), params)
+
+	// Assert: earlier sparse creation did not consume the requested hole.
+	require.NoError(h, err)
+	require.Equal(h, hole, *filled.AccountNumber)
+}
+
+// testAccountManagerAdvanceAccountCursor checks durable sparse allocation.
+func testAccountManagerAdvanceAccountCursor(h *bwtest.HarnessTest) {
+	// kvdb rejects exact requests, so this SQL cursor contract is inapplicable.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("exact account creation requires SQL")
+	}
+
+	// Arrange: persist excluded seven and ordinary two, then reopen so the
+	// next request observes only the durable cursor left by both writes.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	number := wallet.AccountNumber(7)
+	params := wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "excluded sparse",
+		AccountNumber: &number,
+		NoChainSync:   true,
+	}
+	_, err := w.NewAccount(h.Context(), params)
+	require.NoError(h, err)
+
+	hole := wallet.AccountNumber(2)
+	params.Name = "lower hole"
+	params.AccountNumber = &hole
+	params.NoChainSync = false
+	_, err = w.NewAccount(h.Context(), params)
+	require.NoError(h, err)
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	params.Name = "next sequential"
+	params.AccountNumber = nil
+
+	// Act: allocate the next account without an exact selector.
+	next, err := w.NewAccount(h.Context(), params)
+
+	// Assert: the cursor advanced past seven and did not retreat for two.
+	require.NoError(h, err)
+	require.Equal(h, wallet.AccountNumber(8), *next.AccountNumber)
+}
+
+// testAccountManagerCreateCustomScopeAccount verifies that exact root-derived
+// creation persists a new scope and either sync policy across wallet reload.
+func testAccountManagerCreateCustomScopeAccount(h *bwtest.HarnessTest) {
+	// Harness subtests own distinct wallet names and databases, so each policy
+	// must establish its scope without reusing the other policy's metadata.
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "chain sync enabled",
+			noChainSync: false,
+		},
+		{
+			name:        "chain sync excluded",
+			noChainSync: true,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: use a fresh unlocked wallet so each policy must
+			// establish the custom scope without previously stored metadata.
+			// Snapshot accounts to detect mutation on kvdb's refusal path.
+			const accountName = "custom scope account"
+
+			ctx := h.Context()
+			scope := waddrmgr.KeyScope{
+				Purpose: 1017,
+				Coin:    h.NetParams().HDCoinType,
+			}
+			schema := waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			}
+			number := wallet.AccountNumber(7)
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			before, err := w.ListAccounts(ctx)
+			require.NoError(h, err)
+
+			// Act: supply both required new-scope inputs through the public
+			// creation operation, varying only the requested sync policy.
+			created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+				Scope:         scope,
+				Name:          accountName,
+				AddrSchema:    &schema,
+				AccountNumber: &number,
+				NoChainSync:   tc.noChainSync,
+			})
+
+			// Assert: backend configuration selects kvdb's documented
+			// refusal; SQL below must persist the custom scope and policy.
+			if *dbBackend != string(wallet.DBBackendSQLite) &&
+				*dbBackend != string(wallet.DBBackendPostgres) {
+
+				require.ErrorIs(h, err, wallet.ErrAccountOperationUnsupported)
+				require.Nil(h, created)
+
+				after, err := w.ListAccounts(ctx)
+				require.NoError(h, err)
+				// Scope traversal order does not change the account set.
+				require.ElementsMatch(h, before, after)
+
+				return
+			}
+
+			// Check the requested custom-scope identity and policy before
+			// comparing the full snapshot across the persistence boundary.
+			require.NoError(h, err)
+			require.Equal(h, number, *created.AccountNumber)
+			require.Equal(h, scope, created.KeyScope)
+			require.Equal(h, schema, created.AddrSchema)
+			require.Equal(h, tc.noChainSync, created.NoChainSync)
+			require.False(h, created.IsImported)
+
+			// Act: list all accounts before the wallet is opened again.
+			accounts, err := w.ListAccounts(ctx)
+
+			// Assert: the list must contain the full custom-scope account.
+			require.NoError(h, err)
+			require.Contains(h, accounts, *created)
+
+			// Act: read accounts in the new custom scope.
+			scoped, err := w.ListAccountsByScope(ctx, scope)
+
+			// Assert: compare all public fields with the creation result.
+			require.NoError(h, err)
+			require.Contains(h, scoped, *created)
+
+			// Act: read accounts with the custom account's name.
+			byName, err := w.ListAccountsByName(ctx, accountName)
+
+			// Assert: the unique name must return only the created account.
+			require.NoError(h, err)
+			require.Equal(h, []wallet.AccountInfo{*created}, byName)
+
+			// Arrange: open the same stored wallet again. The replacement
+			// wallet must load the custom scope and its account from storage.
+			w = h.ReloadWallet(w)
+
+			// Act: list all accounts after ReloadWallet.
+			durableAccounts, err := w.ListAccounts(ctx)
+
+			// Assert: all fields and the chosen sync flag must survive.
+			require.NoError(h, err)
+			require.Contains(h, durableAccounts, *created)
+
+			// Act: read accounts in the stored custom scope.
+			durableScoped, err := w.ListAccountsByScope(ctx, scope)
+
+			// Assert: the stored scope result must keep all account data.
+			require.NoError(h, err)
+			require.Contains(h, durableScoped, *created)
+
+			// Act: read the custom account by name after ReloadWallet.
+			durableByName, err := w.ListAccountsByName(ctx, accountName)
+
+			// Assert: the stored name result must match the created account.
+			require.NoError(h, err)
+			require.Equal(h, []wallet.AccountInfo{*created}, durableByName)
+
+			durable, err := w.GetAccount(ctx, scope, accountName)
+			require.NoError(h, err)
+			require.Equal(h, created, durable)
+		})
+	}
+}
+
+// testAccountManagerCreateAccountSequence verifies that derived account numbers
+// are allocated contiguously within a key scope, that each scope allocates from
+// its own counter, and that the counter survives a wallet reload.
+func testAccountManagerCreateAccountSequence(h *bwtest.HarnessTest) {
+	const (
+		otherScopeName = "account manager sequence other"
+		resumedName    = "account manager sequence next"
+	)
+
+	names := []string{
+		"account manager sequence one",
+		"account manager sequence two",
+		"account manager sequence three",
+	}
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	numbers := make([]wallet.AccountNumber, 0, len(names))
+	for _, name := range names {
+		created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope: scope,
+			Name:  name,
+		})
+		require.NoError(h, err, "failed to create %q", name)
+		require.NotNil(h, created.AccountNumber, "%q has no number", name)
+
+		numbers = append(numbers, *created.AccountNumber)
+	}
+
+	for i := 1; i < len(numbers); i++ {
+		require.Equal(
+			h, numbers[i-1]+1, numbers[i],
+			"%q did not take the next account number", names[i],
+		)
+	}
+
+	// A second scope allocates from its own counter, so its first
+	// user-created account repeats the first scope's starting number.
+	other, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0044,
+		Name:  otherScopeName,
+	})
+	require.NoError(h, err, "failed to create other scope account")
+	require.NotNil(h, other.AccountNumber, "other scope has no number")
+
+	require.Equal(
+		h, numbers[0], *other.AccountNumber,
+		"second scope did not allocate from its own counter",
+	)
+
+	// The counter is persistent, so the next account continues the sequence
+	// rather than reusing a number.
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	resumed, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  resumedName,
+	})
+	require.NoError(h, err, "failed to create account after reload")
+	require.NotNil(
+		h, resumed.AccountNumber, "resumed account has no number",
+	)
+	require.Equal(
+		h, numbers[len(numbers)-1]+1, *resumed.AccountNumber,
+		"account number did not resume the sequence after reload",
+	)
+}
+
+// testAccountManagerRejectAccountCreation verifies invalid, occupied, and
+// unsupported requests preserve public error identities and account state.
+func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
+	const (
+		sourceName         = "account manager rejection source"
+		afterRejectionName = "account manager after rejection"
+	)
+
+	// Arrange: snapshot one existing account and its scope count so a
+	// rejected request cannot silently alter either observable value.
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
+	require.NoError(h, err, "failed to create rejection source")
+
+	existing, err := w.GetAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to read rejection source")
+
+	wantExisting := *existing
+	wantExisting.PublicKey = canonicalAccountKey(h, wantExisting.PublicKey)
+	accounts, err := w.ListAccountsByScope(ctx, scope)
+	require.NoError(h, err, "failed to list source scope accounts")
+
+	wantCount := len(accounts)
+
+	// Each request has one refusal reason; the backend must preserve its
+	// public identity without changing account state.
+	testCases := []struct {
+		name        string
+		accountName string
+		noChainSync bool
+		wantErr     error
+	}{
+		{
+			name:        "duplicate source name",
+			accountName: sourceName,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+		},
+		{
+			name:        "empty name",
+			accountName: "",
+			wantErr:     wallet.ErrInvalidParam,
+		},
+		{
+			name:        "unsupported chain-sync exclusion",
+			accountName: "excluded account",
+			noChainSync: true,
+			wantErr:     wallet.ErrAccountOperationUnsupported,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Act: submit the rejected request through the same public
+		// Wallet method for every maintained backend.
+		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope:       scope,
+			Name:        tc.accountName,
+			NoChainSync: tc.noChainSync,
+		})
+
+		// Assert: check the public refusal and compare the pre-existing
+		// account and count to their pre-call snapshots.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
+
+		current, err := w.GetAccount(ctx, scope, sourceName)
+		require.NoError(
+			h, err, "failed to read source account after rejection",
+		)
+
+		currentInfo := *current
+		currentInfo.PublicKey = canonicalAccountKey(
+			h, currentInfo.PublicKey,
+		)
+		require.Equal(h, wantExisting, currentInfo)
+
+		accounts, err = w.ListAccountsByScope(ctx, scope)
+		require.NoError(
+			h, err, "failed to list accounts after rejection",
+		)
+		require.Len(
+			h, accounts, wantCount, "rejection changed account count",
+		)
+	}
+
+	// The account number is allocated before the insert, so only the
+	// rolled-back transaction keeps a rejected call from consuming one.
+	next, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  afterRejectionName,
+	})
+	require.NoError(h, err, "failed to create account after rejections")
+	require.NotNil(
+		h, next.AccountNumber, "account after rejections has no number",
+	)
+	require.Equal(
+		h, *wantExisting.AccountNumber+1, *next.AccountNumber,
+		"rejected creation consumed an account number",
+	)
+}
+
+// testAccountManagerEnforceAccountCreationLifecycle verifies NewAccount admits
+// neither locked nor stopped wallets.
+func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
+	const (
+		lockedName  = "account manager locked"
+		stoppedName = "account manager stopped"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	accounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejections")
+
+	wantCount := len(accounts)
+
+	require.NoError(h, w.Lock(ctx), "failed to lock wallet")
+
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  lockedName,
+	})
+
+	require.Error(h, err, "locked wallet created an account")
+	// Retain the stopped pointer for the rejected call; the live replacement
+	// remains registered and provides the next durability boundary.
+	live := h.ReloadWallet(w)
+
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  stoppedName,
+	})
+
+	// An admission rejected before or after the wallet stops must leave no
+	// partial account, so neither name resolves across a reopen and the
+	// account set is unchanged.
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
+	w = h.ReloadWallet(live)
+	_, err = w.GetAccount(ctx, scope, lockedName)
+	require.Error(h, err, "locked rejection created an account")
+	_, err = w.GetAccount(ctx, scope, stoppedName)
+	require.Error(h, err, "stopped rejection created an account")
+
+	accounts, err = w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts after rejections")
+	require.Len(h, accounts, wantCount, "rejection changed account count")
+}
+
+// testAccountManagerRejectWatchOnlyAccountCreation verifies a rootless wallet
+// cannot derive account key material.
+func testAccountManagerRejectWatchOnlyAccountCreation(h *bwtest.HarnessTest) {
+	const accountName = "watch-only"
+
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	require.True(h, w.IsWatchOnly(), "watch-only fixture is not watch-only")
+
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  accountName,
+	})
+
+	require.Error(h, err, "watch-only wallet created an account")
+	_, err = w.GetAccount(ctx, waddrmgr.KeyScopeBIP0084, accountName)
+	require.Error(h, err, "rejected watch-only account name resolves")
+}
+
+// testAccountManagerRenameDerivedAccount verifies that renaming a derived
+// account changes only its name and survives a wallet reload.
+func testAccountManagerRenameDerivedAccount(h *bwtest.HarnessTest) {
+	const (
+		sourceName  = "account manager derived source"
+		renamedName = "account manager derived renamed"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
+	require.NoError(h, err, "failed to create derived rename source")
+
+	source, err := w.GetAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to read derived rename source")
+
+	wantRenamed := *source
+	wantRenamed.AccountName = renamedName
+	wantRenamed.PublicKey = canonicalAccountKey(h, wantRenamed.PublicKey)
+
+	err = w.RenameAccount(ctx, scope, sourceName, renamedName)
+
+	require.NoError(h, err, "failed to rename derived account")
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old derived account name still resolves")
+	renamed, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(h, err, "failed to read renamed derived account")
+
+	renamedInfo := *renamed
+	renamedInfo.PublicKey = canonicalAccountKey(h, renamedInfo.PublicKey)
+	require.Equal(h, wantRenamed, renamedInfo)
+
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old derived account name resolves after reload")
+	durable, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(h, err, "failed to read renamed account after reload")
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, wantRenamed, durableInfo)
+}
+
+// testAccountManagerRenameDefaultAccount verifies the default account keeps a
+// present-zero account number across a rename and a wallet reload, rather than
+// collapsing the zero value to an absent identity.
+//
+// The scope is derived from the funding address type because that is the only
+// scope every backend is guaranteed to hold a default account in: kvdb seeds
+// one per scope at genesis, while SQL creates it lazily on first use.
+func testAccountManagerRenameDefaultAccount(h *bwtest.HarnessTest) {
+	const renamedName = "account manager renamed default"
+
+	scope, err := accountManagerFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: accountManagerFundingType,
+			Amounts:  []btcutil.Amount{oneBTC},
+			Unlocked: true,
+		},
+	)
+
+	source, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err, "failed to read default account")
+	require.NotNil(h, source.AccountNumber, "default account has no number")
+	require.Zero(
+		h, *source.AccountNumber, "default account number is not zero",
+	)
+
+	wantRenamed := *source
+	wantRenamed.AccountName = renamedName
+	wantRenamed.PublicKey = canonicalAccountKey(h, wantRenamed.PublicKey)
+
+	err = w.RenameAccount(
+		ctx, scope, waddrmgr.DefaultAccountName, renamedName,
+	)
+
+	require.NoError(h, err, "failed to rename default account")
+	renamed, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(h, err, "failed to read renamed default account")
+	require.NotNil(
+		h, renamed.AccountNumber, "renamed default account has no number",
+	)
+	require.Zero(
+		h, *renamed.AccountNumber,
+		"renamed default account number is not zero",
+	)
+
+	renamedInfo := *renamed
+	renamedInfo.PublicKey = canonicalAccountKey(h, renamedInfo.PublicKey)
+	require.Equal(h, wantRenamed, renamedInfo)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(
+		h, err, "failed to read renamed default account after reload",
+	)
+	require.NotNil(
+		h, durable.AccountNumber,
+		"default account number is absent after reload",
+	)
+	require.Zero(
+		h, *durable.AccountNumber,
+		"default account number is not zero after reload",
+	)
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, wantRenamed, durableInfo)
+}
+
+// testAccountManagerRenameImportedAccount verifies an InitialAccounts XPub
+// keeps its caller-supplied serialization when renamed and reloaded.
+func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
+	const (
+		sourceName  = "account manager imported source"
+		renamedName = "account manager imported renamed"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 sourceName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+	source, err := w.GetAccount(ctx, keys.scope, sourceName)
+	require.NoError(h, err, "failed to read imported account")
+
+	wantRenamed := *source
+	wantRenamed.AccountName = renamedName
+	wantRenamed.PublicKey = []byte(keys.accountKey.String())
+
+	err = w.RenameAccount(ctx, keys.scope, sourceName, renamedName)
+
+	require.NoError(h, err, "failed to rename imported account")
+	_, err = w.GetAccount(ctx, keys.scope, sourceName)
+	require.Error(h, err, "old imported account name still resolves")
+	renamed, err := w.GetAccount(ctx, keys.scope, renamedName)
+	require.NoError(h, err, "failed to read renamed imported account")
+	require.Equal(h, wantRenamed, *renamed)
+
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, keys.scope, sourceName)
+	require.Error(h, err, "old imported account name resolves after reload")
+	durable, err := w.GetAccount(ctx, keys.scope, renamedName)
+	require.NoError(h, err, "failed to read renamed import after reload")
+	require.Equal(h, wantRenamed, *durable)
+}
+
+// testAccountManagerRejectAccountRename verifies rejected rename requests leave
+// the established source and duplicate target unchanged.
+func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
+	const (
+		sourceName      = "account manager rename source"
+		duplicateTarget = "account manager occupied target"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
+	require.NoError(h, err, "failed to create rename source")
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  duplicateTarget,
+	})
+	require.NoError(h, err, "failed to create duplicate rename target")
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	// These rejections have no stable public error identity yet, so the
+	// rows assert rejection and unchanged state only.
+	testCases := []struct {
+		name    string
+		oldName string
+		newName string
+	}{
+		{
+			name:    "duplicate target",
+			oldName: sourceName,
+			newName: duplicateTarget,
+		},
+		{
+			name:    "empty target",
+			oldName: sourceName,
+			newName: "",
+		},
+		{
+			name:    "reserved target",
+			oldName: sourceName,
+			newName: waddrmgr.ImportedAddrAccountName,
+		},
+		{
+			name:    "unknown source",
+			oldName: "account manager unknown source",
+			newName: "account manager unknown target",
+		},
+		{
+			name:    "reserved source",
+			oldName: waddrmgr.ImportedAddrAccountName,
+			newName: "account manager reserved source target",
+		},
+	}
+
+	for _, tc := range testCases {
+		err := w.RenameAccount(
+			ctx, scope, tc.oldName, tc.newName,
+		)
+
+		require.Error(h, err, "%s was accepted", tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+}
+
+// testAccountManagerEnforceAccountRenameLifecycle verifies metadata rename is
+// admitted while locked but rejected after the wallet stops.
+func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
+	const (
+		sourceName  = "account manager lifecycle source"
+		lockedName  = "account manager locked rename"
+		stoppedName = "account manager stopped rename"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
+	require.NoError(h, err, "failed to create lifecycle source")
+
+	// Reload to reach the started but locked state this rename must be
+	// admitted in, not to re-check that the source persisted.
+	w = h.ReloadWallet(w)
+	source, err := w.GetAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to read lifecycle source")
+
+	wantLockedRename := *source
+	wantLockedRename.AccountName = lockedName
+	wantLockedRename.PublicKey = canonicalAccountKey(
+		h, wantLockedRename.PublicKey,
+	)
+
+	err = w.RenameAccount(ctx, scope, sourceName, lockedName)
+
+	require.NoError(h, err, "locked wallet rejected metadata rename")
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old locked rename name still resolves")
+	locked, err := w.GetAccount(ctx, scope, lockedName)
+	require.NoError(h, err, "failed to read locked rename")
+
+	lockedInfo := *locked
+	lockedInfo.PublicKey = canonicalAccountKey(h, lockedInfo.PublicKey)
+	require.Equal(h, wantLockedRename, lockedInfo)
+
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old locked rename name resolves after reload")
+	durable, err := w.GetAccount(ctx, scope, lockedName)
+	require.NoError(h, err, "failed to read locked rename after reload")
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, wantLockedRename, durableInfo)
+	// Retain the stopped pointer for the rejected call; the live replacement
+	// remains registered and provides the next durability boundary.
+	live := h.ReloadWallet(w)
+
+	err = w.RenameAccount(ctx, scope, lockedName, stoppedName)
+
+	// The rejected rename must not move the account, so the source keeps
+	// its complete result and the target stays absent across a reopen.
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
+	w = h.ReloadWallet(live)
+	_, err = w.GetAccount(ctx, scope, stoppedName)
+	require.Error(h, err, "stopped rename created a target account")
+	unchanged, err := w.GetAccount(ctx, scope, lockedName)
+	require.NoError(h, err, "failed to read source after stopped rename")
+
+	unchangedInfo := *unchanged
+	unchangedInfo.PublicKey = canonicalAccountKey(
+		h, unchangedInfo.PublicKey,
+	)
+	require.Equal(h, wantLockedRename, unchangedInfo)
+}
+
+// testAccountManagerImportAccount verifies that one XPub import's returned
+// view matches an immediate read and survives a wallet reload.
+func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
+	const (
+		existingName = "account manager import existing"
+		accountName  = "account manager imported"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	imported, err := w.ImportAccount(
+		ctx, wallet.ImportAccountParams{
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+			MasterKeyFingerprint: &inputFingerprint,
+		}, false,
+	)
+
+	require.NoError(h, err, "failed to import account")
+	require.Nil(h, imported.AccountNumber, "imported account has a number")
+	require.Equal(h, accountName, imported.AccountName)
+	require.True(h, imported.IsImported, "account is not imported")
+	require.True(
+		h, imported.IsWatchOnly, "imported account is not watch-only",
+	)
+	require.Zero(h, imported.ExternalKeyCount)
+	require.Zero(h, imported.InternalKeyCount)
+	require.Zero(h, imported.ImportedKeyCount)
+	require.Zero(h, imported.ConfirmedBalance)
+	require.Zero(h, imported.UnconfirmedBalance)
+	require.NotZero(
+		h, imported.CreatedAt, "imported account has no creation time",
+	)
+	require.Equal(h, keys.scope, imported.KeyScope)
+	require.Equal(h, keys.addrType, imported.AddrSchema.ExternalAddrType)
+	require.Equal(h, keys.addrType, imported.AddrSchema.InternalAddrType)
+	require.Equal(h, []byte(keys.accountKey.String()), imported.PublicKey)
+	require.NotNil(
+		h, imported.MasterKeyFingerprint,
+		"imported account has no master key fingerprint",
+	)
+	require.Equal(
+		h, wallet.MasterFingerprint(keys.masterKeyFingerprint),
+		*imported.MasterKeyFingerprint,
+	)
+	want := *imported
+	got, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read imported account")
+	require.Equal(h, want, *got)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read imported account after reload")
+	require.Equal(h, want, *durable)
+}
+
+// testAccountManagerPreserveImportedSchema verifies strict and hybrid BIP49
+// imports sharing a scope retain their branch schemas across address allocation
+// and manager reopen, with BIP84/BIP86 controls. Imported-input PSBT funding is
+// Task 482/470's contract; this case observes persisted address script types.
+func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
+	// Versioned BIP49 keys distinguish hybrid scope selection from a native
+	// BIP84 request. The conflicting initial schema exposes scope fallback in
+	// both directions; the canonical controls use the network's normal XPub.
+	version49 := make([]byte, 4)
+	binary.BigEndian.PutUint32(version49, uint32(
+		waddrmgr.HDVersionTestNetBIP0049,
+	))
+	tests := []struct {
+		name            string
+		version         []byte
+		addrType        waddrmgr.AddressType
+		initialAddrType waddrmgr.AddressType
+		scope           waddrmgr.KeyScope
+		schema          waddrmgr.ScopeAddrSchema
+		externalClass   txscript.ScriptClass
+		internalClass   txscript.ScriptClass
+	}{
+		{
+			name:            "preserve strict bip49",
+			version:         version49,
+			addrType:        waddrmgr.NestedWitnessPubKey,
+			initialAddrType: waddrmgr.WitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0049Plus,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+				InternalAddrType: waddrmgr.NestedWitnessPubKey,
+			},
+			externalClass: txscript.ScriptHashTy,
+			internalClass: txscript.ScriptHashTy,
+		},
+		{
+			name:            "preserve hybrid bip49",
+			version:         version49,
+			addrType:        waddrmgr.WitnessPubKey,
+			initialAddrType: waddrmgr.NestedWitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0049Plus,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+			externalClass: txscript.ScriptHashTy,
+			internalClass: txscript.WitnessV0PubKeyHashTy,
+		},
+		{
+			name:            "preserve native bip84",
+			version:         h.NetParams().HDPublicKeyID[:],
+			addrType:        waddrmgr.WitnessPubKey,
+			initialAddrType: waddrmgr.WitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0084,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+			externalClass: txscript.WitnessV0PubKeyHashTy,
+			internalClass: txscript.WitnessV0PubKeyHashTy,
+		},
+		{
+			name:            "preserve taproot bip86",
+			version:         h.NetParams().HDPublicKeyID[:],
+			addrType:        waddrmgr.TaprootPubKey,
+			initialAddrType: waddrmgr.WitnessPubKey,
+			scope:           waddrmgr.KeyScopeBIP0086,
+			schema: waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.TaprootPubKey,
+				InternalAddrType: waddrmgr.TaprootPubKey,
+			},
+			externalClass: txscript.WitnessV1TaprootTy,
+			internalClass: txscript.WitnessV1TaprootTy,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: Seed the BIP49 scope with the fixture's other XPub
+			// so strict and hybrid imports encounter conflicting stored
+			// defaults. Clone only key versions; the requested scope and
+			// serialized public identity must survive unchanged.
+			const accountName = "schema import"
+
+			keys := deterministicImportedAccountKeys(h)
+
+			// Supply the fixture origin explicitly so zero stays present.
+			inputFingerprint := wallet.MasterFingerprint(
+				keys.masterKeyFingerprint,
+			)
+			initialKey, err := keys.otherAccountKey.CloneWithVersion(
+				version49,
+			)
+			require.NoError(h, err)
+			accountKey, err := keys.accountKey.CloneWithVersion(tc.version)
+			require.NoError(h, err)
+
+			var fixture bwtest.WalletFixture
+
+			fixture.InitialAccounts = []wallet.ImportAccountParams{
+				{
+					XPub:                 initialKey,
+					MasterKeyFingerprint: &inputFingerprint,
+					Name:                 "schema seed",
+					AddrType:             tc.initialAddrType,
+				},
+			}
+			w, _ := h.NewWallet(fixture)
+			ctx := h.Context()
+			selector := wallet.NewAccountSelectorByName(tc.scope, accountName)
+
+			// Act: Import and request both address branches, then snapshot
+			// the account after allocation. Cross the harness-owned manager
+			// reopen, read that durable snapshot, and request both branches
+			// again through the same public selector.
+			imported, err := w.ImportAccount(
+				ctx, wallet.ImportAccountParams{
+					Name:                 accountName,
+					XPub:                 accountKey,
+					MasterKeyFingerprint: &inputFingerprint,
+					AddrType:             tc.addrType,
+				}, false,
+			)
+			require.NoError(h, err)
+			external, err := w.NewAddress(ctx, selector, false)
+			require.NoError(h, err)
+			internal, err := w.NewAddress(ctx, selector, true)
+			require.NoError(h, err)
+			before, err := w.GetAccount(ctx, tc.scope, accountName)
+			require.NoError(h, err)
+			w = h.ReloadWallet(w)
+			durable, err := w.GetAccount(ctx, tc.scope, accountName)
+			require.NoError(h, err)
+			reopenedExternal, err := w.NewAddress(ctx, selector, false)
+			require.NoError(h, err)
+			reopenedInternal, err := w.NewAddress(ctx, selector, true)
+			require.NoError(h, err)
+
+			// Assert: The public import keeps the selected schema and true
+			// scope/XPub identity without an invented account number. Full
+			// account equality across reopen catches lost metadata; the same
+			// independent script oracle checks both sets of addresses.
+			require.Equal(h, tc.schema, imported.AddrSchema)
+			require.Equal(h, tc.scope, imported.KeyScope)
+			require.Equal(h, []byte(accountKey.String()), imported.PublicKey)
+			require.Nil(h, imported.AccountNumber)
+			require.Equal(h, tc.schema, before.AddrSchema)
+			require.Equal(h, before, durable)
+
+			for _, pair := range [][2]wallet.AddressInfo{
+				{
+					external,
+					internal,
+				},
+				{
+					reopenedExternal,
+					reopenedInternal,
+				},
+			} {
+				require.Equal(h, tc.schema.ExternalAddrType, pair[0].AddrType)
+				require.Equal(h, tc.schema.InternalAddrType, pair[1].AddrType)
+				externalScript, err := txscript.PayToAddrScript(pair[0].Addr)
+				require.NoError(h, err)
+				internalScript, err := txscript.PayToAddrScript(pair[1].Addr)
+				require.NoError(h, err)
+				require.Equal(h, tc.externalClass,
+					txscript.GetScriptClass(externalScript))
+				require.Equal(h, tc.internalClass,
+					txscript.GetScriptClass(internalScript))
+			}
+		})
+	}
+}
+
+// testAccountManagerImportAccountZeroFingerprint verifies an import declaring
+// a zero master key fingerprint keeps a present-zero identity across the
+// mutation result, its lookup, and a wallet reload, rather than collapsing the
+// zero value to an absent identity.
+func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
+	const (
+		existingName = "account manager zero fingerprint existing"
+		accountName  = "account manager zero fingerprint"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	zeroFingerprint := wallet.MasterFingerprint(0)
+	imported, err := w.ImportAccount(
+		ctx, wallet.ImportAccountParams{
+			MasterKeyFingerprint: &zeroFingerprint,
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+		}, false,
+	)
+
+	require.NoError(h, err, "failed to import zero fingerprint account")
+	require.NotNil(
+		h, imported.MasterKeyFingerprint,
+		"zero fingerprint collapsed to absent on import",
+	)
+	require.Zero(
+		h, *imported.MasterKeyFingerprint,
+		"imported fingerprint is not zero",
+	)
+
+	want := *imported
+	got, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read zero fingerprint account")
+	require.NotNil(
+		h, got.MasterKeyFingerprint,
+		"zero fingerprint collapsed to absent on lookup",
+	)
+	require.Zero(
+		h, *got.MasterKeyFingerprint, "read fingerprint is not zero",
+	)
+	require.Equal(h, want, *got)
+
+	// The seeded account keeps its non-zero fingerprint, so a present-zero
+	// identity is distinguishable from a present-nonzero one in the same
+	// wallet rather than from a backend-wide default.
+	existing, err := w.GetAccount(ctx, keys.scope, existingName)
+	require.NoError(h, err, "failed to read seeded imported account")
+	require.NotNil(
+		h, existing.MasterKeyFingerprint,
+		"seeded account has no master key fingerprint",
+	)
+	require.Equal(
+		h, wallet.MasterFingerprint(keys.masterKeyFingerprint),
+		*existing.MasterKeyFingerprint,
+	)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(
+		h, err, "failed to read zero fingerprint account after reload",
+	)
+	require.NotNil(
+		h, durable.MasterKeyFingerprint,
+		"zero fingerprint collapsed to absent after reload",
+	)
+	require.Zero(
+		h, *durable.MasterKeyFingerprint,
+		"fingerprint is not zero after reload",
+	)
+	require.Equal(h, want, *durable)
+}
+
+// testAccountManagerPreviewAccountImport verifies a dry run returns portable
+// identity fields without materializing an account.
+func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
+	const (
+		existingName = "account manager preview existing"
+		accountName  = "account manager import preview"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	preview, err := w.ImportAccount(
+		ctx, wallet.ImportAccountParams{
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+			MasterKeyFingerprint: &inputFingerprint,
+		}, true,
+	)
+
+	require.NoError(h, err, "failed to preview account import")
+	require.Equal(h, accountName, preview.AccountName)
+	require.True(h, preview.IsImported, "preview is not imported")
+	require.True(h, preview.IsWatchOnly, "preview is not watch-only")
+	require.Nil(h, preview.AccountNumber, "preview has an account number")
+	require.Equal(h, keys.scope, preview.KeyScope)
+	require.Equal(h, []byte(keys.accountKey.String()), preview.PublicKey)
+	require.NotNil(
+		h, preview.MasterKeyFingerprint,
+		"preview account has no master key fingerprint",
+	)
+	require.Equal(
+		h, wallet.MasterFingerprint(keys.masterKeyFingerprint),
+		*preview.MasterKeyFingerprint,
+	)
+	_, err = w.GetAccount(ctx, keys.scope, accountName)
+	require.Error(h, err, "preview materialized an account")
+}
+
+// testAccountManagerRejectAccountImport verifies rejected imports preserve the
+// account set and occupied names retain their public error on retries.
+func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
+	const existingName = "account manager existing import"
+
+	// Arrange: seed an imported account and snapshot the public inventory so
+	// each rejected request can be checked for unintended account creation.
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	testCases := []struct {
+		name        string
+		accountName string
+		accountKey  *hdkeychain.ExtendedKey
+		wantErr     error
+		attempts    int
+	}{
+		// Both occupied-name rows must keep their error identity even when
+		// the XPub also collides. A vacant-name collision has its own case.
+		{
+			name:        "duplicate name, same key",
+			accountName: existingName,
+			accountKey:  keys.accountKey,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+			attempts:    2,
+		},
+		{
+			name:        "duplicate name, other key",
+			accountName: existingName,
+			accountKey:  keys.otherAccountKey,
+			wantErr:     wallet.ErrAccountAlreadyExists,
+			attempts:    2,
+		},
+		{
+			name:        "empty name",
+			accountName: "",
+			accountKey:  keys.otherAccountKey,
+			wantErr:     wallet.ErrInvalidParam,
+			attempts:    1,
+		},
+	}
+
+	// Act: retry occupied names to prove a previous refusal does not change
+	// their classification; submit the invalid name only once.
+	for _, tc := range testCases {
+		for range tc.attempts {
+			info, err := w.ImportAccount(
+				ctx, wallet.ImportAccountParams{
+					Name:                 tc.accountName,
+					XPub:                 tc.accountKey,
+					AddrType:             keys.addrType,
+					MasterKeyFingerprint: &inputFingerprint,
+				}, false,
+			)
+
+			// Assert: each failure keeps its public error and returns no
+			// account, including the second occupied-name attempt.
+			require.ErrorIs(h, err, tc.wantErr, tc.name)
+			require.Nil(h, info, "%s returned an account", tc.name)
+		}
+
+		// Assert: neither the initial refusal nor its retry can add an
+		// account or disturb the seeded inventory.
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+}
+
+// testAccountManagerRejectInvalidImportKey verifies invalid import keys are
+// rejected without changing the account set.
+func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
+	const existingName = "account manager existing import"
+
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.ImportAccountParams{{
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: &inputFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	testCases := []struct {
+		name        string
+		accountName string
+		accountKey  *hdkeychain.ExtendedKey
+	}{
+		{
+			name:        "nil key",
+			accountName: "account manager nil key",
+			accountKey:  nil,
+		},
+		{
+			name:        "private key",
+			accountName: "account manager private key",
+			accountKey:  keys.accountPrivateKey,
+		},
+	}
+
+	for _, tc := range testCases {
+		_, err := w.ImportAccount(
+			ctx, wallet.ImportAccountParams{
+				Name:                 tc.accountName,
+				XPub:                 tc.accountKey,
+				AddrType:             keys.addrType,
+				MasterKeyFingerprint: &inputFingerprint,
+			}, false,
+		)
+
+		require.ErrorIs(h, err, wallet.ErrInvalidAccountKey)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(
+			h, err, "failed to list accounts after rejection",
+		)
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+}
+
+// testAccountManagerEnforceAccountImportLifecycle verifies that a stopped
+// watch-only wallet rejects an otherwise valid account import.
+func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
+	const accountName = "account manager stopped import"
+
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+
+	accounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	wantCount := len(accounts)
+
+	// Retain the stopped pointer for the rejected call; the live replacement
+	// remains registered and provides the next durability boundary.
+	live := h.ReloadWallet(w)
+
+	_, err = w.ImportAccount(
+		ctx, wallet.ImportAccountParams{
+			Name:                 accountName,
+			XPub:                 keys.accountKey,
+			AddrType:             keys.addrType,
+			MasterKeyFingerprint: &inputFingerprint,
+		}, false,
+	)
+
+	// A rejected import must leave no partial account, so the target stays
+	// absent across a reopen and the account set is unchanged.
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
+	w = h.ReloadWallet(live)
+	_, err = w.GetAccount(ctx, keys.scope, accountName)
+	require.Error(h, err, "stopped import created an account")
+
+	accounts, err = w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts after rejection")
+	require.Len(h, accounts, wantCount, "rejection changed account count")
+}
+
+// testAccountManagerRejectAccountIdentity verifies a vacant-name XPub
+// collision returns the wallet-owned error without adding an account.
+func testAccountManagerRejectAccountIdentity(h *bwtest.HarnessTest) {
+	// Arrange: import one childless account into a started watch-only wallet
+	// and snapshot its inventory through the public API.
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	account := wallet.ImportAccountParams{
+		Name:                 "owner",
+		XPub:                 keys.accountKey,
+		AddrType:             keys.addrType,
+		MasterKeyFingerprint: &inputFingerprint,
+	}
+	_, err := w.ImportAccount(ctx, account, false)
+	require.NoError(h, err)
+
+	before, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+
+	// Act: request the same XPub under a vacant name without deriving any
+	// children. The import must fail at account admission.
+	candidate := account
+	candidate.Name = "candidate"
+	candidateFingerprint := *account.MasterKeyFingerprint + 1
+	candidate.MasterKeyFingerprint = &candidateFingerprint
+	info, err := w.ImportAccount(ctx, candidate, false)
+
+	// Assert: the caller sees the wallet sentinel and no candidate account.
+	require.ErrorIs(h, err, wallet.ErrAccountIdentityCollision)
+	require.Nil(h, info)
+
+	// Assert: the collision leaves the public inventory and child counts
+	// intact.
+	after, err := w.ListAccounts(ctx)
+	require.NoError(h, err)
+	require.Equal(h, before, after)
+
+	owner, err := w.GetAccount(ctx, keys.scope, "owner")
+	require.NoError(h, err)
+	require.Zero(h, owner.ExternalKeyCount)
+	require.Zero(h, owner.InternalKeyCount)
+}
+
+// testAccountManagerMixAccountCustody verifies that one signing wallet tracks
+// external XPub children across reopen without treating them as local keys.
+func testAccountManagerMixAccountCustody(h *bwtest.HarnessTest) {
+	// Arrange a local signing account and an independent external XPub in the
+	// same wallet. Retain public identities as the oracles for reopen/signing.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	localAddr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	local, err := w.GetAddressInfo(ctx, localAddr)
+	require.NoError(h, err)
+	require.NotNil(h, local.Derivation)
+	localAccount, err := w.GetAccount(
+		ctx, local.Derivation.KeyScope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err)
+	require.False(h, localAccount.IsWatchOnly)
+	require.NotNil(h, localAccount.AccountNumber)
+	require.Equal(
+		h, uint32(*localAccount.AccountNumber), local.Derivation.Account,
+	)
+
+	// Act by importing public material through the existing AccountManager,
+	// then allocating its first external child through the public selector.
+	keys := deterministicImportedAccountKeys(h)
+
+	// Supply the fixture origin explicitly so zero stays present.
+	inputFingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	externalAccount, err := w.ImportAccount(
+		ctx, wallet.ImportAccountParams{
+			Name:                 "external custody",
+			XPub:                 keys.accountKey,
+			MasterKeyFingerprint: &inputFingerprint,
+			AddrType:             keys.addrType,
+		}, false,
+	)
+	require.NoError(h, err)
+	require.True(h, externalAccount.IsWatchOnly)
+	external, err := w.NewAddress(ctx, wallet.NewAccountSelectorByName(
+		keys.scope, externalAccount.AccountName,
+	), false)
+	require.NoError(h, err)
+
+	// Assert the child belongs to the supplied XPub, rather than account zero
+	// of this wallet. It is an HD child without a wallet-root signing path.
+	branch, err := keys.accountKey.Derive(0)
+	require.NoError(h, err)
+	child, err := branch.Derive(0)
+	require.NoError(h, err)
+	expectedPubKey, err := child.ECPubKey()
+	require.NoError(h, err)
+	require.Equal(h, expectedPubKey, external.PubKey)
+	require.False(h, external.Imported)
+	require.Nil(h, external.Derivation)
+
+	// Arrange one confirmed output for each custodian. The miner transaction
+	// supplies independent outpoints, avoiding assumptions about output order.
+	cases := []struct {
+		account   *wallet.AccountInfo
+		address   wallet.AddressInfo
+		amount    btcutil.Amount
+		watchOnly bool
+		script    []byte
+		outpoint  wire.OutPoint
+	}{
+		{
+			account:   localAccount,
+			address:   local,
+			amount:    oneBTC,
+			watchOnly: false,
+		},
+		{
+			account:   externalAccount,
+			address:   external,
+			amount:    2 * oneBTC,
+			watchOnly: true,
+		},
+	}
+
+	outputs := make([]*wire.TxOut, len(cases))
+	for i := range cases {
+		cases[i].script, err = txscript.PayToAddrScript(cases[i].address.Addr)
+		require.NoError(h, err)
+
+		outputs[i] = wire.NewTxOut(int64(cases[i].amount), cases[i].script)
+	}
+
+	txid := h.SendOutputs(outputs, bwtest.MinerFeeRate)
+	funding := h.AssertTxInMempool(*txid)
+	h.MineBlockWithTx(funding)
+
+	for i := range cases {
+		for index, output := range funding.TxOut {
+			if bytes.Equal(output.PkScript, cases[i].script) {
+				cases[i].outpoint = wire.OutPoint{
+					Hash:  *txid,
+					Index: uint32(index),
+				}
+			}
+		}
+	}
+
+	for phase := range 2 {
+		// Act with the original wallet as the control, then close and reopen
+		// it through the harness on the second pass. Unlocking restores the
+		// fixture mode before observing the same confirmed outputs.
+		if phase == 1 {
+			w = h.ReloadWallet(w)
+			h.UnlockWallet(w)
+		}
+
+		// Assert retained account/address ownership and per-output custody
+		// match the original custodians on both sides of the transition.
+		require.False(h, w.IsWatchOnly())
+		listed, err := w.ListUnspent(ctx, wallet.UtxoQuery{
+			MinConfs: 1,
+			MaxConfs: 100,
+		})
+		require.NoError(h, err)
+		require.Len(h, listed, 2)
+
+		for _, tc := range cases {
+			account, err := w.GetAccount(
+				ctx, tc.account.KeyScope, tc.account.AccountName,
+			)
+			require.NoError(h, err)
+			require.Equal(h, tc.watchOnly, account.IsWatchOnly)
+			require.Equal(h, tc.account.AccountNumber, account.AccountNumber)
+			require.Equal(h, tc.account.PublicKey, account.PublicKey)
+			address, err := w.GetAddressInfo(ctx, tc.address.Addr)
+			require.NoError(h, err)
+			require.Equal(h, tc.address, address)
+			utxo, err := w.GetUtxo(ctx, tc.outpoint)
+			require.NoError(h, err)
+			require.Equal(h, tc.amount, utxo.Amount)
+			require.Equal(h, tc.account.AccountName, utxo.Account)
+			require.Equal(h, !tc.watchOnly, utxo.Spendable)
+			require.Contains(h, listed, utxo)
+		}
+	}
+
+	// Arrange valid signing requests on the reopened wallet. The local path
+	// comes from retained public metadata; the external request targets its
+	// actual funded output, without inventing a numeric account origin.
+	path := createSignerPath(local.Derivation)
+	digest := chainhash.HashB([]byte("mixed account custody"))
+
+	// Act through the local signer with the retained path and deterministic
+	// digest, using the wallet reopened by the preceding lifecycle action.
+	result, err := w.SignDigest(ctx, path, &wallet.SignDigestIntent{
+		Digest:  digest,
+		SigType: wallet.SigTypeECDSA,
+	})
+
+	// Assert the local account still produces a valid signature after reopen.
+	require.NoError(h, err)
+
+	signature, ok := result.(wallet.ECDSASignature)
+	require.True(h, ok)
+	require.True(h, signature.Verify(digest, local.PubKey))
+
+	// Arrange a valid spend of the tracked external output, including its
+	// actual previous-output amount and script for signature-hash calculation.
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&cases[1].outpoint, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(int64(oneBTC), cases[0].script))
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		cases[1].script, int64(cases[1].amount),
+	)
+
+	// Act through output-based signing so refusal depends on external custody
+	// rather than a fabricated numeric account path or malformed request.
+	unlocking, err := w.ComputeUnlockingScript(
+		ctx, &wallet.UnlockingScriptParams{
+			Tx:        tx,
+			Output:    outputs[1],
+			SigHashes: txscript.NewTxSigHashes(tx, fetcher),
+			HashType:  txscript.SigHashAll,
+		},
+	)
+
+	// Assert ownership never grants local signing authority for external keys.
+	require.ErrorIs(h, err, wallet.ErrNoAssocPrivateKey)
+	require.Nil(h, unlocking)
+
+	// Arrange a numbered external account in a separate scope: the numberless
+	// BIP84 import already occupies native slot one on kvdb. A valid spend of
+	// its child must reach account-secret refusal without adding chain state.
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: keys.scope.Coin}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	numbered, err := w.ImportAccount(ctx, wallet.ImportAccountParams{
+		Name:                 "numbered external custody",
+		XPub:                 keys.otherAccountKey,
+		Scope:                &scope,
+		AddrSchema:           &schema,
+		MasterKeyFingerprint: &inputFingerprint,
+	}, false)
+	require.NoError(h, err)
+	numberedChild, err := w.NewAddress(ctx, wallet.NewAccountSelectorByName(
+		scope, numbered.AccountName,
+	), false)
+	require.NoError(h, err)
+	pkScript, err := txscript.PayToAddrScript(numberedChild.Addr)
+	require.NoError(h, err)
+
+	prevOut, numberedTx := createSignerTx(pkScript)
+	numberedFetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+
+	// Act through the same public signer with a known account number and a
+	// valid previous output, so missing private material is the only refusal.
+	unlocking, err = w.ComputeUnlockingScript(
+		ctx, &wallet.UnlockingScriptParams{
+			Tx:        numberedTx,
+			Output:    prevOut,
+			SigHashes: txscript.NewTxSigHashes(numberedTx, numberedFetcher),
+			HashType:  txscript.SigHashAll,
+		},
+	)
+
+	// Assert retaining a supplied path grants no private key: the numbered
+	// account reaches its empty-secret check and produces no unlocking data.
+	require.ErrorIs(h, err, wallet.ErrWatchOnlyAccount)
+	require.Nil(h, unlocking)
+}
+
+// testAccountManagerDerivePathBoundAddress preserves imported BIP49 paths,
+// received balance and account identity through reopening.
+func testAccountManagerDerivePathBoundAddress(h *bwtest.HarnessTest) {
+	// Arrange: import the fixture's account-one XPub with BIP49's mixed schema
+	// and a present-zero fingerprint, using only the declared scope and key.
+	keys := deterministicImportedAccountKeys(h)
+	scope := waddrmgr.KeyScopeBIP0049Plus
+	schema := waddrmgr.ScopeAddrMap[scope]
+	number := wallet.AccountNumber(1)
+	fingerprint := wallet.MasterFingerprint(0)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	params := wallet.ImportAccountParams{
+		MasterKeyFingerprint: &fingerprint,
+		Name:                 "numbered receiving",
+		Scope:                &scope,
+		AddrSchema:           &schema,
+		XPub:                 keys.otherAccountKey,
+	}
+	created, err := w.ImportAccount(h.Context(), params, false)
+	require.NoError(h, err)
+	require.True(h, created.IsImported)
+	require.Equal(h, &number, created.AccountNumber)
+	require.Equal(h, &fingerprint, created.MasterKeyFingerprint)
+	require.Equal(h, schema, created.AddrSchema)
+
+	selector := wallet.NewAccountSelectorByNumber(scope, number)
+
+	// Act: allocate both branches through the same numbered public selector.
+	external, err := w.NewAddress(h.Context(), selector, false)
+	require.NoError(h, err)
+	internal, err := w.NewAddress(h.Context(), selector, true)
+
+	// Assert: the mixed schema and known number survive address conversion;
+	// each branch starts at its own child zero with the declared scope.
+	require.NoError(h, err)
+	require.Equal(h, schema.ExternalAddrType, external.AddrType)
+	require.Equal(h, schema.InternalAddrType, internal.AddrType)
+	require.Equal(h, &wallet.AddressDerivation{
+		KeyScope: scope,
+		Account:  uint32(number),
+	}, external.Derivation)
+	require.Equal(h, &wallet.AddressDerivation{
+		KeyScope: scope,
+		Account:  uint32(number),
+		Branch:   1,
+	}, internal.Derivation)
+
+	// Fund the receiving child and wait for its mined block so the balance
+	// observation checks committed ownership rather than mempool timing.
+	script, err := txscript.PayToAddrScript(external.Addr)
+	require.NoError(h, err)
+
+	const amount = btcutil.Amount(17000)
+
+	txid := h.SendOutput(&wire.TxOut{
+		Value:    int64(amount),
+		PkScript: script,
+	}, bwtest.MinerFeeRate)
+	h.MineBlockWithTx(h.AssertTxInMempool(*txid))
+	before, err := w.GetAccount(h.Context(), scope, params.Name)
+	require.NoError(h, err)
+	require.Equal(h, &number, before.AccountNumber)
+	require.Equal(h, []byte(params.XPub.String()), before.PublicKey)
+	require.Equal(h, &fingerprint, before.MasterKeyFingerprint)
+	require.Equal(h, scope, before.KeyScope)
+	require.True(h, before.IsImported)
+
+	// Reopen through the harness so persisted identity, branch children and
+	// credited membership are read by a replacement Wallet instance.
+	w = h.ReloadWallet(w)
+	after, err := w.GetAccount(h.Context(), scope, params.Name)
+	require.NoError(h, err)
+	require.Equal(h, before, after)
+
+	for _, info := range []wallet.AddressInfo{external, internal} {
+		stored, err := w.GetAddressInfo(h.Context(), info.Addr)
+		require.NoError(h, err)
+		require.Equal(h, info, stored)
+	}
+
+	listed, err := w.ListAddresses(
+		h.Context(), params.Name, waddrmgr.NestedWitnessPubKey,
+	)
+	require.NoError(h, err)
+	require.Contains(h, listed, wallet.AddressProperty{
+		Address: external.Addr,
+		Balance: amount,
+	})
+}
+
+// testAccountManagerAllocatePathBoundKey verifies imported purpose-1017 keys
+// keep their declared origin and resume at the next child after reopening.
+func testAccountManagerAllocatePathBoundKey(h *bwtest.HarnessTest) {
+	// Arrange: declare the custom scope with a witness schema and nonzero
+	// fingerprint. Direct XPub derivation supplies an independent child oracle.
+	keys := deterministicImportedAccountKeys(h)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	schema := waddrmgr.ScopeAddrMap[keys.scope]
+	number := wallet.AccountNumber(0)
+	fingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	require.NotZero(h, fingerprint)
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+	params := wallet.ImportAccountParams{
+		Name:                 "numbered allocation",
+		Scope:                &scope,
+		AddrSchema:           &schema,
+		XPub:                 keys.accountKey,
+		MasterKeyFingerprint: &fingerprint,
+	}
+	_, err := w.ImportAccount(h.Context(), params, false)
+	require.NoError(h, err)
+
+	selector := wallet.NewAccountSelectorByNumber(scope, number)
+	branch, err := keys.accountKey.Derive(0)
+	require.NoError(h, err)
+
+	// Act: allocate once on each side of the harness-owned reopen boundary.
+	for index := range uint32(2) {
+		allocated, err := w.AllocateNextKey(h.Context(), selector, false)
+
+		// Assert: independent child keys and complete declared origins match
+		// the stored cursor, including its continuation after reopening.
+		require.NoError(h, err)
+		child, err := branch.Derive(index)
+		require.NoError(h, err)
+		pub, err := child.ECPubKey()
+		require.NoError(h, err)
+		require.Equal(h, pub, allocated.PubKey)
+		require.Equal(h, index, allocated.Index)
+		require.Zero(h, allocated.Branch)
+		require.Equal(h, &wallet.KeyOrigin{
+			KeyScope:             scope,
+			Account:              uint32(number),
+			MasterKeyFingerprint: uint32(fingerprint),
+		}, allocated.Origin)
+
+		if index == 0 {
+			// Read the actual declared identity before reopening so agreeing
+			// reads alone cannot hide a lost scope, number or fingerprint.
+			before, err := w.GetAccount(h.Context(), scope, params.Name)
+			require.NoError(h, err)
+			require.Equal(h, &number, before.AccountNumber)
+			require.Equal(h, scope, before.KeyScope)
+			require.Equal(h, schema, before.AddrSchema)
+			require.Equal(h, &fingerprint, before.MasterKeyFingerprint)
+			require.True(h, before.IsImported)
+			w = h.ReloadWallet(w)
+			after, err := w.GetAccount(h.Context(), scope, params.Name)
+			require.NoError(h, err)
+			require.Equal(h, before, after)
+		}
+	}
+}

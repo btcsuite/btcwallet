@@ -63,6 +63,11 @@ type TxStore interface {
 	// outputs and deletes those which have already expired.
 	DeleteExpiredLockedOutputs(ns walletdb.ReadWriteBucket) error
 
+	// DeleteMaturedLockedOutputs deletes confirmation-controlled locks whose
+	// spend has reached its requested depth at the given chain height.
+	DeleteMaturedLockedOutputs(ns walletdb.ReadWriteBucket,
+		chainHeight int32) error
+
 	// InsertTx records a transaction as belonging to a wallet's transaction
 	// history. If block is nil, the transaction is considered unspent, and
 	// the transaction's index must be unset.
@@ -100,9 +105,11 @@ type TxStore interface {
 	// LockOutput locks an output to the given ID, preventing it from being
 	// available for coin selection. The absolute time of the lock's
 	// expiration is returned. The expiration of the lock can be extended by
-	// successive invocations of this call.
+	// successive invocations of this call. A confirmation-controlled lock
+	// stores that time but releases only at spend maturity or by its owner.
 	LockOutput(ns walletdb.ReadWriteBucket, id LockID, op wire.OutPoint,
-		duration time.Duration) (time.Time, error)
+		duration time.Duration, optFuncs ...LockOutputOption) (time.Time,
+		error)
 
 	// OutputsToWatch returns a list of outputs to monitor during the
 	// wallet's startup. The returned items are similar to UnspentOutputs,
@@ -116,6 +123,11 @@ type TxStore interface {
 	// they are non-zero and within the label length limit.
 	PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
 		label string) error
+
+	// DeleteTxLabel removes any label recorded for the transaction, which
+	// is how this store records a transaction that has none. A transaction
+	// that already has no label is not an error.
+	DeleteTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash) error
 
 	// RangeTransactions runs the function f on all transaction details
 	// between blocks on the best chain over the height range [begin,end].
@@ -151,6 +163,14 @@ type TxStore interface {
 	// UnspentOutputs returns all unspent received transaction outputs.
 	// The order is undefined.
 	UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error)
+
+	// UnspentOutputsIncludingLocked returns all unspent received
+	// transaction outputs, including outputs currently held by an
+	// active output lease. Callers reporting a wallet balance to
+	// external consumers use this so the balance reflects the
+	// wallet's total UTXO value independent of leasing state.
+	UnspentOutputsIncludingLocked(
+		ns walletdb.ReadBucket) ([]Credit, error)
 
 	// FetchTxLabel reads a transaction label from the tx labels bucket. If
 	// a label with 0 length was written, we return an error, since this is
