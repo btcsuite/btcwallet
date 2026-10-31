@@ -884,18 +884,11 @@ func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
 	require.Equal(h, want, durableInfo)
 }
 
-// testAccountManagerCreateExactAccount verifies an exact account's disabled
-// chain synchronization and complete account facts survive reopening.
+// testAccountManagerCreateExactAccount verifies exact identity and the
+// backend's synchronization policy survive queries and reopening.
 func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
-	// Exact selection is SQL-only; the sequential case covers kvdb.
-	if *dbBackend != string(wallet.DBBackendSQLite) &&
-		*dbBackend != string(wallet.DBBackendPostgres) {
-
-		h.Skip("exact account creation requires SQL")
-	}
-
-	// Arrange: a sparse, excluded account exercises exact activation; the
-	// harness owns the unlocked wallet and its cleanup.
+	// Arrange: request sparse activation with SQL-only exclusion. The
+	// harness owns the unlocked wallet; KVDB must retain its false policy.
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 	number := wallet.AccountNumber(7)
 	params := wallet.NewAccountParams{
@@ -905,6 +898,10 @@ func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
 		NoChainSync:   true,
 	}
 
+	// SQL persists exclusion; KVDB normalizes the same request to false.
+	wantNoChainSync := *dbBackend == string(wallet.DBBackendSQLite) ||
+		*dbBackend == string(wallet.DBBackendPostgres)
+
 	// Act: create publicly through both derivation and storage.
 	created, err := w.NewAccount(h.Context(), params)
 
@@ -912,7 +909,7 @@ func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
 	// normalizing key prefixes with the existing comparison helper.
 	require.NoError(h, err)
 	require.Equal(h, number, *created.AccountNumber)
-	require.True(h, created.NoChainSync)
+	require.Equal(h, wantNoChainSync, created.NoChainSync)
 	require.Zero(h, created.ExternalKeyCount)
 	require.Zero(h, created.InternalKeyCount)
 
@@ -953,7 +950,7 @@ func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
 	// Act: list all accounts after ReloadWallet.
 	durableAccounts, err := w.ListAccounts(h.Context())
 
-	// Assert: all fields, including NoChainSync=true, must survive the reload.
+	// Assert: all fields, including backend policy, survive the reload.
 	require.NoError(h, err)
 	require.Contains(h, durableAccounts, want)
 
@@ -983,13 +980,6 @@ func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
 // testAccountManagerFillAccountHole verifies that reopening after sparse
 // allocation leaves lower exact account numbers available.
 func testAccountManagerFillAccountHole(h *bwtest.HarnessTest) {
-	// Exact lower-hole creation is unavailable on kvdb.
-	if *dbBackend != string(wallet.DBBackendSQLite) &&
-		*dbBackend != string(wallet.DBBackendPostgres) {
-
-		h.Skip("exact account creation requires SQL")
-	}
-
 	// Arrange: persist sparse seven and reopen before requesting lower two,
 	// so the hole must remain available in durable allocation state.
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
@@ -1018,15 +1008,9 @@ func testAccountManagerFillAccountHole(h *bwtest.HarnessTest) {
 
 // testAccountManagerAdvanceAccountCursor checks durable sparse allocation.
 func testAccountManagerAdvanceAccountCursor(h *bwtest.HarnessTest) {
-	// kvdb rejects exact requests, so this SQL cursor contract is inapplicable.
-	if *dbBackend != string(wallet.DBBackendSQLite) &&
-		*dbBackend != string(wallet.DBBackendPostgres) {
-
-		h.Skip("exact account creation requires SQL")
-	}
-
-	// Arrange: persist excluded seven and ordinary two, then reopen so the
-	// next request observes only the durable cursor left by both writes.
+	// Arrange: persist seven (requesting SQL-only exclusion) and ordinary
+	// two, then reopen. KVDB ignores exclusion; the next call must observe
+	// only the durable cursor left by those writes.
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 	number := wallet.AccountNumber(7)
 	params := wallet.NewAccountParams{
@@ -1083,7 +1067,6 @@ func testAccountManagerCreateCustomScopeAccount(h *bwtest.HarnessTest) {
 
 			// Arrange: use a fresh unlocked wallet so each policy must
 			// establish the custom scope without previously stored metadata.
-			// Snapshot accounts to detect mutation on kvdb's refusal path.
 			const accountName = "custom scope account"
 
 			ctx := h.Context()
@@ -1097,8 +1080,11 @@ func testAccountManagerCreateCustomScopeAccount(h *bwtest.HarnessTest) {
 			}
 			number := wallet.AccountNumber(7)
 			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
-			before, err := w.ListAccounts(ctx)
-			require.NoError(h, err)
+
+			// Match each backend's stored policy while retaining both requests.
+			sqlBackend := *dbBackend == string(wallet.DBBackendSQLite) ||
+				*dbBackend == string(wallet.DBBackendPostgres)
+			wantNoChainSync := tc.noChainSync && sqlBackend
 
 			// Act: supply both required new-scope inputs through the public
 			// creation operation, varying only the requested sync policy.
@@ -1110,29 +1096,13 @@ func testAccountManagerCreateCustomScopeAccount(h *bwtest.HarnessTest) {
 				NoChainSync:   tc.noChainSync,
 			})
 
-			// Assert: backend configuration selects kvdb's documented
-			// refusal; SQL below must persist the custom scope and policy.
-			if *dbBackend != string(wallet.DBBackendSQLite) &&
-				*dbBackend != string(wallet.DBBackendPostgres) {
-
-				require.ErrorIs(h, err, wallet.ErrAccountOperationUnsupported)
-				require.Nil(h, created)
-
-				after, err := w.ListAccounts(ctx)
-				require.NoError(h, err)
-				// Scope traversal order does not change the account set.
-				require.ElementsMatch(h, before, after)
-
-				return
-			}
-
-			// Check the requested custom-scope identity and policy before
+			// Assert: check the requested identity and immutable policy before
 			// comparing the full snapshot across the persistence boundary.
 			require.NoError(h, err)
 			require.Equal(h, number, *created.AccountNumber)
 			require.Equal(h, scope, created.KeyScope)
 			require.Equal(h, schema, created.AddrSchema)
-			require.Equal(h, tc.noChainSync, created.NoChainSync)
+			require.Equal(h, wantNoChainSync, created.NoChainSync)
 			require.False(h, created.IsImported)
 
 			// Act: list all accounts before the wallet is opened again.

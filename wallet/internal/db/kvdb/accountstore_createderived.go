@@ -1,6 +1,7 @@
 package kvdb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -19,12 +20,6 @@ import (
 func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
-
-	// waddrmgr owns sequential allocation in the legacy store. Refuse exact
-	// selection before a transaction can allocate or derive any account.
-	if params.AccountNumber != nil {
-		return nil, fmt.Errorf("kvdb exact account: %w", db.ErrInvalidParam)
-	}
 
 	// The legacy format has no per-account synchronization policy. Normalize
 	// the by-value request so the shared workflow also returns the stored false
@@ -86,6 +81,10 @@ type createDerivedAccountOps struct {
 	ns        walletdb.ReadWriteBucket
 	scope     waddrmgr.KeyScope
 	scopedMgr waddrmgr.AccountStore
+
+	// scopeIsNew records creation by EnsureScope in this write, permitting
+	// reuse only of that scope's newly seeded default account.
+	scopeIsNew bool
 }
 
 type derivedAccountKeyDeriver interface {
@@ -101,12 +100,10 @@ func (o *createDerivedAccountOps) PrepareWalletForAccountCreation(
 	return o.mgr.WatchOnly(), nil
 }
 
-// EnsureScope implements db.CreateDerivedAccountOps. The schema input is
-// unused because kvdb only loads existing scopes; the shared workflow checks
-// their persisted schema against the caller's assertion. waddrmgr scopes are
-// pre-registered; the call only fetches and caches the scoped manager.
+// EnsureScope implements db.CreateDerivedAccountOps using native scope
+// creation. The shared workflow checks the persisted schema before allocation.
 func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
-	scope db.KeyScope, _ *db.ScopeAddrSchema) (int64, db.ScopeAddrSchema,
+	scope db.KeyScope, schema *db.ScopeAddrSchema) (int64, db.ScopeAddrSchema,
 	error) {
 
 	waddrScope := waddrmgr.KeyScope{
@@ -115,6 +112,27 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	}
 
 	scopedMgr, err := o.mgr.FetchScopedKeyManager(waddrScope)
+	if waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+		// The native manager owns coin-type keys and commit-time scope
+		// publication. An unknown custom scope must supply its schema.
+		selected, known := db.ScopeAddrMap[scope]
+		if schema != nil {
+			selected = *schema
+		} else if !known {
+			return 0, db.ScopeAddrSchema{}, db.ErrInvalidParam
+		}
+
+		converted, convErr := db.ScopeAddrSchemaToWaddrmgr(selected)
+		if convErr != nil {
+			return 0, db.ScopeAddrSchema{}, convErr
+		}
+
+		scopedMgr, err = o.mgr.NewScopedKeyManager(
+			o.ns, waddrScope, converted,
+		)
+		o.scopeIsNew = err == nil
+	}
+
 	if err != nil {
 		return 0, db.ScopeAddrSchema{}, translateAccountErr(
 			err, db.ErrAccountNotFound,
@@ -123,6 +141,22 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 
 	o.scope = waddrScope
 	o.scopedMgr = scopedMgr
+
+	// A new spendable scope includes a real default account. Admit its key
+	// against committed owners before the scope can become globally visible.
+	if o.scopeIsNew {
+		initial, err := loadAccountInfo(
+			o.ns, scopedMgr, waddrmgr.DefaultAccountNum, false,
+		)
+		if err != nil {
+			return 0, db.ScopeAddrSchema{}, err
+		}
+
+		err = checkAccountIdentity(o.ns, o.mgr, *initial)
+		if err != nil {
+			return 0, db.ScopeAddrSchema{}, err
+		}
+	}
 
 	// Read the persisted scope schema from the waddrmgr scoped manager
 	// instead of the global ScopeAddrMap default. A scope that was
@@ -140,14 +174,32 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	return 0, addrSchema, nil
 }
 
-// AllocateAccountNumber implements db.CreateDerivedAccountOps. The selector
-// is unused because CreateDerivedAccount rejects exact requests before opening
-// the transaction; this adapter retains sequential allocation.
+// AllocateAccountNumber implements db.CreateDerivedAccountOps. Exact writes
+// use the requested slot; the native writer advances its cursor on persistence.
 func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
-	_ int64, _ *uint32) (int64, error) {
+	_ int64, number *uint32) (int64, error) {
 
 	if o.scopedMgr == nil {
 		return 0, errScopedMgrUninitialized
+	}
+
+	// Keep sparse requests independent of sequential allocation. Existing
+	// identity admission below rejects occupied slots before any key write.
+	if number != nil {
+		// The native default's cursor starts unset. Allocate its zero once
+		// when reusing that new account, so later sequential calls start at 1.
+		if o.scopeIsNew && *number == waddrmgr.DefaultAccountNum {
+			account, err := o.scopedMgr.AllocateDerivedAccountNumber(o.ns)
+			return int64(account), err
+		}
+
+		return int64(*number), nil
+	}
+
+	// Missing scopes remain unavailable to sequential creation. In
+	// particular, do not allocate zero over a newly seeded native default.
+	if o.scopeIsNew {
+		return 0, db.ErrAccountNotFound
 	}
 
 	account, err := o.scopedMgr.AllocateDerivedAccountNumber(o.ns)
@@ -176,37 +228,40 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 		return db.CreateDerivedAccountRow{}, err
 	}
 
-	err = checkAccountIdentity(o.ns, o.mgr, db.AccountInfo{
-		KeyScope:    db.KeyScope(o.scope),
-		AccountName: name,
-		PublicKey:   derived.PublicKey,
-		AddrSchema:  schema,
-	})
+	// Use the existing checked conversion for the native uint32 slot; the
+	// shared workflow has already enforced the narrower derived-account limit.
+	number, err := db.Int64ToUint32(accountNumber)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, err
 	}
 
-	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
-	err = o.scopedMgr.PutDerivedAccountWithKeys(
-		o.ns, uint32(accountNumber), name,
-		derived.PublicKey, derived.EncryptedPrivateKey,
-	)
+	candidate := db.AccountInfo{
+		KeyScope:      db.KeyScope(o.scope),
+		AccountNumber: &number,
+		AccountName:   name,
+		PublicKey:     derived.PublicKey,
+		AddrSchema:    schema,
+	}
+
+	err = checkAccountIdentity(o.ns, o.mgr, candidate)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, err
+	}
+
+	// Keep native default reuse and key persistence behind the same writer.
+	err = o.putDerivedAccount(candidate, derived.EncryptedPrivateKey)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, fmt.Errorf(
 			"put derived account: %w", err,
 		)
 	}
 
-	// Persist the creation timestamp into the kvdb-owned side
-	// bucket. Returning the same value to the caller keeps the
-	// create return and the next read in sync.
+	// Store the creation time in the same write as the keys, so creation and
+	// later reads describe the same committed account.
 	now := time.Now().UTC()
 	scope := o.scopedMgr.Scope()
 
-	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
-	err = putAccountCreatedAt(
-		o.ns, scope, uint32(accountNumber), now, nil,
-	)
+	err = putAccountCreatedAt(o.ns, scope, number, now, nil)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, fmt.Errorf(
 			"persist created-at: %w", err,
@@ -222,9 +277,8 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 	// this path round-trip the value natively; legacy rows
 	// (created before this side bucket existed) still rely on the
 	// wallet-layer override as the canonical compatibility fallback.
-	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
 	err = putAccountMasterFingerprint(
-		o.ns, scope, uint32(accountNumber),
+		o.ns, scope, number,
 		derived.MasterKeyFingerprint,
 	)
 	if err != nil {
@@ -240,6 +294,57 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 		},
 		CreatedAt: now,
 	}, nil
+}
+
+// putDerivedAccount writes admitted keys or reuses the native default created
+// in this transaction. Committed account slots are never eligible for reuse.
+func (o *createDerivedAccountOps) putDerivedAccount(candidate db.AccountInfo,
+	encryptedPrivateKey []byte) error {
+
+	number := *candidate.AccountNumber
+	if !o.scopeIsNew {
+		return o.scopedMgr.PutDerivedAccountWithKeys(
+			o.ns, number, candidate.AccountName,
+			candidate.PublicKey, encryptedPrivateKey,
+		)
+	}
+
+	// The provisional default is absent from the root manager's committed
+	// list, so compare it explicitly before a new scope can publish either key.
+	initial, err := loadAccountInfo(
+		o.ns, o.scopedMgr, waddrmgr.DefaultAccountNum, false,
+	)
+	if err != nil {
+		return err
+	}
+
+	if number != waddrmgr.DefaultAccountNum {
+		err = db.CheckAccountIdentity(candidate, []db.AccountInfo{*initial})
+		if err != nil {
+			return err
+		}
+
+		return o.scopedMgr.PutDerivedAccountWithKeys(
+			o.ns, number, candidate.AccountName,
+			candidate.PublicKey, encryptedPrivateKey,
+		)
+	}
+
+	// A zero request must use the real root-derived default, rather than
+	// replacing that key with unrelated material from a derivation callback.
+	if !bytes.Equal(
+		db.AccountXPubPayload(initial.PublicKey),
+		db.AccountXPubPayload(candidate.PublicKey),
+	) {
+
+		return db.ErrInvalidParam
+	}
+
+	if candidate.AccountName == initial.AccountName {
+		return nil
+	}
+
+	return o.scopedMgr.RenameAccount(o.ns, number, candidate.AccountName)
 }
 
 // deriveWithScopedFallback wraps the wallet-supplied derivation callback with

@@ -2213,13 +2213,13 @@ func TestNewAccountInvalidPath(t *testing.T) {
 	require.Nil(t, info)
 }
 
-// TestNewAccountExactUnsupported verifies kvdb rejects exact creation with
-// either policy after admission and before root preparation or Store mutation.
-func TestNewAccountExactUnsupported(t *testing.T) {
+// TestNewAccountExactKVDB verifies exact KVDB requests reach the existing
+// Store transaction and return its false-only synchronization policy.
+func TestNewAccountExactKVDB(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: vary the unsupported mode with identical read-only admission
-	// expectations. Any secret or creation call would fail the strict mocks.
+	// Arrange: forward each requested flag through one admitted Store write.
+	// Its false result models KVDB normalization; real Store tests own keys.
 	tests := []struct {
 		name        string
 		noChainSync bool
@@ -2252,8 +2252,30 @@ func TestNewAccountExactUnsupported(t *testing.T) {
 			number := AccountNumber(7)
 
 			expectAccountNameAvailable(deps, scope, testAccountName)
+			expectAccountDeriveSetup(t, deps, newStubAccountDeriveFn(t))
 
-			// Act: submit a valid path with the unsupported backend/policy.
+			storedSchema := db.ScopeAddrSchema{
+				ExternalAddrType: db.WitnessPubKey,
+				InternalAddrType: db.WitnessPubKey,
+			}
+			deps.store.On("CreateDerivedAccount", t.Context(),
+				db.CreateDerivedAccountParams{
+					WalletID:      w.id,
+					Scope:         db.KeyScope(scope),
+					Name:          testAccountName,
+					AccountNumber: (*uint32)(&number),
+					AddrSchema:    &storedSchema,
+					NoChainSync:   test.noChainSync,
+				}, mock.Anything).Return(&db.AccountInfo{
+				AccountNumber: (*uint32)(&number),
+				AccountName:   testAccountName,
+				KeyScope:      db.KeyScope(scope),
+				AddrSchema:    storedSchema,
+				NoChainSync:   false,
+			}, nil).Once()
+
+			// Act: submit the custom exact path through public admission and
+			// wait for the Store's actual normalized result.
 			info, err := w.NewAccount(t.Context(), NewAccountParams{
 				Scope:         scope,
 				Name:          testAccountName,
@@ -2262,10 +2284,13 @@ func TestNewAccountExactUnsupported(t *testing.T) {
 				NoChainSync:   test.noChainSync,
 			})
 
-			// Assert: both forms preserve the public unsupported outcome
-			// and stop after the required admission reads.
-			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
-			require.Nil(t, info)
+			// Assert: check identity and the Store's false policy,
+			// even when the request supplied SQL-only exclusion.
+			// Fixture cleanup verifies each required call once.
+			require.NoError(t, err)
+			require.Equal(t, number, *info.AccountNumber)
+			require.Equal(t, schema, info.AddrSchema)
+			require.False(t, info.NoChainSync)
 		})
 	}
 }
