@@ -12,8 +12,13 @@ kebab-case title. Then do these steps:
 
 1. Replace every instructional comment.
 2. Complete every section.
-3. Wrap Markdown near 80 columns.
-4. Add the ADR to the index below.
+3. Write in Simple English. Follow the
+   [Simple English Writing Guide](../writing_style.md).
+4. Wrap Markdown near 80 columns.
+5. Add the ADR to the index below.
+
+Simple English is a requirement for all ADRs. A reviewer can request changes
+to an ADR that does not follow the writing guide.
 
 Each ADR has exactly one decision status:
 
