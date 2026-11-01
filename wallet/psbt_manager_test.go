@@ -6545,3 +6545,96 @@ func TestFundPsbtAmbiguousReservationSkipsUnownedInputs(t *testing.T) {
 	}
 }
 
+// TestFundPsbtAmbiguousReservationReportsReleaseFailures verifies that a
+// failed release does not stop cleanup of the remaining inputs, and that each
+// failure is reported alongside the original reservation failure, so the
+// caller knows which of the attempt's leases may remain.
+func TestFundPsbtAmbiguousReservationReportsReleaseFailures(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fund three caller-selected inputs whose reservation commit
+	// is ambiguous. The first and last releases fail, while the middle
+	// one, which runs after the first failure, succeeds.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoints := ambiguousFundingOutPoints()
+	expectCallerInputsFundingSources(t, w, mocks, outPoints)
+	leaseID := expectFundingLease(
+		w, mocks, outPoints, db.ErrIndeterminateCommit,
+	)
+	expectFundingRelease(w, mocks, leaseID, outPoints[0], errDb)
+	expectFundingRelease(w, mocks, leaseID, outPoints[1], nil)
+	expectFundingRelease(w, mocks, leaseID, outPoints[2], errDb)
+
+	// Act: Fund the packet through the public API.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  newCallerInputsPacket(t, outPoints...),
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The FundReservationError reports the ambiguous reservation
+	// and the release failures, naming exactly the two inputs whose
+	// release failed.
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.ErrorIs(t, err, errDb)
+	require.NotErrorIs(t, err, db.ErrIndeterminateCommit)
+
+	var resErr *FundReservationError
+	require.ErrorAs(t, err, &resErr)
+	require.Equal(t, *leaseID, resErr.LeaseID)
+	require.Equal(t, outPoints, resErr.Inputs)
+
+	require.ErrorContains(t, err, outPoints[0].String())
+	require.NotContains(t, err.Error(), outPoints[1].String())
+	require.ErrorContains(t, err, outPoints[2].String())
+}
+
+// TestFundPsbtAmbiguousReservationReportsAmbiguousRelease verifies that a
+// release whose own commit is ambiguous is reported as a failed release with
+// the wallet's indeterminate identity, never as success and never as the
+// Store sentinel.
+func TestFundPsbtAmbiguousReservationReportsAmbiguousRelease(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fund three caller-selected inputs whose reservation commit
+	// is ambiguous, and make only the middle input's release ambiguous.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoints := ambiguousFundingOutPoints()
+	expectCallerInputsFundingSources(t, w, mocks, outPoints)
+	leaseID := expectFundingLease(
+		w, mocks, outPoints, db.ErrIndeterminateCommit,
+	)
+	expectFundingRelease(w, mocks, leaseID, outPoints[0], nil)
+	expectFundingRelease(
+		w, mocks, leaseID, outPoints[1], db.ErrIndeterminateCommit,
+	)
+	expectFundingRelease(w, mocks, leaseID, outPoints[2], nil)
+
+	// Act: Fund the packet through the public API.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  newCallerInputsPacket(t, outPoints...),
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The ambiguous release is reported for its input alongside
+	// the ambiguous reservation. Both carry only the wallet-owned
+	// identity, which the reservation already matches, so the failed
+	// release is told apart by the input it names.
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.NotErrorIs(t, err, db.ErrIndeterminateCommit)
+
+	var resErr *FundReservationError
+	require.ErrorAs(t, err, &resErr)
+	require.Equal(t, *leaseID, resErr.LeaseID)
+	require.Equal(t, outPoints, resErr.Inputs)
+
+	require.NotContains(t, err.Error(), outPoints[0].String())
+	require.ErrorContains(t, err, outPoints[1].String())
+	require.NotContains(t, err.Error(), outPoints[2].String())
+}
+
