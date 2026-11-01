@@ -530,13 +530,23 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 // handleDecorateInputs delivers the result of an accepted component request.
 func (w *Wallet) handleDecorateInputs(r decorateInputsReq) {
 	// Reuse decoration shared with funding without a second admission.
-	packet, err := w.decorateInputs(r.ctx, r.packet, r.skipUnknown)
-	r.respChan <- psbtPacketResp{packet: packet, err: err}
+	_, err := w.decorateInputs(r.ctx, r.packet, r.skipUnknown)
+	if err != nil {
+		r.respChan <- psbtPacketResp{err: err}
+
+		return
+	}
+
+	r.respChan <- psbtPacketResp{packet: r.packet}
 }
 
-// decorateInputs completes its accepted operation with the caller's packet.
+// decorateInputs completes its accepted operation with the caller's packet,
+// in place. It returns how the wallet spends each input, by position, with
+// SpendTypeUnknown for an input it skipped.
 func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
-	skipUnknown bool) (*psbt.Packet, error) {
+	skipUnknown bool) ([]waddrmgr.SpendType, error) {
+
+	spends := make([]waddrmgr.SpendType, len(packet.UnsignedTx.TxIn))
 
 	// We'll iterate through all the inputs of the PSBT and decorate them
 	// if they are owned by the wallet. The `skipUnknown` parameter
@@ -565,35 +575,37 @@ func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
 		// If we own the UTXO, we'll proceed to decorate the
 		// corresponding PSBT input with detailed information from the
 		// wallet.
-		err = w.decorateInput(ctx, &packet.Inputs[i], tx, utxo)
+		spends[i], err = w.decorateInput(
+			ctx, &packet.Inputs[i], tx, utxo,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("error decorating input %d: %w",
 				i, err)
 		}
 	}
 
-	return packet, nil
+	return spends, nil
 }
 
 // decorateInput is a helper function that decorates a single PSBT input with
-// UTXO information from the wallet.
+// UTXO information from the wallet, and returns how the wallet spends it.
 //
 // NOTE: The `pInput` parameter is modified in-place by this function.
 func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
-	tx *wire.MsgTx, utxo *wire.TxOut) error {
+	tx *wire.MsgTx, utxo *wire.TxOut) (waddrmgr.SpendType, error) {
 
 	// Reuse the same wallet lookup and script-construction path as the signer,
 	// so PSBT decoration and spending metadata stay in sync.
 	scriptInfo, err := w.scriptForOutput(ctx, *utxo)
 	if err != nil {
-		return err
+		return waddrmgr.SpendTypeUnknown, err
 	}
 
 	// With the managed address, we can now get the derivation information
 	// for the address.
 	derivation, err := derivationForAddressInfo(scriptInfo.AddressInfo)
 	if err != nil {
-		return err
+		return waddrmgr.SpendTypeUnknown, err
 	}
 
 	// With all the information gathered, we'll now populate the PSBT
@@ -615,7 +627,7 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 		)
 	}
 
-	return nil
+	return scriptInfo.AddrType.SpendType(), nil
 }
 
 // fetchAndValidateUtxo fetches the wallet-owned UTXO and transaction details
@@ -1010,7 +1022,7 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	// derivation information from the wallet. We set `skipUnknown` to
 	// false because all inputs in the `authoredTx` must be known to the
 	// wallet.
-	_, err = w.decorateInputs(ctx, packet, false)
+	spends, err := w.decorateInputs(ctx, packet, false)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1019,7 +1031,7 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	// the caller's own input records back on top of it, which is also
 	// where a caller that contradicted the wallet about its own coin is
 	// refused.
-	err = restoreInputMetadata(packet, callerInputs)
+	err = restoreInputMetadata(packet, callerInputs, spends)
 	if err != nil {
 		return nil, 0, err
 	}

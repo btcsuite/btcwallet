@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -106,9 +107,8 @@ func TestIndexCallerInputs(t *testing.T) {
 	)
 }
 
-// TestRestoreInputMetadataKeepsCallerFields verifies that the fields the
-// wallet never derives survive funding, which is the whole point of keying the
-// caller's records by outpoint in the first place.
+// TestRestoreInputMetadataKeepsCallerFields verifies that on a spend the wallet
+// has no rule for, the fields it never derives survive funding.
 func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
 	t.Parallel()
 
@@ -134,7 +134,7 @@ func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
 
 	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
 		outPoint: {pInput: caller},
-	})
+	}, []waddrmgr.SpendType{waddrmgr.SpendTypeUnknown})
 	require.NoError(t, err)
 
 	restored := packet.Inputs[0]
@@ -150,6 +150,179 @@ func TestRestoreInputMetadataKeepsCallerFields(t *testing.T) {
 	// The wallet's own facts about the coin stay the wallet's.
 	require.Equal(t, testWalletUtxo(), restored.WitnessUtxo)
 	require.Equal(t, testWalletDerivation(), restored.Bip32Derivation)
+}
+
+// TestRestoreInputMetadataRejectsFieldsTheSpendDoesNotUse verifies that a
+// record the wallet's spend of the coin does not use is refused, rather than
+// handed back as if it described the input. An empty record is still present,
+// since the serializer writes any non-nil one.
+func TestRestoreInputMetadataRejectsFieldsTheSpendDoesNotUse(t *testing.T) {
+	t.Parallel()
+
+	leafScript := []*psbt.TaprootTapLeafScript{{
+		ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
+		Script:       []byte{0x51},
+		LeafVersion:  txscript.BaseLeafVersion,
+	}}
+	merkleRoot := bytes.Repeat([]byte{0x09}, 32)
+	otherKey := schnorr.SerializePubKey(testKey(2))
+
+	nestedInput := testDecoratedInput()
+
+	nestedInput.RedeemScript = append(
+		[]byte{0x00, 0x14}, bytes.Repeat([]byte{0x01}, 20)...,
+	)
+
+	taprootInput := psbt.PInput{
+		WitnessUtxo:            testWalletUtxo(),
+		TaprootBip32Derivation: testWalletTaprootDerivation(),
+	}
+
+	tests := []struct {
+		name      string
+		spend     waddrmgr.SpendType
+		decorated psbt.PInput
+		caller    psbt.PInput
+	}{{
+		name:      "a witness script on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{WitnessScript: []byte{0x51}},
+	}, {
+		name:      "a redeem script on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{RedeemScript: []byte{0x51}},
+	}, {
+		name:      "an internal key on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{TaprootInternalKey: otherKey},
+	}, {
+		name:      "a merkle root on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{TaprootMerkleRoot: merkleRoot},
+	}, {
+		name:      "a leaf script on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{TaprootLeafScript: leafScript},
+	}, {
+		name:      "a witness script on a nested p2wpkh spend",
+		spend:     waddrmgr.SpendTypeNestedWitnessKey,
+		decorated: nestedInput,
+		caller:    psbt.PInput{WitnessScript: []byte{0x51}},
+	}, {
+		name:      "a witness script on a p2pkh spend",
+		spend:     waddrmgr.SpendTypeLegacyKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{WitnessScript: []byte{0x51}},
+	}, {
+		name:      "a witness script on a taproot key-path spend",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
+		decorated: taprootInput,
+		caller:    psbt.PInput{WitnessScript: []byte{0x51}},
+	}, {
+		name:      "a redeem script on a taproot key-path spend",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
+		decorated: taprootInput,
+		caller:    psbt.PInput{RedeemScript: []byte{0x51}},
+	}, {
+		name:      "a merkle root on a taproot key-path spend",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
+		decorated: taprootInput,
+		caller:    psbt.PInput{TaprootMerkleRoot: merkleRoot},
+	}, {
+		name:      "a leaf script on a taproot key-path spend",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
+		decorated: taprootInput,
+		caller:    psbt.PInput{TaprootLeafScript: leafScript},
+	}, {
+		name:      "another internal key on a taproot key-path spend",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
+		decorated: taprootInput,
+		caller:    psbt.PInput{TaprootInternalKey: otherKey},
+	}, {
+		name:      "an empty witness script on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{WitnessScript: []byte{}},
+	}, {
+		name:      "an empty redeem script on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{RedeemScript: []byte{}},
+	}, {
+		name:      "an empty merkle root on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{TaprootMerkleRoot: []byte{}},
+	}, {
+		name:      "an empty internal key on a p2wpkh spend",
+		spend:     waddrmgr.SpendTypeWitnessKey,
+		decorated: testDecoratedInput(),
+		caller:    psbt.PInput{TaprootInternalKey: []byte{}},
+	}, {
+		name:      "an empty internal key on a taproot key-path spend",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
+		decorated: taprootInput,
+		caller:    psbt.PInput{TaprootInternalKey: []byte{}},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{tc.decorated},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+				[]waddrmgr.SpendType{tc.spend},
+			)
+
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
+	}
+}
+
+// TestRestoreInputMetadataKeepsWalletInternalKey verifies that a caller naming
+// the wallet's own key as a taproot coin's internal key keeps it. The wallet's
+// taproot coins commit to no script, so that key is the internal key.
+func TestRestoreInputMetadataKeepsWalletInternalKey(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Index: 3}
+	internalKey := schnorr.SerializePubKey(testKey(1))
+
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+		},
+		Inputs: []psbt.PInput{{
+			WitnessUtxo:            testWalletUtxo(),
+			TaprootBip32Derivation: testWalletTaprootDerivation(),
+		}},
+	}
+
+	caller := psbt.PInput{TaprootInternalKey: internalKey}
+
+	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
+		outPoint: {pInput: caller},
+	}, []waddrmgr.SpendType{waddrmgr.SpendTypeTaprootKeyPath})
+
+	require.NoError(t, err)
+	require.Equal(t, internalKey, packet.Inputs[0].TaprootInternalKey)
 }
 
 // TestRestoreInputMetadataRejectsConflicts verifies that a caller telling the
@@ -224,6 +397,9 @@ func TestRestoreInputMetadataRejectsConflicts(t *testing.T) {
 				packet, map[wire.OutPoint]callerInput{
 					outPoint: {pInput: tc.caller},
 				},
+				[]waddrmgr.SpendType{
+					waddrmgr.SpendTypeNestedWitnessKey,
+				},
 			)
 			require.ErrorIs(t, err, ErrConflictingInputMetadata)
 		})
@@ -262,7 +438,7 @@ func TestRestoreInputMetadataRejectsTaprootConflict(t *testing.T) {
 
 	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
 		outPoint: {pInput: caller},
-	})
+	}, []waddrmgr.SpendType{waddrmgr.SpendTypeTaprootKeyPath})
 	require.ErrorIs(t, err, ErrConflictingInputMetadata)
 }
 
@@ -302,7 +478,7 @@ func TestRestoreInputMetadataKeepsNonWitnessUtxo(t *testing.T) {
 
 	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
 		outPoint: {pInput: caller},
-	})
+	}, []waddrmgr.SpendType{waddrmgr.SpendTypeTaprootKeyPath})
 
 	require.NoError(t, err)
 	require.Equal(t, parent, packet.Inputs[0].NonWitnessUtxo)
@@ -319,10 +495,12 @@ func TestRestoreInputMetadataRejectsCrossFamilyDerivation(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		spend     waddrmgr.SpendType
 		decorated psbt.PInput
 		caller    psbt.PInput
 	}{{
-		name: "a taproot caller on a bip32 wallet input",
+		name:  "a taproot caller on a bip32 wallet input",
+		spend: waddrmgr.SpendTypeWitnessKey,
 		decorated: psbt.PInput{
 			WitnessUtxo:     testWalletUtxo(),
 			Bip32Derivation: testWalletDerivation(),
@@ -331,7 +509,8 @@ func TestRestoreInputMetadataRejectsCrossFamilyDerivation(t *testing.T) {
 			TaprootBip32Derivation: testWalletTaprootDerivation(),
 		},
 	}, {
-		name: "a bip32 caller on a taproot wallet input",
+		name:  "a bip32 caller on a taproot wallet input",
+		spend: waddrmgr.SpendTypeTaprootKeyPath,
 		decorated: psbt.PInput{
 			WitnessUtxo:            testWalletUtxo(),
 			TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -359,6 +538,7 @@ func TestRestoreInputMetadataRejectsCrossFamilyDerivation(t *testing.T) {
 				packet, map[wire.OutPoint]callerInput{
 					outPoint: {pInput: tc.caller},
 				},
+				[]waddrmgr.SpendType{tc.spend},
 			)
 
 			require.ErrorIs(t, err, ErrConflictingInputMetadata)
@@ -408,16 +588,19 @@ func TestRestoreInputMetadataRejectsForeignDerivations(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		spend     waddrmgr.SpendType
 		decorated psbt.PInput
 		caller    psbt.PInput
 	}{{
 		name:      "another key in place of the wallet's",
+		spend:     waddrmgr.SpendTypeWitnessKey,
 		decorated: testDecoratedInput(),
 		caller: psbt.PInput{
 			Bip32Derivation: []*psbt.Bip32Derivation{other},
 		},
 	}, {
 		name:      "another key on the wallet's path beside the wallet's",
+		spend:     waddrmgr.SpendTypeWitnessKey,
 		decorated: testDecoratedInput(),
 		caller: psbt.PInput{
 			Bip32Derivation: []*psbt.Bip32Derivation{
@@ -426,6 +609,7 @@ func TestRestoreInputMetadataRejectsForeignDerivations(t *testing.T) {
 		},
 	}, {
 		name:      "another taproot key beside the wallet's",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
 		decorated: taprootInput,
 		caller: psbt.PInput{
 			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{
@@ -436,6 +620,7 @@ func TestRestoreInputMetadataRejectsForeignDerivations(t *testing.T) {
 		// The wallet's taproot coins are key-path only, so a leaf
 		// for its key is a script the coin does not commit to.
 		name:      "the wallet's taproot key with leaf hashes",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
 		decorated: taprootInput,
 		caller: psbt.PInput{
 			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{
@@ -462,6 +647,7 @@ func TestRestoreInputMetadataRejectsForeignDerivations(t *testing.T) {
 				packet, map[wire.OutPoint]callerInput{
 					outPoint: {pInput: tc.caller},
 				},
+				[]waddrmgr.SpendType{tc.spend},
 			)
 
 			require.ErrorIs(t, err, ErrConflictingInputMetadata)
@@ -475,6 +661,12 @@ func TestRestoreInputMetadataRejectsForeignDerivations(t *testing.T) {
 func TestRestoreInputMetadataAgreeingValues(t *testing.T) {
 	t.Parallel()
 
+	nestedInput := testDecoratedInput()
+
+	nestedInput.RedeemScript = append(
+		[]byte{0x00, 0x14}, bytes.Repeat([]byte{0x01}, 20)...,
+	)
+
 	taprootInput := psbt.PInput{
 		WitnessUtxo:            testWalletUtxo(),
 		TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -482,17 +674,28 @@ func TestRestoreInputMetadataAgreeingValues(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		spend     waddrmgr.SpendType
 		decorated psbt.PInput
 		caller    psbt.PInput
 	}{{
 		name:      "a segwit v0 input",
+		spend:     waddrmgr.SpendTypeWitnessKey,
 		decorated: testDecoratedInput(),
 		caller: psbt.PInput{
 			WitnessUtxo:     testWalletUtxo(),
 			Bip32Derivation: testWalletDerivation(),
 		},
 	}, {
+		name:      "a nested witness input",
+		spend:     waddrmgr.SpendTypeNestedWitnessKey,
+		decorated: nestedInput,
+		caller: psbt.PInput{
+			RedeemScript:    nestedInput.RedeemScript,
+			Bip32Derivation: testWalletDerivation(),
+		},
+	}, {
 		name:      "a taproot input",
+		spend:     waddrmgr.SpendTypeTaprootKeyPath,
 		decorated: taprootInput,
 		caller: psbt.PInput{
 			WitnessUtxo:            testWalletUtxo(),
@@ -518,6 +721,7 @@ func TestRestoreInputMetadataAgreeingValues(t *testing.T) {
 				packet, map[wire.OutPoint]callerInput{
 					outPoint: {pInput: tc.caller},
 				},
+				[]waddrmgr.SpendType{tc.spend},
 			)
 
 			require.NoError(t, err)
@@ -574,6 +778,9 @@ func TestRestoreInputMetadataSighash(t *testing.T) {
 						SighashType: tc.caller,
 					}},
 				},
+				[]waddrmgr.SpendType{
+					waddrmgr.SpendTypeWitnessKey,
+				},
 			)
 			require.NoError(t, err)
 			require.Equal(
@@ -603,7 +810,7 @@ func TestRestoreInputMetadataSkipsWalletInputs(t *testing.T) {
 		{Index: 9}: {pInput: psbt.PInput{
 			WitnessScript: []byte{0xff},
 		}},
-	})
+	}, []waddrmgr.SpendType{waddrmgr.SpendTypeWitnessKey})
 	require.NoError(t, err)
 	require.Equal(t, testDecoratedInput(), packet.Inputs[0])
 }
