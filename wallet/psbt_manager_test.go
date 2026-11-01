@@ -545,12 +545,13 @@ func TestDecorateInputSegWitV0(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput to populate the PSBT input.
-	err = w.decorateInput(t.Context(), pInput, tx, utxo)
+	spend, err := w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify no error occurred and that the PSBT input is correctly
 	// populated with WitnessUtxo, NonWitnessUtxo, SighashType, and BIP32
 	// derivation info.
 	require.NoError(t, err)
+	require.Equal(t, waddrmgr.SpendTypeWitnessKey, spend)
 	require.Equal(t, utxo, pInput.WitnessUtxo)
 	require.Equal(t, tx, pInput.NonWitnessUtxo)
 	require.Equal(t, txscript.SigHashAll, pInput.SighashType)
@@ -605,12 +606,13 @@ func TestDecorateInputTaproot(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput to populate the PSBT input.
-	err = w.decorateInput(t.Context(), pInput, tx, utxo)
+	spend, err := w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify no error occurred and that the PSBT input is
 	// correctly populated with WitnessUtxo, SighashType, and Taproot BIP32
 	// derivation info, including the x-only public key.
 	require.NoError(t, err)
+	require.Equal(t, waddrmgr.SpendTypeTaprootKeyPath, spend)
 	require.Equal(t, utxo, pInput.WitnessUtxo)
 	require.Equal(t, txscript.SigHashDefault, pInput.SighashType)
 	// Taproot inputs carry only the taproot derivation (no Bip32Derivation),
@@ -641,7 +643,7 @@ func TestDecorateInputErrExtractAddr(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput.
-	err := w.decorateInput(t.Context(), pInput, tx, utxo)
+	_, err := w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify the error.
 	require.ErrorIs(t, err, ErrUnableToExtractAddress)
@@ -680,7 +682,7 @@ func TestDecorateInputErrAddrInfo(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput.
-	err = w.decorateInput(t.Context(), pInput, tx, utxo)
+	_, err = w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify the error.
 	require.ErrorIs(t, err, errDb)
@@ -724,7 +726,7 @@ func TestDecorateInputErrNotPubKey(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput.
-	err = w.decorateInput(t.Context(), pInput, tx, utxo)
+	_, err = w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify the error.
 	require.ErrorIs(t, err, ErrNotPubKeyAddress)
@@ -765,7 +767,7 @@ func TestDecorateInputErrImported(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput.
-	err = w.decorateInput(t.Context(), pInput, tx, utxo)
+	_, err = w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify the error.
 	require.ErrorIs(t, err, ErrDerivationPathNotFound)
@@ -806,7 +808,7 @@ func TestDecorateInputErrDerivationMissing(t *testing.T) {
 	pInput := &psbt.PInput{}
 
 	// Act: Call decorateInput.
-	err = w.decorateInput(t.Context(), pInput, tx, utxo)
+	_, err = w.decorateInput(t.Context(), pInput, tx, utxo)
 
 	// Assert: Verify the error.
 	require.ErrorIs(t, err, ErrDerivationPathNotFound)
@@ -847,11 +849,14 @@ func TestDecorateInputNestedWitnessUsesRedeemScript(t *testing.T) {
 	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
 
 	// Act: Decorate the nested witness input.
-	err = w.decorateInput(t.Context(), pInput, wire.NewMsgTx(1), utxo)
+	spend, err := w.decorateInput(
+		t.Context(), pInput, wire.NewMsgTx(1), utxo,
+	)
 	require.NoError(t, err)
 
 	// Assert: The PSBT redeem script stores the inner witness program.
 	require.Equal(t, witnessProgram, pInput.RedeemScript)
+	require.Equal(t, waddrmgr.SpendTypeNestedWitnessKey, spend)
 }
 
 // TestDecorateInputsSuccess tests that DecorateInputs correctly decorates
@@ -939,8 +944,11 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	// Arrange: Mock ManagedPubKeyAddress methods.
 
 	// Act: Call DecorateInputs with skipUnknown=true.
-	_, err = w.DecorateInputs(t.Context(), packet, true)
+	decorated, err := w.DecorateInputs(t.Context(), packet, true)
 	require.NoError(t, err)
+
+	// Assert: The caller's packet is the one decorated and returned.
+	require.Same(t, packet, decorated)
 
 	// Assert: Input 0 is decorated.
 	require.NotNil(t, packet.Inputs[0].WitnessUtxo)
@@ -5707,16 +5715,8 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 	packet, err := psbt.NewFromUnsignedTx(tx)
 	require.NoError(t, err)
 
-	callerWitnessScript := []byte{0x51, 0x52, 0x53}
-	callerLeafScript := []*psbt.TaprootTapLeafScript{{
-		ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
-		Script:       []byte{0x51},
-		LeafVersion:  txscript.BaseLeafVersion,
-	}}
 	callerOutputScript := []byte{0x54, 0x55}
 
-	packet.Inputs[0].WitnessScript = callerWitnessScript
-	packet.Inputs[0].TaprootLeafScript = callerLeafScript
 	packet.Inputs[0].SighashType = txscript.SigHashNone |
 		txscript.SigHashAnyOneCanPay
 	packet.Outputs[0].WitnessScript = callerOutputScript
@@ -5755,8 +5755,6 @@ func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
 	)
 
 	fundedInput := funded.Inputs[inputIdx]
-	require.Equal(t, callerWitnessScript, fundedInput.WitnessScript)
-	require.Equal(t, callerLeafScript, fundedInput.TaprootLeafScript)
 	require.Equal(
 		t, txscript.SigHashNone|txscript.SigHashAnyOneCanPay,
 		fundedInput.SighashType,
@@ -5911,6 +5909,41 @@ func TestFundPsbtRejectsContradictedUtxo(t *testing.T) {
 		Value:    utxo.Value * 2,
 		PkScript: utxo.PkScript,
 	}
+
+	before := packetSnapshot(t, packet)
+
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+
+	require.ErrorIs(t, err, ErrConflictingInputMetadata)
+	require.Nil(t, result)
+	require.Equal(t, before, packetSnapshot(t, packet))
+}
+
+// TestFundPsbtRejectsFieldTheSpendDoesNotUse verifies that funding checks a
+// caller's input records against how the wallet spends the coin. The fixture
+// coin is P2WPKH, which reveals no script.
+func TestFundPsbtRejectsFieldTheSpendDoesNotUse(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
+	expectManualFundingSources(t, w, mocks, outPoint)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+
+	paymentScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	tx.AddTxOut(&wire.TxOut{Value: 400_000, PkScript: paymentScript})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	packet.Inputs[0].WitnessScript = []byte{0x51}
 
 	before := packetSnapshot(t, packet)
 

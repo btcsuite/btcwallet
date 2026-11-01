@@ -13,6 +13,7 @@ import (
 
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 var (
@@ -61,9 +62,12 @@ func indexCallerInputs(packet *psbt.Packet) map[wire.OutPoint]callerInput {
 // Every field is either the wallet's to state or the caller's to keep. The
 // wallet states what is being spent and which key spends it, since it looks
 // those up rather than accepting them, so a caller that says otherwise is
-// refused. Everything else is carried across untouched.
+// refused, as is a record the wallet's spend of the coin does not use.
+// Everything else is carried across untouched. spends is how the wallet spends
+// each input, by position.
 func restoreInputMetadata(packet *psbt.Packet,
-	callerInputs map[wire.OutPoint]callerInput) error {
+	callerInputs map[wire.OutPoint]callerInput,
+	spends []waddrmgr.SpendType) error {
 
 	for i, txIn := range packet.UnsignedTx.TxIn {
 		caller, ok := callerInputs[txIn.PreviousOutPoint]
@@ -73,7 +77,9 @@ func restoreInputMetadata(packet *psbt.Packet,
 			continue
 		}
 
-		err := mergeCallerInput(&packet.Inputs[i], &caller.pInput, i)
+		err := mergeCallerInput(
+			&packet.Inputs[i], &caller.pInput, spends[i], i,
+		)
 		if err != nil {
 			return err
 		}
@@ -85,8 +91,15 @@ func restoreInputMetadata(packet *psbt.Packet,
 // mergeCallerInput merges one caller input record into the wallet's decorated
 // record, in place, following the authority rule described on
 // restoreInputMetadata.
-func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
-	err := checkCallerInputAgrees(decorated, caller, idx)
+func mergeCallerInput(decorated, caller *psbt.PInput,
+	spend waddrmgr.SpendType, idx int) error {
+
+	err := checkFieldsFitSpend(decorated, caller, spend, idx)
+	if err != nil {
+		return err
+	}
+
+	err = checkCallerInputAgrees(decorated, caller, idx)
 	if err != nil {
 		return err
 	}
@@ -104,8 +117,8 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 		decorated.NonWitnessUtxo = caller.NonWitnessUtxo
 	}
 
-	// The caller's own fields, which the wallet never derives and
-	// therefore never has an opinion on.
+	// The fields the wallet never derives. Any its spend does not use were
+	// refused above.
 	decorated.WitnessScript = caller.WitnessScript
 	decorated.TaprootLeafScript = caller.TaprootLeafScript
 	decorated.TaprootMerkleRoot = caller.TaprootMerkleRoot
@@ -123,6 +136,70 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 	}
 
 	return nil
+}
+
+// checkFieldsFitSpend refuses caller records that the wallet's spend of this
+// coin does not use.
+//
+// Such a record is inapplicable metadata, and handing it back would present it
+// as describing the input. A record is present when it is non-nil, since that
+// is when it is serialized. A spend type with no rule here is left alone.
+func checkFieldsFitSpend(decorated, caller *psbt.PInput,
+	spend waddrmgr.SpendType, idx int) error {
+
+	switch spend {
+	case waddrmgr.SpendTypeLegacyKey, waddrmgr.SpendTypeWitnessKey,
+		waddrmgr.SpendTypeNestedWitnessKey,
+		waddrmgr.SpendTypeTaprootKeyPath:
+
+	case waddrmgr.SpendTypeUnknown, waddrmgr.SpendTypeScriptHash,
+		waddrmgr.SpendTypeWitnessScript,
+		waddrmgr.SpendTypeTaprootScriptPath,
+		waddrmgr.SpendTypeAnyoneCanSpend:
+
+		return nil
+	}
+
+	switch {
+	case caller.WitnessScript != nil:
+		return fieldFitError("witness script", idx)
+
+	case caller.RedeemScript != nil &&
+		spend != waddrmgr.SpendTypeNestedWitnessKey:
+
+		return fieldFitError("redeem script", idx)
+
+	case caller.TaprootMerkleRoot != nil:
+		return fieldFitError("taproot merkle root", idx)
+
+	case len(caller.TaprootLeafScript) > 0:
+		return fieldFitError("taproot leaf script", idx)
+
+	case caller.TaprootInternalKey == nil:
+		return nil
+	}
+
+	return checkWalletInternalKey(decorated, caller, idx)
+}
+
+// checkWalletInternalKey refuses a caller's taproot internal key other than
+// the wallet's. The wallet's taproot coins commit to no script, so the key it
+// derived is the internal key. Any other spend has no taproot key to match.
+func checkWalletInternalKey(decorated, caller *psbt.PInput, idx int) error {
+	for _, w := range decorated.TaprootBip32Derivation {
+		if bytes.Equal(w.XOnlyPubKey, caller.TaprootInternalKey) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%w: input %d taproot internal key",
+		ErrConflictingInputMetadata, idx)
+}
+
+// fieldFitError names a caller record the wallet's spend does not use.
+func fieldFitError(field string, idx int) error {
+	return fmt.Errorf("%w: input %d carries a %s, which the wallet's spend "+
+		"of it does not use", ErrConflictingInputMetadata, idx, field)
 }
 
 // checkCallerInputAgrees reports whether the caller's records for an input can
