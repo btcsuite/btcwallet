@@ -20,6 +20,15 @@ Specific rules for code style and formatting to ensure consistency across the pr
 
 ---
 
+## ✍️ Simple English Writing Guide
+
+The required writing rules for documentation, ADRs, code comments, and commit
+messages.
+
+**[➡️ Read the Writing Guide](./writing_style.md)**
+
+---
+
 ## ✅ Unit Testing Guidelines
 
 Best practices for writing clear, effective, and maintainable unit tests.

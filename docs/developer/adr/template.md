@@ -1,5 +1,9 @@
 # ADR NNNN: Title
 
+<!--
+Write this ADR in Simple English. Follow ../writing_style.md.
+-->
+
 ## Status
 
 - **Status:** Proposed
