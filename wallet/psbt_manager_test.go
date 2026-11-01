@@ -84,6 +84,23 @@ func expectFundingLease(w *Wallet, mocks *mockWalletDeps,
 	return leaseID
 }
 
+// expectFundingRelease registers one ownership-checked Store release of
+// outPoint under the lease ID the funding attempt reserved under, which
+// expectFundingLease records into leaseID before any release is matched.
+func expectFundingRelease(w *Wallet, mocks *mockWalletDeps,
+	leaseID *wtxmgr.LockID, outPoint wire.OutPoint, result error) *mock.Call {
+
+	matches := func(params db.ReleaseOutputParams) bool {
+		return params.WalletID == w.id &&
+			params.ID == [32]byte(*leaseID) &&
+			params.OutPoint == outPoint
+	}
+
+	return mocks.store.On(
+		"ReleaseOutput", mock.Anything, mock.MatchedBy(matches),
+	).Return(result).Once()
+}
+
 // TestDecorateInputsPartialError preserves the first input's enrichment when
 // a later input fails, including nested lookups during graceful shutdown.
 func TestDecorateInputsPartialError(t *testing.T) {
@@ -6390,5 +6407,141 @@ func newCallerInputsPacket(t *testing.T,
 	require.NoError(t, err)
 
 	return packet
+}
+
+// expectCallerInputsFundingSources registers the reads a completion-mode
+// funding run performs against several caller-selected UTXOs: the shared
+// eligibility tip and change allocation once, and each input's own UTXO,
+// parent transaction, and address lookups.
+func expectCallerInputsFundingSources(t *testing.T, w *Wallet,
+	mocks *mockWalletDeps, outPoints []wire.OutPoint) {
+
+	t.Helper()
+
+	expectManualFundingSources(t, w, mocks, outPoints[0])
+
+	for _, outPoint := range outPoints[1:] {
+		inputKey, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+
+		inputAddr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(inputKey.PubKey().SerializeCompressed()),
+			&chainParams,
+		)
+		require.NoError(t, err)
+
+		expectFundingInputForAddress(
+			t, w, mocks, outPoint, inputAddr, db.WitnessPubKey,
+			inputKey.PubKey(),
+		)
+	}
+}
+
+// ambiguousFundingOutPoints returns the three caller-selected inputs the
+// ambiguous-reservation tests fund, listed in the BIP 69 order the funded
+// transaction keeps them in.
+func ambiguousFundingOutPoints() []wire.OutPoint {
+	return []wire.OutPoint{
+		{Hash: chainhash.Hash{12}, Index: 0},
+		{Hash: chainhash.Hash{13}, Index: 0},
+		{Hash: chainhash.Hash{14}, Index: 0},
+	}
+}
+
+// TestFundPsbtAmbiguousReservationReleasesInputs verifies that an ambiguous
+// reservation releases every attempted input under the attempt's own lease ID
+// before FundPsbt returns, and that a fully successful cleanup reports only
+// the original reservation failure.
+func TestFundPsbtAmbiguousReservationReleasesInputs(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fund three caller-selected inputs whose reservation commit
+	// is ambiguous, and make every release succeed. The Once releases
+	// mean a skipped input or a retry would fail the mock.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoints := ambiguousFundingOutPoints()
+	expectCallerInputsFundingSources(t, w, mocks, outPoints)
+	leaseID := expectFundingLease(
+		w, mocks, outPoints, db.ErrIndeterminateCommit,
+	)
+	expectFundingRelease(w, mocks, leaseID, outPoints[0], nil)
+	expectFundingRelease(w, mocks, leaseID, outPoints[1], nil)
+	expectFundingRelease(w, mocks, leaseID, outPoints[2], nil)
+
+	// Act: Fund the packet through the public API.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  newCallerInputsPacket(t, outPoints...),
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The ambiguous reservation is reported as a
+	// FundReservationError naming the attempt's lease ID and inputs,
+	// under the wallet-owned identity only, and no input is reported as a
+	// failed release.
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.NotErrorIs(t, err, db.ErrIndeterminateCommit)
+
+	var resErr *FundReservationError
+	require.ErrorAs(t, err, &resErr)
+	require.Equal(t, *leaseID, resErr.LeaseID)
+	require.Equal(t, outPoints, resErr.Inputs)
+
+	for _, outPoint := range outPoints {
+		require.NotContains(t, err.Error(), outPoint.String())
+	}
+}
+
+// TestFundPsbtAmbiguousReservationSkipsUnownedInputs verifies that cleanup
+// leaves an input another attempt now owns with that owner, and treats an
+// input that is no longer a wallet UTXO as having no lease left, without
+// reporting either as a failed release.
+func TestFundPsbtAmbiguousReservationSkipsUnownedInputs(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fund three caller-selected inputs whose reservation commit
+	// is ambiguous. The first input's release is refused because another
+	// lease ID owns it, the second is released, and the third is no
+	// longer a wallet UTXO.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoints := ambiguousFundingOutPoints()
+	expectCallerInputsFundingSources(t, w, mocks, outPoints)
+	leaseID := expectFundingLease(
+		w, mocks, outPoints, db.ErrIndeterminateCommit,
+	)
+	expectFundingRelease(
+		w, mocks, leaseID, outPoints[0], db.ErrOutputUnlockNotAllowed,
+	)
+	expectFundingRelease(w, mocks, leaseID, outPoints[1], nil)
+	expectFundingRelease(
+		w, mocks, leaseID, outPoints[2], db.ErrUtxoNotFound,
+	)
+
+	// Act: Fund the packet through the public API.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  newCallerInputsPacket(t, outPoints...),
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: Only the ambiguous reservation is reported. Neither refusal
+	// surfaces as its own error identity or names its input.
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.NotErrorIs(t, err, db.ErrIndeterminateCommit)
+	require.NotErrorIs(t, err, ErrOutputUnlockNotAllowed)
+	require.NotErrorIs(t, err, ErrUnknownOutput)
+
+	var resErr *FundReservationError
+	require.ErrorAs(t, err, &resErr)
+	require.Equal(t, *leaseID, resErr.LeaseID)
+	require.Equal(t, outPoints, resErr.Inputs)
+
+	for _, outPoint := range outPoints {
+		require.NotContains(t, err.Error(), outPoint.String())
+	}
 }
 
