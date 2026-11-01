@@ -104,21 +104,6 @@ func mergeCallerInput(decorated, caller *psbt.PInput, idx int) error {
 		decorated.NonWitnessUtxo = caller.NonWitnessUtxo
 	}
 
-	decorated.Bip32Derivation, err = reconcileBip32(
-		decorated.Bip32Derivation, caller.Bip32Derivation, idx,
-	)
-	if err != nil {
-		return err
-	}
-
-	decorated.TaprootBip32Derivation, err = reconcileTaproot(
-		decorated.TaprootBip32Derivation,
-		caller.TaprootBip32Derivation, idx,
-	)
-	if err != nil {
-		return err
-	}
-
 	// The caller's own fields, which the wallet never derives and
 	// therefore never has an opinion on.
 	decorated.WitnessScript = caller.WitnessScript
@@ -160,7 +145,7 @@ func checkCallerInputAgrees(decorated, caller *psbt.PInput, idx int) error {
 	// outpoint being spent, and the wallet looked its own parent up by
 	// that same outpoint, so the two are the same transaction.
 
-	err := checkDerivationFamily(decorated, caller, idx)
+	err := checkCallerDerivations(decorated, caller, idx)
 	if err != nil {
 		return err
 	}
@@ -175,93 +160,40 @@ func checkCallerInputAgrees(decorated, caller *psbt.PInput, idx int) error {
 	return nil
 }
 
-// checkDerivationFamily reports whether a caller and the wallet agree on what
-// kind of input this is.
-func checkDerivationFamily(decorated, caller *psbt.PInput, idx int) error {
-	callerTaproot := len(caller.TaprootBip32Derivation) > 0
-	callerBip32 := len(caller.Bip32Derivation) > 0
-	walletTaproot := len(decorated.TaprootBip32Derivation) > 0
-	walletBip32 := len(decorated.Bip32Derivation) > 0
-
-	if (callerTaproot && walletBip32) || (callerBip32 && walletTaproot) {
-		return fmt.Errorf("%w: input %d derivation kind",
-			ErrConflictingInputMetadata, idx)
-	}
-
-	return nil
-}
-
-// reconcileBip32 merges the derivation the wallet derived for its own key into
-// the set the caller supplied.
+// checkCallerDerivations refuses any derivation record the caller names other
+// than the wallet's own.
 //
-// The wallet derives one record, for the one key it holds. A caller can carry
-// several, one per cosigner on a multisig input, and those are metadata
-// funding has to preserve rather than a disagreement. So only the record
-// naming the wallet's own key is the wallet's to state: it must match if the
-// caller supplied it, and is added if the caller did not. Every other record
-// is carried untouched.
-func reconcileBip32(wallet, caller []*psbt.Bip32Derivation,
-	idx int) ([]*psbt.Bip32Derivation, error) {
-
-	if len(caller) == 0 {
-		return wallet, nil
-	}
-
-	merged := slices.Clone(caller)
-	for _, w := range wallet {
-		at := slices.IndexFunc(merged,
-			func(c *psbt.Bip32Derivation) bool {
-				return bytes.Equal(c.PubKey, w.PubKey)
+// Funding only spends coins the wallet derived, and decoration states the one
+// key that spends each of them, with no leaf hashes: the wallet's taproot
+// coins are key-path only. A record for another key, or for that key with
+// leaves, describes a spend this coin does not have. The wallet's signer also
+// refuses an input carrying more than one record of a kind.
+func checkCallerDerivations(decorated, caller *psbt.PInput, idx int) error {
+	for _, c := range caller.Bip32Derivation {
+		if !slices.ContainsFunc(decorated.Bip32Derivation,
+			func(w *psbt.Bip32Derivation) bool {
+				return bip32DerivationEqual(c, w)
 			},
-		)
-		if at < 0 {
-			merged = append(merged, w)
+		) {
 
-			continue
-		}
-
-		if !bip32DerivationEqual(merged[at], w) {
-			return nil, fmt.Errorf("%w: input %d bip32 derivation",
+			return fmt.Errorf("%w: input %d bip32 derivation",
 				ErrConflictingInputMetadata, idx)
 		}
 	}
 
-	return merged, nil
-}
-
-// reconcileTaproot is reconcileBip32 for taproot derivations, matching records
-// by their x-only key.
-//
-// Where both name the wallet's key the caller's record is the one kept, since
-// it carries the leaf hashes the wallet does not derive and agrees with the
-// wallet's on everything else.
-func reconcileTaproot(wallet, caller []*psbt.TaprootBip32Derivation,
-	idx int) ([]*psbt.TaprootBip32Derivation, error) {
-
-	if len(caller) == 0 {
-		return wallet, nil
-	}
-
-	merged := slices.Clone(caller)
-	for _, w := range wallet {
-		at := slices.IndexFunc(merged,
-			func(c *psbt.TaprootBip32Derivation) bool {
-				return bytes.Equal(c.XOnlyPubKey, w.XOnlyPubKey)
+	for _, c := range caller.TaprootBip32Derivation {
+		if !slices.ContainsFunc(decorated.TaprootBip32Derivation,
+			func(w *psbt.TaprootBip32Derivation) bool {
+				return taprootDerivationEqual(c, w)
 			},
-		)
-		if at < 0 {
-			merged = append(merged, w)
+		) {
 
-			continue
-		}
-
-		if !taprootDerivationAgrees(merged[at], w) {
-			return nil, fmt.Errorf("%w: input %d taproot bip32 "+
+			return fmt.Errorf("%w: input %d taproot bip32 "+
 				"derivation", ErrConflictingInputMetadata, idx)
 		}
 	}
 
-	return merged, nil
+	return nil
 }
 
 // bip32DerivationEqual compares two BIP32 derivation records, treating a pair
@@ -276,16 +208,17 @@ func bip32DerivationEqual(a, b *psbt.Bip32Derivation) bool {
 		slices.Equal(a.Bip32Path, b.Bip32Path)
 }
 
-// taprootDerivationAgrees compares the wallet-stated fields of two taproot
-// BIP32 derivation records, treating a pair of absent records as agreeing.
-func taprootDerivationAgrees(a, b *psbt.TaprootBip32Derivation) bool {
+// taprootDerivationEqual compares two taproot BIP32 derivation records,
+// treating a pair of absent records as equal.
+func taprootDerivationEqual(a, b *psbt.TaprootBip32Derivation) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
 
 	return bytes.Equal(a.XOnlyPubKey, b.XOnlyPubKey) &&
 		a.MasterKeyFingerprint == b.MasterKeyFingerprint &&
-		slices.Equal(a.Bip32Path, b.Bip32Path)
+		slices.Equal(a.Bip32Path, b.Bip32Path) &&
+		slices.EqualFunc(a.LeafHashes, b.LeafHashes, bytes.Equal)
 }
 
 // changeSwappedOutputs builds a packet's output records in the order the

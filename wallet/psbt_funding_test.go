@@ -245,8 +245,7 @@ func TestRestoreInputMetadataRejectsTaprootConflict(t *testing.T) {
 		}},
 	}
 
-	// The same key the wallet derived, on a different path. A different
-	// key would be a cosigner's record, not a contradiction.
+	// The same key the wallet derived, on a different path.
 	caller := psbt.PInput{
 		TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
 			XOnlyPubKey: schnorr.SerializePubKey(testKey(1)),
@@ -265,56 +264,6 @@ func TestRestoreInputMetadataRejectsTaprootConflict(t *testing.T) {
 		outPoint: {pInput: caller},
 	})
 	require.ErrorIs(t, err, ErrConflictingInputMetadata)
-}
-
-// TestRestoreInputMetadataKeepsTaprootLeafHashes verifies that a caller
-// spending a taproot script path keeps its leaf hashes.
-//
-// The wallet derives the key but never the leaf hashes, so a caller that
-// supplies them is saying something the wallet has no opinion on. Treating
-// that as a disagreement would refuse a perfectly valid script-path packet.
-func TestRestoreInputMetadataKeepsTaprootLeafHashes(t *testing.T) {
-	t.Parallel()
-
-	outPoint := wire.OutPoint{Index: 3}
-	xOnlyKey := bytes.Repeat([]byte{0x02}, 32)
-	leafHash := bytes.Repeat([]byte{0x07}, 32)
-
-	// What the wallet writes for a taproot input: the key it derived, and
-	// no leaf hashes at all.
-	decorated := psbt.PInput{
-		WitnessUtxo: testWalletUtxo(),
-		TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
-			XOnlyPubKey: xOnlyKey,
-			Bip32Path:   []uint32{86, 0, 0, 0, 1},
-		}},
-	}
-
-	// The same key, plus the leaf it signs for.
-	caller := psbt.PInput{
-		TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
-			XOnlyPubKey: xOnlyKey,
-			Bip32Path:   []uint32{86, 0, 0, 0, 1},
-			LeafHashes:  [][]byte{leafHash},
-		}},
-	}
-
-	packet := &psbt.Packet{
-		UnsignedTx: &wire.MsgTx{
-			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
-		},
-		Inputs: []psbt.PInput{decorated},
-	}
-
-	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
-		outPoint: {pInput: caller},
-	})
-	require.NoError(t, err)
-
-	derivation := packet.Inputs[0].TaprootBip32Derivation
-	require.Len(t, derivation, 1)
-	require.Equal(t, xOnlyKey, derivation[0].XOnlyPubKey)
-	require.Equal(t, [][]byte{leafHash}, derivation[0].LeafHashes)
 }
 
 // TestRestoreInputMetadataKeepsNonWitnessUtxo verifies that a caller's parent
@@ -417,91 +366,107 @@ func TestRestoreInputMetadataRejectsCrossFamilyDerivation(t *testing.T) {
 	}
 }
 
-// TestRestoreInputMetadataKeepsCosignerDerivations verifies that derivation
-// records naming keys other than the wallet's survive funding.
+// TestRestoreInputMetadataRejectsForeignDerivations verifies that a caller
+// may name no derivation but the wallet's own.
 //
-// A multisig or coordinator packet carries one record per cosigner. Those are
-// metadata the caller is entitled to have back, not a disagreement about the
-// wallet's own key, so funding keeps them and reconciles its own record into
-// the set.
-func TestRestoreInputMetadataKeepsCosignerDerivations(t *testing.T) {
+// Funding only spends coins the wallet derived, each from one key it states.
+// A record for another key, whether alongside the wallet's or not, describes
+// a signer the coin does not have, and would leave an input the wallet's
+// signer refuses for carrying more than one record.
+func TestRestoreInputMetadataRejectsForeignDerivations(t *testing.T) {
 	t.Parallel()
 
-	outPoint := wire.OutPoint{Index: 3}
-
-	cosignerOne := &psbt.Bip32Derivation{
+	wallet := testWalletDerivation()[0]
+	other := &psbt.Bip32Derivation{
 		PubKey:               testKey(2).SerializeCompressed(),
 		MasterKeyFingerprint: 11,
 		Bip32Path:            []uint32{48, 0, 0, 2, 0},
 	}
-	cosignerTwo := &psbt.Bip32Derivation{
+	onWalletPath := &psbt.Bip32Derivation{
 		PubKey:               testKey(3).SerializeCompressed(),
-		MasterKeyFingerprint: 12,
-		Bip32Path:            []uint32{48, 0, 0, 2, 1},
+		MasterKeyFingerprint: wallet.MasterKeyFingerprint,
+		Bip32Path:            wallet.Bip32Path,
 	}
 
-	packet := &psbt.Packet{
-		UnsignedTx: &wire.MsgTx{
-			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
-		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
-	}
-
-	caller := psbt.PInput{
-		Bip32Derivation: []*psbt.Bip32Derivation{
-			cosignerOne, cosignerTwo,
-		},
-	}
-
-	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
-		outPoint: {pInput: caller},
-	})
-
-	// Assert: both cosigners survive, and the wallet's own record joins
-	// them rather than replacing them.
-	require.NoError(t, err)
-
-	got := packet.Inputs[0].Bip32Derivation
-	require.Len(t, got, 3)
-	require.Contains(t, got, cosignerOne)
-	require.Contains(t, got, cosignerTwo)
-	require.Contains(t, got, testWalletDerivation()[0])
-}
-
-// TestRestoreInputMetadataReconcilesWalletDerivation verifies that a caller
-// carrying the wallet's own key among its records keeps its set intact, with
-// no duplicate added for the wallet.
-func TestRestoreInputMetadataReconcilesWalletDerivation(t *testing.T) {
-	t.Parallel()
-
-	outPoint := wire.OutPoint{Index: 3}
-
-	cosigner := &psbt.Bip32Derivation{
-		PubKey:               testKey(2).SerializeCompressed(),
+	walletTaproot := testWalletTaprootDerivation()[0]
+	otherTaproot := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey:          schnorr.SerializePubKey(testKey(2)),
 		MasterKeyFingerprint: 11,
-		Bip32Path:            []uint32{48, 0, 0, 2, 0},
+		Bip32Path:            []uint32{86, 0, 0, 2, 0},
+	}
+	withLeaves := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey:          walletTaproot.XOnlyPubKey,
+		MasterKeyFingerprint: walletTaproot.MasterKeyFingerprint,
+		Bip32Path:            walletTaproot.Bip32Path,
+		LeafHashes:           [][]byte{bytes.Repeat([]byte{0x07}, 32)},
 	}
 
-	packet := &psbt.Packet{
-		UnsignedTx: &wire.MsgTx{
-			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+	taprootInput := psbt.PInput{
+		WitnessUtxo:            testWalletUtxo(),
+		TaprootBip32Derivation: testWalletTaprootDerivation(),
+	}
+
+	tests := []struct {
+		name      string
+		decorated psbt.PInput
+		caller    psbt.PInput
+	}{{
+		name:      "another key in place of the wallet's",
+		decorated: testDecoratedInput(),
+		caller: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{other},
 		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
+	}, {
+		name:      "another key on the wallet's path beside the wallet's",
+		decorated: testDecoratedInput(),
+		caller: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{
+				wallet, onWalletPath,
+			},
+		},
+	}, {
+		name:      "another taproot key beside the wallet's",
+		decorated: taprootInput,
+		caller: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{
+				walletTaproot, otherTaproot,
+			},
+		},
+	}, {
+		// The wallet's taproot coins are key-path only, so a leaf
+		// for its key is a script the coin does not commit to.
+		name:      "the wallet's taproot key with leaf hashes",
+		decorated: taprootInput,
+		caller: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{
+				withLeaves,
+			},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{tc.decorated},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+		})
 	}
-
-	caller := psbt.PInput{
-		Bip32Derivation: append(
-			[]*psbt.Bip32Derivation{cosigner},
-			testWalletDerivation()...,
-		),
-	}
-
-	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
-		outPoint: {pInput: caller},
-	})
-
-	require.NoError(t, err)
-	require.Len(t, packet.Inputs[0].Bip32Derivation, 2)
 }
 
 // TestRestoreInputMetadataAgreeingValues verifies that a caller which repeats
@@ -510,25 +475,55 @@ func TestRestoreInputMetadataReconcilesWalletDerivation(t *testing.T) {
 func TestRestoreInputMetadataAgreeingValues(t *testing.T) {
 	t.Parallel()
 
-	outPoint := wire.OutPoint{Index: 3}
-
-	caller := psbt.PInput{
-		WitnessUtxo:     testWalletUtxo(),
-		Bip32Derivation: testWalletDerivation(),
+	taprootInput := psbt.PInput{
+		WitnessUtxo:            testWalletUtxo(),
+		TaprootBip32Derivation: testWalletTaprootDerivation(),
 	}
 
-	packet := &psbt.Packet{
-		UnsignedTx: &wire.MsgTx{
-			TxIn: []*wire.TxIn{{PreviousOutPoint: outPoint}},
+	tests := []struct {
+		name      string
+		decorated psbt.PInput
+		caller    psbt.PInput
+	}{{
+		name:      "a segwit v0 input",
+		decorated: testDecoratedInput(),
+		caller: psbt.PInput{
+			WitnessUtxo:     testWalletUtxo(),
+			Bip32Derivation: testWalletDerivation(),
 		},
-		Inputs: []psbt.PInput{testDecoratedInput()},
-	}
+	}, {
+		name:      "a taproot input",
+		decorated: taprootInput,
+		caller: psbt.PInput{
+			WitnessUtxo:            testWalletUtxo(),
+			TaprootBip32Derivation: testWalletTaprootDerivation(),
+		},
+	}}
 
-	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
-		outPoint: {pInput: caller},
-	})
-	require.NoError(t, err)
-	require.Equal(t, testDecoratedInput(), packet.Inputs[0])
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outPoint := wire.OutPoint{Index: 3}
+			packet := &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: outPoint,
+					}},
+				},
+				Inputs: []psbt.PInput{tc.decorated},
+			}
+
+			err := restoreInputMetadata(
+				packet, map[wire.OutPoint]callerInput{
+					outPoint: {pInput: tc.caller},
+				},
+			)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.decorated, packet.Inputs[0])
+		})
+	}
 }
 
 // TestRestoreInputMetadataSighash verifies that an explicit sighash request
