@@ -59,7 +59,9 @@ flowchart LR
     
     result, err := aliceWallet.FundPsbt(ctx, fundIntent)
     if err != nil {
-        // An ambiguous reservation may have leased the inputs.
+        // The wallet already tried to release an ambiguous
+        // reservation. Release is idempotent, so retrying covers any
+        // release that failed.
         var resErr *wallet.FundReservationError
         if errors.As(err, &resErr) {
             for _, op := range resErr.Inputs {
@@ -83,10 +85,13 @@ flowchart LR
     select the same coins. The leases expire on their own after a short
     wallet-defined period; if the transaction is abandoned, release them early
     with `ReleaseOutput` and `result.LeaseID`. If the reservation's commit is
-    ambiguous, `FundPsbt` returns no result and a
-    `*wallet.FundReservationError`, which matches
-    `wallet.ErrIndeterminateCommit` and carries the lease ID and inputs that
-    may be leased, so they can be released.
+    ambiguous, `FundPsbt` first tries to release every input under that
+    attempt's lease ID, even if the caller has canceled, leaving any input
+    another attempt has since leased with that owner. It then returns no
+    result and a `*wallet.FundReservationError`, which matches
+    `wallet.ErrIndeterminateCommit`, carries the lease ID and inputs, and also
+    wraps any release that failed or whose own outcome is unknown, so those
+    can be released again or left to expire.
     
 3.  **Sign the PSBT:** The wallet signs all inputs it has the keys for.
 

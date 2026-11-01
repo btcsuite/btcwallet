@@ -176,6 +176,11 @@ const (
 	// publish, and short enough that an abandoned attempt frees its inputs
 	// through ordinary lease expiry without any cleanup worker.
 	fundLeaseDuration = 10 * time.Minute
+
+	// fundCleanupTimeout bounds the releases a FundPsbt attempt makes
+	// after an ambiguous reservation. Stop joins the attempt, so the
+	// bound also limits how long cleanup can delay shutdown.
+	fundCleanupTimeout = time.Minute
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -232,13 +237,18 @@ type FundResult struct {
 
 // FundReservationError reports a FundPsbt attempt whose input reservation
 // commit was ambiguous: the leases may or may not exist. FundPsbt returns no
-// packet in that case, so this error carries what the caller needs to release
-// any leases that did commit. It matches ErrIndeterminateCommit through
-// errors.Is; use errors.As to read its fields.
+// packet in that case. Before returning, it attempts to release every input
+// under LeaseID, leaving any input another attempt has since leased with that
+// owner. It matches ErrIndeterminateCommit through errors.Is; use errors.As to
+// read its fields.
 //
+// If a release failed, the error also wraps that failure, and a release whose
+// own commit was ambiguous is reported as ErrIndeterminateCommit rather than
+// as success. Leases of this attempt may then remain; the caller may retry
+// ReleaseOutput with LeaseID for each input, or let them expire on their own.
 // Releasing an input another attempt has since leased returns
 // ErrOutputUnlockNotAllowed, which means the lease is not this attempt's and
-// can be ignored. Leases left in place expire on their own.
+// can be ignored.
 type FundReservationError struct {
 	// LeaseID is the lock ID the attempt reserved under.
 	LeaseID wtxmgr.LockID
@@ -247,17 +257,18 @@ type FundReservationError struct {
 	// they appear in the funded transaction.
 	Inputs []wire.OutPoint
 
-	// cause is the ambiguous reservation failure, which supplies the
-	// message and wraps ErrIndeterminateCommit.
+	// cause is the ambiguous reservation failure, which wraps
+	// ErrIndeterminateCommit, joined with any release failures.
 	cause error
 }
 
-// Error returns the ambiguous reservation failure's message.
+// Error returns the ambiguous reservation failure's message, followed by any
+// release failures.
 func (e *FundReservationError) Error() string {
 	return e.cause.Error()
 }
 
-// Unwrap returns the ambiguous reservation failure.
+// Unwrap returns the ambiguous reservation failure and any release failures.
 func (e *FundReservationError) Unwrap() error {
 	return e.cause
 }
@@ -328,7 +339,9 @@ type SignPsbtResult struct {
 //	}
 //	result, err := psbtManager.FundPsbt(ctx, fundIntent)
 //	if err != nil {
-//		// An ambiguous reservation may have leased the inputs.
+//		// The wallet already tried to release an ambiguous
+//		// reservation. Release is idempotent, so retrying covers
+//		// any release that failed.
 //		var resErr *wallet.FundReservationError
 //		if errors.As(err, &resErr) {
 //			for _, op := range resErr.Inputs {
@@ -769,10 +782,10 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 // packet under `FundResult.LeaseID`. They expire on their own after a fixed
 // wallet-defined duration, and the caller may release them earlier through
 // ReleaseOutput with that ID. If the reservation commit is ambiguous, FundPsbt
-// returns no result and a *FundReservationError, which matches
-// ErrIndeterminateCommit and carries the lease ID and inputs; the leases may or
-// may not exist, and the caller may release them with that ID. Every other
-// failure acquires no lease.
+// attempts to release every input under that ID before it returns, even if the
+// caller has canceled, and then returns no result and a *FundReservationError,
+// which matches ErrIndeterminateCommit, carries the lease ID and inputs, and
+// wraps any release failure. Every other failure acquires no lease.
 //
 // A change address is committed only once input selection keeps a positive,
 // non-dust change output. Funding that fails before that point, and packets
@@ -903,13 +916,17 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 	// returned leases run a full duration from return.
 	err = w.reserveFundingInputs(r.ctx, leaseID, outPoints)
 
-	// An ambiguous commit may have leased the inputs, so the error carries
-	// what the caller needs to release them, but no packet is returned.
+	// An ambiguous commit may have leased the inputs, and no packet is
+	// returned that would let the caller use them, so release them here.
+	// The error still carries the lease ID and inputs for any release
+	// that did not succeed.
 	if errors.Is(err, ErrIndeterminateCommit) {
+		cleanupErr := w.releaseFundingInputs(r.ctx, leaseID, outPoints)
+
 		err = &FundReservationError{
 			LeaseID: leaseID,
 			Inputs:  outPoints,
-			cause:   err,
+			cause:   errors.Join(err, cleanupErr),
 		}
 	}
 
@@ -965,6 +982,48 @@ func (w *Wallet) reserveFundingInputs(ctx context.Context,
 	}
 
 	return nil
+}
+
+// releaseFundingInputs releases the inputs of an ambiguous reservation under
+// the attempt's lease ID before FundPsbt returns without a packet.
+//
+// Every outpoint is attempted even after an earlier release fails, and the
+// failures are joined. The Store release is ownership-checked, so an input
+// another attempt has since leased keeps that owner and is not a failure, and
+// an input that is no longer a wallet UTXO has no lease left to release. A
+// release whose own commit is ambiguous reports ErrIndeterminateCommit rather
+// than success. Nothing is retried or read back.
+//
+// The releases run under a bounded context detached from the caller's
+// cancellation: a caller that gave up still must not leave the inputs out of
+// coin selection until the leases expire. The handler is joined by Stop, so
+// cleanup finishes before the Store closes.
+func (w *Wallet) releaseFundingInputs(ctx context.Context,
+	leaseID wtxmgr.LockID, outPoints []wire.OutPoint) error {
+
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), fundCleanupTimeout,
+	)
+	defer cancel()
+
+	errs := make([]error, 0, len(outPoints))
+	for _, outPoint := range outPoints {
+		err := w.store.ReleaseOutput(ctx, db.ReleaseOutputParams{
+			WalletID: w.id,
+			ID:       leaseID,
+			OutPoint: outPoint,
+		})
+		if err == nil || errors.Is(err, db.ErrOutputUnlockNotAllowed) ||
+			errors.Is(err, db.ErrUtxoNotFound) {
+
+			continue
+		}
+
+		errs = append(errs, fmt.Errorf("release funding input %v: %w",
+			outPoint, translateLeaseErr(err)))
+	}
+
+	return errors.Join(errs...)
 }
 
 // populatePsbtPacket updates the PSBT packet with the new transaction details,
