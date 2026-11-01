@@ -6301,17 +6301,17 @@ func TestFundPsbtInputLeasedBeforeDecoration(t *testing.T) {
 }
 
 // TestFundPsbtReservationFailure verifies that a funding attempt whose input
-// reservation fails returns no packet and maps each Store result onto the
-// wallet-owned error identity, without retrying or reading back an ambiguous
-// commit.
+// reservation definitely fails returns no packet, maps each Store result onto
+// the wallet-owned error identity without retrying, and makes no release,
+// since a failed reservation leased nothing. The ambiguous commit, which does
+// release, is covered by the TestFundPsbtAmbiguousReservation tests.
 func TestFundPsbtReservationFailure(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name          string
-		storeErr      error
-		expectErr     error
-		indeterminate bool
+		name      string
+		storeErr  error
+		expectErr error
 	}{
 		{
 			name:      "conflicting lease",
@@ -6322,12 +6322,6 @@ func TestFundPsbtReservationFailure(t *testing.T) {
 			name:      "missing utxo",
 			storeErr:  db.ErrUtxoNotFound,
 			expectErr: ErrUnknownOutput,
-		},
-		{
-			name:          "ambiguous commit",
-			storeErr:      db.ErrIndeterminateCommit,
-			expectErr:     ErrIndeterminateCommit,
-			indeterminate: true,
 		},
 		{
 			name:      "other store failure",
@@ -6343,59 +6337,38 @@ func TestFundPsbtReservationFailure(t *testing.T) {
 			// Arrange: Prepare a synced wallet funding one
 			// caller-selected input, and make its lease call fail
 			// with the case's Store error. The Once expectation
-			// means a retry would fail the mock, and no read is
-			// registered after the failing call, so a readback
-			// would fail it too.
+			// means a retry would fail the mock, and no release is
+			// registered, so a cleanup attempt would fail it too.
 			w, mocks := createStartedSQLWalletWithMocks(t)
 			mocks.syncer.On("syncState").
 				Return(syncStateSynced).Once()
 
 			outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
 			expectManualFundingSources(t, w, mocks, outPoint)
-			leaseID := expectFundingLease(
+			expectFundingLease(
 				w, mocks, []wire.OutPoint{outPoint}, tc.storeErr,
 			)
-
-			tx := wire.NewMsgTx(2)
-			tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
-			tx.AddTxOut(&wire.TxOut{
-				Value:    300_000,
-				PkScript: validOutput.PkScript,
-			})
-			packet, err := psbt.NewFromUnsignedTx(tx)
-			require.NoError(t, err)
 
 			// Act: Fund the packet through the public API.
 			result, err := w.FundPsbt(
 				t.Context(), &FundIntent{
-					Packet:  packet,
+					Packet:  newCallerInputsPacket(t, outPoint),
 					FeeRate: defaultFeeRate,
 				},
 			)
 
 			// Assert: The attempt returns the mapped error and no
-			// result. An ambiguous commit surfaces only the
-			// wallet-owned identity, never the Store sentinel, as a
-			// FundReservationError that reports the lease ID and
-			// inputs it may have leased so the caller can release
-			// them.
+			// result, and is not reported as an ambiguous
+			// reservation.
 			require.ErrorIs(t, err, tc.expectErr)
 			require.Nil(t, result)
 
 			var resErr *FundReservationError
-			if !tc.indeterminate {
-				require.NotErrorAs(t, err, &resErr)
-
-				return
-			}
-
-			require.NotErrorIs(t, err, db.ErrIndeterminateCommit)
-			require.ErrorAs(t, err, &resErr)
-			require.Equal(t, *leaseID, resErr.LeaseID)
-			require.Equal(t, []wire.OutPoint{outPoint}, resErr.Inputs)
+			require.NotErrorAs(t, err, &resErr)
 		})
 	}
 }
+
 // newCallerInputsPacket returns a packet that spends the given outpoints to one
 // payment, the shape the completion-mode funding fixtures author.
 func newCallerInputsPacket(t *testing.T,
