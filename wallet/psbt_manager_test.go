@@ -5562,27 +5562,13 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 
 	t.Helper()
 
-	inputScript, err := txscript.PayToAddrScript(inputAddr)
-	require.NoError(t, err)
-
-	utxo := &wire.TxOut{Value: 1_000_000, PkScript: inputScript}
-
 	mocks.syncer.On("syncedTo", mock.Anything).Return(
 		waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 
-	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
-		WalletID: w.id, OutPoint: outPoint,
-	}).Return(&db.UtxoInfo{
-		OutPoint: outPoint,
-		Amount:   btcutil.Amount(utxo.Value),
-		PkScript: inputScript,
-		Height:   1,
-	}, nil)
-
-	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
-		WalletID: w.id, Txid: outPoint.Hash,
-	}).Return(testStoreTxDetail(outPoint.Hash, utxo), nil)
+	utxo := expectFundingInputForAddress(
+		t, w, mocks, outPoint, inputAddr, addrType, inputPubKey,
+	)
 
 	// The change source, which is derived under the default account.
 	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
@@ -5631,12 +5617,6 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
 	).Return(nil).Maybe()
 
-	// Input decoration and change output decoration both resolve their
-	// address through the store.
-	expectSignerDerivedAddressInfo(
-		t, w, mocks, inputAddr, addrType, inputPubKey,
-	)
-
 	// The change output is only looked up once funding gets as far as
 	// decorating it, which a run that is refused earlier never does.
 	changeAccountNum := uint32(0)
@@ -5652,6 +5632,43 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 		HasDerivationPath:    true,
 		PubKey:               changeKey.PubKey().SerializeCompressed(),
 	}, nil)
+
+	return utxo
+}
+
+// expectFundingInputForAddress registers the reads a completion-mode funding
+// run performs against one caller-selected UTXO paying to the given address:
+// its eligibility and decoration UTXO lookup, its parent transaction, and the
+// address lookup decoration resolves it through. It returns the output the
+// UTXO pays to.
+func expectFundingInputForAddress(t *testing.T, w *Wallet,
+	mocks *mockWalletDeps, outPoint wire.OutPoint,
+	inputAddr address.Address, addrType db.AddressType,
+	inputPubKey *btcec.PublicKey) *wire.TxOut {
+
+	t.Helper()
+
+	inputScript, err := txscript.PayToAddrScript(inputAddr)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1_000_000, PkScript: inputScript}
+
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id, OutPoint: outPoint,
+	}).Return(&db.UtxoInfo{
+		OutPoint: outPoint,
+		Amount:   btcutil.Amount(utxo.Value),
+		PkScript: inputScript,
+		Height:   1,
+	}, nil)
+
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id, Txid: outPoint.Hash,
+	}).Return(testStoreTxDetail(outPoint.Hash, utxo), nil)
+
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, inputAddr, addrType, inputPubKey,
+	)
 
 	return utxo
 }
@@ -6379,3 +6396,26 @@ func TestFundPsbtReservationFailure(t *testing.T) {
 		})
 	}
 }
+// newCallerInputsPacket returns a packet that spends the given outpoints to one
+// payment, the shape the completion-mode funding fixtures author.
+func newCallerInputsPacket(t *testing.T,
+	outPoints ...wire.OutPoint) *psbt.Packet {
+
+	t.Helper()
+
+	tx := wire.NewMsgTx(2)
+	for _, outPoint := range outPoints {
+		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	}
+
+	tx.AddTxOut(&wire.TxOut{
+		Value:    300_000,
+		PkScript: validOutput.PkScript,
+	})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	return packet
+}
+
