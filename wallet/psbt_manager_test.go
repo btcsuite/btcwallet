@@ -6638,3 +6638,129 @@ func TestFundPsbtAmbiguousReservationReportsAmbiguousRelease(t *testing.T) {
 	require.NotContains(t, err.Error(), outPoints[2].String())
 }
 
+// TestFundPsbtAmbiguousReservationCleanupAfterCancel verifies that a caller
+// canceling after admission does not abort the release of an ambiguous
+// reservation: cleanup runs under a bounded context that is still live.
+func TestFundPsbtAmbiguousReservationCleanupAfterCancel(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet funding one caller-selected input
+	// whose reservation commit is ambiguous, and cancel the caller's
+	// context while the reservation is in flight. The release records
+	// the context it was handed.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{10}, Index: 0}
+	expectManualFundingSources(t, w, mocks, outPoint)
+	leaseID := expectFundingLease(
+		w, mocks, []wire.OutPoint{outPoint}, db.ErrIndeterminateCommit,
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	leaseCall := mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1]
+	recordLeaseID := leaseCall.RunFn
+	leaseCall.Run(func(args mock.Arguments) {
+		recordLeaseID(args)
+		cancel()
+	})
+
+	var (
+		releaseCtxErr = errors.New("release not called")
+		hasDeadline   bool
+	)
+	expectFundingRelease(w, mocks, leaseID, outPoint, nil).
+		Run(func(args mock.Arguments) {
+			releaseCtx, _ := args.Get(0).(context.Context)
+			releaseCtxErr = releaseCtx.Err()
+			_, hasDeadline = releaseCtx.Deadline()
+		})
+
+	// Act: Fund the packet through the public API.
+	result, err := w.FundPsbt(ctx, &FundIntent{
+		Packet:  newCallerInputsPacket(t, outPoint),
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The attempt reports the ambiguous reservation, and the
+	// release ran under a context that the caller's cancellation did not
+	// reach but that is still bounded.
+	require.Nil(t, result)
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.NoError(t, releaseCtxErr)
+	require.True(t, hasDeadline)
+}
+
+// TestFundPsbtAmbiguousReservationCleanupJoinedByStop verifies that the
+// release of an ambiguous reservation is part of the admitted funding work:
+// Stop waits for it to finish, so cleanup never races Store closure, and
+// shutdown does not abort it.
+func TestFundPsbtAmbiguousReservationCleanupJoinedByStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet funding one caller-selected input
+	// whose reservation commit is ambiguous, and hold the release until
+	// Stop has begun.
+	w, mocks := createSQLWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+	mocks.vault.On("Lock").Return().Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{11}, Index: 0}
+	expectManualFundingSources(t, w, mocks, outPoint)
+	leaseID := expectFundingLease(
+		w, mocks, []wire.OutPoint{outPoint}, db.ErrIndeterminateCommit,
+	)
+
+	enteredChan := make(chan struct{})
+	releaseChan := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseChan) })
+	t.Cleanup(unblock)
+
+	var releaseCtxErr error
+	expectFundingRelease(w, mocks, leaseID, outPoint, nil).
+		Run(func(args mock.Arguments) {
+			close(enteredChan)
+			<-releaseChan
+
+			ctx, _ := args.Get(0).(context.Context)
+			releaseCtxErr = ctx.Err()
+		})
+
+	packet := newCallerInputsPacket(t, outPoint)
+
+	resultChan := make(chan error, 1)
+	go func() {
+		_, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			FeeRate: defaultFeeRate,
+		})
+		resultChan <- err
+	}()
+
+	<-enteredChan
+
+	// Act: Begin Stop while the release is held, then let it finish.
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.stop() }()
+
+	<-w.lifetimeCtx.Done()
+
+	select {
+	case <-stoppedChan:
+		require.Fail(t, "stop returned before cleanup finished")
+
+	default:
+	}
+
+	unblock()
+
+	// Assert: Funding reports the ambiguous reservation, the release was
+	// not canceled by shutdown, and Stop returns only after it.
+	require.ErrorIs(t, <-resultChan, ErrIndeterminateCommit)
+	require.NoError(t, <-stoppedChan)
+	require.NoError(t, releaseCtxErr)
+}
