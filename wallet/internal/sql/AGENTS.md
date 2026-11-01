@@ -1,16 +1,18 @@
 # Wallet SQL AGENTS.md
 
-This is the knowledge base for the `wallet/internal/sql/` subsystem. It manages
-  SQL schema definitions, queries, migrations, and generates sqlc code for
-  PostgreSQL and SQLite backends.
+This is the knowledge base for the `wallet/internal/sql/` subsystem. The
+  subsystem contains the SQL schema, queries, and migrations. It also
+  generates the sqlc code for the PostgreSQL and SQLite backends.
 
 ## RESPONSIBILITIES
-- **Schema & Migrations:** Defines database tables, indexes, and schema
-  migrations for both backends.
-- **Query Definitions:** Houses raw SQL queries used by the database layer.
-- **Code Generation:** Manages sqlc configuration and generated Go code.
-- **Backend Specifics:** Maintains separate SQL assets for PostgreSQL and SQLite
-  to handle dialect differences.
+- **Schema & Migrations:** Defines the database tables, indexes, and schema
+  migrations for the two backends.
+- **Query Definitions:** Contains the raw SQL queries that the database layer
+  uses.
+- **Code Generation:** Contains the sqlc configuration and the generated Go
+  code.
+- **Backend Specifics:** Keeps separate SQL assets for PostgreSQL and SQLite,
+  because their dialects are different.
 
 ## WHERE TO LOOK
 | Component                 | Path                 | Description                                 |
@@ -25,28 +27,29 @@ This is the knowledge base for the `wallet/internal/sql/` subsystem. It manages
 | **SQLite Generated**      | `sqlite/sqlc/`       | Generated Go code from sqlc for SQLite.     |
 
 ## GENERATED CODE BOUNDARIES
-- Don't edit any files under `sqlc/` directories directly, including `*.sql.go`,
+- Do not directly edit files in `sqlc/` directories. This includes `*.sql.go`,
   `models.go`, `db.go`, and `querier.go`.
-- Modify source `.sql` under `queries/`, `migrations/`, or `bootstrap/`
-  instead.
-- Run `make sql` to regenerate the Go code after making changes. This command is
-  mutating, runs lint auto-fixes, and rewrites files. Always run it on a clean
-  git tree.
+- Change the source `.sql` files in `queries/`, `migrations/`, or
+  `bootstrap/`.
+- After you change them, run `make sql` to generate the Go code again. This
+  command changes files: it applies lint fixes and writes files again. Run it
+  only on a clean git tree.
 
 ## LOCAL CONVENTIONS
-- Format and lint SQL with SQLFluff. Keywords and types must be uppercase,
-  while identifiers and function names must be lowercase.
-- Prefer `!=` over `<>`. SQL indentation uses 4 spaces.
-- Keep PostgreSQL and SQLite differences explicit. Don't try to force a single
-  query file.
-- Match database layer expectations. Ensure query names and parameter types
-  align with the Go database adapters.
-- Write migrations that are clean and reversible. Always provide both `.up.sql`
-  and `.down.sql` files.
+- Use SQLFluff to format and lint SQL. Keywords and types must be uppercase.
+  Identifiers and function names must be lowercase.
+- Prefer `!=` to `<>`. Use 4 spaces for SQL indentation.
+- Keep the differences between PostgreSQL and SQLite explicit. Do not force
+  the two backends into one query file.
+- Match the expectations of the database layer. Query names and parameter
+  types must agree with the Go database adapters.
+- Write clean, reversible migrations. Always supply an `.up.sql` file and a
+  `.down.sql` file.
 
 ## TESTING FOCUS
-- Verify SQL changes by running `make sql` and checking for clean git status.
-- Run database integration tests in `wallet/internal/db/itest/` to verify schema
-  and query changes.
-- Use `make itest-db db=[sqlite|postgres]` to run tests against specific
-  backends.
+- To verify SQL changes, run `make sql` and make sure that the git status is
+  clean.
+- To verify schema and query changes, run the database integration tests in
+  `wallet/internal/db/itest/`.
+- To run the tests against one backend, use
+  `make itest-db db=[sqlite|postgres]`.
