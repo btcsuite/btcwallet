@@ -951,20 +951,15 @@ func (s *syncer) applyStoreTxBatch(ctx context.Context,
 			)
 		}
 
-		status, label, err := s.txNotificationState(
-			ctx, match.Rec.Hash, block,
-		)
-		if err != nil {
-			return err
-		}
+		// Observation labels are omitted so the batch reconciles current
+		// user metadata atomically instead of validating a stale snapshot.
 
 		transactions = append(transactions, db.CreateTxParams{
 			WalletID:         s.walletID,
 			Tx:               &match.Rec.MsgTx,
 			Received:         match.Rec.Received,
 			Block:            block,
-			Status:           status,
-			Label:            label,
+			Status:           db.TxStatusPublished,
 			CreditCandidates: creditCandidates,
 		})
 	}
@@ -987,39 +982,6 @@ func (s *syncer) applyStoreTxBatch(ctx context.Context,
 	}
 
 	return nil
-}
-
-// txNotificationState returns the status and label to use for a relevant tx
-// notification recorded through the Store path.
-func (s *syncer) txNotificationState(ctx context.Context,
-	txHash chainhash.Hash, block *db.Block) (db.TxStatus, string, error) {
-
-	const (
-		label  = ""
-		status = db.TxStatusPublished
-	)
-
-	if block != nil {
-		return status, label, nil
-	}
-
-	info, err := s.store.GetTx(ctx, db.GetTxQuery{
-		WalletID: s.walletID,
-		Txid:     txHash,
-	})
-	switch {
-	case errors.Is(err, db.ErrTxNotFound):
-		return status, label, nil
-
-	case err != nil:
-		return 0, "", fmt.Errorf("get tx %v: %w", txHash, err)
-	}
-
-	if info.Block != nil || !db.IsUnminedStatus(info.Status) {
-		return status, label, nil
-	}
-
-	return status, info.Label, nil
 }
 
 // putSyncBatch records recovery scan results and synced blocks through the

@@ -480,9 +480,13 @@ type TxStore interface {
 
 	// ApplyTxBatch atomically records a batch of transaction records and an
 	// optional wallet sync-tip update.
+	//
+	// Replayed transactions with an empty Label preserve their stored label,
+	// whether confirmed or unmined. Use UpdateTx to change or clear a label.
 	ApplyTxBatch(ctx context.Context, params TxBatchParams) error
 
 	// ApplyScanBatch atomically records recovery scan writes for one wallet.
+	// Transaction observations follow ApplyTxBatch's omitted-label rule.
 	ApplyScanBatch(ctx context.Context, params ScanBatchParams) error
 
 	// RewindWallet atomically detaches one wallet's confirmed transactions at
