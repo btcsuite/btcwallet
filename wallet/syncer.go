@@ -365,9 +365,9 @@ func (s *syncer) syncState() syncState {
 }
 
 // initChainSync performs the initial setup for the chain synchronization loop.
-// This includes waiting for the backend to sync, checking for rollbacks, and
-// enabling block notifications. It returns an error if any of these setup
-// steps fail.
+// It registers live watches, catches up to the backend tip and resends unmined
+// history once before live event processing. Any setup or history-read failure
+// returns to the controller's existing initialization retry boundary.
 func (s *syncer) initChainSync(ctx context.Context) error {
 	var err error
 
@@ -423,6 +423,25 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to start block "+
 			"notifications: %w", err)
+	}
+
+	// Catch up before resending history so mined transactions are excluded.
+	// Keep the full resend out of live polling: retained RBF alternatives
+	// can each wait on backend I/O and would otherwise delay every block.
+	for s.syncState() != syncStateSynced {
+		_, err = s.advanceChainSync(ctx)
+		if err != nil {
+			return fmt.Errorf("advance initial chain sync: %w", err)
+		}
+	}
+
+	err = s.broadcastUnminedTxns(ctx)
+	if err != nil {
+		// A failed history read must revoke readiness before retrying
+		// initialization; individual send failures are logged in place.
+		s.state.Store(uint32(syncStateSyncing))
+
+		return fmt.Errorf("broadcast initial unmined txns: %w", err)
 	}
 
 	return nil
@@ -785,8 +804,9 @@ func (s *syncer) run(ctx context.Context) error {
 }
 
 // runSyncStep performs a single iteration of the synchronization loop. It
-// advances the chain sync state, broadcasts unmined transactions, and then
-// waits for the next event (notification or job).
+// advances the chain sync state and then waits for the next event (notification
+// or job). Full-history rebroadcast belongs to initialization, so live chain
+// processing does not wait behind repeated network sends.
 func (s *syncer) runSyncStep(ctx context.Context) error {
 	// Attempt to advance the wallet's sync state.
 	syncFinished, err := s.advanceChainSync(ctx)
@@ -796,12 +816,6 @@ func (s *syncer) runSyncStep(ctx context.Context) error {
 
 	if !syncFinished {
 		return nil
-	}
-
-	// Rebroadcast unmined transactions.
-	err = s.broadcastUnminedTxns(ctx)
-	if err != nil {
-		return fmt.Errorf("broadcast unmined txns: %w", err)
 	}
 
 	// Proceed to idle mode, waiting for notifications or jobs.
