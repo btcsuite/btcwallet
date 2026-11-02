@@ -841,7 +841,7 @@ func TestSelectTxInputs(t *testing.T) {
 			// either public wallet wrapper.
 			selection, err := w.selectTxInputs(
 				[]wire.TxOut{output}, defaultFeeRate, inputSource,
-				txauthor.NewChangeScriptInfo(changeScript),
+				txauthor.NewChangeScriptInfo(changeScript), nil,
 			)
 
 			// Assert: The input source is queried exactly once and an
@@ -930,7 +930,7 @@ func TestSelectTxInputsChecksAmounts(t *testing.T) {
 	// wrappers apply.
 	selection, err := w.selectTxInputs(
 		outputs, defaultFeeRate, inputSource,
-		txauthor.NewChangeScriptInfo(script),
+		txauthor.NewChangeScriptInfo(script), nil,
 	)
 
 	// Assert: The wallet's own error identifies the violation, the

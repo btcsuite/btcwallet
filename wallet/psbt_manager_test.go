@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -902,6 +903,8 @@ func TestDecorateInputsInternalKey(t *testing.T) {
 		Txid:     validUTXO.Hash,
 	}).Return(testStoreTxDetail(validUTXO.Hash, utxo), nil).Once()
 	expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+	// Script ownership is probed before ordinary key-path validation.
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Twice()
 
 	packet := testFundingPacket(validUTXO)
 	packet.Inputs[0].TaprootInternalKey = schnorr.SerializePubKey(testKey(1))
@@ -1104,6 +1107,399 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	require.NotNil(t, packet.Inputs[2].WitnessUtxo)
 	require.Equal(t, int64(2000), packet.Inputs[2].WitnessUtxo.Value)
 	require.Len(t, packet.Inputs[2].Bip32Derivation, 1)
+}
+
+// TestDecorateInputsTaprootScript preserves imported spending metadata through
+// public funding, whose field validation depends on the actual spend type.
+func TestDecorateInputsTaprootScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit two real signature leaves and retain caller internal
+	// key metadata. The owned script import has no single root origin.
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(key.Zero)
+
+	alternate, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(alternate.Zero)
+
+	firstScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(key.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	secondScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(alternate.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	tree := txscript.AssembleTaprootScriptTree(
+		txscript.NewBaseTapLeaf(firstScript),
+		txscript.NewBaseTapLeaf(secondScript),
+	)
+	rootHash := tree.RootNode.TapHash()
+	root := rootHash[:]
+	outputKey := txscript.ComputeTaprootOutputKey(key.PubKey(), root)
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	w, deps := createStartedSQLWalletWithMocks(t)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outpoint := wire.OutPoint{
+		Hash: chainhash.Hash{1},
+	}
+	inputRead := len(deps.store.ExpectedCalls)
+	output := expectFundingSourcesForAddress(t, w, deps, outpoint, addr)
+
+	// The fixture arranges UTXO and parent reads first, then change. This
+	// run needs two UTXO reads, one parent read and one change registration.
+	deps.store.ExpectedCalls[inputRead].Twice()
+	deps.store.ExpectedCalls[inputRead+1].Once()
+	deps.store.ExpectedCalls[len(deps.store.ExpectedCalls)-1].Once()
+	deps.chain.ExpectedCalls[len(deps.chain.ExpectedCalls)-1].Once()
+
+	packet := testFundingPacket(outpoint)
+	packet.UnsignedTx.AddTxOut(wire.NewTxOut(400_000, script))
+	packet.Outputs = make([]psbt.POutput, 1)
+
+	origin := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey: schnorr.SerializePubKey(key.PubKey()),
+		LeafHashes:  [][]byte{},
+		Bip32Path:   []uint32{1, 0},
+	}
+	packet.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{origin}
+	packet.Inputs[0].TaprootMerkleRoot = root
+	packet.Inputs[0].TaprootInternalKey = origin.XOnlyPubKey
+
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: script,
+	}).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		HasScript:    true,
+		ScriptPubKey: script,
+	}, nil).Once()
+
+	expectFundingLease(w, deps, []wire.OutPoint{outpoint}, nil)
+
+	// Budget either leaf's complete signature witness without asking the
+	// wallet to select a leaf or decrypt an imported script to estimate it.
+	control := tree.LeafMerkleProofs[0].ToControlBlock(key.PubKey())
+	controlBytes, err := control.ToBytes()
+	require.NoError(t, err)
+
+	witnessSize := wire.TxWitness{
+		make([]byte, 65), firstScript, controlBytes,
+	}.SerializeSize()
+
+	// Act: Fund publicly so decoration's spend classification reaches the
+	// existing caller-field checks without selecting or loading a leaf.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+		InputWitnessSizes: map[wire.OutPoint]uint32{
+			outpoint: uint32(witnessSize),
+		},
+	})
+
+	// Assert: Funding accepts script-path metadata and preserves the real
+	// UTXO and caller signing facts. Fixture cleanup checks the Store calls.
+	require.NoError(t, err)
+
+	input := result.Packet.Inputs[0]
+	require.Equal(t, output, input.WitnessUtxo)
+	require.Empty(t, input.Bip32Derivation)
+	require.Equal(
+		t, []*psbt.TaprootBip32Derivation{origin},
+		input.TaprootBip32Derivation,
+	)
+	require.Equal(t, root, input.TaprootMerkleRoot)
+	require.Equal(t, origin.XOnlyPubKey, input.TaprootInternalKey)
+}
+
+// TestFundPsbtTaprootScriptWitnessFee verifies that public funding pays for
+// the caller's script-path satisfaction rather than a key-path signature.
+func TestFundPsbtTaprootScriptWitnessFee(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A valid 1,034-byte leaf produces a 422-vB transaction with
+	// one input and two P2TR outputs. The old key-path estimate charged
+	// only 155 sats at 1,000 sat/kvB. Reuse real keys and a committed leaf.
+	keys := testAuthKeys()
+	checkSigScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(keys[0].PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	script := append(
+		bytes.Repeat([]byte{txscript.OP_NOP}, 1_000),
+		checkSigScript...,
+	)
+	prevOut, leaf, leafScript := testOneLeafOutput(
+		t, keys, txscript.BaseLeafVersion, script,
+	)
+	addr := extractAddrFromPKScript(prevOut.PkScript, &chainParams)
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{1}}
+
+	w, deps := createStartedSQLWalletWithMocks(t)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	inputRead := len(deps.store.ExpectedCalls)
+	utxo := expectFundingSourcesForAddress(t, w, deps, outpoint, addr)
+
+	// The fixture arranges UTXO and parent reads first, then change. This
+	// run needs two UTXO reads, one parent read and one change registration.
+	deps.store.ExpectedCalls[inputRead].Twice()
+	deps.store.ExpectedCalls[inputRead+1].Once()
+	deps.store.ExpectedCalls[len(deps.store.ExpectedCalls)-1].Once()
+	deps.chain.ExpectedCalls[len(deps.chain.ExpectedCalls)-1].Once()
+
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID: w.id, ScriptPubKey: utxo.PkScript,
+	}).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		HasScript:    true,
+		ScriptPubKey: utxo.PkScript,
+	}, nil).Once()
+	expectFundingLease(w, deps, []wire.OutPoint{outpoint}, nil)
+
+	packet := testFundingPacket(outpoint)
+	packet.UnsignedTx.AddTxOut(wire.NewTxOut(400_000, utxo.PkScript))
+	packet.Outputs = make([]psbt.POutput, 1)
+	packet.Inputs[0].TaprootLeafScript =
+		[]*psbt.TaprootTapLeafScript{leafScript}
+	original := clonePacket(packet)
+
+	// A maximum-length signature slot bounds the witness before funding
+	// changes the transaction that the actual signature will commit to.
+	witnessSize := wire.TxWitness{
+		make([]byte, 65), script, leafScript.ControlBlock,
+	}.SerializeSize()
+
+	// Act: Fund through the public API, then satisfy the committed leaf
+	// against the returned transaction to measure an executable spend.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: btcunit.NewSatPerKVByte(1_000),
+		InputWitnessSizes: map[wire.OutPoint]uint32{
+			outpoint: uint32(witnessSize),
+		},
+	})
+	require.NoError(t, err)
+
+	tx := result.Packet.UnsignedTx.Copy()
+	prevOuts := txscript.NewCannedPrevOutputFetcher(utxo.PkScript, utxo.Value)
+	sigHashes := txscript.NewTxSigHashes(tx, prevOuts)
+	sig, err := txscript.RawTxInTapscriptSignature(
+		tx, sigHashes, 0, utxo.Value, utxo.PkScript, leaf,
+		txscript.SigHashDefault, keys[0],
+	)
+	require.NoError(t, err)
+
+	tx.TxIn[0].Witness = wire.TxWitness{
+		sig, script, leafScript.ControlBlock,
+	}
+
+	// Assert: Execute the exact witness used for the fee comparison, so a
+	// padded but invalid transaction cannot make the regression pass.
+	vm, err := txscript.NewEngine(
+		utxo.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, utxo.Value, prevOuts,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+
+	weight := blockchain.GetTransactionWeight(btcutil.NewTx(tx))
+	vsize := (weight + blockchain.WitnessScaleFactor - 1) /
+		blockchain.WitnessScaleFactor
+
+	fee := utxo.Value
+	for _, output := range tx.TxOut {
+		fee -= output.Value
+	}
+
+	require.EqualValues(t, 422, vsize)
+	require.GreaterOrEqual(t, fee, vsize)
+	require.Equal(t, original, packet)
+}
+
+// TestFundPsbtRejectsTaprootWitnessSize checks that funding cannot accept an
+// imported script with a missing or demonstrably too small witness budget.
+func TestFundPsbtRejectsTaprootWitnessSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		size    uint32
+		wantErr error
+	}{
+		{
+			name:    "missing bound",
+			size:    0,
+			wantErr: ErrMissingInputWitnessSize,
+		},
+		{
+			name:    "bound below revealed leaf",
+			size:    1,
+			wantErr: ErrConflictingInputMetadata,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Both budgets use the same imported leaf and
+			// leave 200 sats after payment. The ordinary estimate drops
+			// dust change, so no address allocation or lease is expected.
+			keys := testAuthKeys()
+			prevOut, _, leafScript := testTapscriptFixture(t, keys)
+			addr := extractAddrFromPKScript(prevOut.PkScript, &chainParams)
+			outpoint := wire.OutPoint{Hash: chainhash.Hash{1}}
+			w, deps := createStartedSQLWalletWithMocks(t)
+			deps.syncer.On("syncState").Return(syncStateSynced).Once()
+			deps.syncer.On("syncedTo", mock.Anything).Return(
+				waddrmgr.BlockStamp{Height: 100}, nil,
+			).Once()
+			inputRead := len(deps.store.ExpectedCalls)
+			utxo := expectFundingInputForAddress(
+				t, w, deps, outpoint, addr,
+			)
+
+			// The fixture arranges UTXO then parent reads. Validation
+			// follows both UTXO reads and the sole parent read.
+			deps.store.ExpectedCalls[inputRead].Twice()
+			deps.store.ExpectedCalls[inputRead+1].Once()
+
+			accountNumber := uint32(waddrmgr.DefaultAccountNum)
+			scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+			deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+				WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+			}).Return(&db.AccountInfo{
+				AccountNumber: &accountNumber,
+				AccountName:   defaultAccountName,
+				AddrSchema:    db.ScopeAddrMap[scope],
+			}, nil).Once()
+			deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+				WalletID: w.id, ScriptPubKey: utxo.PkScript,
+			}).Return(&db.AddressInfo{
+				AddrType:     db.TaprootPubKey,
+				HasScript:    true,
+				ScriptPubKey: utxo.PkScript,
+			}, nil).Once()
+
+			packet := testFundingPacket(outpoint)
+			packet.UnsignedTx.AddTxOut(wire.NewTxOut(
+				utxo.Value-200, utxo.PkScript,
+			))
+			packet.Outputs = make([]psbt.POutput, 1)
+			packet.Inputs[0].TaprootLeafScript =
+				[]*psbt.TaprootTapLeafScript{leafScript}
+
+			// Act: Request funding with a budget that supplies no
+			// usable bound for the script-path witness.
+			result, err := w.FundPsbt(t.Context(), &FundIntent{
+				Packet:  packet,
+				FeeRate: defaultFeeRate,
+				InputWitnessSizes: map[wire.OutPoint]uint32{
+					outpoint: tc.size,
+				},
+			})
+
+			// Assert: Stable identities distinguish a missing bound
+			// from conflicting metadata without matching diagnostics.
+			// No packet or lease escapes; fixture cleanup checks calls.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, result)
+		})
+	}
+}
+
+// TestDecorateInputsPreservesTaprootScriptSighash checks that decorating an
+// imported script input keeps its existing signature valid for public signing.
+func TestDecorateInputsPreservesTaprootScriptSighash(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Sign a real Taproot leaf with an explicit SINGLE|ANYONECANPAY
+	// policy. The imported output is known, but has no wallet key origin.
+	keys := testAuthKeys()
+	t.Cleanup(keys[0].Zero)
+	t.Cleanup(keys[1].Zero)
+	utxo, leaf, leafScript := testTapscriptFixture(t, keys)
+	hashType := txscript.SigHashSingle | txscript.SigHashAnyOneCanPay
+	packet, _, _ := testAuthPacket(t, utxo, hashType)
+	packet.UnsignedTx.TxIn[0].PreviousOutPoint.Index = 0
+	packet.Inputs[0].TaprootLeafScript =
+		[]*psbt.TaprootTapLeafScript{leafScript}
+
+	// Recompute the digest after choosing the parent output that the mock
+	// store will return, so the signature commits to this exact transaction.
+	prevOuts := txscript.NewCannedPrevOutputFetcher(
+		utxo.PkScript, utxo.Value,
+	)
+	sig, err := txscript.RawTxInTapscriptSignature(
+		packet.UnsignedTx,
+		txscript.NewTxSigHashes(packet.UnsignedTx, prevOuts), 0,
+		utxo.Value, utxo.PkScript, leaf, hashType, keys[0],
+	)
+	require.NoError(t, err)
+
+	// PSBT script signatures store the sighash separately from the 64-byte
+	// Schnorr signature; both must survive the public decoration call.
+	leafHash := leaf.TapHash()
+	packet.Inputs[0].TaprootScriptSpendSig =
+		[]*psbt.TaprootScriptSpendSig{
+			{
+				XOnlyPubKey: schnorr.SerializePubKey(keys[0].PubKey()),
+				LeafHash:    leafHash[:],
+				Signature:   sig[:schnorr.SignatureSize],
+				SigHash:     hashType,
+			},
+		}
+	before := clonePacket(packet).Inputs[0]
+	w, deps := createUnlockedSQLWalletWithMocks(t)
+	outpoint := packet.UnsignedTx.TxIn[0].PreviousOutPoint
+
+	// Decoration reads only the owned output, its parent and the imported
+	// address. The existing fixture cleanup verifies each mock once.
+	deps.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outpoint,
+	}).Return(testStoreUtxoInfo(outpoint, utxo), nil).Once()
+	deps.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     outpoint.Hash,
+	}).Return(testStoreTxDetail(outpoint.Hash, utxo), nil).Once()
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: utxo.PkScript,
+	}).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		HasScript:    true,
+		ScriptPubKey: utxo.PkScript,
+	}, nil).Once()
+
+	// Act: Decorate through the standalone API, then let public signing
+	// validate the existing signature without fetching any private key.
+	decorated, err := w.DecorateInputs(t.Context(), packet, false)
+	require.NoError(t, err)
+	result, err := w.SignPsbt(
+		t.Context(), &SignPsbtParams{Packet: decorated},
+	)
+
+	// Assert: The signer accepts the original explicit policy and signature,
+	// and no signature or input metadata is replaced during either operation.
+	require.NoError(t, err)
+	require.Same(t, packet, decorated)
+	require.Empty(t, result.SignedInputs)
+	require.Equal(t, hashType, packet.Inputs[0].SighashType)
+	require.Equal(t, before, packet.Inputs[0])
 }
 
 // TestDecorateInputsErrUnknownRequired tests that DecorateInputs returns
@@ -2038,7 +2434,7 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 		}).Return(nil, errDb)
 
 		_, _, err := w.populatePsbtPacket(
-			t.Context(), packet, newAuthoredTx(),
+			t.Context(), packet, newAuthoredTx(), nil,
 		)
 		require.ErrorIs(t, err, errDb)
 	})
@@ -2075,7 +2471,7 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 		}).Return((*db.AddressInfo)(nil), errDb)
 
 		_, _, err = w.populatePsbtPacket(
-			t.Context(), packet, newAuthoredTx(),
+			t.Context(), packet, newAuthoredTx(), nil,
 		)
 		require.ErrorIs(t, err, errDb)
 	})
@@ -2166,7 +2562,7 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 
 	// Act: Call populatePsbtPacket.
 	updatedPacket, changeIdx, err := w.populatePsbtPacket(
-		t.Context(), packet, authoredTx,
+		t.Context(), packet, authoredTx, nil,
 	)
 
 	// Assert: Verify success.
@@ -5389,7 +5785,7 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 	}
 	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
 		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
-	}).Return(accountInfo, nil)
+	}).Return(accountInfo, nil).Once()
 
 	// Change derivation resolves the account by name, and only falls back
 	// to a lookup by number when the name has been changed, so this
@@ -5515,6 +5911,7 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 
 	tests := []struct {
 		name          string
+		reads         int
 		addrType      db.AddressType
 		origin        []*psbt.Bip32Derivation
 		taprootOrigin []*psbt.TaprootBip32Derivation
@@ -5523,22 +5920,26 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 	}{
 		{
 			name:     "omit unknown origin",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			parent:   true,
 		},
 		{
 			name:     "retain matching native origin",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			origin:   origin,
 			parent:   true,
 		},
 		{
 			name:        "omit unknown taproot origin",
+			reads:       2,
 			addrType:    db.TaprootPubKey,
 			internalKey: stored.PubKey[1:],
 		},
 		{
 			name:          "retain matching taproot origin",
+			reads:         2,
 			addrType:      db.TaprootPubKey,
 			taprootOrigin: taprootOrigin,
 			internalKey:   stored.PubKey[1:],
@@ -5562,6 +5963,9 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 			expectFundingLease(w, mocks, []wire.OutPoint{validUTXO}, nil)
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -5620,11 +6024,13 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		reads    int
 		addrType db.AddressType
 		caller   psbt.PInput
 	}{
 		{
 			name:     "contradict taproot internal key",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
@@ -5632,6 +6038,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot derivation on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: taprootOrigin,
@@ -5639,6 +6046,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot internal key on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: stored.PubKey[1:],
@@ -5646,6 +6054,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "bip32 derivation on taproot input",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: origin,
@@ -5653,6 +6062,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "foreign native derivation",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: testWalletDerivation(),
@@ -5660,6 +6070,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "foreign taproot derivation",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -5667,6 +6078,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot script-path derivation",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: leafOrigin,
@@ -5691,6 +6103,9 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -5725,11 +6140,13 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 	// The family rows must not become Wallet facts merely by being seeded.
 	tests := []struct {
 		name     string
+		reads    int
 		addrType db.AddressType
 		caller   psbt.PInput
 	}{
 		{
 			name:     "conflicting taproot internal key",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
@@ -5737,6 +6154,7 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 		},
 		{
 			name:     "taproot derivation on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -5744,6 +6162,7 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 		},
 		{
 			name:     "native derivation on taproot input",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: testWalletDerivation(),
@@ -5766,6 +6185,9 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -6285,7 +6707,8 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	expectSignerDerivedAddressInfo(
 		t, w, mocks, inputAddr, db.TaprootPubKey, inputKey.PubKey(),
 	)
-	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Once()
+	// Probe script ownership before ordinary key-path decoration.
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Twice()
 	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)

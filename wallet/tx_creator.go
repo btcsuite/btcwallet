@@ -711,7 +711,7 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 		return
 	}
 
-	tx, changeAccount, change, err := w.authorTxIntent(r.ctx, r.intent)
+	tx, changeAccount, change, err := w.authorTxIntent(r.ctx, r.intent, nil)
 	if err != nil {
 		r.respChan <- authoredTxResp{err: err}
 
@@ -735,9 +735,11 @@ func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
 // inputs for that info, and allocates one fresh change address only when the
 // selection keeps change. The change account and address, nil without change,
 // are returned so the wrapper can register kept change once its own result is
-// final.
-func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
-	*txauthor.AuthoredTx, *db.AccountInfo, *db.AddressInfo, error) {
+// final. witnessSizes carries explicit PSBT witness bounds into the same fee
+// loop; ordinary transaction creation passes nil for its standard inputs.
+func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent,
+	witnessSizes map[wire.OutPoint]uint32) (*txauthor.AuthoredTx,
+	*db.AccountInfo, *db.AddressInfo, error) {
 
 	changeScope := w.determineChangeSource(intent)
 
@@ -754,7 +756,7 @@ func (w *Wallet) authorTxIntent(ctx context.Context, intent *TxIntent) (
 	}
 
 	selection, err := w.selectTxInputs(
-		intent.Outputs, intent.FeeRate, inputSource, changeInfo,
+		intent.Outputs, intent.FeeRate, inputSource, changeInfo, witnessSizes,
 	)
 	if err != nil {
 		return nil, nil, nil, err
@@ -805,12 +807,14 @@ func (w *Wallet) watchAuthoredChange(ctx context.Context, changeIndex int,
 // selectTxInputs selects inputs that pay for outputs at feeRate, sizing the fee
 // and judging change for change scripts changeInfo describes. Its narrow
 // request keeps wrapper-owned input policies, change accounts, labels, and
-// lifecycle effects outside coin selection.
+// lifecycle effects outside coin selection. witnessSizes supplies the caller's
+// script-witness bounds without changing standard input estimates.
 func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
 	feeRate btcunit.SatPerKVByte, inputSource txauthor.InputSource,
-	changeInfo txauthor.ChangeScriptInfo) (*txauthor.InputSelection, error) {
+	changeInfo txauthor.ChangeScriptInfo,
+	witnessSizes map[wire.OutPoint]uint32) (*txauthor.InputSelection, error) {
 
-	// The txauthor.SelectInputs function expects a slice of *wire.TxOut,
+	// The txauthor selection function expects a slice of *wire.TxOut,
 	// but our intent has a slice of wire.TxOut. We perform the conversion
 	// here.
 	//
@@ -825,8 +829,8 @@ func (w *Wallet) selectTxInputs(outputs []wire.TxOut,
 	// to perform the actual coin selection and fee calculation.
 	feeSatPerKb := feeRate.Val()
 
-	selection, err := txauthor.SelectInputs(
-		txOutputs, feeSatPerKb, inputSource, changeInfo,
+	selection, err := txauthor.SelectInputsWithWitnessSizes(
+		txOutputs, feeSatPerKb, inputSource, changeInfo, witnessSizes,
 	)
 	if err != nil {
 		return nil, translateAuthorError(err)
