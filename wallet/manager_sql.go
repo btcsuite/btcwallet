@@ -17,9 +17,21 @@ import (
 // size; IterWallets remains responsible for exhausting the durable Wallet set.
 const managerWalletBatchSize = 100
 
+// sqlManagerStore keeps constructor batching local to SQL backends instead of
+// expanding the Store contract used by running Wallets and the legacy adapter.
+type sqlManagerStore interface {
+	db.Store
+
+	// CreateInitialDerivedAccounts keeps the unpublished account set in a
+	// single backend write while retaining ordinary identity admission.
+	CreateInitialDerivedAccounts(ctx context.Context, walletID uint32,
+		accounts []db.CreateDerivedAccountParams,
+		deriveFn db.AccountDerivationFunc) error
+}
+
 // sqlManagerBackend owns the SQL Store shared by a Manager's wallets.
 type sqlManagerBackend struct {
-	store   db.Store
+	store   sqlManagerStore
 	closeFn func() error
 }
 
@@ -53,9 +65,11 @@ func (b *sqlManagerBackend) listWallets(
 	return wallets, nil
 }
 
-// create atomically creates a SQL wallet and returns its committed data.
+// create persists a SQL wallet and its initial account batch before runtime
+// publication. The borrowed root is used only during this synchronous call.
 func (b *sqlManagerBackend) create(ctx context.Context,
-	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey,
+	accounts []db.CreateDerivedAccountParams) (
 	*walletData, error) {
 
 	createParams, err := sqlCreateWalletParams(params, rootKey,
@@ -70,7 +84,34 @@ func (b *sqlManagerBackend) create(ctx context.Context,
 		return nil, fmt.Errorf("create runtime wallet: %w", err)
 	}
 
-	return b.walletData(info)
+	data, err := b.walletData(info)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(accounts) == 0 {
+		return data, nil
+	}
+
+	// Use the creation root while it is already available, avoiding a root
+	// read/decryption per account. Authentication and the locked return stay
+	// at the existing vault boundary even though no worker has started yet.
+	err = data.vault.Unlock(ctx, params.PrivatePassphrase)
+	if err != nil {
+		return nil, fmt.Errorf("unlock initial accounts: %w", err)
+	}
+	defer data.vault.Lock()
+
+	err = b.store.CreateInitialDerivedAccounts(
+		ctx, data.id, accounts,
+		newAccountDeriveFn(rootKey, data.vault, data.masterFingerprint),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create initial accounts: %w",
+			newAccountErr(err))
+	}
+
+	return data, nil
 }
 
 // walletData resolves the runtime dependencies for one committed wallet row.
