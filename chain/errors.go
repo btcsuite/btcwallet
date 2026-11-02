@@ -91,8 +91,8 @@ const (
 	// See also: https://github.com/bitcoin/bitcoin/blob/7cc9a087069bfcdb79a08ce77eb3a60adf9483af/src/validation.cpp#L703-L722
 	ErrMinRelayFeeNotMet
 
-	// ErrMempoolChainTooLong is returned when the chain of transactions
-	// currently in the mempool is too long.
+	// ErrMempoolChainTooLong is returned when accepting a transaction
+	// would exceed transaction-chain or cluster count/size policy limits.
 	ErrMempoolChainTooLong
 
 	// ErrTRUCViolation is returned when the transaction violates the TRUC
@@ -410,6 +410,10 @@ func (r RPCErr) Error() string {
 // For example when using the bitcoind rpc method `testmempoolaccept` or
 // `sendrawtransaction`.
 var Bitcoind28ErrMap = map[string]error{
+	// Core 31 replaces ancestor/descendant limits with cluster limits.
+	// Reuse the graph-limit category for acceptance and publication errors.
+	"too-large-cluster": ErrMempoolChainTooLong,
+
 	// https://github.com/bitcoin/bitcoin/pull/30212
 	"transaction outputs already in utxo set": ErrTxAlreadyConfirmed,
 
