@@ -37,6 +37,9 @@ func (s *Store) ResolveOwnedAddresses(ctx context.Context,
 				return fmt.Errorf("map address row: %w", err)
 			}
 
+			// Ownership remains available for signing; automatic tracking
+			// separately respects the account's existing sync exclusion.
+			info.NoChainSync = row.NoChainSync.Bool
 			owned[string(info.ScriptPubKey)] = info
 		}
 
