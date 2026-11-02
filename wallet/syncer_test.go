@@ -334,6 +334,15 @@ func TestSyncerRollbackRetainedRequestFailure(t *testing.T) {
 	state := NewRecoveryState(0, &chainParams, nil)
 	batchCall := store.On("ApplyScanBatch", mock.Anything,
 		mock.Anything).Return(errDBMock).Once()
+	// Keep the retained event at the processed tip: this tests error
+	// aggregation after a failed replay, rather than future-block deferral.
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{
+				Height: 1,
+			},
+		}, nil,
+	).Once()
 	store.On("ApplyTxBatch", mock.Anything, db.TxBatchParams{
 		WalletID:     7,
 		Transactions: []db.CreateTxParams{},
@@ -413,6 +422,15 @@ func TestSyncerRollbackTargetedEventFailure(t *testing.T) {
 	batchCall := store.On("ApplyScanBatch", mock.Anything, mock.Anything).
 		Return(nil).Once()
 	eventFailure := errors.New("retained targeted event failed")
+	// Targeted scanning does not move the global checkpoint. Admit this
+	// retained at-tip event so its failure still tests range completion.
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{
+				Height: 1,
+			},
+		}, nil,
+	).Once()
 	failed := store.On("ApplyTxBatch", mock.Anything, db.TxBatchParams{
 		WalletID:     7,
 		Transactions: []db.CreateTxParams{},
@@ -2070,7 +2088,7 @@ func matchConfirmedTxBatchNoSyncTip(walletID uint32, tx *wire.MsgTx,
 }
 
 // TestProcessRelevantTxUsesStoreConfirmedBlock verifies that a confirmed
-// relevant transaction notification (one carrying a block) builds an
+// relevant transaction notification at the processed tip builds an
 // ApplyTxBatch with the transaction's confirming block set but SyncedTo left
 // nil, so the standalone notification records the confirmed tx without
 // advancing the wallet sync tip. The Store block row is then ensured by the
@@ -2112,6 +2130,15 @@ func TestProcessRelevantTxUsesStoreConfirmedBlock(t *testing.T) {
 		Time: time.Unix(789, 0).UTC(),
 	}
 
+	// The containing block is already processed, so this observation may
+	// record its transaction without claiming to move the wallet's tip.
+	info := new(db.WalletInfo)
+	info.SyncedTo = &db.Block{
+		Hash:      block.Hash,
+		Height:    222,
+		Timestamp: block.Time,
+	}
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(info, nil).Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchConfirmedTxBatchNoSyncTip(
 			walletID, tx, addr, received, block,
@@ -8998,4 +9025,112 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, coinbase.Hash, history[0].Hash)
+}
+
+// TestTxSubscriptionSpendConfirmation keeps a spend-only input watched until
+// its block is processed, then delivers its real confirmed subscription event.
+func TestTxSubscriptionSpendConfirmation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit one owned credit before subscribing, leaving the real
+	// SQLite sync worker behind the fixture's backend-readiness gate. The
+	// next block spends this output without paying any wallet address, so
+	// the ordered scan can find it only while the input remains watched.
+	w, client, script := subscriptionWallet(t)
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	s.cfg.SyncMethod = SyncMethodFullBlocks
+
+	funding := subscriptionTx(script, 501)
+	record, err := wtxmgr.NewTxRecordFromMsgTx(funding, time.Now())
+	require.NoError(t, err)
+
+	first := &db.Block{
+		Hash:      chainhash.Hash{51},
+		Height:    1,
+		Timestamp: time.Now().Truncate(time.Second),
+	}
+	require.NoError(t, s.applyStoreTxBatch(
+		t.Context(), liveMatches(record),
+		first, first,
+	))
+
+	events, _, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+
+	spend := wire.NewMsgTx(2)
+	spend.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+		Hash:  funding.TxHash(),
+		Index: 0,
+	}, nil, nil))
+	spend.AddTxOut(&wire.TxOut{
+		Value:    900,
+		PkScript: []byte{txscript.OP_TRUE},
+	})
+	record, err = wtxmgr.NewTxRecordFromMsgTx(spend, first.Timestamp)
+	require.NoError(t, err)
+
+	// Reuse a complete header fixture and link the containing block to the
+	// funded tip; the scan validates this ancestry before committing it.
+	header := chainParams.GenesisBlock.Header
+	header.PrevBlock = first.Hash
+	header.Timestamp = first.Timestamp
+	block := wire.NewMsgBlock(&header)
+	require.NoError(t, block.AddTransaction(spend))
+	hash := block.BlockHash()
+	meta := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   hash,
+			Height: 2,
+		},
+		Time: first.Timestamp,
+	}
+	client.On("GetBlockHashes", int64(2), int64(2)).
+		Return([]chainhash.Hash{hash}, nil).Once()
+	client.On("GetBlocks", []chainhash.Hash{hash}).
+		Return([]*wire.MsgBlock{block}, nil).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+
+	// Act: Deliver btcd's standalone mined observation before its containing
+	// block has advanced the processed tip, matching the failing RPC path.
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{
+			TxRecord: record,
+			Block:    meta,
+		},
+		matches: liveMatches(record),
+	}))
+
+	// Assert: The early observation neither emits a zero-confirmation mined
+	// event nor records the spend and removes its input from the watch set.
+	select {
+	case event := <-events:
+		require.NotNil(t, event)
+		t.Fatalf("unprocessed block delivered an event: %+v", event.Detail)
+	default:
+	}
+
+	_, err = w.GetTx(t.Context(), spend.TxHash())
+	require.ErrorIs(t, err, ErrTxNotFound)
+
+	// Act: Scan the real containing block through the existing ordered path.
+	// Only its successful batch may record the spend and advance the tip.
+	require.NoError(t, s.scanBatch(t.Context(), waddrmgr.BlockStamp{
+		Hash:      first.Hash,
+		Height:    1,
+		Timestamp: first.Timestamp,
+	}, 2))
+
+	// Assert: The scan still matches the spent input despite having no owned
+	// output, and the public subscriber receives the actual mined identity,
+	// wallet debit and confirmation count after that block commits.
+	detail := receiveTxSubscription(t, events).Detail
+	require.Equal(t, spend.TxHash(), detail.Hash)
+	require.NotNil(t, detail.Block)
+	require.Equal(t, hash, detail.Block.Hash)
+	require.EqualValues(t, 2, detail.Block.Height)
+	require.EqualValues(t, 1, detail.Confirmations)
+	require.EqualValues(t, -1000, detail.Value)
 }

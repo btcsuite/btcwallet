@@ -894,14 +894,24 @@ func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
 	return wtxmgr.DependencySort(txSet), nil
 }
 
-// putTxNotifications records relevant transaction notifications through the
-// store.
+// putTxNotifications records standalone observations at or below the processed
+// tip, leaving future confirmed transactions to the ordered block scan.
 func (s *syncer) putTxNotifications(ctx context.Context,
 	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
 
 	var block *db.Block
 	if blockMeta != nil {
-		var err error
+		current, err := s.syncedTo(ctx)
+		if err != nil {
+			return err
+		}
+
+		// Recording a future spend would remove its input from the scan's
+		// watch set before that scan can announce a tip-consistent event.
+		// Leave it watched until the block batch records both tx and tip.
+		if blockMeta.Height > current.Height {
+			return nil
+		}
 
 		block, err = storeBlockFromBlockMeta(*blockMeta)
 		if err != nil {
@@ -1958,9 +1968,10 @@ func (s *syncer) handleChainUpdate(n any) {
 func (s *syncer) processChainEventBeforeSync(ctx context.Context,
 	event chainEvent) error {
 
-	// Known matches are safe to record, but historical scanning must still
-	// visit this height after recovery and watch registration finish. Leave
-	// malformed metadata to the ordinary handler's existing validation.
+	// Process at-tip matches without checkpointing. Confirmations above the
+	// processed tip stay with historical scanning so an early spend cannot
+	// remove its input watch or emit a zero-confirmation mined event.
+	// Leave malformed metadata to the ordinary handler's validation.
 	if block, ok := event.notification.(chain.FilteredBlockConnected); ok &&
 		block.Block != nil {
 
