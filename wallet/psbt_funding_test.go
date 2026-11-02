@@ -302,6 +302,8 @@ func TestRestoreInputMetadataRejectsFieldsTheSpendDoesNotUse(t *testing.T) {
 func TestRestoreInputMetadataKeepsWalletInternalKey(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Decoration supplies the known internal key independently
+	// of its origin record, and the caller repeats that same key.
 	outPoint := wire.OutPoint{Index: 3}
 	internalKey := schnorr.SerializePubKey(testKey(1))
 
@@ -312,15 +314,20 @@ func TestRestoreInputMetadataKeepsWalletInternalKey(t *testing.T) {
 		Inputs: []psbt.PInput{{
 			WitnessUtxo:            testWalletUtxo(),
 			TaprootBip32Derivation: testWalletTaprootDerivation(),
+			TaprootInternalKey:     internalKey,
 		}},
 	}
 
 	caller := psbt.PInput{TaprootInternalKey: internalKey}
 
+	// Act: Reconcile the caller's internal key using the normal key-path
+	// spend policy without deriving the key from an origin record.
 	err := restoreInputMetadata(packet, map[wire.OutPoint]callerInput{
 		outPoint: {pInput: caller},
 	}, []waddrmgr.SpendType{waddrmgr.SpendTypeTaprootKeyPath})
 
+	// Assert: Agreement preserves the supplied key and does not require
+	// replacing the Wallet's independently known internal-key fact.
 	require.NoError(t, err)
 	require.Equal(t, internalKey, packet.Inputs[0].TaprootInternalKey)
 }

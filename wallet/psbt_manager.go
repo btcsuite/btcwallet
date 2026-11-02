@@ -614,6 +614,8 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 		return waddrmgr.SpendTypeUnknown, err
 	}
 
+	taproot := txscript.IsPayToTaproot(utxo.PkScript)
+
 	// With the managed address, we can now get the derivation information
 	// for the address.
 	derivation, err := derivationForAddressInfo(scriptInfo.AddressInfo)
@@ -621,16 +623,30 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 		return waddrmgr.SpendTypeUnknown, err
 	}
 
+	// Script and public-key facts determine the internal key independently
+	// of the root origin; native inputs cannot carry an internal key.
+	var internalKey []byte
+	if taproot {
+		internalKey = scriptInfo.PubKey.SerializeCompressed()[1:]
+	}
+
+	// Both public entrypoints share this check before replacing metadata,
+	// so funding restoration can only receive absent or agreeing keys.
+	if pInput.TaprootInternalKey != nil {
+		err := checkWalletInternalKey(internalKey, pInput.TaprootInternalKey)
+		if err != nil {
+			return waddrmgr.SpendTypeUnknown, err
+		}
+	}
+
 	// With all the information gathered, we'll now populate the PSBT
 	// input based on its address type by calling the existing, non-
 	// deprecated helper functions.
-	switch {
-	// For SegWit v1 (Taproot) inputs, we'll use the SegWit v1 helper.
-	case txscript.IsPayToTaproot(utxo.PkScript):
+	// Taproot carries its known internal key even without a root origin.
+	if taproot {
+		pInput.TaprootInternalKey = internalKey
 		addInputInfoSegWitV1(pInput, utxo, derivation)
-
-	// For SegWit v0 inputs, we'll use the SegWit v0 helper.
-	default:
+	} else {
 		// With the redeem script, we can now populate the PSBT input.
 		addInputInfoSegWitV0Common(
 			pInput, tx, utxo, derivation,
@@ -1053,7 +1069,7 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	packet.UnsignedTx = tx
 	packet.Inputs = make([]psbt.PInput, len(tx.TxIn))
 
-	for _, txIn := range tx.TxIn {
+	for i, txIn := range tx.TxIn {
 		caller, ok := callerInputs[txIn.PreviousOutPoint]
 		if !ok {
 			// An input the wallet selected itself, which keeps
@@ -1062,6 +1078,11 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 		}
 
 		txIn.Sequence = caller.sequence
+
+		// Check caller facts in shared decoration before restoration.
+		// UTXO and known-origin metadata are still overwritten and
+		// reconciled against the original indexed records below.
+		packet.Inputs[i] = caller.pInput
 	}
 
 	// Authoring leaves the caller's outputs in their own order and swaps
@@ -2752,9 +2773,11 @@ func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
 	}
 	in.SighashType = txscript.SigHashAll
 
-	// Include the derivation path for each input.
-	in.Bip32Derivation = []*psbt.Bip32Derivation{
-		derivationInfo,
+	// Known Wallet origins replace caller records in both families so
+	// reconciliation cannot mistake a seeded opposite-family claim for fact.
+	if derivationInfo != nil {
+		in.Bip32Derivation = []*psbt.Bip32Derivation{derivationInfo}
+		in.TaprootBip32Derivation = nil
 	}
 
 	// For nested P2WKH we need to add the redeem script to the input,
@@ -2794,6 +2817,7 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	// Taproot inputs carry only the taproot-specific derivation. Emitting a
 	// parallel Bip32Derivation would make the input ambiguous for the
 	// wallet's own signer (see validateDerivation), so it is omitted here.
+	in.Bip32Derivation = nil
 	in.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
 		XOnlyPubKey:          derivationInfo.PubKey[1:],
 		MasterKeyFingerprint: derivationInfo.MasterKeyFingerprint,
