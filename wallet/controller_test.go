@@ -950,6 +950,39 @@ func TestSubmitRescanRequest_Errors(t *testing.T) {
 		// Assert: Verify failure.
 		require.ErrorContains(t, err, "best block fail")
 	})
+
+	t.Run("CanceledBeforeAdmission", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Start the request loop so it is ready to receive, and
+		// allow a wrongly admitted scan to reach the syncer mailbox.
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+
+		deps.syncer.On("syncState").Return(syncStateSynced)
+		deps.chain.On("GetBestBlock").Return(
+			&chainhash.Hash{}, int32(100), nil,
+		).Maybe()
+		deps.syncer.On("requestScan", mock.Anything, mock.Anything).Return(
+			nil,
+		).Maybe()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act and Assert: A ready request loop and a canceled caller are
+		// both selectable, so repeat the call to expose a random admission.
+		for range 64 {
+			for _, typ := range []scanType{scanTypeRewind, scanTypeTargeted} {
+				err := w.submitRescanRequest(ctx, typ, 50, nil)
+				require.ErrorIs(t, err, context.Canceled)
+			}
+		}
+
+		deps.syncer.AssertNotCalled(
+			t, "requestScan", mock.Anything, mock.Anything,
+		)
+	})
 }
 
 // TestControllerStop verifies that stop correctly shuts down the
