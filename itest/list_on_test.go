@@ -336,6 +336,18 @@ var allTestCases = []*testCase{
 		Name:     "controller info",
 		TestFunc: testControllerInfo,
 	},
+	{
+		Name:     "controller resync history",
+		TestFunc: testControllerResyncHistory,
+	},
+	{
+		Name:     "controller rescan history",
+		TestFunc: testControllerRescanHistory,
+	},
+	{
+		Name:     "controller rescan tip",
+		TestFunc: testControllerRescanTip,
+	},
 	// Keep the public Signer request in the integration matrix so callers
 	// cannot accidentally depend on wallet-internal database types.
 	{
