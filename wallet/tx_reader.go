@@ -587,11 +587,10 @@ func safeInt64ToWeightUnit(w int64) btcunit.WeightUnit {
 // safeIntToUint32 converts an int to a uint32, returning false if the
 // conversion would overflow.
 func safeIntToUint32(i int) (uint32, bool) {
-	if i < 0 || i > math.MaxUint32 {
-		return 0, false
-	}
-
-	return uint32(i), true
+	// Check through the shared wide conversion so MaxUint32 never needs
+	// to fit into the platform's int on 32-bit targets.
+	value, err := db.Int64ToUint32(int64(i))
+	return value, err == nil
 }
 
 // safeUint32ToInt32 converts a uint32 to an int32, returning false if the
