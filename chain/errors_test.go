@@ -2,9 +2,12 @@ package chain
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -62,6 +65,116 @@ func TestBitcoindMapRPCErr(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
+}
+
+// TestBtcdMapRPCErr checks input diagnostics take precedence over their
+// nested policy causes while output and unknown errors retain their identity.
+func TestBtcdMapRPCErr(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a closed SDK client so the unknown-reason version lookup
+	// terminates without network I/O; known reasons need no backend lookup.
+	rpc, err := rpcclient.New(
+		&rpcclient.ConnConfig{
+			DisableConnectOnNew: true,
+		}, nil,
+	)
+	require.NoError(t, err)
+	rpc.Shutdown()
+	rpc.WaitForShutdown()
+
+	// Use diagnostics that embed broad keys in their causes so each
+	// assertion checks precedence over unordered table iteration.
+	txid := strings.Repeat("a", 64)
+	inputContext := txid + ":0 which references output " + txid + ":1 - "
+	scripts := " (input witness [], input script bytes 00, " +
+		"prev output script bytes 51)"
+	nonStandard := "transaction " + txid +
+		" has a non-standard input: transaction input #0 has a " +
+		"non-standard script form"
+	testCases := []struct {
+		name   string
+		rpcErr error
+		want   error
+	}{
+		{
+			name: "input parsing",
+			rpcErr: errors.New("failed to parse input " +
+				inputContext + "signature script is not push only" +
+				scripts),
+			want: ErrScriptVerifyFlag,
+		},
+		{
+			name: "input validation",
+			rpcErr: errors.New("failed to validate input " +
+				inputContext + "invalid transaction version: 1" +
+				scripts),
+			want: ErrScriptVerifyFlag,
+		},
+		{
+			name: "publication rejection",
+			rpcErr: &btcjson.RPCError{
+				Code:    btcjson.ErrRPCTxRejected,
+				Message: "TX rejected: " + nonStandard,
+			},
+			want: ErrNonStandardInputs,
+		},
+		{
+			name: "nonstandard output",
+			rpcErr: errors.New("transaction " + txid +
+				" is not standard: transaction output 0: " +
+				"non-standard script form"),
+			want: ErrNonStandardScript,
+		},
+		{
+			name:   "unknown rejection",
+			rpcErr: errors.New("unrecognized btcd rejection"),
+			want:   ErrUndefined,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange this mapper with the closed transport so the
+			// unknown fallback cannot depend on a live backend.
+			client := &RPCClient{
+				Client: rpc,
+			}
+
+			// Act through the acceptance/publication mapper with the
+			// complete backend diagnostic, including any broad cause.
+			err := client.MapRPCErr(tc.rpcErr)
+
+			// Assert the caller sees the precise input category or
+			// the unchanged output/unknown fallback through errors.Is.
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+// TestNeutrinoMapRPCErr checks peer input rejects retain their specificity
+// when the shared btcd table also matches the nested script-policy text.
+func TestNeutrinoMapRPCErr(t *testing.T) {
+	t.Parallel()
+
+	// Arrange the real peer-reject wrapper without a chain service: the
+	// mapper only needs the reason preserved by the broadcast path.
+	peerErr := &pushtx.BroadcastError{
+		Code: pushtx.Invalid,
+		Reason: "rejected by peer: transaction " + strings.Repeat("a", 64) +
+			" has a non-standard input: transaction input #0 has a " +
+			"non-standard script form",
+	}
+	client := &NeutrinoClient{}
+
+	// Act through the existing second consumer of the btcd error table.
+	err := client.MapRPCErr(peerErr)
+
+	// Assert generic script text cannot mask the input-specific rejection
+	// just because that generic table entry happens to be visited first.
+	require.ErrorIs(t, err, ErrNonStandardInputs)
 }
 
 // TestMatchErrStr checks that `matchErrStr` can correctly replace the dashes
