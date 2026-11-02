@@ -4,8 +4,65 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/stretchr/testify/require"
 )
+
+// TestBitcoindMapRPCErr checks cluster-limit reasons share the existing chain
+// limit category while legacy and unknown reasons retain their classifications.
+func TestBitcoindMapRPCErr(t *testing.T) {
+	t.Parallel()
+
+	// Arrange both Core call boundaries: acceptance returns a raw reason,
+	// while publication returns an RPC error. Controls preserve the older
+	// chain-limit spelling and fallback for unknown reasons.
+	testCases := []struct {
+		name   string
+		rpcErr error
+		want   error
+	}{
+		{
+			name:   "cluster acceptance rejection",
+			rpcErr: errors.New("too-large-cluster"),
+			want:   ErrMempoolChainTooLong,
+		},
+		{
+			name: "cluster publication rejection",
+			rpcErr: &btcjson.RPCError{
+				Code:    btcjson.ErrRPCVerifyRejected,
+				Message: "too-large-cluster",
+			},
+			want: ErrMempoolChainTooLong,
+		},
+		{
+			name:   "legacy chain rejection",
+			rpcErr: errors.New("too-long-mempool-chain"),
+			want:   ErrMempoolChainTooLong,
+		},
+		{
+			name:   "unknown rejection",
+			rpcErr: errors.New("unrecognized rejection"),
+			want:   ErrUndefined,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange a disconnected client: mapping is pure
+			// classification and must not require a live backend.
+			client := &BitcoindClient{}
+
+			// Act through the shared acceptance/publication mapper.
+			err := client.MapRPCErr(tc.rpcErr)
+
+			// Assert callers can match the policy category through
+			// errors.Is, including the unknown fallback's wrapping.
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
 
 // TestMatchErrStr checks that `matchErrStr` can correctly replace the dashes
 // with spaces and turn title cases into lowercases for a given error and match
