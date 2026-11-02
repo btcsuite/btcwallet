@@ -106,8 +106,8 @@ var (
 		"unsupported multiple BIP0032 derivation info found",
 	)
 
-	// ErrAmbiguousDerivation is returned when an input has both Taproot and
-	// BIP32 derivation information, which is an ambiguous state.
+	// ErrAmbiguousDerivation is returned when an input's Taproot and BIP32
+	// records describe conflicting origins.
 	ErrAmbiguousDerivation = errors.New(
 		"both Taproot and BIP32 derivation info found",
 	)
@@ -1597,6 +1597,17 @@ func (w *Wallet) planPsbtInput(ctx context.Context, packet *psbt.Packet, i int,
 		return nil, false, err
 	}
 
+	// Matching records can also accompany a SegWit v0 pay-join input. The
+	// actual prevout determines which of the reconciled origins to use.
+	if isTaproot && len(pInput.Bip32Derivation) != 0 {
+		utxo, err := fetchPsbtUtxo(packet, i)
+		if err != nil {
+			return nil, false, err
+		}
+
+		isTaproot = txscript.IsPayToTaproot(utxo.PkScript)
+	}
+
 	// Based on the validated derivation information, we dispatch
 	// the planning task to the appropriate helper function. If the
 	// input is identified as Taproot, we use
@@ -1761,8 +1772,8 @@ func shouldSkipSigningError(err error, idx int) bool {
 //
 // It enforces the following rules:
 //  1. Only one derivation path per type is supported.
-//  2. Taproot and BIP32 derivation information cannot be present
-//     simultaneously. This avoids ambiguity about which signing path to take.
+//  2. Simultaneous Taproot and BIP32 records must describe the same origin.
+//     Matching records select Taproot signing; conflicting records fail.
 //
 // It returns a boolean indicating whether the input is a Taproot input (true)
 // or a legacy/SegWit input (false), and an error if the validation fails.
@@ -1781,9 +1792,20 @@ func validateDerivation(pInput *psbt.PInput, idx int) (bool, error) {
 	}
 
 	if tapCount == 1 && bip32Count == 1 {
-		// This is ambiguous/invalid state in the PSBT.
-		return false, fmt.Errorf("input %d: %w", idx,
-			ErrAmbiguousDerivation)
+		// A redundant compressed-key record is unambiguous only when its
+		// x-only key, complete path and root fingerprint agree. Preserve
+		// both records for callers while choosing Taproot signing.
+		tap := pInput.TaprootBip32Derivation[0]
+		bip := pInput.Bip32Derivation[0]
+
+		if len(bip.PubKey) != btcec.PubKeyBytesLenCompressed ||
+			!bytes.Equal(bip.PubKey[1:], tap.XOnlyPubKey) ||
+			!slices.Equal(bip.Bip32Path, tap.Bip32Path) ||
+			bip.MasterKeyFingerprint != tap.MasterKeyFingerprint {
+
+			return false, fmt.Errorf("input %d: %w", idx,
+				ErrAmbiguousDerivation)
+		}
 	}
 
 	// If we have Taproot info, it's a Taproot input.
