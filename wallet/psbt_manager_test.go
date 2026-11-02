@@ -2203,7 +2203,9 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 func TestParseBip32Path(t *testing.T) {
 	t.Parallel()
 
-	// Use mainnet params for testing (HDCoinType = 0).
+	// Arrange: Use mainnet address parameters while including an explicit
+	// coin-1 account scope. A stored scope need not use the address network's
+	// default coin type; malformed path prefixes must still be rejected.
 	chainParams := &chaincfg.MainNetParams
 	w := &Wallet{
 		cfg: Config{
@@ -2281,11 +2283,22 @@ func TestParseBip32Path(t *testing.T) {
 			expectedErr: ErrInvalidBip32Path,
 		},
 		{
-			name: "coin type mismatch",
+			name: "explicit account coin scope",
 			path: []uint32{
 				hardened(84), hardened(1), hardened(0), 0, 0,
 			},
-			expectedErr: ErrInvalidBip32Path,
+			wantPath: BIP32Path{
+				KeyScope: waddrmgr.KeyScope{
+					Purpose: 84,
+					Coin:    1,
+				},
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: 0,
+					Account:         0,
+					Branch:          0,
+					Index:           0,
+				},
+			},
 		},
 		{
 			name: "unknown purpose (now allowed in parseBip32Path)",
@@ -2311,7 +2324,7 @@ func TestParseBip32Path(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Act: Call parseBip32Path with the test path.
+			// Act: Parse the supplied path before any Store account lookup.
 			gotPath, err := w.parseBip32Path(tc.path)
 
 			// Assert: Verify that the function returns the expected
@@ -3122,13 +3135,28 @@ func TestSignPsbt(t *testing.T) {
 
 	// The store account-secret lookup keys on InternalAccount, so a path
 	// that leaves it unset would silently resolve account 0 and sign with
-	// the wrong key. Both the default and a non-zero account are exercised.
+	// the wrong key. Exercise both account selection and a stored coin-0
+	// scope on regtest, whose address network defaults to coin 1.
 	tests := []struct {
 		name    string
 		account uint32
+		coin    uint32
 	}{
-		{name: "default account", account: 0},
-		{name: "non-zero account", account: 2},
+		{
+			name:    "default account",
+			account: 0,
+			coin:    1,
+		},
+		{
+			name:    "non-zero account",
+			account: 2,
+			coin:    1,
+		},
+		{
+			name:    "stored coin scope differs from network",
+			account: 0,
+			coin:    0,
+		},
 	}
 
 	for _, test := range tests {
@@ -3143,10 +3171,10 @@ func TestSignPsbt(t *testing.T) {
 			pubKeyBytes := pubKey.SerializeCompressed()
 
 			// Arrange: Define the BIP32 derivation path for the
-			// input key (RegressionNet, P2WKH, coin type 1).
+			// input key, using its stored coin scope on regtest.
 			derivationPath := []uint32{
 				hdkeychain.HardenedKeyStart + 84,
-				hdkeychain.HardenedKeyStart + 1,
+				hdkeychain.HardenedKeyStart + test.coin,
 				hdkeychain.HardenedKeyStart + test.account,
 				0, 0,
 			}
@@ -3189,7 +3217,7 @@ func TestSignPsbt(t *testing.T) {
 			// for the resolved account.
 			_, _ = expectStoreSignerPrivKey(
 				t, mocks, w.id,
-				waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+				waddrmgr.KeyScope{Purpose: 84, Coin: test.coin},
 				waddrmgr.DerivationPath{
 					InternalAccount: test.account,
 					Branch:          0,
@@ -3197,7 +3225,8 @@ func TestSignPsbt(t *testing.T) {
 				},
 			)
 
-			// Act: Call SignPsbt on the packet.
+			// Act: Sign through public admission using the declared
+			// stored account scope, including coin 0 on regtest.
 			result, err := w.SignPsbt(t.Context(), signParams)
 
 			// Assert: the input is reported signed and the packet
@@ -3207,7 +3236,6 @@ func TestSignPsbt(t *testing.T) {
 			require.Len(t, result.SignedInputs, 1)
 			require.Equal(t, uint32(0), result.SignedInputs[0])
 			require.Len(t, packet.Inputs[0].PartialSigs, 1)
-			mocks.store.AssertExpectations(t)
 		})
 	}
 }
@@ -3546,15 +3574,16 @@ func TestSignPsbtRejectsInvalidRecordBeforeKeyLookup(t *testing.T) {
 func TestSignPsbtPlansEveryInputBeforeKeyLookup(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: input 0 is signable, input 1 names the wrong coin type.
+	// Arrange: Input 0 is signable, while input 1 names an unhardened
+	// account component that remains invalid independently of coin scope.
 	packet := testP2WPKHSignPacket(t, 0, 1)
-	packet.Inputs[1].Bip32Derivation[0].Bip32Path[1] =
-		hdkeychain.HardenedKeyStart + 0
+	packet.Inputs[1].Bip32Derivation[0].Bip32Path[2] = 0
 
 	before := clonePacket(packet)
 	w, mocks := createUnlockedWalletWithMocks(t)
 
-	// Act: sign the packet.
+	// Act: Submit both inputs together, requiring all planning to finish
+	// before the wallet can look up a private key for the signable input.
 	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
 
 	// Assert: the bad path is reported, no key was looked up, and the

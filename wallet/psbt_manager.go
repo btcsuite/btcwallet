@@ -1637,7 +1637,9 @@ func (w *Wallet) planPsbtInput(ctx context.Context, packet *psbt.Packet, i int,
 // conventions):
 //  1. Path length must be exactly 5.
 //  2. First 3 elements must be hardened.
-//  3. Coin type must match the wallet's chain parameters.
+//
+// The coin type identifies a stored account scope, independently of the
+// address network. Signing resolves the exact scope and account from storage.
 //
 // NOTE: While the underlying cryptographic derivation is defined by BIP32, the
 // specific requirement for a 5-level path with hardened prefixes is strictly a
@@ -1668,13 +1670,6 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	account := path[2] - hdkeychain.HardenedKeyStart
 	branch := path[3]
 	index := path[4]
-
-	// Verify that the coin type matches the wallet's chain parameters.
-	if coinType != w.cfg.ChainParams.HDCoinType {
-		return BIP32Path{}, fmt.Errorf("%w: expected coin type %d, "+
-			"got %d", ErrInvalidBip32Path,
-			w.cfg.ChainParams.HDCoinType, coinType)
-	}
 
 	scope := waddrmgr.KeyScope{
 		Purpose: purpose,
