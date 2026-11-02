@@ -158,6 +158,10 @@ var (
 	// not be exposed to the caller.
 	errComputeRawSig = errors.New("cannot compute raw signature")
 
+	// errForeignSigningKey marks only a base-key mismatch, keeping caller
+	// tweak failures out of the internal ownership-skip path.
+	errForeignSigningKey = errors.New("foreign signing key")
+
 	// errTxOutputIndexOutOfRange is returned when a transaction output is
 	// missing the referenced index.
 	errTxOutputIndexOutOfRange = errors.New("tx output index out of range")
@@ -1709,7 +1713,8 @@ func shouldSkipSigningError(err error, idx int) bool {
 	// operational Store, vault, tweaking and signing errors must reach the
 	// caller.
 	missingSigningKey := errors.Is(err, ErrAccountNotInStore) ||
-		errors.Is(err, ErrWatchOnlyAccount)
+		errors.Is(err, ErrWatchOnlyAccount) ||
+		errors.Is(err, errForeignSigningKey)
 	if errors.Is(err, errComputeRawSig) && missingSigningKey {
 		log.Debugf("Skipping input %d: %v", idx, err)
 		return true
@@ -2076,8 +2081,24 @@ func (w *Wallet) signTaprootPsbtInput(ctx context.Context, packet *psbt.Packet,
 		SigHashes:  sigHashes,
 		HashType:   pInput.SighashType,
 		Path:       path,
-		Tweaker:    tweaker,
 		Details:    details,
+	}
+
+	// A path can exist in several participants' wallets. Verify the base
+	// key against the x-only origin before a caller tweak or signature so
+	// collaborative signing cannot add another owner's invalid record.
+	params.Tweaker = func(key *btcec.PrivateKey) (*btcec.PrivateKey, error) {
+		if !bytes.Equal(key.PubKey().SerializeCompressed()[1:],
+			tapDerivation.XOnlyPubKey) {
+
+			return nil, errForeignSigningKey
+		}
+
+		if tweaker != nil {
+			return tweaker(key)
+		}
+
+		return key, nil
 	}
 
 	// Compute the raw signature.
@@ -2149,8 +2170,27 @@ func (w *Wallet) signBip32PsbtInput(ctx context.Context, packet *psbt.Packet,
 		SigHashes:  sigHashes,
 		HashType:   pInput.SighashType,
 		Path:       path,
-		Tweaker:    tweaker,
 		Details:    details,
+	}
+
+	// Verify ownership during the existing key lookup: another participant
+	// can use this same path under a different root. Authorize the base key
+	// before any caller tweak, preserving the caller's key encoding.
+	params.Tweaker = func(key *btcec.PrivateKey) (*btcec.PrivateKey, error) {
+		origin, err := btcec.ParsePubKey(derivation.PubKey)
+		if err != nil {
+			return nil, fmt.Errorf("parse origin: %w", err)
+		}
+
+		if !key.PubKey().IsEqual(origin) {
+			return nil, errForeignSigningKey
+		}
+
+		if tweaker != nil {
+			return tweaker(key)
+		}
+
+		return key, nil
 	}
 
 	// Compute the raw signature.
