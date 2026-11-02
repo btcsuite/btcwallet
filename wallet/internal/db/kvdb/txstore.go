@@ -633,15 +633,11 @@ func (s *Store) applyLegacyTxNotification(addrmgrNs walletdb.ReadWriteBucket,
 		return err
 	}
 
-	handled, err := s.applyConfirmedDuplicate(
+	err = s.applyConfirmedDuplicate(
 		addrmgrNs, txmgrNs, txRec.Hash, block, req,
 	)
 	if err != nil {
 		return err
-	}
-
-	if handled {
-		return nil
 	}
 
 	label, err := s.confirmedBatchLabel(txmgrNs, txRec.Hash, req)
@@ -684,38 +680,40 @@ func (s *Store) confirmedBatchLabel(txmgrNs walletdb.ReadBucket,
 	return existing.Label, nil
 }
 
-// applyConfirmedDuplicate handles a confirmed batch notification for a
-// transaction hash already present in the legacy store.
+// applyConfirmedDuplicate validates existing confirmed history before native
+// insertion replays its credits. Absent and unconfirmed rows also proceed.
 func (s *Store) applyConfirmedDuplicate(
 	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadBucket,
 	txHash chainhash.Hash, block *wtxmgr.BlockMeta,
-	req db.CreateTxRequest) (bool, error) {
+	req db.CreateTxRequest) error {
 
 	existing, err := s.txStore.TxDetails(txmgrNs, &txHash)
 	if err != nil {
-		return false, fmt.Errorf("lookup existing tx: %w", err)
+		return fmt.Errorf("lookup existing tx: %w", err)
 	}
 
 	if existing == nil || existing.Block.Height < 0 {
-		return false, nil
+		return nil
 	}
 
 	matches, err := s.legacyConfirmedDuplicateMatches(
 		addrmgrNs, txmgrNs, existing, txHash, block, req,
 	)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	if matches {
-		return true, nil
+		// Recovery can discover more credits for the same mined record.
+		// Let InsertConfirmedTx preserve old credits and add the new ones.
+		return nil
 	}
 
-	return true, fmt.Errorf("tx %s: %w", txHash, db.ErrTxAlreadyExists)
+	return fmt.Errorf("tx %s: %w", txHash, db.ErrTxAlreadyExists)
 }
 
-// legacyConfirmedDuplicateMatches reports whether a confirmed duplicate batch
-// notification is already fully reflected by the legacy store.
+// legacyConfirmedDuplicateMatches validates a confirmed replay's block and
+// known metadata before native insertion adds any newly discovered credits.
 func (s *Store) legacyConfirmedDuplicateMatches(
 	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadBucket,
 	existing *wtxmgr.TxDetails, txHash chainhash.Hash,
@@ -785,6 +783,12 @@ func (s *Store) applyUnconfirmedDuplicate(
 		return nil
 	}
 
+	// Both promotion and repeated unconfirmed observations must preserve
+	// ownership. Check it once before selecting either replay path.
+	if len(existing.Credits) != len(req.Params.Credits) {
+		return fmt.Errorf("tx %s: %w", txHash, db.ErrTxAlreadyExists)
+	}
+
 	status, err := readLegacyTxStatus(txmgrNs, txHash)
 	if err != nil {
 		return fmt.Errorf("read duplicate tx status: %w", err)
@@ -847,8 +851,9 @@ func (s *Store) promoteUnconfirmedDuplicate(
 	return true, nil
 }
 
-// legacyDuplicateMatches reports whether a duplicate batch notification's
-// wallet metadata is already fully reflected by the legacy store.
+// legacyDuplicateMatches validates status, label and known-credit metadata.
+// Unconfirmed admission requires an exact set, while confirmed replay may add
+// or omit credits before native insertion.
 func (s *Store) legacyDuplicateMatches(
 	addrmgrNs walletdb.ReadBucket, existing *wtxmgr.TxDetails,
 	status db.TxStatus, req db.CreateTxRequest) (bool, error) {
@@ -866,23 +871,21 @@ func (s *Store) legacyDuplicateMatches(
 	return s.legacyCreditsMatch(addrmgrNs, existing.Credits, req)
 }
 
-// legacyCreditsMatch reports whether requested credit ownership exactly matches
-// the legacy credit records already stored for an unconfirmed transaction.
+// legacyCreditsMatch validates supplied metadata for previously known credits.
+// Confirmed observations may omit known credits or discover additional ones;
+// unconfirmed admission already requires an exact credit count.
 func (s *Store) legacyCreditsMatch(addrmgrNs walletdb.ReadBucket,
 	existing []wtxmgr.CreditRecord, req db.CreateTxRequest) (bool, error) {
 
-	if len(existing) != len(req.Params.Credits) {
-		return false, nil
-	}
-
-	existingCredits := make(map[uint32]bool, len(existing))
 	for _, credit := range existing {
-		existingCredits[credit.Index] = credit.Change
-	}
-
-	for index, addr := range req.Params.Credits {
-		existingChange, ok := existingCredits[index]
+		addr, ok := req.Params.Credits[credit.Index]
 		if !ok {
+			// A confirmed observation need not repeat all prior credits.
+			// Native insertion retains them while validating new entries.
+			if req.Params.Block != nil {
+				continue
+			}
+
 			return false, nil
 		}
 
@@ -890,7 +893,9 @@ func (s *Store) legacyCreditsMatch(addrmgrNs walletdb.ReadBucket,
 		if addr != nil {
 			chainParams := s.addrStore.ChainParams()
 
-			err := validateCreditAddr(*req.Params.Tx, index, addr, chainParams)
+			err := validateCreditAddr(
+				*req.Params.Tx, credit.Index, addr, chainParams,
+			)
 			if err != nil {
 				return false, err
 			}
@@ -902,13 +907,13 @@ func (s *Store) legacyCreditsMatch(addrmgrNs walletdb.ReadBucket,
 
 			if err != nil {
 				return false, fmt.Errorf("lookup credit address %d: %w",
-					index, err)
+					credit.Index, err)
 			}
 
 			expectedChange = managedAddr.Internal()
 		}
 
-		if existingChange != expectedChange {
+		if credit.Change != expectedChange {
 			return false, nil
 		}
 	}
