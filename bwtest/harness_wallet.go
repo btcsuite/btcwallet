@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -28,6 +29,11 @@ const (
 	// defaultWalletRecoveryWindow keeps enough look-ahead addresses for test
 	// cases that derive multiple addresses while scanning historical blocks.
 	defaultWalletRecoveryWindow = 20
+
+	// unimportedFundingPurpose is the custom key scope purpose of the
+	// account FundUnimportedAccount imports, keeping it apart from the
+	// wallet's default scopes.
+	unimportedFundingPurpose = 1017
 
 	// defaultWalletSyncRetryInterval controls how often wallet sync retries
 	// when the chain backend is temporarily unavailable during startup.
@@ -398,9 +404,6 @@ func (h *HarnessTest) FundWallet(w *wallet.Wallet,
 // FundWalletOfType pays one output per amount to distinct wallet addresses of
 // the requested address type in a single miner transaction, confirms it, and
 // returns what the funding transaction created.
-//
-// The transaction's outputs are classified here, where the transaction itself
-// is known, so no caller has to infer which of them the wallet owns.
 func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 	addrType waddrmgr.AddressType,
 	amounts ...btcutil.Amount) WalletFunding {
@@ -419,6 +422,105 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 			PkScript: pkScript,
 		})
 	}
+
+	return h.payOutputs(outputs)
+}
+
+// FundUnimportedAccount pays one output per amount to a test-name-derived
+// account in a single miner transaction, confirms it, and only then imports
+// that account into w. The wallet synced the paying block before the account
+// existed, so only a historical scan can credit the payment; the method fails
+// the test if the wallet already reports it.
+//
+// The account is imported as number 0 of a custom scope. A seeded wallet may
+// already hold that number there (kvdb does), so w must be watch-only on every
+// database to keep one contract. Call it at most once per wallet. The returned
+// AccountScope names the account for Rescan, and WalletOutpoints are the
+// outputs paid to it, which w owns only once a scan credits them.
+func (h *HarnessTest) FundUnimportedAccount(w *wallet.Wallet,
+	amounts ...btcutil.Amount) (waddrmgr.AccountScope, WalletFunding) {
+
+	h.Helper()
+	require.True(h, w.IsWatchOnly(), "funded account needs a watch-only wallet")
+
+	scope := waddrmgr.KeyScope{
+		Purpose: unimportedFundingPurpose,
+		Coin:    h.NetParams().HDCoinType,
+	}
+	accountKey, err := hdkeychain.NewMaster(
+		h.SeedFromTestName(), h.NetParams(),
+	)
+	require.NoError(h, err, "failed to derive account root")
+
+	for _, child := range []uint32{scope.Purpose, scope.Coin, 0} {
+		accountKey, err = accountKey.Derive(
+			hdkeychain.HardenedKeyStart + child,
+		)
+		require.NoError(h, err, "failed to derive account key")
+	}
+
+	accountKey, err = accountKey.Neuter()
+	require.NoError(h, err, "failed to neuter account key")
+
+	// Pay the account's first receive addresses, m/0/i below its key.
+	external, err := accountKey.Derive(0)
+	require.NoError(h, err, "failed to derive receive branch")
+
+	outputs := make([]*wire.TxOut, 0, len(amounts))
+	for i, amount := range amounts {
+		child, err := external.Derive(uint32(i)) //nolint:gosec
+		require.NoError(h, err, "failed to derive receive key")
+
+		pubKey, err := child.ECPubKey()
+		require.NoError(h, err, "failed to read receive key")
+
+		addr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(pubKey.SerializeCompressed()), h.NetParams(),
+		)
+		require.NoError(h, err, "failed to create receive address")
+
+		pkScript, err := txscript.PayToAddrScript(addr)
+		require.NoError(h, err, "failed to create pkscript")
+
+		outputs = append(outputs, &wire.TxOut{
+			Value:    int64(amount),
+			PkScript: pkScript,
+		})
+	}
+
+	funding := h.payOutputs(outputs)
+
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	params := wallet.ImportAccountParams{
+		Name:       "unimported funding",
+		Scope:      &scope,
+		AddrSchema: &schema,
+		XPub:       accountKey,
+	}
+	account, err := w.ImportAccount(h.Context(), params, false)
+	require.NoError(h, err, "failed to import funded account")
+	require.NotNil(h, account.AccountNumber, "imported account has no number")
+
+	_, err = w.GetTx(h.Context(), funding.Tx.TxHash())
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound, "wallet credited unimported funding",
+	)
+
+	target := waddrmgr.AccountScope{
+		Scope:   scope,
+		Account: uint32(*account.AccountNumber),
+	}
+
+	return target, funding
+}
+
+// payOutputs pays outputs in a single miner transaction, confirms it, and
+// returns what it created, treating the outputs given as the wallet's.
+//
+// The transaction's outputs are classified here, where the transaction itself
+// is known, so no caller has to infer which of them the wallet owns.
+func (h *HarnessTest) payOutputs(outputs []*wire.TxOut) WalletFunding {
+	h.Helper()
 
 	txid := h.SendOutputs(outputs, MinerFeeRate)
 
