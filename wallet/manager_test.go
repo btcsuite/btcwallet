@@ -1285,14 +1285,17 @@ func newManagerLifecycleTest(t *testing.T,
 }
 
 // TestManagerStartStopPublishesStableSet verifies only the admitted Start
-// returns the complete ordered set, without rebuilding an active runtime.
+// returns the complete ordered set after birthday recovery, without rebuilding
+// an active runtime.
 func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Hold discovery to exercise overlapping Start admission, then
-	// use real Wallet startup dependencies to verify ordered publication.
+	// reopen processed Wallets that must rewind before ordered publication.
 	entered := make(chan struct{})
 	release := make(chan struct{})
+
+	birthday := db.Block{Height: 100}
 
 	data := make([]*walletData, 0, 2)
 	for i, name := range []string{"first", "second"} {
@@ -1300,8 +1303,15 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 		id := uint32(i + 1)
 
 		deps.store.On("GetWallet", mock.Anything, name).Return(
-			&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+			&db.WalletInfo{
+				BirthdayBlock: &birthday,
+				SyncedTo:      &db.Block{Height: 200},
+			}, nil,
 		).Once()
+		deps.store.On("RewindWallet", mock.Anything, db.RewindWalletParams{
+			WalletID: id,
+			Block:    birthday,
+		}).Return(nil).Once()
 		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
 			WalletID: id,
 		}).Return([]db.AccountInfo{}, nil).Once()
@@ -1323,6 +1333,7 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	}).Return(data, nil).Once()
 	backend.On("close").Return(nil).Once()
 	manager := newManagerLifecycleTest(t, backend)
+	manager.config.RescanOnStart = true
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 	chain.On("Notifications").Return((<-chan any)(nil)).Once()
@@ -1356,7 +1367,7 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	repeated, repeatErr := manager.Start(t.Context())
 
 	// Assert: Rejections return no pointers, while the admitted call exposes
-	// every durable Wallet in the backend's stable identifier order. The
+	// every rewound Wallet in the backend's stable identifier order. The
 	// repeated-start diagnostic explains the rejection to callers.
 	require.ErrorIs(t, overlapErr, ErrStateForbidden)
 	require.Nil(t, overlapping)
@@ -1376,12 +1387,12 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The second Wallet fails its birthday read. Hold the first
+	// Arrange: The second Wallet refuses its birthday rewind. Hold the first
 	// Wallet's real vault cleanup so another Start must reject until the
 	// admitted call finishes cleaning up its partially started set.
 	_, firstDeps := createTestWalletWithMocks(t)
 	_, secondDeps := createTestWalletWithMocks(t)
-	startErr := errors.New("birthday unavailable")
+	startErr := errors.New("rewind unavailable")
 
 	firstDeps.store.On("GetWallet", mock.Anything, "first").Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
@@ -1391,8 +1402,18 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	firstDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
-	secondDeps.store.On("GetWallet", mock.Anything, "second").
-		Return(nil, startErr).Once()
+
+	birthday := db.Block{Height: 100}
+	secondDeps.store.On("GetWallet", mock.Anything, "second").Return(
+		&db.WalletInfo{
+			BirthdayBlock: &birthday,
+			SyncedTo:      &db.Block{Height: 200},
+		}, nil,
+	).Once()
+	secondDeps.store.On("RewindWallet", mock.Anything, db.RewindWalletParams{
+		WalletID: 2,
+		Block:    birthday,
+	}).Return(startErr).Once()
 
 	cleanupEntered := make(chan struct{})
 	releaseCleanup := make(chan struct{})
@@ -1418,6 +1439,7 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	}, nil).Once()
 	backend.On("close").Return(nil).Once()
 	manager := newManagerLifecycleTest(t, backend)
+	manager.config.RescanOnStart = true
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 	chain.On("IsCurrent").Return(false).Maybe()

@@ -849,21 +849,23 @@ func TestControllerUnlockWaitsForAcceptedResultDuringShutdown(t *testing.T) {
 func TestControllerVerifyBirthday_Verified(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a wallet where the birthday block is already verified.
+	// Arrange: Reopen a processed Wallet under default startup policy.
+	// No rewind is expected; the strict Store mock protects disabled rescan.
 	w, deps := createTestWalletWithMocks(t)
 	bs := waddrmgr.BlockStamp{Height: 123, Hash: chainhash.Hash{0x01}}
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{
+			SyncedTo: &db.Block{Height: 200},
 			BirthdayBlock: &db.Block{
 				Height: 123,
 				Hash:   chainhash.Hash{0x01},
 			},
 		}, nil).Once()
 
-	// Act: Verify birthday.
+	// Act: Resolve the verified birthday with startup rescan disabled.
 	err := w.verifyBirthday(t.Context())
 
-	// Assert: Verify success.
+	// Assert: Keep the verified cache without rewinding the processed tip.
 	require.NoError(t, err)
 	require.Equal(t, bs, w.birthdayBlock)
 }

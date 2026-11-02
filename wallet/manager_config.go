@@ -93,6 +93,11 @@ type ManagerConfig struct {
 	// RecoveryWindow sets the shared address-discovery lookahead.
 	RecoveryWindow uint32
 
+	// RescanOnStart rewinds each Wallet to its verified birthday before
+	// starting synchronization. Keys, labels and transaction metadata remain
+	// stored; disable this after recovery to avoid repeating the rescan.
+	RescanOnStart bool
+
 	// AutoLockDuration sets the omitted-timeout unlock duration. Non-positive
 	// values use the safe default rather than disabling automatic locking.
 	AutoLockDuration time.Duration
@@ -209,6 +214,7 @@ func (c ManagerConfig) walletConfig(name string) (Config, error) {
 		Chain:                   c.ChainSource,
 		ChainParams:             &chainParams,
 		RecoveryWindow:          c.RecoveryWindow,
+		RescanOnStart:           c.RescanOnStart,
 		WalletSyncRetryInterval: c.WalletSyncRetryInterval,
 		SyncMethod:              c.SyncMethod,
 		AutoLockDuration:        c.AutoLockDuration,
