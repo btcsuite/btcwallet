@@ -88,6 +88,14 @@ Funding is also available on its own through `(*HarnessTest).FundWallet` and
 `(*HarnessTest).FundWalletOfType`, and addresses through
 `(*HarnessTest).NewWalletAddress` and `(*HarnessTest).NewWalletAddressOfType`.
 
+`(*HarnessTest).FundUnimportedAccount` funds history a wallet has not seen: it
+pays a test-name-derived account, confirms the payment, and only then imports
+that account into a watch-only wallet. Live sync has already passed the paying
+block, so only `Resync` or `Rescan` can credit the payment. It returns the
+imported account's `AccountScope` as a `Rescan` target with the usual
+`WalletFunding`, whose `WalletOutpoints` the wallet owns once a scan credits
+them.
+
 `(*HarnessTest).CreateTestAccount` creates a named sequential account when
 account creation is fixture setup rather than the behavior under test. The
 wallet must already be started and unlocked. The helper fails the current test
