@@ -402,13 +402,17 @@ type PsbtManager interface {
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
 	//
-	// Owned Taproot inputs receive the Wallet's internal key. A conflicting
-	// caller internal key, or one on a non-Taproot input, returns
-	// ErrConflictingInputMetadata.
+	// Owned key-path Taproot inputs receive the Wallet's internal key. A
+	// conflicting caller internal key, or one on a non-Taproot input,
+	// returns ErrConflictingInputMetadata.
 	//
-	// When the origin is unknown, no new derivation records are added.
-	// Caller origins for the spending key are retained without authenticating
-	// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
+	// Owned imported Taproot scripts receive verified witness UTXO facts.
+	// Caller internal keys, merkle roots, leaf scripts and derivations remain
+	// unverified for the signer to validate when selecting a spending path.
+	//
+	// For key-based inputs with unknown root origin, no new derivations are
+	// added. Origins for the known key are retained without checking
+	// unknown paths. Wrong keys or families return ErrConflictingInputMetadata.
 	DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		skipUnknown bool) (*psbt.Packet, error)
 
@@ -528,13 +532,17 @@ type finalizePsbtReq struct {
 //     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
 //
-// Owned Taproot inputs receive the Wallet's internal key. A conflicting
-// caller internal key, or one on a non-Taproot input, returns
-// ErrConflictingInputMetadata.
+// Owned key-path Taproot inputs receive the Wallet's internal key. A
+// conflicting caller internal key, or one on a non-Taproot input,
+// returns ErrConflictingInputMetadata.
 //
-// When the origin is unknown, no new derivation records are added.
-// Caller origins for the spending key are retained without authenticating
-// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
+// Owned imported Taproot scripts receive verified witness UTXO facts.
+// Caller internal keys, merkle roots, leaf scripts and derivations remain
+// unverified for the signer to validate when selecting a spending path.
+//
+// For key-based inputs with unknown root origin, no new derivations are
+// added. Origins for the known key are retained without checking
+// unknown paths. Wrong keys or families return ErrConflictingInputMetadata.
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
@@ -617,16 +625,49 @@ func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
 		// If we own the UTXO, we'll proceed to decorate the
 		// corresponding PSBT input with detailed information from the
 		// wallet.
-		spends[i], err = w.decorateInput(
-			ctx, &packet.Inputs[i], tx, utxo,
+		spend, err := w.decorateTaprootScriptInput(
+			ctx, &packet.Inputs[i], utxo,
 		)
+		if err == nil && spend == waddrmgr.SpendTypeUnknown {
+			spend, err = w.decorateInput(ctx, &packet.Inputs[i], tx, utxo)
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("error decorating input %d: %w",
 				i, err)
 		}
+
+		spends[i] = spend
 	}
 
 	return spends, nil
+}
+
+// decorateTaprootScriptInput supplies verified output facts for script imports.
+// SpendTypeUnknown leaves ordinary inputs on the existing decoration path.
+func (w *Wallet) decorateTaprootScriptInput(ctx context.Context,
+	input *psbt.PInput, utxo *wire.TxOut) (waddrmgr.SpendType, error) {
+
+	if !txscript.IsPayToTaproot(utxo.PkScript) {
+		return waddrmgr.SpendTypeUnknown, nil
+	}
+
+	addr := extractAddrFromPKScript(utxo.PkScript, w.cfg.ChainParams)
+
+	info, err := w.getAddressInfo(ctx, addr)
+	if err != nil {
+		return waddrmgr.SpendTypeUnknown, err
+	}
+
+	if !isScriptSpendAddress(info) {
+		return waddrmgr.SpendTypeUnknown, nil
+	}
+
+	// Keep caller signing records unverified and carry the actual spend type
+	// into existing funding validation; the signer owns leaf authorization.
+	addInputInfoSegWitV1(input, utxo, nil)
+
+	return info.AddrType.SpendType(), nil
 }
 
 // decorateInput is a helper function that decorates a single PSBT input with

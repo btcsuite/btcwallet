@@ -902,6 +902,8 @@ func TestDecorateInputsInternalKey(t *testing.T) {
 		Txid:     validUTXO.Hash,
 	}).Return(testStoreTxDetail(validUTXO.Hash, utxo), nil).Once()
 	expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+	// Script ownership is probed before ordinary key-path validation.
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Twice()
 
 	packet := testFundingPacket(validUTXO)
 	packet.Inputs[0].TaprootInternalKey = schnorr.SerializePubKey(testKey(1))
@@ -1104,6 +1106,99 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	require.NotNil(t, packet.Inputs[2].WitnessUtxo)
 	require.Equal(t, int64(2000), packet.Inputs[2].WitnessUtxo.Value)
 	require.Len(t, packet.Inputs[2].Bip32Derivation, 1)
+}
+
+// TestDecorateInputsTaprootScript preserves imported spending metadata through
+// public funding, whose field validation depends on the actual spend type.
+func TestDecorateInputsTaprootScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit two real signature leaves and retain caller internal
+	// key metadata. The owned script import has no single root origin.
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(key.Zero)
+
+	alternate, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(alternate.Zero)
+
+	firstScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(key.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	secondScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(alternate.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	tree := txscript.AssembleTaprootScriptTree(
+		txscript.NewBaseTapLeaf(firstScript),
+		txscript.NewBaseTapLeaf(secondScript),
+	)
+	rootHash := tree.RootNode.TapHash()
+	root := rootHash[:]
+	outputKey := txscript.ComputeTaprootOutputKey(key.PubKey(), root)
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	w, deps := createStartedSQLWalletWithMocks(t)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outpoint := wire.OutPoint{
+		Hash: chainhash.Hash{1},
+	}
+	output := expectFundingSourcesForAddress(t, w, deps, outpoint, addr)
+	packet := testFundingPacket(outpoint)
+	packet.UnsignedTx.AddTxOut(wire.NewTxOut(400_000, script))
+	packet.Outputs = make([]psbt.POutput, 1)
+
+	origin := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey: schnorr.SerializePubKey(key.PubKey()),
+		LeafHashes:  [][]byte{},
+		Bip32Path:   []uint32{1, 0},
+	}
+	packet.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{origin}
+	packet.Inputs[0].TaprootMerkleRoot = root
+	packet.Inputs[0].TaprootInternalKey = origin.XOnlyPubKey
+
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: script,
+	}).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		HasScript:    true,
+		ScriptPubKey: script,
+	}, nil).Once()
+
+	expectFundingLease(w, deps, []wire.OutPoint{outpoint}, nil)
+
+	// Act: Fund publicly so decoration's spend classification reaches the
+	// existing caller-field checks without selecting or loading a leaf.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: Funding accepts script-path metadata and preserves the real
+	// UTXO and caller signing facts. Fixture cleanup checks the Store calls.
+	require.NoError(t, err)
+
+	input := result.Packet.Inputs[0]
+	require.Equal(t, output, input.WitnessUtxo)
+	require.Empty(t, input.Bip32Derivation)
+	require.Equal(
+		t, []*psbt.TaprootBip32Derivation{origin},
+		input.TaprootBip32Derivation,
+	)
+	require.Equal(t, root, input.TaprootMerkleRoot)
+	require.Equal(t, origin.XOnlyPubKey, input.TaprootInternalKey)
 }
 
 // TestDecorateInputsErrUnknownRequired tests that DecorateInputs returns
@@ -5902,6 +5997,7 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 
 	tests := []struct {
 		name          string
+		reads         int
 		addrType      db.AddressType
 		origin        []*psbt.Bip32Derivation
 		taprootOrigin []*psbt.TaprootBip32Derivation
@@ -5910,22 +6006,26 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 	}{
 		{
 			name:     "omit unknown origin",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			parent:   true,
 		},
 		{
 			name:     "retain matching native origin",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			origin:   origin,
 			parent:   true,
 		},
 		{
 			name:        "omit unknown taproot origin",
+			reads:       2,
 			addrType:    db.TaprootPubKey,
 			internalKey: stored.PubKey[1:],
 		},
 		{
 			name:          "retain matching taproot origin",
+			reads:         2,
 			addrType:      db.TaprootPubKey,
 			taprootOrigin: taprootOrigin,
 			internalKey:   stored.PubKey[1:],
@@ -5949,6 +6049,9 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 			expectFundingLease(w, mocks, []wire.OutPoint{validUTXO}, nil)
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -6007,11 +6110,13 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		reads    int
 		addrType db.AddressType
 		caller   psbt.PInput
 	}{
 		{
 			name:     "contradict taproot internal key",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
@@ -6019,6 +6124,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot derivation on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: taprootOrigin,
@@ -6026,6 +6132,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot internal key on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: stored.PubKey[1:],
@@ -6033,6 +6140,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "bip32 derivation on taproot input",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: origin,
@@ -6040,6 +6148,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "foreign native derivation",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: testWalletDerivation(),
@@ -6047,6 +6156,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "foreign taproot derivation",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -6054,6 +6164,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot script-path derivation",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: leafOrigin,
@@ -6078,6 +6189,9 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -6112,11 +6226,13 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 	// The family rows must not become Wallet facts merely by being seeded.
 	tests := []struct {
 		name     string
+		reads    int
 		addrType db.AddressType
 		caller   psbt.PInput
 	}{
 		{
 			name:     "conflicting taproot internal key",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
@@ -6124,6 +6240,7 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 		},
 		{
 			name:     "taproot derivation on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -6131,6 +6248,7 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 		},
 		{
 			name:     "native derivation on taproot input",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: testWalletDerivation(),
@@ -6153,6 +6271,9 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -6672,7 +6793,8 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	expectSignerDerivedAddressInfo(
 		t, w, mocks, inputAddr, db.TaprootPubKey, inputKey.PubKey(),
 	)
-	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Once()
+	// Probe script ownership before ordinary key-path decoration.
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Twice()
 	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
