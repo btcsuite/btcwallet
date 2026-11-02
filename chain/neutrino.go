@@ -841,15 +841,15 @@ out:
 // chain backends and maps it to an defined error here. It uses the
 // `BtcdErrMap`, whose keys are btcd error strings and values are errors made
 // from bitcoind error strings.
+// Input diagnostics take precedence over their nested policy causes.
 //
 // NOTE: we assume neutrino shares the same error strings as btcd.
 func (s *NeutrinoClient) MapRPCErr(rpcErr error) error {
-	// Iterate the map and find the matching error.
-	for btcdErr, matchedErr := range BtcdErrMap {
-		// Match it against btcd's error.
-		if matchErrStr(rpcErr, btcdErr) {
-			return matchedErr
-		}
+	// Peer rejects carry the same nested btcd causes, so share current
+	// classification before this backend's unversioned legacy fallback.
+	err := mapBtcdErr(rpcErr)
+	if err != nil {
+		return err
 	}
 
 	// Neutrino doesn't support version check, we will try to match the

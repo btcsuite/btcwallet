@@ -599,13 +599,13 @@ func (c *RPCClient) LookupInputMempoolSpend(op wire.OutPoint) (
 // chain backends and maps it to an defined error here. It uses the
 // `BtcdErrMap`, whose keys are btcd error strings and values are errors made
 // from bitcoind error strings.
+// Input diagnostics take precedence over their nested policy causes.
 func (c *RPCClient) MapRPCErr(rpcErr error) error {
-	// Iterate the map and find the matching error.
-	for btcdErr, matchedErr := range BtcdErrMap {
-		// Match it against btcd's error.
-		if matchErrStr(rpcErr, btcdErr) {
-			return matchedErr
-		}
+	// Share current-reason precedence with peer rejects before applying
+	// this backend's version-dependent legacy fallback.
+	err := mapBtcdErr(rpcErr)
+	if err != nil {
+		return err
 	}
 
 	// If no matching error is found, we try to match it to an older

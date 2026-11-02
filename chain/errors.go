@@ -519,7 +519,12 @@ var BtcdErrMap = map[string]error{
 
 	// Some nonstandard transactions - non-standard script.
 	"non-standard script form": ErrNonStandardScript,
-	"has a non-standard input": ErrNonStandardScript,
+
+	// Input diagnostics identify the failing input even when their nested
+	// cause also matches a broader script or transaction-policy reason.
+	"has a non-standard input":  ErrNonStandardInputs,
+	"failed to parse input ":    ErrScriptVerifyFlag,
+	"failed to validate input ": ErrScriptVerifyFlag,
 
 	// Some nonstandard transactions - bare multisig script
 	// (2-of-3).
@@ -552,7 +557,6 @@ var BtcdErrMap = map[string]error{
 	//
 	// A tiny transaction(in non-witness bytes) that is disallowed.
 	// "unmatched btcd error 1": ErrTxTooSmall,
-	// "unmatched btcd error 2": ErrScriptVerifyFlag,
 	// // A transaction with invalid OP codes.
 	// "unmatched btcd error 3": ErrInvalidOpcode,
 	// // Minimally-small transaction(in non-witness bytes) that is
@@ -612,6 +616,35 @@ var BtcdErrMapPre2402 = map[string]error{
 
 	// Some nonstandard transactions - output too small.
 	"is dust": ErrDust,
+}
+
+// mapBtcdErr classifies current btcd reasons, preferring input diagnostics
+// over their nested policy causes. A nil result leaves legacy and unknown
+// handling to the caller.
+func mapBtcdErr(rpcErr error) error {
+	// Both RPC and peer rejects preserve the nested cause. Resolve input
+	// categories first so unordered map iteration cannot mask them.
+	for _, inputErr := range []error{
+		ErrNonStandardInputs,
+		ErrScriptVerifyFlag,
+	} {
+		for btcdErr, matchedErr := range BtcdErrMap {
+			if errors.Is(matchedErr, inputErr) &&
+				matchErrStr(rpcErr, btcdErr) {
+
+				return matchedErr
+			}
+		}
+	}
+
+	// Other current policy reasons retain the existing broad matching.
+	for btcdErr, matchedErr := range BtcdErrMap {
+		if matchErrStr(rpcErr, btcdErr) {
+			return matchedErr
+		}
+	}
+
+	return nil
 }
 
 // matchErrStr takes an error returned from RPC client and matches it against
