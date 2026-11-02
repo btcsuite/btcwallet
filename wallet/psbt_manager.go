@@ -187,6 +187,16 @@ type FundIntent struct {
 	// necessary, rather than performing full coin selection.
 	Packet *psbt.Packet
 
+	// InputWitnessSizes bounds the full serialized witness stack for each
+	// Taproot input, keyed by outpoint. A bound includes compact-size
+	// prefixes, signatures, arguments, script, control block and any annex,
+	// but excludes the transaction marker and flag. The caller must bound
+	// the spend it will finalize; PSBT leaf records alone cannot do so.
+	// A bound must also cover each supplied leaf/control-block pair.
+	// Imported Taproot script inputs require a positive bound. Non-Taproot
+	// inputs keep their ordinary estimate; unselected entries are ignored.
+	InputWitnessSizes map[wire.OutPoint]uint32
+
 	// Policy specifies the coin selection policy to use when funding the
 	// PSBT. This field is only used when the `Packet` has no inputs,
 	// indicating that automatic coin selection should be performed. If this
@@ -394,13 +404,17 @@ type PsbtManager interface {
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
 	//
-	// Owned Taproot inputs receive the Wallet's internal key. A conflicting
-	// caller internal key, or one on a non-Taproot input, returns
-	// ErrConflictingInputMetadata.
+	// Owned key-path Taproot inputs receive the Wallet's internal key. A
+	// conflicting caller internal key, or one on a non-Taproot input,
+	// returns ErrConflictingInputMetadata.
 	//
-	// When the origin is unknown, no new derivation records are added.
-	// Caller origins for the spending key are retained without authenticating
-	// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
+	// Owned imported Taproot scripts receive verified witness UTXO facts.
+	// Caller internal keys, merkle roots, leaf scripts and derivations remain
+	// unverified for the signer to validate when selecting a spending path.
+	//
+	// For key-based inputs with unknown root origin, no new derivations are
+	// added. Origins for the known key are retained without checking
+	// unknown paths. Wrong keys or families return ErrConflictingInputMetadata.
 	DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		skipUnknown bool) (*psbt.Packet, error)
 
@@ -520,13 +534,17 @@ type finalizePsbtReq struct {
 //     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
 //
-// Owned Taproot inputs receive the Wallet's internal key. A conflicting
-// caller internal key, or one on a non-Taproot input, returns
-// ErrConflictingInputMetadata.
+// Owned key-path Taproot inputs receive the Wallet's internal key. A
+// conflicting caller internal key, or one on a non-Taproot input,
+// returns ErrConflictingInputMetadata.
 //
-// When the origin is unknown, no new derivation records are added.
-// Caller origins for the spending key are retained without authenticating
-// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
+// Owned imported Taproot scripts receive verified witness UTXO facts.
+// Caller internal keys, merkle roots, leaf scripts and derivations remain
+// unverified for the signer to validate when selecting a spending path.
+//
+// For key-based inputs with unknown root origin, no new derivations are
+// added. Origins for the known key are retained without checking
+// unknown paths. Wrong keys or families return ErrConflictingInputMetadata.
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
@@ -609,16 +627,53 @@ func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
 		// If we own the UTXO, we'll proceed to decorate the
 		// corresponding PSBT input with detailed information from the
 		// wallet.
-		spends[i], err = w.decorateInput(
-			ctx, &packet.Inputs[i], tx, utxo,
+		spend, err := w.decorateTaprootScriptInput(
+			ctx, &packet.Inputs[i], utxo,
 		)
+		if err == nil && spend == waddrmgr.SpendTypeUnknown {
+			spend, err = w.decorateInput(ctx, &packet.Inputs[i], tx, utxo)
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("error decorating input %d: %w",
 				i, err)
 		}
+
+		spends[i] = spend
 	}
 
 	return spends, nil
+}
+
+// decorateTaprootScriptInput supplies verified output facts for script imports.
+// SpendTypeUnknown leaves ordinary inputs on the existing decoration path.
+func (w *Wallet) decorateTaprootScriptInput(ctx context.Context,
+	input *psbt.PInput, utxo *wire.TxOut) (waddrmgr.SpendType, error) {
+
+	if !txscript.IsPayToTaproot(utxo.PkScript) {
+		return waddrmgr.SpendTypeUnknown, nil
+	}
+
+	addr := extractAddrFromPKScript(utxo.PkScript, w.cfg.ChainParams)
+
+	info, err := w.getAddressInfo(ctx, addr)
+	if err != nil {
+		return waddrmgr.SpendTypeUnknown, err
+	}
+
+	if !isScriptSpendAddress(info) {
+		return waddrmgr.SpendTypeUnknown, nil
+	}
+
+	// Keep caller signing records unverified and carry the actual spend type
+	// into existing funding validation; the signer owns leaf authorization.
+	// Preserve the sighash policy that existing signatures may commit to
+	// before this helper supplies its default for newly populated inputs.
+	sighashType := input.SighashType
+	addInputInfoSegWitV1(input, utxo, nil)
+	input.SighashType = sighashType
+
+	return info.AddrType.SpendType(), nil
 }
 
 // decorateInput is a helper function that decorates a single PSBT input with
@@ -939,7 +994,7 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 
 	// Author the transaction through the shared authoring boundary.
 	authoredTx, changeAccount, change, err := w.authorTxIntent(
-		r.ctx, txIntent,
+		r.ctx, txIntent, r.intent.InputWitnessSizes,
 	)
 	if err != nil {
 		r.respChan <- fundPsbtResp{err: err}
@@ -949,7 +1004,7 @@ func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
 
 	// Populate the PSBT packet with the new transaction details.
 	packet, changeIndex, err := w.populatePsbtPacket(
-		r.ctx, packet, authoredTx,
+		r.ctx, packet, authoredTx, r.intent.InputWitnessSizes,
 	)
 
 	// Another attempt can lease an input after authoring accepted it but
@@ -1105,9 +1160,11 @@ func (w *Wallet) releaseFundingInputs(ctx context.Context,
 // populatePsbtPacket updates the PSBT packet with the new transaction details,
 // decorates the inputs, and handles the change output. It returns the modified
 // packet and the index of the change output, or -1 if no change output was
-// added.
+// added. Imported script inputs must have a bound in witnessSizes that covers
+// their revealed leaf data as well as the caller's eventual satisfaction.
 func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
-	authoredTx *txauthor.AuthoredTx) (*psbt.Packet, int32, error) {
+	authoredTx *txauthor.AuthoredTx,
+	witnessSizes map[wire.OutPoint]uint32) (*psbt.Packet, int32, error) {
 
 	// Take the caller's own records off the packet before the authored
 	// transaction replaces the transaction they were attached to. Inputs
@@ -1163,6 +1220,14 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	// false because all inputs in the `authoredTx` must be known to the
 	// wallet.
 	spends, err := w.decorateInputs(ctx, packet, false)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Only decoration knows which owned outputs are script imports.
+	// Refuse an unbounded satisfaction before change registration or leases
+	// can expose a transaction whose fee assumed a key-path witness.
+	err = checkFundingWitnessSizes(packet, spends, witnessSizes)
 	if err != nil {
 		return nil, 0, err
 	}
