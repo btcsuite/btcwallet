@@ -689,37 +689,56 @@ func (w *Wallet) validateNewAccountScope(ctx context.Context,
 	params *db.CreateDerivedAccountParams) error {
 
 	// Omission preserves lazy canonical creation without an extra read.
-	defaultSchema, canonical := db.ScopeAddrMap[params.Scope]
+	_, canonical := db.ScopeAddrMap[params.Scope]
 	if canonical && params.AddrSchema == nil {
 		return nil
 	}
 
 	schema, err := w.store.GetKeyScopeSchema(ctx, w.id, params.Scope)
+	// Constructor initialization has no persisted scope yet. Resolve that
+	// case through the same rule as an ordinary lookup that finds no scope.
 	switch {
 	case errors.Is(err, db.ErrKeyScopeNotFound):
-		if !canonical {
-			if params.AddrSchema == nil || params.AccountNumber == nil {
-				return fmt.Errorf("new scope needs schema and number: %w",
-					db.ErrInvalidParam)
-			}
-
-			return nil
-		}
-
-		// Receiving APIs map address types to canonical scopes. A newly
-		// created scope must retain that mapping; an existing scope below
-		// remains governed by its persisted schema, including overrides.
-		schema = defaultSchema
+		_, err = validateDerivedAccountScope(params, nil)
 
 	case err != nil:
 		return err
+
+	default:
+		_, err = validateDerivedAccountScope(params, &schema)
 	}
 
+	return err
+}
+
+// validateDerivedAccountScope resolves the schema under the ordinary account
+// policy for both live creation and unpublished initial accounts. A nil stored
+// schema describes a new scope, without requiring a Store lookup at genesis.
+func validateDerivedAccountScope(params *db.CreateDerivedAccountParams,
+	storedSchema *db.ScopeAddrSchema) (db.ScopeAddrSchema, error) {
+
+	schema, canonical := db.ScopeAddrMap[params.Scope]
+	if storedSchema != nil {
+		schema = *storedSchema
+	} else if !canonical {
+		// A custom scope has no canonical schema or first account number
+		// to infer; require both before installing its durable identity.
+		if params.AddrSchema == nil || params.AccountNumber == nil {
+			return db.ScopeAddrSchema{}, fmt.Errorf("new scope needs "+
+				"schema and number: %w", db.ErrInvalidParam)
+		}
+
+		return *params.AddrSchema, nil
+	}
+
+	// Receiving APIs rely on canonical new scopes; after creation the
+	// stored schema remains authoritative, including existing overrides.
 	if params.AddrSchema != nil && *params.AddrSchema != schema {
-		return fmt.Errorf("conflicting scope schema: %w", db.ErrInvalidParam)
+		return db.ScopeAddrSchema{}, fmt.Errorf("conflicting scope "+
+			"schema: %w", db.ErrInvalidParam)
 	}
 
-	return nil
+	return schema, nil
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total balance
