@@ -768,7 +768,9 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		walletCfg.RecoveryWindow = *params.RecoveryWindow
 	}
 
-	data, err := m.backend.create(context.Background(), params, rootKey)
+	data, err := m.backend.create(
+		context.Background(), params, rootKey, nil,
+	)
 	if err != nil {
 		return nil, err
 	}
