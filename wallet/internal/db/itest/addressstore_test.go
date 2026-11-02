@@ -1763,6 +1763,23 @@ func TestResolveOwnedAddresses(t *testing.T) {
 		ownedScripts = append(ownedScripts, script)
 	}
 
+	// Key-only accounts remain owned. Include their stored policy in the
+	// existing mixed-script resolver contract, separate from credit admission.
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    walletID,
+			Scope:       db.KeyScopeBIP0084,
+			Name:        "key-only",
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	excludedAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "key-only", false,
+	)
+	ownedScripts = append(ownedScripts, excludedAddr.ScriptPubKey)
+
 	// Two scripts the wallet does not own. They must be omitted from the
 	// result rather than surfaced as an error.
 	foreignScripts := [][]byte{RandomBytes(32), RandomBytes(32)}
@@ -1788,7 +1805,10 @@ func TestResolveOwnedAddresses(t *testing.T) {
 			info, ok := owned[string(script)]
 			require.True(t, ok)
 			require.Equal(t, script, info.ScriptPubKey)
-			require.True(t, info.IsWatchOnly)
+
+			isExcluded := string(script) == string(excludedAddr.ScriptPubKey)
+			require.Equal(t, !isExcluded, info.IsWatchOnly)
+			require.Equal(t, isExcluded, info.NoChainSync)
 		}
 
 		for _, script := range foreignScripts {
