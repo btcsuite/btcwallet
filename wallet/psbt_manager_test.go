@@ -584,13 +584,13 @@ func TestDecorateInputSegWitV0(t *testing.T) {
 func TestDecorateInputTaproot(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup private and public keys for a Taproot address.
+	// Arrange: Resolve a known-origin Taproot key from the Store while
+	// leaving the caller input empty, including its optional internal key.
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
 	pubKey := privKey.PubKey()
 
-	// Arrange: Create a Taproot address and its corresponding script.
 	taprootAddr, err := address.NewAddressTaproot(
 		schnorr.SerializePubKey(pubKey), &chainParams,
 	)
@@ -601,20 +601,11 @@ func TestDecorateInputTaproot(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock the address manager to return our Taproot address as a
-	// ManagedPubKeyAddress when `Address` is called with the Taproot
-	// address.
 	expectSignerDerivedAddressInfo(
 		t, w, mocks, taprootAddr, db.TaprootPubKey, pubKey,
 	)
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Once()
 
-	// Arrange: Mock the ManagedPubKeyAddress methods to return relevant
-	// derivation and public key information. AddrType is not strictly
-	// checked for Taproot inputs in decorateInput, so no mock is needed
-	// for it.
-
-	// Arrange: Create a UTXO with the Taproot script and an empty PSBT
-	// input.
 	utxo := &wire.TxOut{
 		Value:    1000,
 		PkScript: taprootScript,
@@ -622,16 +613,19 @@ func TestDecorateInputTaproot(t *testing.T) {
 	tx := &wire.MsgTx{}
 	pInput := &psbt.PInput{}
 
-	// Act: Call decorateInput to populate the PSBT input.
+	// Act: Decorate from the Wallet's output and address facts without
+	// relying on any caller-supplied internal key or derivation record.
 	spend, err := w.decorateInput(t.Context(), pInput, tx, utxo)
 
-	// Assert: Verify no error occurred and that the PSBT input is
-	// correctly populated with WitnessUtxo, SighashType, and Taproot BIP32
-	// derivation info, including the x-only public key.
+	// Assert: Known-origin decoration supplies the real internal key as
+	// well as the UTXO, default sighash, and unambiguous Taproot derivation.
 	require.NoError(t, err)
 	require.Equal(t, waddrmgr.SpendTypeTaprootKeyPath, spend)
 	require.Equal(t, utxo, pInput.WitnessUtxo)
 	require.Equal(t, txscript.SigHashDefault, pInput.SighashType)
+	require.Equal(
+		t, schnorr.SerializePubKey(pubKey), pInput.TaprootInternalKey,
+	)
 	// Taproot inputs carry only the taproot derivation (no Bip32Derivation),
 	// otherwise the wallet's own signer rejects them as ambiguous.
 	require.Empty(t, pInput.Bip32Derivation)
@@ -874,6 +868,41 @@ func TestDecorateInputNestedWitnessUsesRedeemScript(t *testing.T) {
 	// Assert: The PSBT redeem script stores the inner witness program.
 	require.Equal(t, witnessProgram, pInput.RedeemScript)
 	require.Equal(t, waddrmgr.SpendTypeNestedWitnessKey, spend)
+}
+
+// TestDecorateInputsInternalKey refuses a conflicting caller key even when
+// the owned Taproot address has a complete Wallet origin.
+func TestDecorateInputsInternalKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The Store knows the input's key and full derivation, while
+	// the caller supplies a different valid x-only key on the same input.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	inputAddr, stored := storeChild(
+		t, storeDerivationAccountPubKey(t), db.TaprootPubKey, false, 0,
+	)
+	utxo := wire.NewTxOut(1_000_000, stored.ScriptPubKey)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: validUTXO,
+	}).Return(testStoreUtxoInfo(validUTXO, utxo), nil).Once()
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     validUTXO.Hash,
+	}).Return(testStoreTxDetail(validUTXO.Hash, utxo), nil).Once()
+	expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+
+	packet := testFundingPacket(validUTXO)
+	packet.Inputs[0].TaprootInternalKey = schnorr.SerializePubKey(testKey(1))
+
+	// Act: Use the public decoration entrypoint with the conflicting key,
+	// so agreement must be enforced before any caller field is overwritten.
+	result, err := w.DecorateInputs(t.Context(), packet, false)
+
+	// Assert: A complete origin cannot authorize contradicting the known
+	// internal key; decoration reports the same conflict as funding.
+	require.ErrorIs(t, err, ErrConflictingInputMetadata)
+	require.Nil(t, result)
 }
 
 // TestDecorateInputsSuccess tests that DecorateInputs correctly decorates
@@ -5707,6 +5736,81 @@ func testFundingPacket(outPoints ...wire.OutPoint) *psbt.Packet {
 	return packet
 }
 
+// TestFundPsbtKnownInputMetadata refuses caller claims that contradict a
+// known Wallet origin, even when caller records are seeded before decoration.
+func TestFundPsbtKnownInputMetadata(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Each record conflicts with a fact known for the owned input.
+	// The family rows must not become Wallet facts merely by being seeded.
+	tests := []struct {
+		name     string
+		addrType db.AddressType
+		caller   psbt.PInput
+	}{
+		{
+			name:     "conflicting taproot internal key",
+			addrType: db.TaprootPubKey,
+			caller: psbt.PInput{
+				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
+			},
+		},
+		{
+			name:     "taproot derivation on native input",
+			addrType: db.WitnessPubKey,
+			caller: psbt.PInput{
+				TaprootBip32Derivation: testWalletTaprootDerivation(),
+			},
+		},
+		{
+			name:     "native derivation on taproot input",
+			addrType: db.TaprootPubKey,
+			caller: psbt.PInput{
+				Bip32Derivation: testWalletDerivation(),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Reuse manual funding with a complete-origin input.
+			// Rejected packets must not reach the unconfigured lease mock.
+			w, mocks := createStartedSQLWalletWithMocks(t)
+			mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+			inputAddr, stored := storeChild(
+				t, storeDerivationAccountPubKey(t), test.addrType, false, 0,
+			)
+			utxo := expectFundingSourcesForAddress(
+				t, w, mocks, validUTXO, inputAddr,
+			)
+			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+
+			packet := testFundingPacket(validUTXO)
+			packet.UnsignedTx.AddTxOut(
+				wire.NewTxOut(400_000, utxo.PkScript),
+			)
+			packet.Outputs = make([]psbt.POutput, 1)
+			packet.Inputs[0] = test.caller
+			before := packetSnapshot(t, packet)
+
+			// Act: Fund through the public API so both shared decoration
+			// and canonical reconciliation see the seeded caller records.
+			result, err := w.FundPsbt(t.Context(), &FundIntent{
+				Packet:  packet,
+				FeeRate: defaultFeeRate,
+			})
+
+			// Assert: Known Wallet facts reject the contradiction before
+			// leasing and leave the original caller packet untouched.
+			require.ErrorIs(t, err, ErrConflictingInputMetadata)
+			require.Nil(t, result)
+			require.Equal(t, before, packetSnapshot(t, packet))
+		})
+	}
+}
+
 // TestFundPsbtPreservesCallerMetadata verifies that everything a caller
 // attached to its packet survives funding.
 //
@@ -6216,6 +6320,10 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 
 	packet.Inputs[0].NonWitnessUtxo = parent
 	packet.Inputs[0].WitnessUtxo = utxo
+	// A matching caller key must survive the same agreement check that
+	// refuses a contradictory key in the known-origin funding regression.
+	packet.Inputs[0].TaprootInternalKey =
+		schnorr.SerializePubKey(inputKey.PubKey())
 
 	before := packetSnapshot(t, packet)
 
@@ -6245,6 +6353,10 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 
 	fundedInput := funded.Inputs[inputIdx]
 	require.Equal(t, parent, fundedInput.NonWitnessUtxo)
+	require.Equal(
+		t, packet.Inputs[0].TaprootInternalKey,
+		fundedInput.TaprootInternalKey,
+	)
 
 	// The wallet supplies the taproot derivation for its own coin, and
 	// records no parent for one, so this is the caller's record and not a

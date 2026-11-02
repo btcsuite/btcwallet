@@ -179,21 +179,25 @@ func checkFieldsFitSpend(decorated, caller *psbt.PInput,
 		return nil
 	}
 
-	return checkWalletInternalKey(decorated, caller, idx)
+	err := checkWalletInternalKey(
+		decorated.TaprootInternalKey, caller.TaprootInternalKey,
+	)
+	if err != nil {
+		return fmt.Errorf("%w: input %d taproot internal key", err, idx)
+	}
+
+	return nil
 }
 
 // checkWalletInternalKey refuses a caller's taproot internal key other than
 // the wallet's. The wallet's taproot coins commit to no script, so the key it
-// derived is the internal key. Any other spend has no taproot key to match.
-func checkWalletInternalKey(decorated, caller *psbt.PInput, idx int) error {
-	for _, w := range decorated.TaprootBip32Derivation {
-		if bytes.Equal(w.XOnlyPubKey, caller.TaprootInternalKey) {
-			return nil
-		}
+// knows is the internal key, even without an origin. Other spends have none.
+func checkWalletInternalKey(internalKey, callerKey []byte) error {
+	if len(internalKey) > 0 && bytes.Equal(internalKey, callerKey) {
+		return nil
 	}
 
-	return fmt.Errorf("%w: input %d taproot internal key",
-		ErrConflictingInputMetadata, idx)
+	return ErrConflictingInputMetadata
 }
 
 // fieldFitError names a caller record the wallet's spend does not use.
