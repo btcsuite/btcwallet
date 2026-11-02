@@ -154,6 +154,16 @@ func (m *Store) CreateDerivedAccount(ctx context.Context,
 	return args.Get(0).(*db.AccountInfo), args.Error(1)
 }
 
+// CreateInitialDerivedAccounts supplies the SQL constructor's batch outcome.
+func (m *Store) CreateInitialDerivedAccounts(ctx context.Context,
+	walletID uint32, accounts []db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) error {
+
+	args := m.Called(ctx, walletID, accounts, deriveFn)
+
+	return args.Error(0)
+}
+
 // CreateImportedAccount implements the db.AccountStore interface.
 func (m *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
