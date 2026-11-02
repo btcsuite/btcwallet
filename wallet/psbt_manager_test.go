@@ -6866,3 +6866,163 @@ func TestFundPsbtAmbiguousReservationCleanupJoinedByStop(t *testing.T) {
 	require.NoError(t, <-stoppedChan)
 	require.NoError(t, releaseCtxErr)
 }
+
+// TestSignPsbtReconcilesMatchingOrigins signs the actual output type when both
+// origin formats agree, preserving both records across repeated public signing.
+func TestSignPsbtReconcilesMatchingOrigins(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Add a matching opposite-family record to each real fixture.
+	// Each packet still spends its original output with the fixture's key.
+	_, pubKey := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	native := testP2WPKHSignPacket(t, 0)
+	nativeOrigin := native.Inputs[0].Bip32Derivation[0]
+	native.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{
+			{
+				XOnlyPubKey:          nativeOrigin.PubKey[1:],
+				Bip32Path:            nativeOrigin.Bip32Path,
+				MasterKeyFingerprint: nativeOrigin.MasterKeyFingerprint,
+			},
+		}
+
+	taproot := testTaprootSignPacket(t, testBip86Output(t, pubKey), nil)
+	taprootOrigin := taproot.Inputs[0].TaprootBip32Derivation[0]
+	taproot.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{
+		{
+			PubKey:               pubKey.SerializeCompressed(),
+			Bip32Path:            taprootOrigin.Bip32Path,
+			MasterKeyFingerprint: taprootOrigin.MasterKeyFingerprint,
+		},
+	}
+
+	tests := []struct {
+		name    string
+		purpose uint32
+		packet  *psbt.Packet
+	}{
+		{
+			name:    "SegWit v0",
+			purpose: 84,
+			packet:  native,
+		},
+		{
+			name:    "Taproot key path",
+			purpose: 86,
+			packet:  taproot,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Allow only the first pass to retrieve its key.
+			// Fixture cleanup verifies the Store and vault calls once.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			key, _ := expectStoreSignerPrivKey(
+				t, mocks, w.id,
+				waddrmgr.KeyScope{Purpose: tc.purpose, Coin: 1},
+				waddrmgr.DerivationPath{},
+			)
+			t.Cleanup(key.Zero)
+
+			before := clonePacket(tc.packet).Inputs[0]
+
+			// Act: Sign once, then submit the signed packet again so
+			// public authorization validates the emitted record.
+			first, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: tc.packet},
+			)
+			require.NoError(t, err)
+
+			signed := clonePacket(tc.packet)
+			second, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: tc.packet},
+			)
+
+			// Assert: The real output was signed successfully and
+			// verified on the second pass, with no duplicate signature,
+			// new key lookup or replacement of either origin record.
+			require.NoError(t, err)
+			require.Equal(t, []uint32{0}, first.SignedInputs)
+			require.Empty(t, second.SignedInputs)
+			require.Equal(t, signed, tc.packet)
+			require.Equal(
+				t, before.Bip32Derivation,
+				tc.packet.Inputs[0].Bip32Derivation,
+			)
+			require.Equal(
+				t, before.TaprootBip32Derivation,
+				tc.packet.Inputs[0].TaprootBip32Derivation,
+			)
+		})
+	}
+}
+
+// TestSignPsbtRejectsConflictingOrigins preserves strict metadata authorization
+// when valid BIP32 and Taproot records disagree about one origin fact.
+func TestSignPsbtRejectsConflictingOrigins(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start from an owned, signable input and vary exactly one
+	// well-formed origin fact. No Store lookup is authorized for any row.
+	base := testP2WPKHSignPacket(t, 0)
+	origin := base.Inputs[0].Bip32Derivation[0]
+	foreign, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(foreign.Zero)
+
+	otherPath := append([]uint32(nil), origin.Bip32Path...)
+	otherPath[4]++
+
+	tests := []struct {
+		name   string
+		origin psbt.TaprootBip32Derivation
+	}{
+		{
+			name: "different public key",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey: schnorr.SerializePubKey(foreign.PubKey()),
+				Bip32Path:   origin.Bip32Path,
+			},
+		},
+		{
+			name: "different path",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey: origin.PubKey[1:],
+				Bip32Path:   otherPath,
+			},
+		},
+		{
+			name: "different fingerprint",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey:          origin.PubKey[1:],
+				Bip32Path:            origin.Bip32Path,
+				MasterKeyFingerprint: 1,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, _ := createUnlockedWalletWithMocks(t)
+			packet := clonePacket(base)
+			packet.Inputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{&tc.origin}
+			before := packetSnapshot(t, packet)
+
+			// Act: Submit conflicting origins to public signing before
+			// selecting either signing algorithm or looking up a key.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: Ambiguity remains fatal, returns no result and
+			// leaves the participant's original packet unchanged.
+			require.ErrorIs(t, err, ErrAmbiguousDerivation)
+			require.Nil(t, result)
+			require.Equal(t, before, packetSnapshot(t, packet))
+		})
+	}
+}
