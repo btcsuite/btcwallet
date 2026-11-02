@@ -24,6 +24,12 @@ import (
 // signature record that does not verify for the input it sits on.
 var ErrInvalidSignatureRecord = errors.New("invalid psbt signature record")
 
+// ErrSigningKeyMismatch is returned when the output of an input SignPsbt would
+// sign does not commit to the key, script or leaf it would sign with, or the
+// key is not the one the wallet derives for it.
+var ErrSigningKeyMismatch = errors.New("signing key does not satisfy the " +
+	"psbt input")
+
 // ecdsaScriptContext is what an ECDSA signature on one input commits to.
 type ecdsaScriptContext struct {
 	// script is the script the spend runs.
@@ -341,7 +347,9 @@ func authorizeTaprootScriptSpendSigs(packet *psbt.Packet, idx int,
 
 		seen[id] = struct{}{}
 
-		leaf, err := committedTapLeaf(pIn, utxo.PkScript[2:34], sig)
+		leaf, err := committedTapLeaf(
+			pIn, utxo.PkScript[2:34], sig.LeafHash,
+		)
 		if err != nil {
 			return err
 		}
@@ -363,11 +371,11 @@ func authorizeTaprootScriptSpendSigs(packet *psbt.Packet, idx int,
 	return nil
 }
 
-// committedTapLeaf returns the leaf a script-path record names, once one of
-// the input's leaf scripts both hashes to it and is proven into the output
-// key by its control block, under the same leaf version.
+// committedTapLeaf returns the leaf with the given hash, once one of the
+// input's leaf scripts both hashes to it and is proven into the output key by
+// its control block, under the same leaf version.
 func committedTapLeaf(pIn *psbt.PInput, outputKey []byte,
-	sig *psbt.TaprootScriptSpendSig) (txscript.TapLeaf, error) {
+	leafHash []byte) (txscript.TapLeaf, error) {
 
 	for _, leafScript := range pIn.TaprootLeafScript {
 		leaf := txscript.TapLeaf{
@@ -375,8 +383,8 @@ func committedTapLeaf(pIn *psbt.PInput, outputKey []byte,
 			Script:      leafScript.Script,
 		}
 
-		leafHash := leaf.TapHash()
-		if !bytes.Equal(leafHash[:], sig.LeafHash) {
+		hash := leaf.TapHash()
+		if !bytes.Equal(hash[:], leafHash) {
 			continue
 		}
 
@@ -707,4 +715,143 @@ func verifySchnorr(sig, digest, xOnlyKey []byte) error {
 	}
 
 	return nil
+}
+
+// ecdsaSignerKey returns the key a derivation record's key becomes under a
+// tweak, as a PSBT record names it. An untweaked key keeps the record's bytes.
+func ecdsaSignerKey(record []byte, tweak KeyTweak) ([]byte, error) {
+	base, err := btcec.ParsePubKey(record)
+	if err != nil {
+		return nil, fmt.Errorf("%w: derivation key: %w",
+			ErrInvalidSignParam, err)
+	}
+
+	if tweak == (KeyTweak{}) {
+		return record, nil
+	}
+
+	key, err := tweak.pubKey(base)
+	if err != nil {
+		return nil, err
+	}
+
+	return key.SerializeCompressed(), nil
+}
+
+// authorizeEcdsaSigner checks that a resolved script can take an ECDSA
+// signature and, for the key-hash forms, that it commits to key. How any other
+// script uses key is left to the script engine.
+func authorizeEcdsaSigner(scriptCtx ecdsaScriptContext, key []byte) error {
+	// Only a version 0 witness program can be spent with ECDSA.
+	if !scriptCtx.witness && txscript.IsWitnessProgram(scriptCtx.script) {
+		return fmt.Errorf("%w: output is not an ecdsa spend",
+			ErrSigningKeyMismatch)
+	}
+
+	// The legacy digest parses the script, which fails only after the
+	// private key is looked up.
+	if !scriptCtx.witness && parseScriptOps(scriptCtx.script) == nil {
+		return fmt.Errorf("%w: script does not parse",
+			ErrSigningKeyMismatch)
+	}
+
+	if scriptCtx.keyHash != nil &&
+		!bytes.Equal(address.Hash160(key), scriptCtx.keyHash) {
+
+		return fmt.Errorf("%w: output does not pay the key",
+			ErrSigningKeyMismatch)
+	}
+
+	return nil
+}
+
+// taprootSignerKey returns the x-only key a Taproot derivation key becomes
+// under a tweak. The record names only an x-only key, so a tweaked key is
+// computed from base, the key the wallet derives at the record's path, once
+// the record is checked to name it.
+func taprootSignerKey(record []byte, base *btcec.PublicKey,
+	tweak KeyTweak) ([]byte, error) {
+
+	if !recordKeyIs(record, base) {
+		return nil, fmt.Errorf("%w: derivation key is not the wallet's "+
+			"key at its path", ErrSigningKeyMismatch)
+	}
+
+	key, err := tweak.pubKey(base)
+	if err != nil {
+		return nil, err
+	}
+
+	return schnorr.SerializePubKey(key), nil
+}
+
+// authorizeTaprootSigner checks what a Taproot output commits to: key as its
+// internal key on the key path, or the record's leaf on the script path. How
+// the leaf uses key is left to the script engine.
+func authorizeTaprootSigner(pIn *psbt.PInput, utxo *wire.TxOut,
+	derivation *psbt.TaprootBip32Derivation, key []byte) error {
+
+	if txscript.GetScriptClass(utxo.PkScript) !=
+		txscript.WitnessV1TaprootTy {
+
+		return fmt.Errorf("%w: output is not taproot",
+			ErrSigningKeyMismatch)
+	}
+
+	outputKey := utxo.PkScript[2:34]
+
+	if len(derivation.LeafHashes) == 0 {
+		if !keySpendsOutput(pIn, outputKey, key) {
+			return fmt.Errorf("%w: output does not pay the "+
+				"derivation key", ErrSigningKeyMismatch)
+		}
+
+		return nil
+	}
+
+	leaf, err := committedTapLeaf(pIn, outputKey, derivation.LeafHashes[0])
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSigningKeyMismatch, err)
+	}
+
+	// The wallet signs only base-version leaves.
+	if leaf.LeafVersion != txscript.BaseLeafVersion {
+		return fmt.Errorf("%w: leaf version %#x",
+			ErrSigningKeyMismatch, uint8(leaf.LeafVersion))
+	}
+
+	return nil
+}
+
+// keySpendsOutput reports whether key is the internal key a key-path spend of
+// the output uses, matching the input's internal key record when it has one.
+func keySpendsOutput(pIn *psbt.PInput, outputKey, key []byte) bool {
+	if len(pIn.TaprootInternalKey) > 0 &&
+		!bytes.Equal(pIn.TaprootInternalKey, key) {
+
+		return false
+	}
+
+	internalKey, err := schnorr.ParsePubKey(key)
+	if err != nil {
+		return false
+	}
+
+	tweaked := txscript.ComputeTaprootOutputKey(
+		internalKey, pIn.TaprootMerkleRoot,
+	)
+
+	return bytes.Equal(schnorr.SerializePubKey(tweaked), outputKey)
+}
+
+// recordKeyIs reports whether the key a PSBT record names is pub: by x-only
+// form for a 32-byte key, otherwise as a serialized key.
+func recordKeyIs(record []byte, pub *btcec.PublicKey) bool {
+	if len(record) == schnorr.PubKeyBytesLen {
+		return bytes.Equal(record, schnorr.SerializePubKey(pub))
+	}
+
+	key, err := btcec.ParsePubKey(record)
+
+	return err == nil && key.IsEqual(pub)
 }
