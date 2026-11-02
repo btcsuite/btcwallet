@@ -656,6 +656,13 @@ func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 		return err
 	}
 
+	// sendReq may still choose a ready request loop over a canceled context,
+	// so reject a canceled caller before it can admit unobserved scan work.
+	err = ctx.Err()
+	if err != nil {
+		return err
+	}
+
 	// Admission keeps dependency access joined through concurrent Stop.
 	r := rescanReq{
 		typ:         typ,
