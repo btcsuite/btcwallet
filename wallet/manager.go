@@ -115,6 +115,11 @@ type CreateWalletParams struct {
 	// honored for ModeShell.
 	InitialAccounts []ImportAccountParams
 
+	// RecoveryWindow overrides the Manager's discovery lookahead for this
+	// Wallet before its first scan. Nil inherits the default; zero disables
+	// recovery. The override is runtime policy and is not persisted.
+	RecoveryWindow *uint32
+
 	// WatchOnly requests a watch-only wallet and is valid only for ModeShell.
 	WatchOnly bool
 
@@ -757,6 +762,12 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
+	// A creation override belongs to this snapshot, leaving siblings and
+	// subsequent creations on the Manager default.
+	if params.RecoveryWindow != nil {
+		walletCfg.RecoveryWindow = *params.RecoveryWindow
+	}
+
 	data, err := m.backend.create(context.Background(), params, rootKey)
 	if err != nil {
 		return nil, err
@@ -853,6 +864,13 @@ func (w *Wallet) importInitialAccounts(ctx context.Context,
 //
 //nolint:cyclop
 func (p *CreateWalletParams) validate(chainParams *chaincfg.Params) error {
+	// Refuse invalid lookahead before root derivation or Store mutation can
+	// leave an identity that cannot complete startup.
+	if p.RecoveryWindow != nil && *p.RecoveryWindow > MaxRecoveryWindow {
+		return fmt.Errorf("%w: recovery window exceeds %d",
+			ErrWalletParams, MaxRecoveryWindow)
+	}
+
 	if p.Mode != ModeShell && len(p.InitialAccounts) > 0 {
 		return fmt.Errorf("%w: initial accounts should only be set "+
 			"for ModeShell", ErrWalletParams)
