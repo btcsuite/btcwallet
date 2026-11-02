@@ -2151,6 +2151,86 @@ func TestApplyTxBatchPreservesOmittedLabel(t *testing.T) {
 	require.Equal(t, "original", info.Label)
 }
 
+// TestApplyTxBatchConfirmedReplayAddsCredits preserves known credits while
+// recording outputs discovered after a transaction was already confirmed.
+func TestApplyTxBatchConfirmedReplayAddsCredits(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use real transaction persistence and explicit nil-credit
+	// ownership. Only the native conversion's chain-parameter reads need a
+	// mock, once for the initial write and once for each of the two replays.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	_, script := newTestAddressScript(t)
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").
+		Return(&chaincfg.RegressionNetParams).Times(3)
+	t.Cleanup(func() {
+		addrStore.AssertExpectations(t)
+	})
+
+	store := NewStore(dbConn, txStore, addrStore)
+
+	// A recovery observation may name only its newly found output. Seed the
+	// other output first so replay must preserve credit 0 as well as add 1.
+	txMsg := wire.NewMsgTx(1)
+	txMsg.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{
+			Hash: chainhash.Hash{80},
+		},
+	})
+	txMsg.AddTxOut(&wire.TxOut{
+		Value:    1000,
+		PkScript: script,
+	})
+	txMsg.AddTxOut(&wire.TxOut{
+		Value:    900,
+		PkScript: script,
+	})
+
+	params := db.CreateTxParams{
+		Tx:       txMsg,
+		Received: time.Unix(1710003800, 0),
+		Block:    someBlock(t, 145),
+		Status:   db.TxStatusPublished,
+		Credits: map[uint32]address.Address{
+			0: nil,
+		},
+	}
+	require.NoError(t, store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	}))
+
+	// Act: Add the newly discovered credit to the same mined transaction.
+	// Repeating that observation must be harmless when live and historical
+	// processing supply the same credit more than once.
+	params.Credits = map[uint32]address.Address{
+		1: nil,
+	}
+	for range 2 {
+		require.NoError(t, store.ApplyTxBatch(
+			t.Context(), db.TxBatchParams{
+				Transactions: []db.CreateTxParams{params},
+			},
+		))
+	}
+
+	// Assert: The public detailed view retains both distinct credits with
+	// their original amounts, without dropping the omitted known credit or
+	// duplicating the replayed one.
+	detail, err := store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		Txid: txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Len(t, detail.OwnedOutputs, 2)
+	require.EqualValues(t, 0, detail.OwnedOutputs[0].Index)
+	require.EqualValues(t, 1000, detail.OwnedOutputs[0].Amount)
+	require.EqualValues(t, 1, detail.OwnedOutputs[1].Index)
+	require.EqualValues(t, 900, detail.OwnedOutputs[1].Amount)
+}
+
 // TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch verifies that a
 // confirmed duplicate for the same transaction hash cannot be recorded in a
 // second block.
