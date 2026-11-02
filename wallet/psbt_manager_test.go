@@ -3943,6 +3943,18 @@ func TestSignPsbtSkipsWalletRecord(t *testing.T) {
 	// Arrange: a packet the wallet has already signed once. The store
 	// lookup is programmed for that first pass only.
 	packet := testP2WPKHSignPacket(t, 0)
+
+	// A pay-join participant can provide both formats even for a SegWit v0
+	// prevout. Matching origins must not switch its signing algorithm.
+	origin := packet.Inputs[0].Bip32Derivation[0]
+	packet.Inputs[0].TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{
+		{
+			XOnlyPubKey:          origin.PubKey[1:],
+			MasterKeyFingerprint: origin.MasterKeyFingerprint,
+			Bip32Path:            origin.Bip32Path,
+		},
+	}
+
 	derivations := clonePacket(packet).Inputs[0].Bip32Derivation
 
 	w, mocks := createUnlockedWalletWithMocks(t)
@@ -3993,6 +4005,17 @@ func TestSignPsbtSkipsWalletKeySpendRecord(t *testing.T) {
 				0, 0,
 			},
 		}}
+
+	// lnd can include both origin formats for the same key. Keep the
+	// redundant base record through both public signing passes.
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{
+		{
+			PubKey: walletPub.SerializeCompressed(),
+			Bip32Path: packet.Inputs[0].
+				TaprootBip32Derivation[0].Bip32Path,
+		},
+	}
+
 	derivations := clonePacket(packet).Inputs[0].TaprootBip32Derivation
 
 	w, mocks := createUnlockedWalletWithMocks(t)
@@ -7376,4 +7399,72 @@ func TestSignPsbtOwnsUncompressedLegacyKey(t *testing.T) {
 	require.Equal(t, encoded, packet.Inputs[0].PartialSigs[0].PubKey)
 	_, err = w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
 	require.NoError(t, err)
+}
+
+// TestSignPsbtRejectsConflictingOrigins preserves strict metadata authorization
+// when valid BIP32 and Taproot records disagree about one origin fact.
+func TestSignPsbtRejectsConflictingOrigins(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start from an owned, signable input and vary exactly one
+	// well-formed origin fact. No Store lookup is authorized for any row.
+	base := testP2WPKHSignPacket(t, 0)
+	origin := base.Inputs[0].Bip32Derivation[0]
+	foreign, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(foreign.Zero)
+
+	otherPath := append([]uint32(nil), origin.Bip32Path...)
+	otherPath[4]++
+
+	tests := []struct {
+		name   string
+		origin psbt.TaprootBip32Derivation
+	}{
+		{
+			name: "different public key",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey: schnorr.SerializePubKey(foreign.PubKey()),
+				Bip32Path:   origin.Bip32Path,
+			},
+		},
+		{
+			name: "different path",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey: origin.PubKey[1:],
+				Bip32Path:   otherPath,
+			},
+		},
+		{
+			name: "different fingerprint",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey:          origin.PubKey[1:],
+				Bip32Path:            origin.Bip32Path,
+				MasterKeyFingerprint: 1,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, _ := createUnlockedWalletWithMocks(t)
+			packet := clonePacket(base)
+			packet.Inputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{&tc.origin}
+			before := packetSnapshot(t, packet)
+
+			// Act: Submit conflicting origins to public signing before
+			// selecting either signing algorithm or looking up a key.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: Ambiguity remains fatal, returns no result and
+			// leaves the participant's original packet unchanged.
+			require.ErrorIs(t, err, ErrAmbiguousDerivation)
+			require.Nil(t, result)
+			require.Equal(t, before, packetSnapshot(t, packet))
+		})
+	}
 }
