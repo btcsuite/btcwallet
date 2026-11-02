@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -511,4 +513,117 @@ func waitTxGraphCall(t *testing.T, ctx context.Context, raw *sql.DB,
 			return err == nil && count >= waiting
 		}, 10*time.Second, 10*time.Millisecond,
 	)
+}
+
+// TestConcurrentTxAdmissionPostgres verifies that overlapping observations of
+// one hash replay the first committed row instead of failing its unique key.
+func TestConcurrentTxAdmissionPostgres(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{
+		"CreateTx",
+		"ApplyTxBatch",
+		"ApplyScanBatch",
+	} {
+		t.Run(method, func(t *testing.T) {
+			// Arrange: Hold an uncommitted matching transaction behind the
+			// existing Wallet-row lock. Each public entry point must wait
+			// before deciding whether that hash needs a new row.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "concurrent-admission")
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+
+			t.Cleanup(cancel)
+
+			barrier, err := store.Pool().Begin(ctx)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = barrier.Rollback(ctx) })
+
+			queries := store.Queries().WithTx(barrier)
+			_, err = queries.GetWalletForAccountCreation(
+				ctx, int64(walletID),
+			)
+			require.NoError(t, err)
+
+			tx := newRegularTx(
+				[]wire.OutPoint{randomOutPoint()},
+				[]*wire.TxOut{
+					{
+						Value:    1000,
+						PkScript: []byte{0x51},
+					},
+				},
+			)
+
+			var raw bytes.Buffer
+			require.NoError(t, tx.Serialize(&raw))
+			hash := tx.TxHash()
+			received := time.Unix(1710006000, 0).UTC()
+			_, err = queries.InsertTransaction(
+				ctx, sqlc.InsertTransactionParams{
+					WalletID:     int64(walletID),
+					TxHash:       hash[:],
+					RawTx:        raw.Bytes(),
+					TxStatus:     int16(db.TxStatusPending),
+					ReceivedTime: received,
+				},
+			)
+			require.NoError(t, err)
+
+			params := db.CreateTxParams{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: received,
+				Status:   db.TxStatusPending,
+			}
+
+			// Act: Overlap the public observation with the first writer,
+			// using actual SQL lock activity to release it only after the
+			// observation reaches the conflicting write boundary.
+			result := startTxGraphCall(t, cancel, func() error {
+				switch method {
+				case "CreateTx":
+					return store.CreateTx(ctx, params)
+				case "ApplyTxBatch":
+					return store.ApplyTxBatch(ctx, db.TxBatchParams{
+						WalletID:     walletID,
+						Transactions: []db.CreateTxParams{params},
+					})
+				default:
+					return store.ApplyScanBatch(ctx, db.ScanBatchParams{
+						WalletID:     walletID,
+						Transactions: []db.CreateTxParams{params},
+					})
+				}
+			})
+			waitTxGraphCall(t, ctx, store.DB(), result, 1)
+			require.NoError(t, barrier.Commit(ctx))
+
+			admissionErr := <-result
+
+			// Assert: The public replay succeeds with exactly one intact
+			// transaction; a blocked unique insert must not escape as an
+			// error that would stall lnd's chain notification loop.
+			require.NoError(t, admissionErr)
+
+			stored, err := store.GetTx(ctx, db.GetTxQuery{
+				WalletID: walletID,
+				Txid:     hash,
+			})
+			require.NoError(t, err)
+			require.Equal(t, db.TxStatusPending, stored.Status)
+			require.Equal(t, raw.Bytes(), stored.SerializedTx)
+			require.Equal(t, received, stored.Received)
+
+			var count int
+
+			err = store.DB().QueryRowContext(ctx, `
+				SELECT count(*) FROM transactions
+				WHERE wallet_id = $1 AND tx_hash = $2`,
+				int64(walletID), hash[:],
+			).Scan(&count)
+			require.NoError(t, err)
+			require.Equal(t, 1, count)
+		})
+	}
 }
