@@ -180,11 +180,12 @@ custody:
 | Uniformly watch-only | automatic chain sync | excluded from automatic chain sync |
 
 When false, the account participates in automatic chain discovery and live
-script registration. When true, its derived scripts are excluded from both.
-Neither value changes address ownership, public child derivation, or signing
-capability, and neither causes an owned transaction learned through another
-ingestion path to be discarded. Signing continues to follow the wallet's
-existing custody model.
+script registration. When true, its derived scripts are excluded from both
+and from automatic credits. Publication neither credits nor watches these
+outputs, and records a transaction only if other inputs or outputs make it
+wallet-relevant. Explicit `Credits` remain authoritative. Neither value changes
+address ownership, public child derivation, or signing capability. Signing
+continues to follow the wallet's existing custody model.
 
 #### Scope And Branch Schema
 
