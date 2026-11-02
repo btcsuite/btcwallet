@@ -857,7 +857,9 @@ func (s *Store) legacyDuplicateMatches(
 		return false, nil
 	}
 
-	if existing.Label != req.Params.Label {
+	// Chain observations omit user labels. Only an explicit contradictory
+	// label changes metadata; an omitted label retains the stored value.
+	if req.Params.Label != "" && existing.Label != req.Params.Label {
 		return false, nil
 	}
 

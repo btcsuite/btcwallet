@@ -1512,10 +1512,6 @@ func TestHandleChainUpdate(t *testing.T) {
 	tx := wire.NewMsgTx(1)
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	require.NoError(t, err)
-	store.On("GetTx", mock.Anything, db.GetTxQuery{
-		WalletID: walletID,
-		Txid:     rec.Hash,
-	}).Return(nil, db.ErrTxNotFound).Once()
 	store.On("ApplyTxBatch", mock.Anything, mock.Anything).Return(
 		nil).Once()
 
@@ -1722,11 +1718,6 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
 	require.NoError(t, err)
 
-	store.On("GetTx", mock.Anything, db.GetTxQuery{
-		WalletID: walletID,
-		Txid:     rec.Hash,
-	}).Return(nil, db.ErrTxNotFound).Once()
-
 	mailbox := make(chan chainEvent, 1)
 
 	s.chainEventChan = mailbox
@@ -1748,58 +1739,63 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// TestProcessRelevantTxPreservesUnminedMetadata verifies that a mempool echo of
-// an already-recorded local transaction promotes it to published while
-// preserving the existing label when replayed through ApplyTxBatch.
+// TestProcessRelevantTxPreservesUnminedMetadata verifies that a mempool echo
+// retains a published row's label edited before batch admission.
 func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
 	t.Parallel()
 
-	const walletID uint32 = 9
+	// Arrange: Seed labeled published history with the real SQLite fixture.
+	// The Store mock delegates the batch after a user edit, making the
+	// metadata change deterministic without adding a worker or another fixture.
+	w, _, script := subscriptionWallet(t)
+	tx := subscriptionTx(script, 94)
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Unix(456, 0).UTC())
+	require.NoError(t, err)
+	require.NoError(t, w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: rec.Received,
+		Status:   db.TxStatusPublished,
+		Label:    "pending label",
+		Credits:  map[uint32]address.Address{0: nil},
+	}))
 
 	store := &walletmock.Store{}
 	s := newTestSyncer(
-		Config{ChainParams: &chainParams}, nil, nil, nil, store,
-		walletID,
+		Config{ChainParams: &chainParams}, nil, nil, nil, store, w.id,
 	)
+	label := "edited label"
+	store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			require.NoError(t, w.store.UpdateTx(
+				t.Context(), db.UpdateTxParams{
+					WalletID: w.id,
+					Txid:     rec.Hash,
+					Label:    &label,
+				},
+			))
+			params, ok := args.Get(1).(db.TxBatchParams)
+			require.True(t, ok)
+			require.NoError(t, w.store.ApplyTxBatch(t.Context(), params))
+		}).Return(nil).Once()
 
-	addr, err := address.NewAddressPubKeyHash(
-		make([]byte, 20), &chainParams,
-	)
-	require.NoError(t, err)
-
-	pkScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
-	tx := wire.NewMsgTx(1)
-	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
-
-	received := time.Unix(456, 0).UTC()
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
-	require.NoError(t, err)
-
-	const label = "pending label"
-
-	store.On("GetTx", mock.Anything, db.GetTxQuery{
-		WalletID: walletID,
-		Txid:     rec.Hash,
-	}).Return(&db.TxInfo{
-		Hash:   rec.Hash,
-		Status: db.TxStatusPending,
-		Label:  label,
-	}, nil).Once()
-
-	store.On("ApplyTxBatch", mock.Anything,
-		matchUnminedTxBatchState(
-			walletID, tx, addr, received, db.TxStatusPublished, label,
-		),
-	).Return(nil).Once()
-
+	// Act: Replay the prepared chain observation through the existing syncer
+	// boundary; only the batch transaction reconciles current user metadata.
 	err = s.processChainEvent(t.Context(), chainEvent{
 		notification: chain.RelevantTx{TxRecord: rec},
 		matches:      liveMatches(rec),
 	})
 
+	// Assert: Replay and the user edit both survive through public reads.
+	// This literal mock has no constructor cleanup, so verify it once here.
 	require.NoError(t, err)
+	info, err := w.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     rec.Hash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, info.Status)
+	require.Equal(t, label, info.Label)
 	store.AssertExpectations(t)
 }
 
@@ -1827,11 +1823,6 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 	received := time.Unix(124, 0).UTC()
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
 	require.NoError(t, err)
-
-	store.On("GetTx", mock.Anything, db.GetTxQuery{
-		WalletID: walletID,
-		Txid:     rec.Hash,
-	}).Return(nil, db.ErrTxNotFound).Once()
 
 	store.On("ApplyTxBatch", mock.Anything,
 		matchUnminedTxBatch(walletID, tx, memberAddr, received),
@@ -8099,10 +8090,6 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 
 			record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 			require.NoError(t, err)
-			deps.store.On("GetTx", mock.Anything, db.GetTxQuery{
-				WalletID: w.id,
-				Txid:     tx.TxHash(),
-			}).Return(nil, db.ErrTxNotFound).Once()
 			deps.store.On("ApplyTxBatch", mock.Anything, mock.Anything).
 				Return(nil).Once()
 			deps.syncer.On("syncedTo", t.Context()).Return(
@@ -8150,7 +8137,7 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Subscribe before injecting a failed Store commit. Expect only
-	// the transaction lookup and write; fixture cleanup checks these once and
+	// the write; fixture cleanup checks it once and
 	// any unexpected notification read fails through the existing Store mock.
 	w, deps := createStartedWalletWithMocks(t)
 	s := newSyncer(
@@ -8163,10 +8150,6 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	tx := subscriptionTx([]byte{txscript.OP_TRUE}, 5)
 	record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	require.NoError(t, err)
-	deps.store.On("GetTx", mock.Anything, db.GetTxQuery{
-		WalletID: w.id,
-		Txid:     tx.TxHash(),
-	}).Return(nil, db.ErrTxNotFound).Once()
 	deps.store.On("ApplyTxBatch", mock.Anything, mock.Anything).
 		Return(errDBMock).Once()
 
