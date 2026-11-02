@@ -1923,14 +1923,14 @@ func TestApplyTxBatchDuplicateUnminedKeepsConfirmed(t *testing.T) {
 func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Seed labeled pending history without address credits. The
+	// confirming notification supplies another label to test retention.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
 	newAddrmgrNamespace(t, dbConn)
 	txStore := newTxStore(t, dbConn)
-	addrStore := &bwmock.AddrStore{}
-	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Maybe()
-	store := NewStore(dbConn, txStore, addrStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	txMsg := &wire.MsgTx{Version: 1}
 	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -1957,6 +1957,9 @@ func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
 		Height:    147,
 		Timestamp: time.Unix(1710003900, 0),
 	}
+
+	// Act: Confirm the existing pending row through the transaction batch;
+	// the supplied label must not replace its original user metadata.
 	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
 		WalletID: 0,
 		Transactions: []db.CreateTxParams{{
@@ -1970,6 +1973,8 @@ func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Assert: Public reads retain the original label alongside the expected
+	// confirmed status and block, independently of later replay behavior.
 	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
 		WalletID: 0,
 		Txid:     txMsg.TxHash(),
@@ -1987,6 +1992,8 @@ func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
 func TestApplyTxBatchPromotesPendingDuplicate(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Seed labeled pending history in the native DB fixture; its
+	// publication echo supplies another label to exercise promotion metadata.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -2014,6 +2021,8 @@ func TestApplyTxBatchPromotesPendingDuplicate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Act: Promote the pending row through the published mempool batch,
+	// without adding a separate unlabeled replay operation to this test.
 	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
 		WalletID: 0,
 		Transactions: []db.CreateTxParams{{
@@ -2026,6 +2035,8 @@ func TestApplyTxBatchPromotesPendingDuplicate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Assert: Promotion keeps the transaction unconfirmed and published,
+	// while preserving its original label through the public Store read.
 	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
 		WalletID: 0,
 		Txid:     txMsg.TxHash(),
@@ -2034,6 +2045,110 @@ func TestApplyTxBatchPromotesPendingDuplicate(t *testing.T) {
 	require.Nil(t, txInfo.Block)
 	require.Equal(t, db.TxStatusPublished, txInfo.Status)
 	require.Equal(t, originalLabel, txInfo.Label)
+}
+
+// TestApplyScanBatchPreservesOmittedLabel checks that an unlabeled confirmed
+// scan replay preserves metadata on an already-confirmed transaction.
+func TestApplyScanBatchPreservesOmittedLabel(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed confirmed, labeled history using the existing native DB
+	// fixture. The scan needs one sync-tip snapshot; cleanup verifies that
+	// sole mock expectation without mixing promotion into the subject action.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Once()
+	t.Cleanup(func() {
+		addrStore.AssertExpectations(t)
+	})
+
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{69},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: []byte{0x51}})
+	params := db.CreateTxParams{
+		Tx:       txMsg,
+		Received: time.Unix(1710003800, 0),
+		Block: &db.Block{
+			Hash:      chainhash.Hash{70},
+			Height:    147,
+			Timestamp: time.Unix(1710003900, 0),
+		},
+		Status: db.TxStatusPublished,
+		Label:  "original",
+	}
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	})
+	require.NoError(t, err)
+
+	// Act: Replay the same confirmed chain facts without requesting a label
+	// change, as catch-up scanning does for an already-recorded transaction.
+	params.Label = ""
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	})
+
+	// Assert: Successful replay preserves the stored user label. Promotion
+	// and block-state assertions remain in their existing dedicated tests.
+	require.NoError(t, err)
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		Txid: txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "original", info.Label)
+}
+
+// TestApplyTxBatchPreservesOmittedLabel checks that an unlabeled mempool echo
+// preserves metadata on an already-published transaction.
+func TestApplyTxBatchPreservesOmittedLabel(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed a published row directly with the existing native DB
+	// fixture. Its empty credit set needs no address manager or promotion.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{71},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: []byte{0x51}})
+	params := db.CreateTxParams{
+		Tx:       txMsg,
+		Received: time.Unix(1710004100, 0),
+		Status:   db.TxStatusPublished,
+		Label:    "original",
+	}
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	})
+	require.NoError(t, err)
+
+	// Act: Admit the delayed mempool observation with an omitted label;
+	// this is replay of published history, not pending-to-published promotion.
+	params.Label = ""
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	})
+
+	// Assert: The observation succeeds and keeps the publisher's label;
+	// the original promotion test continues to own transition assertions.
+	require.NoError(t, err)
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		Txid: txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "original", info.Label)
 }
 
 // TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch verifies that a

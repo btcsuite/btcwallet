@@ -1364,7 +1364,7 @@ func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
 }
 
 // ApplyBatchTxWithOps ingests a transaction using the caller's batch SQL
-// transaction. An absent confirmed label preserves existing user metadata;
+// transaction. An absent observation label preserves existing user metadata;
 // explicit labels retain the same strict comparison as direct creation.
 func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
@@ -1376,7 +1376,7 @@ func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
 
 	// Resolve the label from the same metadata replay will validate. Existing
 	// rows never write this label back, so concurrent user edits survive.
-	if existing != nil && req.Params.Block != nil && req.Params.Label == "" {
+	if existing != nil && req.Params.Label == "" {
 		req.Params.Label = existing.Label
 	}
 
