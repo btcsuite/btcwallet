@@ -263,7 +263,7 @@ type txManager interface {
 // Wallet supplies both capabilities through the same private dependency.
 var _ txManager = (*Wallet)(nil)
 
-// syncer is a stateless blocking worker responsible for synchronizing the
+// syncer is a blocking worker responsible for synchronizing the
 // wallet with the blockchain. It operates within the lifecycle provided by the
 // caller via context and manages the chain loop, scanning, and reorg handling.
 type syncer struct {
@@ -284,6 +284,10 @@ type syncer struct {
 
 	// state tracks the chain synchronization status.
 	state atomic.Uint32
+
+	// rebroadcastPending coalesces connection notices until a caught-up resend.
+	// Only the existing sync worker reads or writes it.
+	rebroadcastPending bool
 
 	// scanReqChan is the internal mailbox used to receive scan requests
 	// from the controller. It is buffered to ensure that submitting a
@@ -365,9 +369,9 @@ func (s *syncer) syncState() syncState {
 }
 
 // initChainSync performs the initial setup for the chain synchronization loop.
-// This includes waiting for the backend to sync, checking for rollbacks, and
-// enabling block notifications. It returns an error if any of these setup
-// steps fail.
+// It registers live watches, catches up to the backend tip and resends unmined
+// history once before live event processing. Any setup or history-read failure
+// returns to the controller's existing initialization retry boundary.
 func (s *syncer) initChainSync(ctx context.Context) error {
 	var err error
 
@@ -423,6 +427,28 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to start block "+
 			"notifications: %w", err)
+	}
+
+	// Catch up before resending history so mined transactions are excluded.
+	// Keep the full resend out of live polling: retained RBF alternatives
+	// can each wait on backend I/O and would otherwise delay every block.
+	for s.syncState() != syncStateSynced {
+		_, err = s.advanceChainSync(ctx)
+		if err != nil {
+			return fmt.Errorf("advance initial chain sync: %w", err)
+		}
+	}
+
+	// Startup's resend also covers notices received during initialization.
+	s.rebroadcastPending = false
+
+	err = s.broadcastUnminedTxns(ctx)
+	if err != nil {
+		// A failed history read must revoke readiness before retrying
+		// initialization; individual send failures are logged in place.
+		s.state.Store(uint32(syncStateSyncing))
+
+		return fmt.Errorf("broadcast initial unmined txns: %w", err)
 	}
 
 	return nil
@@ -797,9 +823,9 @@ func (s *syncer) run(ctx context.Context) error {
 	}
 }
 
-// runSyncStep performs a single iteration of the synchronization loop. It
-// advances the chain sync state, broadcasts unmined transactions, and then
-// waits for the next event (notification or job).
+// runSyncStep advances the chain, resends history for a pending connection,
+// then waits for a notification or job. Ordinary live processing avoids
+// repeated full-history network sends.
 func (s *syncer) runSyncStep(ctx context.Context) error {
 	// Attempt to advance the wallet's sync state.
 	syncFinished, err := s.advanceChainSync(ctx)
@@ -811,10 +837,15 @@ func (s *syncer) runSyncStep(ctx context.Context) error {
 		return nil
 	}
 
-	// Rebroadcast unmined transactions.
-	err = s.broadcastUnminedTxns(ctx)
-	if err != nil {
-		return fmt.Errorf("broadcast unmined txns: %w", err)
+	// Catch-up must precede a reconnect resend, even for a notice consumed
+	// during scanning. Later notices can request another send.
+	if s.rebroadcastPending {
+		s.rebroadcastPending = false
+
+		err = s.broadcastUnminedTxns(ctx)
+		if err != nil {
+			return fmt.Errorf("broadcast unmined txns: %w", err)
+		}
 	}
 
 	// Proceed to idle mode, waiting for notifications or jobs.
@@ -1987,6 +2018,12 @@ func (s *syncer) processChainEvent(ctx context.Context,
 	event chainEvent) error {
 
 	switch n := event.notification.(type) {
+	// Retain the notice without I/O before initialization or a scan finishes;
+	// runSyncStep consumes it after catch-up.
+	case chain.ClientConnected:
+		s.rebroadcastPending = true
+		return nil
+
 	case prepareRollbackReq:
 		// Acknowledge only from the worker so historical and live writes
 		// are both quiescent until Manager releases this operation.

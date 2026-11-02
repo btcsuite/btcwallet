@@ -2275,19 +2275,22 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		w.sync = s
 		w.state = newWalletState(s)
 
+		// Initial catch-up reads the tip before the live steps; history
+		// replay runs once and does not repeat after the scan or block.
 		tip := &db.Block{Hash: chainhash.Hash{100}, Height: 100}
 		deps.store.On("GetWallet", mock.Anything, "").Return(
 			&db.WalletInfo{SyncedTo: tip}, nil,
-		).Times(5)
+		).Times(6)
 		expectMatchingRollbackBatch(deps.store, deps.chain)
 		deps.chain.On("IsCurrent").Return(true).Once()
 		deps.chain.On("NotifyBlocks").Return(nil).Once()
 		deps.chain.On("GetBestBlock").Return(
 			&tip.Hash, int32(tip.Height), nil,
-		).Times(4)
+		).Times(5)
 		deps.store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
-			WalletID: w.id, UnminedOnly: true,
-		}).Return(nil, nil).Times(3)
+			WalletID:    w.id,
+			UnminedOnly: true,
+		}).Return(nil, nil).Once()
 
 		// Keep both startup and the imported-address scan empty so the
 		// rescan reaches its commit without unrelated derivation setup.
