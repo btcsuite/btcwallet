@@ -146,6 +146,8 @@ SELECT
     da.address_id AS derived_address_id,
     da.account_id,
     acc.account_number,
+    -- Admit automatic credits from stored policy without another lookup.
+    acc.no_chain_sync,
     ks.purpose,
     ks.coin_type,
     a.script_type_id,
@@ -194,6 +196,7 @@ type GetAddressByScriptPubKeyRow struct {
 	DerivedAddressID  sql.NullInt64
 	AccountID         sql.NullInt64
 	AccountNumber     sql.NullInt64
+	NoChainSync       sql.NullBool
 	Purpose           sql.NullInt64
 	CoinType          sql.NullInt64
 	ScriptTypeID      int64
@@ -220,6 +223,7 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.DerivedAddressID,
 		&i.AccountID,
 		&i.AccountNumber,
+		&i.NoChainSync,
 		&i.Purpose,
 		&i.CoinType,
 		&i.ScriptTypeID,
@@ -566,6 +570,8 @@ SELECT
     da.address_id AS derived_address_id,
     da.account_id,
     acc.account_number,
+    -- Admit automatic credits from stored policy without another lookup.
+    acc.no_chain_sync,
     ks.purpose,
     ks.coin_type,
     a.script_type_id,
@@ -616,6 +622,7 @@ type ListAddressesByScriptPubKeysRow struct {
 	DerivedAddressID  sql.NullInt64
 	AccountID         sql.NullInt64
 	AccountNumber     sql.NullInt64
+	NoChainSync       sql.NullBool
 	Purpose           sql.NullInt64
 	CoinType          sql.NullInt64
 	ScriptTypeID      int64
@@ -662,6 +669,7 @@ func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddr
 			&i.DerivedAddressID,
 			&i.AccountID,
 			&i.AccountNumber,
+			&i.NoChainSync,
 			&i.Purpose,
 			&i.CoinType,
 			&i.ScriptTypeID,
