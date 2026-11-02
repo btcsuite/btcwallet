@@ -1203,6 +1203,61 @@ func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
 	require.Equal(t, declaredPoint, declaredUTXOs[0].OutPoint)
 }
 
+// TestUTXOSpendabilityIgnoresLockState verifies that output custody follows the
+// stored account type, so locking the manager neither makes a derived account's
+// outputs unspendable nor an imported xpub account's outputs spendable.
+func TestUTXOSpendabilityIgnoresLockState(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+
+	// Arrange: credit a derived and an imported xpub account while
+	// unlocked, then lock. A locked manager drops the derived account's
+	// private key, which is the state that misclassified it.
+	importedAcct := createImportedXpubAccount(
+		t, store, scope, "imported-xpub-locked", 0xC0,
+	)
+	derivedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(1000),
+		balanceTestTipHeight, false,
+	)
+	importedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, importedAcct,
+		btcutil.Amount(2000), balanceTestTipHeight, false,
+	)
+	require.NoError(t, mgr.Lock())
+
+	// Act: read both outputs through the list and point readers, which
+	// share the enrichment under test.
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: 0,
+	})
+	require.NoError(t, err)
+
+	derived, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: 0,
+		OutPoint: derivedPoint,
+	})
+	require.NoError(t, err)
+
+	// Assert: each output keeps the custody of the account that owns it.
+	spendable := make(map[wire.OutPoint]bool, len(utxos))
+	for _, utxo := range utxos {
+		require.NotNil(t, utxo.Spendable, "%v", utxo.OutPoint)
+		spendable[utxo.OutPoint] = *utxo.Spendable
+	}
+
+	require.Equal(t, map[wire.OutPoint]bool{
+		derivedPoint:  true,
+		importedPoint: false,
+	}, spendable)
+	require.NotNil(t, derived.Spendable)
+	require.True(t, *derived.Spendable)
+}
+
 // createImportedXpubAccount creates an imported (watch-only) xpub account via
 // CreateImportedAccount, which allocates an ordinary kvdb account number
 // rather than the legacy ImportedAddrAccount pseudo-account. An optional number
