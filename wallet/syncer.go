@@ -1201,12 +1201,15 @@ func scanHorizonParams(scanState *RecoveryState,
 
 // appendScanTxParams appends store transaction params for every relevant output
 // in the scan result, attaching the resolved store block. It validates that
-// each credit index is within the transaction's output range.
+// each credit index is within the transaction's output range. Candidates let
+// the Store apply receiving policy after persisting the scan horizons.
 func (s *syncer) appendScanTxParams(params *db.ScanBatchParams,
 	result scanResult, block *db.Block) error {
 
 	for _, match := range result.RelevantOutputs {
-		credits := make(map[uint32]address.Address, len(match.Entries))
+		candidates := make(
+			map[uint32][]address.Address, len(match.Entries),
+		)
 		for _, entry := range match.Entries {
 			index := entry.Credit.Index
 			if uint64(index) >= uint64(len(match.Rec.MsgTx.TxOut)) {
@@ -1214,17 +1217,17 @@ func (s *syncer) appendScanTxParams(params *db.ScanBatchParams,
 					db.ErrInvalidParam)
 			}
 
-			credits[index] = entry.Address
+			candidates[index] = append(candidates[index], entry.Address)
 		}
 
 		params.Transactions = append(
 			params.Transactions, db.CreateTxParams{
-				WalletID: s.walletID,
-				Tx:       &match.Rec.MsgTx,
-				Received: result.meta.Time,
-				Block:    block,
-				Status:   db.TxStatusPublished,
-				Credits:  credits,
+				WalletID:         s.walletID,
+				Tx:               &match.Rec.MsgTx,
+				Received:         result.meta.Time,
+				Block:            block,
+				Status:           db.TxStatusPublished,
+				CreditCandidates: candidates,
 			},
 		)
 	}
