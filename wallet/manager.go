@@ -115,9 +115,9 @@ type CreateWalletParams struct {
 	// honored for ModeShell.
 	InitialAccounts []ImportAccountParams
 
-	// InitialDerivedAccounts installs SQL root-derived accounts before the
-	// first scan. Spendable modes only; native KVDB initialization does not
-	// accept this option.
+	// InitialDerivedAccounts installs root-derived accounts before the first
+	// scan. Spendable modes only. KVDB reuses native account zero and ignores
+	// NoChainSync, as on the ordinary account API.
 	InitialDerivedAccounts []NewAccountParams
 
 	// RecoveryWindow overrides the Manager's discovery lookahead for this
@@ -789,7 +789,7 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 	return newManagedWallet(walletCfg, data, m.chainSyncer), nil
 }
 
-// initialDerivedAccounts normalizes the requested SQL accounts before any
+// initialDerivedAccounts normalizes requested accounts before any
 // identity is persisted, sharing ordinary scope policy and Store allocation.
 func (m *Manager) initialDerivedAccounts(initial []NewAccountParams) (
 	[]db.CreateDerivedAccountParams, error) {
@@ -797,12 +797,6 @@ func (m *Manager) initialDerivedAccounts(initial []NewAccountParams) (
 	// Preserve the existing nil backend handoff for an omitted request.
 	if len(initial) == 0 {
 		return nil, nil
-	}
-
-	// Native initialization keeps its existing scope owner until PR1 adds
-	// the separately owned native batch.
-	if m.config.Backend == DBBackendKVDB {
-		return nil, ErrAccountOperationUnsupported
 	}
 
 	accounts := make(

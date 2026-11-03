@@ -3951,32 +3951,180 @@ func TestManagerCreateInitialAccountValidation(t *testing.T) {
 	}
 }
 
-// TestManagerCreateRejectsKVDBInitialAccounts preserves ordinary native
-// creation while refusing SQL-only initialization before consuming its name.
-func TestManagerCreateRejectsKVDBInitialAccounts(t *testing.T) {
+// TestManagerCreateInitialDerivedAccountsKVDB verifies native creation exports
+// all families, retains root keys and returns locked with valid cursors.
+func TestManagerCreateInitialDerivedAccountsKVDB(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Supply valid native credentials and one initial account to the
-	// existing real KVDB fixture; no separate native batch is owned here.
+	// Arrange default payment, a zero-only custom scope and all 256 families.
+	// The highest family precedes zero to verify the sparse cursor is retained.
 	manager := testKVDBManager(t)
 	params := sqliteCreateParams(t)
 	params.PubPassphrase = []byte(InsecurePubPassphrase)
-	params.InitialDerivedAccounts = []NewAccountParams{
-		{
-			Scope: waddrmgr.KeyScopeBIP0084,
-			Name:  waddrmgr.DefaultAccountName,
-		},
+	zero := AccountNumber(0)
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	zeroScope := waddrmgr.KeyScope{Purpose: 1018, Coin: 1}
+	familyScope := waddrmgr.KeyScope{Purpose: 1017, Coin: 1}
+
+	for _, scope := range []waddrmgr.KeyScope{
+		waddrmgr.KeyScopeBIP0084, zeroScope,
+	} {
+		params.InitialDerivedAccounts = append(
+			params.InitialDerivedAccounts, NewAccountParams{
+				Scope:         scope,
+				Name:          waddrmgr.DefaultAccountName,
+				AccountNumber: &zero,
+				AddrSchema:    &schema,
+			},
+		)
 	}
 
-	// Act: Request the unsupported initialization through public creation.
+	for i := AccountNumber(0); i < 256; i++ {
+		number := (i + 255) % 256
+		name := fmt.Sprintf("act:%d", number)
+
+		if number == 0 {
+			name = waddrmgr.DefaultAccountName
+		}
+
+		params.InitialDerivedAccounts = append(
+			params.InitialDerivedAccounts, NewAccountParams{
+				Scope:         familyScope,
+				Name:          name,
+				AccountNumber: &number,
+				AddrSchema:    &schema,
+				NoChainSync:   true,
+			},
+		)
+	}
+
+	// Act through public creation; the native Store must finish the batch
+	// before the Wallet is published or starts observing the chain.
 	w, err := manager.Create(params)
-
-	// Assert: Refusal leaves no published Wallet; removing the SQL-only option
-	// permits ordinary creation of the same name with the same credentials.
-	require.Nil(t, w)
-	require.ErrorIs(t, err, ErrAccountOperationUnsupported)
-
-	params.InitialDerivedAccounts = nil
-	_, err = manager.Create(params)
 	require.NoError(t, err)
+	info, err := w.Info(t.Context())
+	require.NoError(t, err)
+
+	// Assert locked publication and complete export against the actual root,
+	// rather than accepting metadata with unrelated account keys.
+	require.True(t, info.Locked)
+	families, err := w.ListAccountsByScope(t.Context(), familyScope)
+	require.NoError(t, err)
+	require.Len(t, families, 256)
+
+	root, err := hdkeychain.NewMaster(params.Seed, &chainParams)
+	require.NoError(t, err)
+
+	defer root.Zero()
+
+	expected, err := deriveBIP44AccountKey(root, db.KeyScope(familyScope), 255)
+	require.NoError(t, err)
+
+	defer expected.Zero()
+
+	expectedPub, err := expected.Neuter()
+	require.NoError(t, err)
+	last, err := w.GetAccount(t.Context(), familyScope, "act:255")
+	require.NoError(t, err)
+	require.False(t, last.NoChainSync)
+	require.Equal(
+		t, db.AccountXPubPayload([]byte(expectedPub.String())),
+		db.AccountXPubPayload(last.PublicKey),
+	)
+
+	// Unlock normally, then use sequential public allocation to distinguish
+	// an unset zero-only cursor from a sparse cursor already advanced to 255.
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	}))
+	next, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope:      zeroScope,
+		Name:       "next",
+		AddrSchema: &schema,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, *next.AccountNumber)
+
+	next, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope:      familyScope,
+		Name:       "next",
+		AddrSchema: &schema,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 256, *next.AccountNumber)
+}
+
+// TestManagerKVDBInitialAccountsRollback verifies a late duplicate-zero refusal
+// rolls back nonzero accounts and permits their durable number/key reuse.
+func TestManagerKVDBInitialAccountsRollback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange zero, a nonzero write that warms native caches, then zero again.
+	// The repeated zero name refuses the batch after the nonzero write.
+	path := testKVDBPath(t)
+	manager := testKVDBManagerAt(t, path)
+	params := sqliteCreateParams(t)
+	params.PubPassphrase = []byte(InsecurePubPassphrase)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 1}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+
+	for _, number := range []AccountNumber{0, 1, 0} {
+		params.InitialDerivedAccounts = append(
+			params.InitialDerivedAccounts, NewAccountParams{
+				Scope:         scope,
+				Name:          fmt.Sprintf("initial:%d", number),
+				AccountNumber: &number,
+				AddrSchema:    &schema,
+			},
+		)
+	}
+
+	// The reopened owner needs one watch refresh; fixture cleanup verifies it.
+	chain := createTestChain(t)
+	chain.On("NotifyReceived", mock.Anything).Return(nil).Once()
+
+	// Act by refusing creation and releasing its complete owner, then reopen
+	// through a fresh public Manager so no old address caches can be reused.
+	w, err := manager.Create(params)
+	require.ErrorIs(t, err, ErrAccountAlreadyExists)
+	require.Nil(t, w)
+	require.NoError(t, manager.Stop())
+	reopened, err := NewManager(t.Context(), ManagerConfig{
+		Backend:           DBBackendKVDB,
+		DataSource:        path,
+		ChainParams:       chainParams,
+		ChainSource:       chain,
+		KVDBPubPassphrase: params.PubPassphrase,
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, reopened.Stop())
+	})
+
+	wallets, err := reopened.Start(t.Context())
+	require.NoError(t, err)
+	require.Len(t, wallets, 1)
+	w = wallets[0]
+
+	// Assert only the native default committed, then authenticate and reuse
+	// the rolled-back nonzero path with its usable private key.
+	accounts, err := w.ListAccountsByScope(t.Context(), scope)
+	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+	require.Zero(t, *accounts[0].AccountNumber)
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	}))
+	_, err = w.NewAccount(t.Context(), params.InitialDerivedAccounts[1])
+	require.NoError(t, err)
+	addr, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(scope, "initial:1"), false,
+	)
+	require.NoError(t, err)
+	key, err := w.GetPrivKeyForAddress(t.Context(), addr.Addr)
+	require.NoError(t, err)
+	key.Zero()
 }
