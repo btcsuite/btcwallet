@@ -73,6 +73,95 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	return info, nil
 }
 
+// CreateInitialDerivedAccounts prepares a fresh, unpublished Wallet's native
+// scopes and then commits its account set in one write. The owner must close
+// the address manager on failure: native writers warm caches before commit.
+func (s *Store) CreateInitialDerivedAccounts(ctx context.Context,
+	walletID uint32, accounts []db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) error {
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	// Scope registration happens OnCommit. Finish that write before any
+	// account cache is warmed, so failed account writes have one close owner.
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		return s.prepareInitialScopes(
+			ctx, tx.ReadWriteBucket(waddrmgr.NamespaceKey), accounts,
+		)
+	})
+	if err != nil {
+		return err
+	}
+
+	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		for _, account := range accounts {
+			account.WalletID = walletID
+			account.NoChainSync = false
+
+			ops := &createDerivedAccountOps{
+				mgr: s.addrStore,
+				ns:  ns,
+			}
+
+			_, err := db.CreateDerivedAccountWithOps(
+				ctx, account, ops, deriveFn,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+// prepareInitialScopes registers each requested scope once without loading
+// account keys. The caller commits before using the newly registered managers.
+func (s *Store) prepareInitialScopes(ctx context.Context,
+	ns walletdb.ReadWriteBucket,
+	accounts []db.CreateDerivedAccountParams) error {
+
+	schemas := make(map[db.KeyScope]db.ScopeAddrSchema)
+	for _, account := range accounts {
+		err := ctx.Err()
+		if err != nil {
+			return err
+		}
+
+		err = account.Validate()
+		if err != nil {
+			return err
+		}
+
+		schema, known := schemas[account.Scope]
+		if !known {
+			manager, _, err := ensureLegacyScope(
+				s.addrStore, ns, account.Scope, account.AddrSchema,
+			)
+			if err != nil {
+				return err
+			}
+
+			schema, err = db.ScopeAddrSchemaFromWaddrmgr(manager.AddrSchema())
+			if err != nil {
+				return err
+			}
+
+			schemas[account.Scope] = schema
+		}
+
+		if account.AddrSchema != nil && *account.AddrSchema != schema {
+			return fmt.Errorf("conflicting scope schema: %w",
+				db.ErrInvalidParam)
+		}
+	}
+
+	return nil
+}
+
 // createDerivedAccountOps adapts the shared workflow to waddrmgr. The
 // same walletdb tx (via ns) covers every step so allocation and
 // persistence roll back together on failure.
