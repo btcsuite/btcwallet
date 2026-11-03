@@ -600,11 +600,12 @@ func testSignerECDHWatchOnly(h *bwtest.HarnessTest) {
 	)
 }
 
-// testSignerDerivationDurableReopen verifies that public derivation and the
-// shared secret follow the wallet's durable identity rather than the process
-// that happened to be holding it open.
-func testSignerDerivationDurableReopen(h *bwtest.HarnessTest) {
-	// Arrange: A started, unlocked wallet and a peer that outlives the reopen.
+// testSignerAccountIdentityReopen connects a new account's receiving address
+// to its public derivation, ECDH, digest signing, and unlocking identity across
+// a fresh Manager reopening the same database.
+func testSignerAccountIdentityReopen(h *bwtest.HarnessTest) {
+	// Arrange: Materialize the default account before creating one additional
+	// spendable account, so account-zero fallback cannot satisfy this proof.
 	ctx := h.Context()
 	scope, err := signerAddrType.KeyScope()
 	require.NoError(h, err, "failed to resolve the signer key scope")
@@ -612,63 +613,122 @@ func testSignerDerivationDurableReopen(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 	h.NewWalletAddressOfType(w, signerAddrType)
 
-	peerKey, err := btcec.NewPrivateKey()
-	require.NoError(h, err, "failed to generate the peer key")
+	account := h.CreateTestAccount(w, scope, "signer identity account")
+	require.NotZero(h, *account.AccountNumber)
+	selector := wallet.NewAccountSelectorByName(scope, account.AccountName)
+	info, err := w.NewAddress(ctx, selector, false)
+	require.NoError(h, err)
+	require.Equal(h, uint32(*account.AccountNumber), info.Derivation.Account)
 
-	path := wallet.BIP32Path{
-		KeyScope: scope,
-		DerivationPath: waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Branch:          0,
-			Index:           9,
-		},
-	}
+	// A fixed hash supplies a reproducible, non-identity peer scalar, so this
+	// oracle cannot pass by returning the receiving public key's X coordinate.
+	peerKey, _ := btcec.PrivKeyFromBytes(
+		chainhash.HashB([]byte("signer identity peer")),
+	)
+	defer peerKey.Zero()
+
+	var wantSecret [32]byte
+	copy(wantSecret[:], btcec.GenerateSharedSecret(peerKey, info.PubKey))
+
+	// Derivation selects the account by name while signing uses the address's
+	// numeric path; both must identify the key committed by its output script.
+	path := createSignerPath(info.Derivation)
 	params := wallet.DerivePubKeyParams{
-		Account: wallet.NewAccountSelectorByName(
-			scope, waddrmgr.DefaultAccountName,
-		),
-		Branch: path.DerivationPath.Branch,
-		Index:  path.DerivationPath.Index,
+		Account: selector,
+		Branch:  info.Derivation.Branch,
+		Index:   info.Derivation.Index,
+	}
+	pkScript, err := txscript.PayToAddrScript(info.Addr)
+	require.NoError(h, err)
+
+	// Retain the unsigned spend, hash cache, and digest across reopen so both
+	// Wallet generations must verify against the original public facts.
+	prevOut, tx := createSignerTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+	digest := chainhash.HashB([]byte("signer durable digest"))
+	intent := &wallet.SignDigestIntent{Digest: digest}
+	unlockParams := &wallet.UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: hashes,
+		HashType:  txscript.SigHashAll,
 	}
 
-	// Act: Take both answers from the original wallet.
+	// Act: Exercise both account-selected and address-selected signing against
+	// the same receiving key before crossing the durable close boundary.
 	before, err := w.DerivePubKey(ctx, params)
 	require.NoError(h, err, "failed to derive before the reopen")
 
 	beforeSecret, err := w.ECDH(ctx, path, peerKey.PubKey())
 	require.NoError(h, err, "failed to compute the secret before the reopen")
-	require.NotEqual(
-		h, [32]byte{}, beforeSecret, "the shared secret is the zero value",
-	)
+	beforeSig, err := w.SignDigest(ctx, path, intent)
+	require.NoError(h, err)
+	beforeUnlocking, err := w.ComputeUnlockingScript(ctx, unlockParams)
+	require.NoError(h, err)
 
-	// Stop the wallet, close its Manager, and load the same store again.
+	// Assert: Public address encoding, peer-side ECDH, and signature/script
+	// verification must agree without reading Wallet secrets.
+	derivedAddr, err := signerAddrType.AddrFromPubKeyBytes(
+		before.SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+	require.Equal(h, info.Addr.String(), derivedAddr.String())
+	require.True(h, info.PubKey.IsEqual(before))
+
+	require.Equal(h, wantSecret, beforeSecret, "peer ECDH disagrees")
+
+	sig, ok := beforeSig.(wallet.ECDSASignature)
+	require.True(h, ok, "expected ECDSA signature before reopen")
+	require.True(h, sig.Verify(digest, info.PubKey))
+
+	spend := tx.Copy()
+	spend.TxIn[0].Witness = beforeUnlocking.Witness
+	spend.TxIn[0].SignatureScript = beforeUnlocking.SigScript
+	engine, err := txscript.NewEngine(
+		pkScript, spend, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
+
+	// Act: ReloadWallet joins the original Manager's shutdown and registers a
+	// fresh Wallet on the same database. Repeat the public operations with the
+	// retained inputs so new metadata cannot redefine the expected identity.
 	w = h.ReloadWallet(w)
 
-	info, err := w.Info(ctx)
-	require.NoError(h, err, "failed to query wallet info")
-	require.True(h, info.Locked, "the reopened wallet is not locked")
-
-	// Act: Derive from the reopened wallet while it is still locked.
 	after, err := w.DerivePubKey(ctx, params)
-
-	// Assert: The durable identity, not the live wallet, defines the key.
 	require.NoError(h, err, "failed to derive after the reopen")
-	require.True(
-		h, before.IsEqual(after),
-		"the reopened wallet derived a different public key",
-	)
 
 	h.UnlockWallet(w)
 
-	// Act: Repeat the exchange with the same peer.
 	afterSecret, err := w.ECDH(ctx, path, peerKey.PubKey())
-
-	// Assert: The signing key survived the reopen with the public key.
 	require.NoError(h, err, "failed to compute the secret after the reopen")
+	afterSig, err := w.SignDigest(ctx, path, intent)
+	require.NoError(h, err)
+	afterUnlocking, err := w.ComputeUnlockingScript(ctx, unlockParams)
+	require.NoError(h, err)
+
+	// Assert: Independently verify the fresh Wallet against the original
+	// public key and output, using a fresh transaction copy for its stacks.
+	require.True(h, info.PubKey.IsEqual(after))
 	require.Equal(
-		h, beforeSecret, afterSecret,
-		"the reopened wallet computed a different shared secret",
+		h, wantSecret, afterSecret, "peer ECDH disagrees after reopen",
 	)
+
+	sig, ok = afterSig.(wallet.ECDSASignature)
+	require.True(h, ok, "expected ECDSA signature after reopen")
+	require.True(h, sig.Verify(digest, info.PubKey))
+
+	spend = tx.Copy()
+	spend.TxIn[0].Witness = afterUnlocking.Witness
+	spend.TxIn[0].SignatureScript = afterUnlocking.SigScript
+	engine, err = txscript.NewEngine(
+		pkScript, spend, 0, txscript.StandardVerifyFlags,
+		nil, hashes, prevOut.Value, fetcher,
+	)
+	require.NoError(h, err)
+	require.NoError(h, engine.Execute())
 }
 
 // testSignerDeriveImportedXPub verifies that an account seeded from an

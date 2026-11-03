@@ -396,8 +396,8 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerECDHWatchOnly,
 	},
 	{
-		Name:     "signer derivation durable reopen",
-		TestFunc: testSignerDerivationDurableReopen,
+		Name:     "signer account identity reopen",
+		TestFunc: testSignerAccountIdentityReopen,
 	},
 	{
 		Name:     "signer derive imported xpub",
