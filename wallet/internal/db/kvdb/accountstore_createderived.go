@@ -106,41 +106,16 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	scope db.KeyScope, schema *db.ScopeAddrSchema) (int64, db.ScopeAddrSchema,
 	error) {
 
-	waddrScope := waddrmgr.KeyScope{
-		Purpose: scope.Purpose,
-		Coin:    scope.Coin,
-	}
-
-	scopedMgr, err := o.mgr.FetchScopedKeyManager(waddrScope)
-	if waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
-		// The native manager owns coin-type keys and commit-time scope
-		// publication. An unknown custom scope must supply its schema.
-		selected, known := db.ScopeAddrMap[scope]
-		if schema != nil {
-			selected = *schema
-		} else if !known {
-			return 0, db.ScopeAddrSchema{}, db.ErrInvalidParam
-		}
-
-		converted, convErr := db.ScopeAddrSchemaToWaddrmgr(selected)
-		if convErr != nil {
-			return 0, db.ScopeAddrSchema{}, convErr
-		}
-
-		scopedMgr, err = o.mgr.NewScopedKeyManager(
-			o.ns, waddrScope, converted,
-		)
-		o.scopeIsNew = err == nil
-	}
-
+	scopedMgr, scopeIsNew, err := ensureLegacyScope(
+		o.mgr, o.ns, scope, schema,
+	)
 	if err != nil {
-		return 0, db.ScopeAddrSchema{}, translateAccountErr(
-			err, db.ErrAccountNotFound,
-		)
+		return 0, db.ScopeAddrSchema{}, err
 	}
 
-	o.scope = waddrScope
+	o.scope = waddrmgr.KeyScope(scope)
 	o.scopedMgr = scopedMgr
+	o.scopeIsNew = scopeIsNew
 
 	// A new spendable scope includes a real default account. Admit its key
 	// against committed owners before the scope can become globally visible.
@@ -172,6 +147,42 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	}
 
 	return 0, addrSchema, nil
+}
+
+// ensureLegacyScope reuses or seeds a native scope without loading account
+// keys. Callers retain identity admission; initial creation can commit scope
+// registration before any account cache is warmed.
+func ensureLegacyScope(mgr waddrmgr.AddrStore, ns walletdb.ReadWriteBucket,
+	scope db.KeyScope, schema *db.ScopeAddrSchema) (waddrmgr.AccountStore,
+	bool, error) {
+
+	manager, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+	if !waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+		return manager, false, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	// Unknown scopes need a caller schema; known scopes retain the existing
+	// native defaults unless an explicit schema was supplied.
+	selected, known := db.ScopeAddrMap[scope]
+	if schema != nil {
+		selected = *schema
+	} else if !known {
+		return nil, false, db.ErrInvalidParam
+	}
+
+	converted, err := db.ScopeAddrSchemaToWaddrmgr(selected)
+	if err != nil {
+		return nil, false, err
+	}
+
+	manager, err = mgr.NewScopedKeyManager(
+		ns, waddrmgr.KeyScope(scope), converted,
+	)
+	if err != nil {
+		return nil, false, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	return manager, true, nil
 }
 
 // AllocateAccountNumber implements db.CreateDerivedAccountOps. Exact writes
