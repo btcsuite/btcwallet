@@ -96,10 +96,31 @@ func (s *Store) CreateInitialDerivedAccounts(ctx context.Context,
 
 	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		defaults := make(map[db.KeyScope]string)
 
 		for _, account := range accounts {
 			account.WalletID = walletID
 			account.NoChainSync = false
+
+			// Native zero is already root-derived. Reuse it only once per
+			// requested scope; later declarations remain ordinary conflicts.
+			if account.AccountNumber != nil && *account.AccountNumber == 0 {
+				switch name, exists := defaults[account.Scope]; {
+				case exists && name == account.Name:
+					return db.ErrAccountNameConflict
+				case exists:
+					return db.ErrAccountNumberConflict
+				}
+
+				err := s.initializeNativeDefault(ctx, ns, account, deriveFn)
+				if err != nil {
+					return err
+				}
+
+				defaults[account.Scope] = account.Name
+
+				continue
+			}
 
 			ops := &createDerivedAccountOps{
 				mgr: s.addrStore,
@@ -160,6 +181,98 @@ func (s *Store) prepareInitialScopes(ctx context.Context,
 	}
 
 	return nil
+}
+
+// initializeNativeDefault retains the fresh scope's actual account-zero key,
+// while admitting its identity and persisting requested name and origin data.
+func (s *Store) initializeNativeDefault(ctx context.Context,
+	ns walletdb.ReadWriteBucket, account db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) error {
+
+	manager, err := s.addrStore.FetchScopedKeyManager(
+		waddrmgr.KeyScope(account.Scope),
+	)
+	if err != nil {
+		return err
+	}
+
+	initial, err := loadAccountInfo(ns, manager, 0, false)
+	if err != nil {
+		return err
+	}
+
+	fingerprint, err := s.checkInitialDefault(ctx, ns, initial, deriveFn)
+	if err != nil {
+		return err
+	}
+
+	if initial.AccountName != account.Name {
+		err = manager.RenameAccount(ns, 0, account.Name)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Reserve zero only if the native cursor is still unset; an earlier
+	// sparse account in this same input must keep its higher cursor intact.
+	last, err := manager.LastAccount(ns)
+	if err != nil {
+		return err
+	}
+
+	if last == ^uint32(0) {
+		_, err = manager.AllocateDerivedAccountNumber(ns)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = putAccountMasterFingerprint(
+		ns, manager.Scope(), 0, fingerprint,
+	)
+	if err != nil {
+		return err
+	}
+
+	return putAccountCreatedAt(ns, manager.Scope(), 0, time.Now().UTC(), nil)
+}
+
+// checkInitialDefault verifies the derived path still names the native key,
+// then returns its fingerprint after shared cross-scope identity admission.
+func (s *Store) checkInitialDefault(ctx context.Context,
+	ns walletdb.ReadBucket, initial *db.AccountInfo,
+	deriveFn db.AccountDerivationFunc) (uint32, error) {
+
+	derived, err := deriveFn(ctx, initial.KeyScope, 0, false)
+	if err != nil {
+		return 0, err
+	}
+
+	if !bytes.Equal(
+		db.AccountXPubPayload(initial.PublicKey),
+		db.AccountXPubPayload(derived.PublicKey),
+	) {
+
+		return 0, db.ErrInvalidParam
+	}
+
+	var (
+		identities []db.AccountInfo
+		numbers    []uint32
+	)
+
+	for _, scoped := range s.addrStore.ActiveScopedKeyManagers() {
+		err := collectScopedAccounts(
+			ns, scoped, db.ListAccountsQuery{}, false,
+			&identities, &numbers,
+		)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return derived.MasterKeyFingerprint,
+		db.CheckAccountIdentity(*initial, identities)
 }
 
 // createDerivedAccountOps adapts the shared workflow to waddrmgr. The
