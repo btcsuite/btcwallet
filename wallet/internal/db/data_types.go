@@ -707,7 +707,9 @@ type AddressInfo struct {
 	// publication admission without another lookup. Other results omit it.
 	NoChainSync bool
 
-	// ID is the database unique identifier for the address.
+	// ID is the durable SQL row identifier. KVDB point and creation results
+	// leave it zero because legacy addresses have no durable row ID. KVDB
+	// address pages assign a synthetic ordinal for their current sorted view.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
 	// databases (signed 64-bit integers).

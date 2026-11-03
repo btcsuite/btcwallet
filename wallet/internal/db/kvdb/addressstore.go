@@ -96,7 +96,7 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 }
 
 // derivedAddressInfo creates one derived address info using the legacy scoped
-// manager and assigns its synthetic address ID.
+// manager. Only list results need synthetic IDs for pagination.
 func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 	manager waddrmgr.AccountStore,
 	walletIsWatchOnly bool,
@@ -137,11 +137,6 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 	info, err := managedAddressInfo(
 		ns, manager, walletIsWatchOnly, accountInfo.IsImported, managedAddr,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	err = setAddressID(ns, manager, account, walletIsWatchOnly, info)
 	if err != nil {
 		return nil, err
 	}
@@ -242,14 +237,6 @@ func (s *Store) importAddressTx(ns walletdb.ReadWriteBucket,
 	}
 
 	err = validateImportedAddress(params, info)
-	if err != nil {
-		return nil, err
-	}
-
-	err = setAddressID(
-		ns, manager, managedAddr.InternalAccount(),
-		addrMgr.WatchOnly(), info,
-	)
 	if err != nil {
 		return nil, err
 	}
@@ -402,8 +389,8 @@ func resolveOwnedScripts(ns walletdb.ReadBucket, addrMgr waddrmgr.AddrStore,
 	return nil
 }
 
-// resolvedAddressInfo resolves one legacy managed address and assigns its
-// synthetic address ID.
+// resolvedAddressInfo resolves one legacy managed address without enumerating
+// its account; synthetic address IDs are only pagination cursors.
 func resolvedAddressInfo(ns walletdb.ReadBucket,
 	resolver waddrmgr.AddrStore,
 	addr address.Address) (*db.AddressInfo, error) {
@@ -436,11 +423,6 @@ func resolvedAddressInfo(ns walletdb.ReadBucket,
 	info, err := managedAddressInfo(
 		ns, manager, resolver.WatchOnly(), accountImported, managedAddr,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	err = setAddressID(ns, manager, account, resolver.WatchOnly(), info)
 	if err != nil {
 		return nil, err
 	}
@@ -1062,29 +1044,6 @@ func listRawImportedAddressItems(dbConn walletdb.DB,
 	}
 
 	return addressPageItems(items, query), nil
-}
-
-// setAddressID assigns target's synthetic ID from the current legacy
-// account view.
-func setAddressID(ns walletdb.ReadBucket, manager waddrmgr.AccountStore,
-	account uint32, walletIsWatchOnly bool, target *db.AddressInfo) error {
-
-	items, err := accountAddressInfos(
-		ns, manager, account, walletIsWatchOnly,
-	)
-	if err != nil {
-		return err
-	}
-
-	for i := range items {
-		if bytes.Equal(items[i].ScriptPubKey, target.ScriptPubKey) {
-			target.ID = items[i].ID
-
-			return nil
-		}
-	}
-
-	return db.ErrAddressNotFound
 }
 
 // accountAddressInfos loads all addresses for a legacy account and assigns
