@@ -315,17 +315,16 @@ func TestCreateTxCreditBareMultisigMember(t *testing.T) {
 	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
 }
 
-// TestCreateTxCreditlessSucceeds verifies that a credit-less (sweep) tx is
-// recorded even without the address-manager namespace, since the namespace is
-// only consulted when recording credits.
+// TestCreateTxCreditlessSucceeds verifies native creditless admission without
+// an address-manager namespace, refusing ordinary competing inputs while
+// retaining both records after an accepted network observation.
 func TestCreateTxCreditlessSucceeds(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a stored sweep without an address-manager bucket so conflict
+	// admission reuses native transactions without adding address state.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
-
-	// Deliberately omit newAddrmgrNamespace: a credit-less tx must not
-	// require the address-manager bucket.
 	txStore := newTxStore(t, dbConn)
 	store := NewStore(dbConn, txStore, nil)
 
@@ -342,6 +341,46 @@ func TestCreateTxCreditlessSucceeds(t *testing.T) {
 		Status:   db.TxStatusPublished,
 	})
 	require.NoError(t, err)
+
+	competing := txMsg.Copy()
+	competing.TxOut[0].Value--
+	params := db.CreateTxParams{
+		Tx:       competing,
+		Received: time.Unix(1710003301, 0),
+		Status:   db.TxStatusPublished,
+	}
+
+	// Act: Refuse ordinary and Pending admission before observing acceptance.
+	// Read the absent row, admit Published, then retry the original hash while
+	// both competitors remain so duplicate detection must precede admission.
+	refusalErr := store.CreateTx(t.Context(), params)
+	params.Status = db.TxStatusPending
+	pendingErr := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	})
+	missing, missingErr := store.GetTx(t.Context(), db.GetTxQuery{
+		Txid: competing.TxHash(),
+	})
+	params.Status = db.TxStatusPublished
+	permittedErr := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{params},
+	})
+	retained, retainedErr := store.GetTx(t.Context(), db.GetTxQuery{
+		Txid: competing.TxHash(),
+	})
+	params.Tx = txMsg
+	retryErr := store.CreateTx(t.Context(), params)
+
+	// Assert: Strict paths left no competitor; observation retained both rows.
+	// The original retry remains a duplicate so Wallet checks stored witnesses.
+	require.ErrorIs(t, refusalErr, db.ErrTxInputConflict)
+	require.ErrorIs(t, pendingErr, db.ErrTxInputConflict)
+	require.ErrorIs(t, missingErr, db.ErrTxNotFound)
+	require.Nil(t, missing)
+	require.NoError(t, permittedErr)
+	require.NoError(t, retainedErr)
+	require.NotNil(t, retained)
+	require.ErrorIs(t, retryErr, db.ErrTxAlreadyExists)
 
 	txid := txMsg.TxHash()
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
