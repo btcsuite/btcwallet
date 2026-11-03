@@ -896,6 +896,17 @@ func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket,
 	return nil
 }
 
+// IsReceivingAddress reports whether a native owned address belongs in the
+// automatic receiving set. Default scopes and custom change remain relevant;
+// raw imports have no derivation path and are watched separately. This policy
+// does not restrict key ownership or signing access.
+func IsReceivingAddress(hasDerivationPath bool, scope KeyScope,
+	branch uint32) bool {
+
+	return !hasDerivationPath || IsDefaultScope(scope) ||
+		branch == InternalBranch
+}
+
 // ForEachRelevantActiveAddress invokes the given closure on each active
 // address relevant to the wallet. Ideally, only addresses within the default
 // key scopes would be relevant, but due to a bug (now fixed) in which change
