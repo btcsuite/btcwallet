@@ -49,7 +49,7 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	// Assert the child retains local signing custody and its real account
 	// identity, including through point and account-scoped ownership reads.
 	require.NoError(t, err)
-	require.Equal(t, uint32(1), info.ID)
+	require.Zero(t, info.ID)
 	require.False(t, info.IsImported)
 	require.False(t, info.IsWatchOnly)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
@@ -84,6 +84,10 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
+	// Pagination alone retains the synthetic ordinal; all point metadata
+	// stays identical when that page-local cursor is removed.
+	require.Equal(t, uint32(1), result.Items[0].ID)
+	result.Items[0].ID = 0
 	require.Equal(t, *info, result.Items[0])
 }
 
