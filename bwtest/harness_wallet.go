@@ -462,13 +462,14 @@ func (h *HarnessTest) FundUnimportedAccount(w *wallet.Wallet,
 	accountKey, err = accountKey.Neuter()
 	require.NoError(h, err, "failed to neuter account key")
 
-	// Pay the account's first receive addresses, m/0/i below its key.
-	external, err := accountKey.Derive(0)
+	// Fund custom change: native receiving excludes custom external signing
+	// keys, while every backend can recover the account's internal branch.
+	change, err := accountKey.Derive(waddrmgr.InternalBranch)
 	require.NoError(h, err, "failed to derive receive branch")
 
 	outputs := make([]*wire.TxOut, 0, len(amounts))
 	for i, amount := range amounts {
-		child, err := external.Derive(uint32(i)) //nolint:gosec
+		child, err := change.Derive(uint32(i)) //nolint:gosec
 		require.NoError(h, err, "failed to derive receive key")
 
 		pubKey, err := child.ECPubKey()

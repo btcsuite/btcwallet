@@ -2369,72 +2369,149 @@ func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
 	)
 }
 
-// TestApplyTxBatchResolvesCreditCandidates verifies kvdb resolves notification
-// credit candidates inside the batch write before recording credits.
+// TestApplyTxBatchResolvesCreditCandidates aligns automatic receiving credits
+// with native scope/branch scanning while retaining key ownership.
 func TestApplyTxBatchResolvesCreditCandidates(t *testing.T) {
 	t.Parallel()
 
-	dbConn, cleanup := newTestDB(t)
+	// Arrange: A real native wallet owns ordinary change plus both branches
+	// of a custom key family. KVDB ignores SQL's NoChainSync flag, so native
+	// scope and derivation metadata must determine automatic relevance.
+	store, mgr, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
+	txStore := newTxStore(t, store.db)
+	store.txStore = txStore
 
-	newAddrmgrNamespace(t, dbConn)
-	txStore := newTxStore(t, dbConn)
+	const keyAccount = "keys"
 
-	addr, script := newTestAddressScript(t)
-	managedAddr := &bwmock.ManagedAddress{}
-	managedAddr.On("Internal").Return(true).Maybe()
-	managedAddr.On("Address").Return(addr).Maybe()
-	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
-	managedAddr.On("Imported").Return(false).Maybe()
-	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
-	managedAddr.On("Compressed").Return(true).Maybe()
-	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
-	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+	custom := db.KeyScope{
+		Purpose: 1017,
+		Coin:    1,
+	}
+	schema := db.ScopeAddrSchema{
+		ExternalAddrType: db.WitnessPubKey,
+		InternalAddrType: db.WitnessPubKey,
+	}
+	zero := uint32(0)
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			Scope:         custom,
+			Name:          keyAccount,
+			AddrSchema:    &schema,
+			AccountNumber: &zero,
+			NoChainSync:   true,
+		}, kvdbDeriveFnFixture(t, mgr),
+	)
+	require.NoError(t, err)
 
-	addrStore := &bwmock.AddrStore{}
-	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
-	addrStore.On("Address", mock.Anything, addr).Return(
-		managedAddr, nil,
-	).Twice()
-	addrStore.On("MarkUsed", mock.Anything, addr).Return(nil).Once()
-	store := NewStore(dbConn, txStore, addrStore)
+	outputs := []struct {
+		scope  db.KeyScope
+		name   string
+		change bool
+	}{
+		{
+			scope:  db.KeyScopeBIP0084,
+			name:   waddrmgr.DefaultAccountName,
+			change: true,
+		},
+		{
+			scope:  custom,
+			name:   keyAccount,
+			change: true,
+		},
+		{
+			scope:  custom,
+			name:   keyAccount,
+			change: false,
+		},
+	}
+	txMsg := wire.NewMsgTx(wire.TxVersion)
+	txMsg.AddTxIn(wire.NewTxIn(&wire.OutPoint{
+		Hash: chainhash.Hash{66},
+	}, nil, nil))
 
-	txMsg := &wire.MsgTx{Version: 1}
-	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
-		Hash: chainhash.Hash{65},
-	}})
-	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: script})
+	candidates := make(map[uint32][]address.Address)
+	fallback := make(map[uint32][]address.Address)
 
-	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
-		WalletID: 0,
-		Transactions: []db.CreateTxParams{{
-			WalletID: 0,
-			Tx:       txMsg,
-			Received: time.Unix(1710003110, 0),
-			Status:   db.TxStatusPublished,
-			CreditCandidates: map[uint32][]address.Address{
-				0: {addr},
+	for i, output := range outputs {
+		info, err := store.NewDerivedAddress(
+			t.Context(), db.NewDerivedAddressParams{
+				AccountName: output.name,
+				Scope:       output.scope,
+				Change:      output.change,
 			},
-		}},
-	})
-	require.NoError(t, err)
-
-	txid := txMsg.TxHash()
-	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		require.NotNil(t, ns)
-
-		details, err := txStore.TxDetails(ns, &txid)
+		)
 		require.NoError(t, err)
-		require.NotNil(t, details)
-		require.Len(t, details.Credits, 1)
-		require.True(t, details.Credits[0].Change)
 
-		return nil
+		addr := addressFromScript(info.ScriptPubKey, mgr.ChainParams())
+		require.NotNil(t, addr)
+
+		candidates[uint32(i)] = []address.Address{addr}
+		fallback[uint32(i)] = nil
+
+		txMsg.AddTxOut(wire.NewTxOut(10_000, info.ScriptPubKey))
+	}
+
+	// Empty candidate lists exercise script fallback with the same outputs;
+	// a distinct input keeps this separate from duplicate replay.
+	fallbackTx := txMsg.Copy()
+	fallbackTx.TxIn[0].PreviousOutPoint.Index = 1
+
+	// Act: Admit both notification forms through the public batch operation.
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		Transactions: []db.CreateTxParams{
+			{
+				Tx:               txMsg,
+				Status:           db.TxStatusPublished,
+				Received:         time.Unix(1710003110, 0),
+				CreditCandidates: candidates,
+			},
+			{
+				Tx:               fallbackTx,
+				Status:           db.TxStatusPublished,
+				Received:         time.Unix(1710003111, 0),
+				CreditCandidates: fallback,
+			},
+		},
 	})
+
+	// Assert: Both forms retain ordinary and custom change, excluding the
+	// custom external signing key from automatic receiving credits.
 	require.NoError(t, err)
 
-	addrStore.AssertExpectations(t)
+	// Native script-only credits retain their existing change flag behavior;
+	// address candidates still carry the original internal-credit control.
+	for _, result := range []struct {
+		tx     *wire.MsgTx
+		change bool
+	}{
+		{
+			tx:     txMsg,
+			change: true,
+		},
+		{
+			tx:     fallbackTx,
+			change: false,
+		},
+	} {
+		txid := result.tx.TxHash()
+		err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+			details, err := txStore.TxDetails(
+				tx.ReadBucket(wtxmgrNamespaceKey), &txid,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, details)
+			require.Len(t, details.Credits, 2)
+
+			for i, credit := range details.Credits {
+				require.Equal(t, uint32(i), credit.Index)
+				require.Equal(t, result.change, credit.Change)
+			}
+
+			return nil
+		})
+		require.NoError(t, err)
+	}
 }
 
 // TestApplyTxBatchRestoresSyncedToOnFailure verifies that a batch failure after

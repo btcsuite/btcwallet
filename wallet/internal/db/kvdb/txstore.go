@@ -556,8 +556,8 @@ func (s *Store) resolveLegacyCreditCandidates(
 	return params, nil
 }
 
-// ownedLegacyCreditCandidate returns the first candidate address owned by the
-// legacy address manager.
+// ownedLegacyCreditCandidate returns the first owned candidate eligible for
+// automatic credits under the native scan scope and branch selection.
 func (s *Store) ownedLegacyCreditCandidate(
 	addrmgrNs walletdb.ReadBucket, params db.CreateTxParams, index uint32,
 	candidates []address.Address) (address.Address, error) {
@@ -576,13 +576,23 @@ func (s *Store) ownedLegacyCreditCandidate(
 			return nil, err
 		}
 
-		_, err = s.addrStore.Address(addrmgrNs, candidate)
-		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+		info, err := resolvedAddressInfo(addrmgrNs, s.addrStore, candidate)
+		if errors.Is(err, db.ErrAddressNotFound) {
 			continue
 		}
 
 		if err != nil {
 			return nil, fmt.Errorf("lookup candidate address: %w", err)
+		}
+
+		// Custom external HD children remain signing keys but do not belong
+		// to native receiving scans; raw imports have no derivation path.
+		if !waddrmgr.IsReceivingAddress(
+			info.HasDerivationPath, waddrmgr.KeyScope(info.KeyScope),
+			info.Branch,
+		) {
+
+			continue
 		}
 
 		return candidate, nil
@@ -591,7 +601,8 @@ func (s *Store) ownedLegacyCreditCandidate(
 	return nil, nil //nolint:nilnil // A nil address means no candidate matched.
 }
 
-// legacyCreditScriptOwned reports whether script resolves to a wallet address.
+// legacyCreditScriptOwned reports whether script resolves to an address in
+// the native automatic receiving set.
 func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
 	script []byte) (bool, error) {
 
@@ -600,8 +611,8 @@ func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
 		return false, nil
 	}
 
-	_, err := s.addrStore.Address(addrmgrNs, addr)
-	if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+	info, err := resolvedAddressInfo(addrmgrNs, s.addrStore, addr)
+	if errors.Is(err, db.ErrAddressNotFound) {
 		return false, nil
 	}
 
@@ -609,7 +620,11 @@ func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
 		return false, fmt.Errorf("lookup script address: %w", err)
 	}
 
-	return true, nil
+	// The fallback must not re-admit a candidate excluded by scope policy.
+	return waddrmgr.IsReceivingAddress(
+		info.HasDerivationPath, waddrmgr.KeyScope(info.KeyScope),
+		info.Branch,
+	), nil
 }
 
 // applyLegacyTxNotification records one relevant transaction notification using
