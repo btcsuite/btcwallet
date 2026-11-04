@@ -477,7 +477,7 @@ func TestManagerChainRollbackStop(t *testing.T) {
 	t.Parallel()
 
 	// Success retains the existing ordering contract; failure also exposes
-	// losing a close error when the reader takes cleanup away from Stop.
+	// losing a close error when automatic cleanup races the Stop request.
 	tests := []struct {
 		name        string
 		rollbackErr error
@@ -547,13 +547,14 @@ func TestManagerChainRollbackStop(t *testing.T) {
 				}
 			}).Return(test.closeErr).Once()
 
-			// Act: Observe Stop's lifetime cancellation while persistence is
-			// held. Its lock acquisition then follows rollback settlement, so
-			// a failing reader must leave storage cleanup to that waiting Stop.
-			rolled, stopped := make(chan error, 1), make(chan error, 1)
+			// Act: Hold accepted persistence in the runtime, then request
+			// Accept ordinary Stop before releasing the write.
+			stopReq := stopManagerReq{resp: make(chan error, 1)}
+
 			go func() {
-				rolled <- m.dispatchChainEvent(t.Context(),
-					chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+				_ = m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+					Block: wtxmgr.Block{Height: 8},
+				})
 			}()
 
 			var ok bool
@@ -563,17 +564,16 @@ func TestManagerChainRollbackStop(t *testing.T) {
 			close(req.readyForRollback)
 			<-entered
 
-			go func() { stopped <- m.Stop() }()
-
-			<-m.lifetimeCtx.Done()
+			// Acceptance is the boundary under test; the public Stop result
+			// and repeated-call behavior are covered by the lifecycle cases.
+			require.NoError(t, m.sendReq(t.Context(), stopReq))
 			releaseWork()
 
-			// Assert: Both causes reach their owning caller, and Store closes
+			// Assert: Stop retains its cleanup result, and Store closes
 			// only after accepted persistence and Wallet shutdown settle.
 			// Failure never signals permission for another historical write.
-			// Delivery now acknowledges receipt; Stop owns cleanup errors.
-			<-rolled
-			require.ErrorIs(t, <-stopped, test.closeErr)
+			require.ErrorIs(t, <-stopReq.resp, test.closeErr)
+			require.NoError(t, m.Stop())
 			require.NoError(t, closeOrderErr)
 			require.False(t, m.started.Load())
 		})
@@ -3541,8 +3541,8 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 	require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
 }
 
-// TestManagerChainCanceledSourceRejectsCreate rejects terminal admission after
-// Stop cancels its lifetime, before it obtains the lock to close storage.
+// TestManagerChainCanceledSourceRejectsCreate rejects creation after lifetime
+// cancellation, before the runtime closes storage.
 func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	t.Parallel()
 
@@ -3552,7 +3552,9 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 	manager := newManagerLifecycleTest(t, backend)
 	manager.started.Store(true)
-	manager.cancel()
+
+	req := chainEventReq{err: errChainMock, done: make(chan struct{})}
+	require.NoError(t, manager.sendReq(t.Context(), req))
 
 	// Act: Try creation before the ordinary cleanup owner closes the Store.
 	w, err := manager.Create(CreateWalletParams{Name: "late"})

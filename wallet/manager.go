@@ -140,15 +140,13 @@ type CreateWalletParams struct {
 // to manage multiple distinct wallets (e.g., for different coins or different
 // accounts) simultaneously.
 type Manager struct {
-	sync.RWMutex
-
-	// started rejects another Start while starting, running or stopping.
-	// The Manager lock serializes resource changes and terminal admission.
+	// started lets public Start reject immediately while the runtime loop
+	// is occupied. Only that loop changes the observed lifecycle guard.
 	started atomic.Bool
 
 	// wallets holds fully initialized and started Wallets keyed by unique
-	// name. The Manager lock serializes Store access, runtime assembly, and
-	// publication after initial-account import and private startup complete.
+	// name. The runtime loop owns membership and publishes each Wallet only
+	// after its initial accounts and native watches are ready.
 	wallets map[string]*Wallet
 
 	// backend owns the database and resolves the storage dependencies for
@@ -162,11 +160,11 @@ type Manager struct {
 	chainSyncer chainRouter
 
 	// lifetimeCtx outlives construction and startup requests. Wallets keep
-	// their own lifetimes; canceling this one releases shared event delivery.
+	// their own lifetimes; this closes after aggregate cleanup finishes.
 	//nolint:containedctx // Manager owns and joins the shared reader lifetime.
 	lifetimeCtx context.Context
 
-	// cancel signals terminal reader shutdown before draining Wallet work.
+	// cancel publishes completion after owned work and Store closure finish.
 	cancel context.CancelFunc
 
 	// requestChan transfers public operations to the sole runtime owner.
@@ -292,6 +290,11 @@ type managerInfoReq struct {
 	resp chan string
 }
 
+// stopManagerReq reserves cleanup errors for the first accepted Stop caller.
+type stopManagerReq struct {
+	resp chan error
+}
+
 // chainEventReq bounds intake until the owner finishes one source event.
 type chainEventReq struct {
 	event any
@@ -321,22 +324,25 @@ type rollbackResultReq struct {
 }
 // managerRuntime holds one loop's state for its handlers, without shared locks.
 type managerRuntime struct {
-	manager   *Manager
-	operation chan struct{}
-	pending   *chainEventReq
-	wallets   []*Wallet
-	events    map[uint32]chainEvent
-	cursor    int
+	manager               *Manager
+	operation             chan struct{}
+	rollingBack, stopping bool
+	pending               *chainEventReq
+	wallets               []*Wallet
+	events                map[uint32]chainEvent
+	cursor                int
+	stopReply             chan error
+	failedStart           *startManagerResultReq
+	failedCreate          *createWalletResultReq
 }
 
-// mainLoop drains accepted I/O after legacy Stop cancels its lifetime.
+// mainLoop selects delivery alongside requests until accepted I/O settles.
 func (m *Manager) mainLoop() {
 	workerCtx, cancelWork := context.WithCancel(m.lifetimeCtx)
-	defer cancelWork()
 
 	runtime := managerRuntime{manager: m}
-	cancelled := m.lifetimeCtx.Done()
-	for cancelled != nil || runtime.operation != nil {
+
+	for !runtime.stopping || runtime.operation != nil {
 		delivery, event := runtime.nextDelivery(workerCtx)
 		select {
 		case delivery <- event:
@@ -344,15 +350,21 @@ func (m *Manager) mainLoop() {
 
 		case req := <-m.requestChan:
 			runtime.handleReq(workerCtx, req)
+		}
 
-		case <-cancelled:
-			// Observe cancellation once while accepted results settle.
-			cancelled = nil
+		// Startup/Create retains watch-time intake until its result arrives;
+		// rollback preparation can be interrupted without that handoff.
+		if runtime.stopping && runtime.rollingBack {
+			cancelWork()
 		}
 	}
+
+	cancelWork()
+	runtime.finish()
+	m.cancel()
 }
 
-// handleReq dispatches requests on the one runtime owner.
+// handleReq routes lifecycle requests to this loop's existing state owner.
 func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 	switch req := raw.(type) {
 	case startManagerReq:
@@ -362,15 +374,16 @@ func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 		r.create(ctx, req)
 
 	case managerInfoReq:
-		m := r.manager
-		if r.operation == nil {
-			m.RLock()
-		}
-		names := slices.Sorted(maps.Keys(m.wallets))
-		if r.operation == nil {
-			m.RUnlock()
-		}
+		names := slices.Sorted(maps.Keys(r.manager.wallets))
 		req.resp <- fmt.Sprintf("active_wallets=%v", names)
+
+	case stopManagerReq:
+		if r.stopReply == nil && !r.stopping {
+			r.stopReply = req.resp
+		}
+
+		r.stopping = true
+
 	default:
 		r.handleChainReq(ctx, raw)
 	}
@@ -389,7 +402,19 @@ func (r *managerRuntime) handleChainReq(ctx context.Context, raw any) {
 		r.completeRollback(ctx, req)
 
 	case chainEventReq:
+		if req.err != nil {
+			log.Warnf("Chain notification reader stopped: %v", req.err)
+
+			r.stopping = true
+		}
+
+		if r.stopping {
+			close(req.done)
+			return
+		}
+
 		r.pending = &req
+
 	}
 }
 
@@ -399,7 +424,7 @@ func (r *managerRuntime) start(ctx context.Context, req startManagerReq) {
 
 	var err error
 	switch {
-	case m.lifetimeCtx.Err() != nil:
+	case r.stopping:
 		err = ErrManagerStopped
 
 	case req.ctx.Err() != nil:
@@ -409,22 +434,18 @@ func (r *managerRuntime) start(ctx context.Context, req startManagerReq) {
 		err = ErrStateForbidden
 
 	default:
-		m.Lock()
-		if m.lifetimeCtx.Err() != nil {
-			m.started.Store(false)
-			m.Unlock()
-			req.resp <- startManagerResp{err: ErrManagerStopped}
-			return
-		}
 		r.operation = make(chan struct{})
 		cfg, backend, router := m.config, m.backend, m.chainSyncer
 		requests, wg := m.requestChan, &m.wg
 		wg.Add(1)
+
 		go m.startChainSyncer(ctx)
+
 		wg.Go(func() {
 			candidates, err := startWallets(req.ctx, cfg, backend, router)
 			requests <- startManagerResultReq{req, candidates, err}
 		})
+
 		return
 	}
 
@@ -433,27 +454,21 @@ func (r *managerRuntime) start(ctx context.Context, req startManagerReq) {
 
 // create preserves caller-owned waiting instead of growing an owner queue.
 func (r *managerRuntime) create(ctx context.Context, req createWalletReq) {
-	if r.operation != nil {
-		req.resp <- createWalletResp{retry: r.operation}
-		return
-	}
-
-	// Finish preceding fanout before a native Create registration.
-	if r.pending != nil {
-		req.resp <- createWalletResp{retry: r.pending.done}
-		return
-	}
-
 	m := r.manager
-	m.Lock()
 
 	var result createWalletResp
 	switch {
-	case m.lifetimeCtx.Err() != nil:
+	case r.stopping:
 		result.err = ErrManagerStopped
 
 	case !m.started.Load():
 		result.err = ErrStateForbidden
+
+	case r.operation != nil:
+		result.retry = r.operation
+
+	case r.pending != nil:
+		result.retry = r.pending.done
 
 	case req.params.Name != "" && m.wallets[req.params.Name] != nil:
 		result.err = ErrWalletExists
@@ -482,43 +497,42 @@ func (r *managerRuntime) create(ctx context.Context, req createWalletReq) {
 		return
 	}
 
-	m.Unlock()
 	req.resp <- result
 }
 
 // completeStart publishes only a complete successful set on the owner loop.
 func (r *managerRuntime) completeStart(req startManagerResultReq) {
-	m := r.manager
-	defer m.Unlock()
 	close(r.operation)
 	r.operation = nil
 
 	if req.err != nil {
-		req.err = errors.Join(req.err, m.stopWallets(req.wallets))
-		req.req.resp <- startManagerResp{err: req.err}
+		r.failedStart, r.stopping = &req, true
 		return
 	}
+
 	for _, w := range req.wallets {
-		m.wallets[w.cfg.Name] = w
+		r.manager.wallets[w.cfg.Name] = w
 	}
+
 	req.req.resp <- startManagerResp{wallets: req.wallets}
 }
 
 // completeCreate keeps failed candidates under joined cleanup before replying.
 func (r *managerRuntime) completeCreate(req createWalletResultReq) {
-	m := r.manager
-	defer m.Unlock()
 	close(r.operation)
 	r.operation = nil
 
 	if req.err != nil && req.wallet != nil {
-		req.err = errors.Join(req.err, m.stopWallets([]*Wallet{req.wallet}))
-		req.wallet = nil
-	} else if req.err == nil {
-		m.wallets[req.wallet.cfg.Name] = req.wallet
+		r.failedCreate, r.stopping = &req, true
+		return
+	}
+
+	if req.err == nil {
+		r.manager.wallets[req.wallet.cfg.Name] = req.wallet
 	} else if errors.Is(req.err, db.ErrWalletExists) {
 		req.err = fmt.Errorf("%w: %w", ErrWalletExists, req.err)
 	}
+
 	req.req.resp <- createWalletResp{wallet: req.wallet, err: req.err}
 }
 
@@ -526,15 +540,9 @@ func (r *managerRuntime) completeCreate(req createWalletResultReq) {
 func (r *managerRuntime) beginRollback(ctx context.Context,
 	event chain.BlockDisconnected, recovery bool, receipt chan struct{}) {
 
-	m := r.manager
-	// Retain inherited Stop exclusion until lifecycle migration.
-	m.Lock()
-	if m.checkCreate() != nil {
-		m.Unlock()
-		close(receipt)
-		return
-	}
 	r.operation = make(chan struct{})
+	r.rollingBack = true
+	m := r.manager
 	backend, wallets := m.backend, slices.Collect(maps.Values(m.wallets))
 	requests, wg := m.requestChan, &m.wg
 	barrier := make(chan struct{})
@@ -551,19 +559,20 @@ func (r *managerRuntime) beginRollback(ctx context.Context,
 func (r *managerRuntime) completeRollback(ctx context.Context,
 	req rollbackResultReq) {
 
-	m := r.manager
-	defer m.Unlock()
+	r.rollingBack = false
 	close(r.operation)
 	r.operation = nil
 
 	if req.err != nil {
 		if ctx.Err() == nil {
 			log.Errorf("Unable to roll back chain: %v", req.err)
-			_ = m.stopWallets(nil)
 		}
+
+		r.stopping = true
 	} else {
 		close(req.barrier)
 	}
+
 	if req.receipt != nil {
 		close(req.receipt)
 	}
@@ -572,8 +581,10 @@ func (r *managerRuntime) completeRollback(ctx context.Context,
 // prepareEvent starts recovery or matches one source event after publication.
 func (r *managerRuntime) prepareEvent(ctx context.Context) {
 	if r.pending == nil {
+
 		return
 	}
+
 	if event, ok := r.pending.event.(chain.BlockDisconnected); ok {
 		r.beginRollback(ctx, event, false, r.pending.done)
 		r.pending = nil
@@ -581,7 +592,7 @@ func (r *managerRuntime) prepareEvent(ctx context.Context) {
 		return
 	}
 
-	r.wallets = r.manager.chainRecipients()
+	r.wallets = slices.Collect(maps.Values(r.manager.wallets))
 	r.events = r.manager.chainSyncer.routeChainEvent(
 		r.pending.event, r.wallets,
 	)
@@ -591,7 +602,7 @@ func (r *managerRuntime) prepareEvent(ctx context.Context) {
 func (r *managerRuntime) nextDelivery(ctx context.Context) (
 	chan chainEvent, chainEvent) {
 
-	if r.manager.lifetimeCtx.Err() != nil || r.operation != nil {
+	if r.stopping || r.operation != nil {
 		return nil, chainEvent{}
 	}
 
@@ -616,6 +627,40 @@ func (r *managerRuntime) nextDelivery(ctx context.Context) (
 	}
 
 	return nil, chainEvent{}
+}
+
+// finish joins failed candidates and assigns cleanup errors to their owner.
+func (r *managerRuntime) finish() {
+	var candidates []*Wallet
+	if r.failedStart != nil {
+		candidates = r.failedStart.wallets
+	}
+
+	if r.failedCreate != nil {
+		candidates = append(candidates, r.failedCreate.wallet)
+	}
+
+	err := r.manager.stop(candidates)
+	if r.stopReply != nil {
+		r.stopReply <- err
+
+		err = nil
+	}
+
+	switch {
+	case r.failedStart != nil:
+		r.failedStart.req.resp <- startManagerResp{
+			err: errors.Join(r.failedStart.err, err),
+		}
+
+	case r.failedCreate != nil:
+		r.failedCreate.req.resp <- createWalletResp{
+			err: errors.Join(r.failedCreate.err, err),
+		}
+
+	case err != nil:
+		log.Errorf("Unable to stop manager: %v", err)
+	}
 }
 
 // sendReq transfers ownership only while the Manager and caller are live.
@@ -667,11 +712,9 @@ func startWallets(ctx context.Context, cfg ManagerConfig,
 	return wallets, nil
 }
 
-// stopWallets stops all Wallets before closing storage. The slice holds Wallets
-// from failed Start/Create calls that are not in m.wallets.
-// The caller holds the write lock and must have a non-nil backend.
-func (m *Manager) stopWallets(wallets []*Wallet) error {
-	m.cancel()
+// stop joins Wallets and intake before closing their Store.
+func (m *Manager) stop(wallets []*Wallet) error {
+	m.started.Store(true)
 
 	for _, wallet := range m.wallets {
 		wallets = append(wallets, wallet)
@@ -771,63 +814,31 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 	return result.wallets, result.err
 }
 
-// Stop terminally drains every Wallet and closes the owned database.
-// It waits for startup, accepted creation, and any other Stop to finish.
-// After shutdown, Stop is a no-op.
+// Stop joins accepted work and returns the first caller's cleanup errors.
 func (m *Manager) Stop() error {
-	// Release a reader blocked on a full mailbox before waiting for admission.
-	m.cancel()
+	req := stopManagerReq{resp: make(chan error, 1)}
+	_ = m.sendReq(context.Background(), req)
+	<-m.lifetimeCtx.Done()
 
-	m.Lock()
-
-	// LIFO releases membership before joining, including repeated Stop after
-	// storage closed. The reader can be parked on its recipient snapshot.
-	defer m.wg.Wait()
-	defer m.Unlock()
-
-	// Preserve terminal admission on repeated no-op shutdown calls.
-	if m.backend == nil {
+	// The first caller's buffered outcome wins over final completion;
+	// later callers join without replaying another caller's cleanup error.
+	select {
+	case err := <-req.resp:
+		return err
+	default:
 		return nil
 	}
-
-	// Construction already owns an open backend, so shutdown must reject
-	// Start even when no startup attempt has claimed the guard yet.
-	m.started.Store(true)
-
-	return m.stopWallets(nil)
 }
 
-// startChainSyncer reads the shared stream until shutdown or source loss.
-// Its caller enrolls it before launch so terminal shutdown joins the reader.
+// startChainSyncer reports source loss through the same inbox as normal events.
 func (m *Manager) startChainSyncer(ctx context.Context) {
+	defer m.wg.Done()
+
 	err := m.chainSyncer.run(ctx, m.dispatchChainEvent)
-
-	// No reader work follows Done. Automatic teardown can therefore
-	// reuse Stop without waiting for this goroutine to join itself.
-	m.wg.Done()
-
 	if err != nil && ctx.Err() == nil {
-		log.Warnf("Chain notification reader stopped: %v", err)
-
-		err := m.Stop()
-		if err != nil {
-			log.Errorf("Unable to stop manager: %v", err)
-		}
+		req := chainEventReq{err: err, done: make(chan struct{})}
+		_ = m.sendReq(ctx, req)
 	}
-}
-
-// chainRecipients fixes active membership without holding the Manager lock
-// across matching or potentially blocked delivery to a Wallet mailbox.
-func (m *Manager) chainRecipients() []*Wallet {
-	m.RLock()
-	defer m.RUnlock()
-
-	wallets := make([]*Wallet, 0, len(m.wallets))
-	for _, w := range m.wallets {
-		wallets = append(wallets, w)
-	}
-
-	return wallets
 }
 
 // dispatchChainEvent retains source order until the owner completes delivery.
@@ -943,20 +954,6 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 			return nil, ErrManagerStopped
 		}
 	}
-}
-
-// checkCreate rejects terminal admission after Stop cancels the reader, even
-// before Stop obtains admission and closes storage. The caller holds the lock.
-func (m *Manager) checkCreate() error {
-	if m.lifetimeCtx.Err() != nil {
-		return ErrManagerStopped
-	}
-
-	if !m.started.Load() {
-		return ErrStateForbidden
-	}
-
-	return nil
 }
 
 // createWallet prepares an unpublished candidate for owner-controlled startup.
