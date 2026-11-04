@@ -1146,6 +1146,136 @@ func TestControllerUnlock(t *testing.T) {
 	w.wg.Wait()
 }
 
+// TestControllerUnlockRepeatedPreservesSchedule verifies that repeated Unlock
+// rejects both passphrases without changing an active or disabled schedule on
+// either maintained Vault backend.
+func TestControllerUnlockRepeatedPreservesSchedule(t *testing.T) {
+	t.Parallel()
+
+	// Keep timing and diagnostic labels readable above the nested matrix.
+	// Repeating partway through the default schedule exposes a timer reset;
+	// the first state check stays one second before the reference expiry.
+	const (
+		repeatDelay = defaultLockDuration / 4
+		checkDelay  = defaultLockDuration - repeatDelay - time.Second
+		inputLog    = "backend=%s schedule=%s pass=%s repeat=%v"
+	)
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Create real backend fixtures inside the fake-time bubble so
+		// the request loops and timers share its clock. The fixtures own
+		// shutdown and verify their existing chain mocks.
+		birthday := chainParams.GenesisBlock.Header.Timestamp
+		wantErr := keyvault.ErrVaultUnlocked
+
+		for _, manager := range []*Manager{
+			testKVDBManager(t),
+			testSQLiteManager(t),
+		} {
+			pass := []byte("private")
+			w, err := manager.Create(CreateWalletParams{
+				Name:              testWalletName,
+				Mode:              ModeImportSeed,
+				Seed:              fixedTestSeed(),
+				PubPassphrase:     []byte(InsecurePubPassphrase),
+				PrivatePassphrase: pass,
+				Birthday:          birthday,
+			})
+			require.NoError(t, err)
+
+			// Disabled timers must outlive every retry deadline.
+			// A negative repeat can only disable an active timer.
+			schedules := []struct {
+				name           string
+				timeout        time.Duration
+				repeatTimeouts []time.Duration
+				finalDelay     time.Duration
+				wantLocked     bool
+			}{
+				{
+					name:    "active",
+					timeout: defaultLockDuration,
+					repeatTimeouts: []time.Duration{
+						10 * time.Second,
+						2 * defaultLockDuration,
+						0,
+						-1,
+					},
+					finalDelay: time.Second,
+					wantLocked: true,
+				},
+				{
+					name:    "disabled",
+					timeout: -1,
+					repeatTimeouts: []time.Duration{
+						10 * time.Second,
+						0,
+					},
+					finalDelay: w.cfg.AutoLockDuration,
+					wantLocked: false,
+				},
+			}
+
+			// Run cases serially and reset each through public Lock. This keeps
+			// timer changes under the real Controller's ownership.
+			for _, s := range schedules {
+				for _, repeatPass := range [][]byte{
+					pass, []byte("wrong-passphrase"),
+				} {
+					for _, delay := range s.repeatTimeouts {
+						t.Logf(inputLog, manager.config.Backend, s.name,
+							repeatPass, delay)
+
+						// Arrange: Lock and unlock with the first timeout.
+						// Advance fake time so a reset shifts the deadline.
+						err = w.Lock(t.Context())
+						require.NoError(t, err)
+
+						req := UnlockRequest{
+							Passphrase: pass,
+							Timeout:    s.timeout,
+						}
+						err = w.Unlock(t.Context(), req)
+						require.NoError(t, err)
+						time.Sleep(repeatDelay)
+
+						// Act: Submit the repeat through public Unlock.
+						// Vary the passphrase and timeout from the case data.
+						req = UnlockRequest{
+							Passphrase: repeatPass,
+							Timeout:    delay,
+						}
+						err = w.Unlock(t.Context(), req)
+
+						// Assert: Every repeat must be rejected.
+						// A shortened timer would have fired by this check;
+						// the original deadline has not expired yet.
+						require.ErrorIs(t, err, wantErr)
+						time.Sleep(checkDelay)
+						synctest.Wait()
+
+						info, err := w.Info(t.Context())
+						require.NoError(t, err)
+						require.False(t, info.Locked)
+
+						// Observe the original expiry after the loop drains.
+						// For a disabled timer, outlive every retry deadline
+						// so a new timer cannot escape the state check.
+						time.Sleep(s.finalDelay)
+						synctest.Wait()
+
+						info, err = w.Info(t.Context())
+						require.NoError(t, err)
+						require.Equal(t, s.wantLocked, info.Locked)
+					}
+				}
+			}
+		}
+	})
+}
+
 // TestControllerChangePassphrase verifies the ChangePassphrase method. It
 // ensures that the wallet forwards the request to the address manager to
 // update the passphrases.
