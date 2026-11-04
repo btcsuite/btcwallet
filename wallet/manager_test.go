@@ -635,7 +635,7 @@ func TestManagerChainRollbackStopDuringPreparation(t *testing.T) {
 					Return((<-chan any)(notifications)).Once()
 				t.Cleanup(func() { source.AssertExpectations(t) })
 
-				m.chainSyncer = newChainSyncer(source, &chainParams)
+				m.chainSyncer = newChainSyncer(source, &chainParams, nil)
 
 				notifications <- chain.BlockDisconnected{
 					Block: wtxmgr.Block{Height: 8},
@@ -1272,7 +1272,7 @@ func newManagerLifecycleTest(t *testing.T,
 
 	manager.requestChan = make(chan any)
 	manager.chainSyncer = newChainSyncer(
-		chain, &manager.config.ChainParams,
+		chain, &manager.config.ChainParams, manager.requestChan,
 	)
 
 	for _, w := range wallets {
@@ -2974,7 +2974,7 @@ func TestChainSyncerWatchAddresses(t *testing.T) {
 	client := createTestChain(t)
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 
-	s := newChainSyncer(client, &chainParams)
+	s := newChainSyncer(client, &chainParams, nil)
 
 	var received []TxEntries
 
@@ -3025,7 +3025,7 @@ func TestChainSyncerWatchOutpoints(t *testing.T) {
 	client := createTestChain(t)
 	client.On("NotifySpent", mock.Anything).Unset()
 
-	s := newChainSyncer(client, &chainParams)
+	s := newChainSyncer(client, &chainParams, nil)
 
 	var received []TxEntries
 
@@ -3081,7 +3081,7 @@ func TestChainSyncerNotifyReceived(t *testing.T) {
 
 	client := createTestChain(t)
 
-	s := newChainSyncer(client, &chainParams)
+	s := newChainSyncer(client, &chainParams, nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -3128,7 +3128,7 @@ func TestChainSyncerRouting(t *testing.T) {
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Twice()
 
-	s := newChainSyncer(client, &chainParams)
+	s := newChainSyncer(client, &chainParams, nil)
 
 	root, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
 	require.NoError(t, err)
@@ -3270,7 +3270,7 @@ func TestChainSyncerProgressRouting(t *testing.T) {
 			t.Parallel()
 
 			// Arrange: No watches are needed for block/control recipients.
-			s := newChainSyncer(createTestChain(t), &chainParams)
+			s := newChainSyncer(createTestChain(t), &chainParams, nil)
 
 			wallets := []*Wallet{{id: 1}, {id: 2}}
 
@@ -3391,7 +3391,7 @@ func TestManagerChainEventOrder(t *testing.T) {
 
 	manager := &Manager{
 		wallets:     map[string]*Wallet{"first": w},
-		chainSyncer: newChainSyncer(client, &chainParams),
+		chainSyncer: newChainSyncer(client, &chainParams, nil),
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
 	}
@@ -3451,7 +3451,7 @@ func TestManagerChainEventMembership(t *testing.T) {
 
 	manager := &Manager{
 		wallets:     map[string]*Wallet{"first": first},
-		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
+		chainSyncer: newChainSyncer(createTestChain(t), &chainParams, nil),
 	}
 
 	// Act: Publish under the existing membership lock between two events.

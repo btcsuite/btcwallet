@@ -250,7 +250,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	}
 
 	m.chainSyncer = newChainSyncer(
-		m.config.ChainSource, &m.config.ChainParams,
+		m.config.ChainSource, &m.config.ChainParams, m.requestChan,
 	)
 
 	//nolint:contextcheck // Runtime work outlives the construction context.

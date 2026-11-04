@@ -188,7 +188,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 
 	m.requestChan = make(chan any)
 	router := newChainSyncer(
-		m.config.ChainSource, &m.config.ChainParams,
+		m.config.ChainSource, &m.config.ChainParams, m.requestChan,
 	)
 	m.chainSyncer = router
 	m.started.Store(true)
@@ -318,7 +318,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	}
 	// Reuse the SQL owner so reported failures follow production policy.
 	owner := testSQLManager(t, mockStore)
-	w.chainSyncer = newChainSyncer(mockChain, &chainParams)
+	w.chainSyncer = newChainSyncer(mockChain, &chainParams, owner.requestChan)
 
 	w.chainEventChan = make(chan chainEvent, 1)
 	w.cache = newStoreRuntimeCache(mockStore)

@@ -56,6 +56,8 @@ type chainSyncer struct {
 
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
+	// requestChan is the required inbox of the sole lifecycle owner.
+	requestChan chan<- any
 }
 
 // chainSyncer implements the behavior shared by Manager and its Wallets.
@@ -78,11 +80,12 @@ type watchRegistry struct {
 
 // newChainSyncer retains the caller-owned source without starting any work.
 func newChainSyncer(source chain.Interface,
-	params *chaincfg.Params) *chainSyncer {
+	params *chaincfg.Params, requests chan<- any) *chainSyncer {
 
 	return &chainSyncer{
-		source: source,
-		params: params,
+		source:      source,
+		params:      params,
+		requestChan: requests,
 		watches: &watchRegistry{
 			addresses: make(map[string]map[uint32]struct{}),
 			outpoints: make(map[wire.OutPoint]map[uint32]struct{}),
