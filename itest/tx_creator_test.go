@@ -1749,3 +1749,262 @@ func testFundPsbtWatchOnly(h *bwtest.HarnessTest) {
 		)
 	}
 }
+
+// testFundPsbtRejectIntent checks that representative validation failures
+// preserve the caller and every public funding/allocation observation.
+func testFundPsbtRejectIntent(h *bwtest.HarnessTest) {
+	// Arrange: Use one funded fixture and baseline for the data-only refusal
+	// rows; the existing success cases own each accepted boundary control.
+	ctx := h.Context()
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err)
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{oneBTC},
+		},
+	)
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	source := &wallet.ScopedAccount{
+		KeyScope:    scope,
+		AccountName: waddrmgr.DefaultAccountName,
+	}
+	query := wallet.UtxoQuery{MaxConfs: maxConfsLimit}
+	account, err := w.GetAccount(ctx, scope, source.AccountName)
+	require.NoError(h, err)
+	addresses, err := w.ListAddresses(
+		ctx, source.AccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+	coins, err := w.ListUnspent(ctx, query)
+	require.NoError(h, err)
+	testCases := []struct {
+		name    string
+		amount  int64
+		records int
+		feeRate btcunit.SatPerKVByte
+		wantErr error
+	}{
+		{
+			name:    "malformed records",
+			amount:  payment.Value,
+			records: 0,
+			feeRate: relayFeeRate,
+			wantErr: wallet.ErrPacketMalformed,
+		},
+		{
+			name:    "dust payment",
+			amount:  int64(h.DustThreshold(payment.PkScript)) - 1,
+			records: 1,
+			feeRate: relayFeeRate,
+			wantErr: txrules.ErrOutputIsDust,
+		},
+		{
+			name:    "zero fee",
+			amount:  payment.Value,
+			records: 1,
+			feeRate: btcunit.ZeroSatPerKVByte,
+			wantErr: wallet.ErrMissingFeeRate,
+		},
+		{
+			name:    "excessive fee",
+			amount:  payment.Value,
+			records: 1,
+			feeRate: btcunit.NewSatPerKVByte(
+				wallet.DefaultMaxFeeRate.Val() + 1,
+			),
+			wantErr: wallet.ErrFeeRateTooLarge,
+		},
+	}
+
+	for _, tc := range testCases {
+		// Arrange: Vary only the caller's output, record count, and fee;
+		// encoding also works for the deliberately incomplete record list.
+		output := payment
+		output.Value = tc.amount
+		packet := fundPsbtPacket(h, output)
+		packet.Outputs = make([]psbt.POutput, tc.records)
+		original, err := packet.B64Encode()
+		require.NoError(h, err)
+
+		// Act: Ask the same real Wallet to fund each invalid representation.
+		result, err := w.FundPsbt(
+			ctx, &wallet.FundIntent{
+				Packet: packet, FeeRate: tc.feeRate,
+				Policy: &wallet.InputsPolicy{Source: source},
+			},
+		)
+
+		// Assert: A stable refusal returns no packet and leaves all caller,
+		// allocation, coin and reservation observations exactly unchanged.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
+		require.Nil(h, result)
+
+		unchanged, err := packet.B64Encode()
+		require.NoError(h, err)
+		require.Equal(h, original, unchanged)
+
+		afterAccount, err := w.GetAccount(
+			ctx, scope, source.AccountName,
+		)
+		require.NoError(h, err)
+		require.Equal(h, account, afterAccount)
+
+		afterAddresses, err := w.ListAddresses(
+			ctx, source.AccountName, txCreatorFundingType,
+		)
+		require.NoError(h, err)
+		require.ElementsMatch(h, addresses, afterAddresses)
+
+		afterCoins, err := w.ListUnspent(ctx, query)
+		require.NoError(h, err)
+		require.Equal(h, coins, afterCoins)
+
+		leases, err := w.ListLeasedOutputs(ctx)
+		require.NoError(h, err)
+		require.Empty(h, leases)
+	}
+}
+
+// testFundPsbtRejectInputs checks both unavailable manual inputs and an
+// insufficient automatic source without acquiring leases or allocating change.
+func testFundPsbtRejectInputs(h *bwtest.HarnessTest) {
+	// Arrange: Retain one real control lease and both wallet/foreign coins,
+	// so a refusal cannot pass by silently dropping preexisting ownership.
+	ctx := h.Context()
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err)
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		},
+	)
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	source := &wallet.ScopedAccount{
+		KeyScope:    scope,
+		AccountName: waddrmgr.DefaultAccountName,
+	}
+	owner := wtxmgr.LockID{1}
+	_, err = w.LeaseOutput(
+		ctx, owner, funding.WalletOutpoints[0], leaseDuration,
+	)
+	require.NoError(h, err)
+	leases, err := w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+
+	query := wallet.UtxoQuery{MaxConfs: maxConfsLimit}
+	coins, err := w.ListUnspent(ctx, query)
+	require.NoError(h, err)
+	account, err := w.GetAccount(ctx, scope, source.AccountName)
+	require.NoError(h, err)
+	addresses, err := w.ListAddresses(
+		ctx, source.AccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+
+	testCases := []struct {
+		name  string
+		input wire.OutPoint
+	}{
+		{
+			name:  "leased input",
+			input: funding.WalletOutpoints[0],
+		},
+		{
+			name:  "foreign input",
+			input: funding.ForeignOutpoints[0],
+		},
+	}
+	for _, tc := range testCases {
+		// Arrange: Each manual packet selects one unavailable real outpoint.
+		packet := fundPsbtPacket(h, payment, tc.input)
+		original, err := packet.B64Encode()
+		require.NoError(h, err)
+
+		// Act: Complete that packet without permission to replace its input.
+		result, err := w.FundPsbt(
+			ctx, &wallet.FundIntent{
+				Packet: packet, FeeRate: relayFeeRate,
+				ChangeSource: source,
+			},
+		)
+
+		// Assert: Each refusal preserves the original owner's complete lease
+		// and all relevant public state before the next attempt starts.
+		require.ErrorIs(h, err, wallet.ErrUtxoNotEligible, tc.name)
+		require.Nil(h, result)
+
+		unchanged, err := packet.B64Encode()
+		require.NoError(h, err)
+		require.Equal(h, original, unchanged)
+
+		afterLeases, err := w.ListLeasedOutputs(ctx)
+		require.NoError(h, err)
+		require.Equal(h, leases, afterLeases)
+
+		afterCoins, err := w.ListUnspent(ctx, query)
+		require.NoError(h, err)
+		require.Equal(h, coins, afterCoins)
+
+		afterAccount, err := w.GetAccount(
+			ctx, scope, source.AccountName,
+		)
+		require.NoError(h, err)
+		require.Equal(h, account, afterAccount)
+
+		afterAddresses, err := w.ListAddresses(
+			ctx, source.AccountName, txCreatorFundingType,
+		)
+		require.NoError(h, err)
+		require.ElementsMatch(h, addresses, afterAddresses)
+	}
+
+	// Arrange: Exceed the entire balance, not merely the unleased balance,
+	// so the typed insufficient-funds result has a distinct public oracle.
+	payment.Value = oneBTC + twoBTC + halfBTC
+	packet := fundPsbtPacket(h, payment)
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Request automatic funding from the same scoped account.
+	result, err := w.FundPsbt(
+		ctx, &wallet.FundIntent{
+			Packet: packet, FeeRate: relayFeeRate,
+			Policy: &wallet.InputsPolicy{Source: source},
+		},
+	)
+
+	// Assert: Insufficiency also preserves every public funding observation;
+	// release only the fixture's control lease once both refusal paths finish.
+	var inputErr txauthor.InputSourceError
+	require.ErrorAs(h, err, &inputErr)
+	require.Nil(h, result)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+
+	afterLeases, err := w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+	require.Equal(h, leases, afterLeases)
+
+	afterCoins, err := w.ListUnspent(ctx, query)
+	require.NoError(h, err)
+	require.Equal(h, coins, afterCoins)
+
+	afterAccount, err := w.GetAccount(ctx, scope, source.AccountName)
+	require.NoError(h, err)
+	require.Equal(h, account, afterAccount)
+
+	afterAddresses, err := w.ListAddresses(
+		ctx, source.AccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+	require.ElementsMatch(h, addresses, afterAddresses)
+	require.NoError(
+		h, w.ReleaseOutput(
+			ctx, owner, funding.WalletOutpoints[0],
+		),
+	)
+}
