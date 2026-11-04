@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -272,6 +273,24 @@ type startManagerResp struct {
 	err     error
 }
 
+// createWalletReq transfers creation to the same owner as live delivery.
+type createWalletReq struct {
+	params CreateWalletParams
+	resp   chan createWalletResp
+}
+
+// createWalletResp keeps the exact published pointer beside its result.
+type createWalletResp struct {
+	wallet *Wallet
+	err    error
+	retry  <-chan struct{}
+}
+
+// managerInfoReq reads membership without exposing the loop's mutable map.
+type managerInfoReq struct {
+	resp chan string
+}
+
 // managerRuntime holds one loop's state for its handlers, without shared locks.
 type managerRuntime struct {
 	manager *Manager
@@ -296,6 +315,16 @@ func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 	switch req := raw.(type) {
 	case startManagerReq:
 		r.start(ctx, req)
+
+	case createWalletReq:
+		r.create(ctx, req)
+
+	case managerInfoReq:
+		m := r.manager
+		m.RLock()
+		names := slices.Sorted(maps.Keys(m.wallets))
+		m.RUnlock()
+		req.resp <- fmt.Sprintf("active_wallets=%v", names)
 	}
 }
 
@@ -333,6 +362,48 @@ func (r *managerRuntime) start(_ context.Context, req startManagerReq) {
 	m.wg.Add(1)
 	go m.startChainSyncer()
 	req.resp <- startManagerResp{wallets: wallets}
+}
+
+// create keeps publication and legacy Stop under the same exclusion.
+func (r *managerRuntime) create(ctx context.Context, req createWalletReq) {
+	m := r.manager
+	m.Lock()
+	defer m.Unlock()
+
+	err := m.checkCreate()
+	if err != nil {
+		req.resp <- createWalletResp{err: err}
+		return
+	}
+
+	if req.params.Name != "" && m.wallets[req.params.Name] != nil {
+		req.resp <- createWalletResp{err: ErrWalletExists}
+		return
+	}
+
+	w, err := m.createWallet(req.params)
+	if err != nil {
+		if errors.Is(err, db.ErrWalletExists) {
+			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
+		}
+		req.resp <- createWalletResp{err: err}
+		return
+	}
+
+	// An accepted public Create retains its ordinary result through Stop.
+	ctx = context.WithoutCancel(ctx)
+	err = w.importInitialAccounts(ctx, req.params.InitialAccounts)
+	if err == nil {
+		err = w.start(ctx, m.backend.prepareLiveWatches)
+	}
+	if err != nil {
+		err = errors.Join(err, m.stopWallets([]*Wallet{w}))
+		req.resp <- createWalletResp{err: err}
+		return
+	}
+
+	m.wallets[w.cfg.Name] = w
+	req.resp <- createWalletResp{wallet: w}
 }
 
 // sendReq transfers ownership only while the Manager and caller are live.
@@ -683,17 +754,14 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 
 // String returns a summary of the active wallets managed by the Manager.
 func (m *Manager) String() string {
-	m.RLock()
-	defer m.RUnlock()
+	req := managerInfoReq{resp: make(chan string, 1)}
 
-	names := make([]string, 0, len(m.wallets))
-	for name := range m.wallets {
-		names = append(names, name)
+	err := m.sendReq(context.Background(), req)
+	if err != nil {
+		return "active_wallets=[]"
 	}
 
-	sort.Strings(names)
-
-	return fmt.Sprintf("active_wallets=%v", names)
+	return <-req.resp
 }
 
 // validateManagedWalletName rejects an absent durable identity before cache,
@@ -713,60 +781,25 @@ func validateManagedWalletName(name string) error {
 // TODO(yy): Add a context parameter once wallet creation uses a single atomic
 // database transaction.
 func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
-	m.Lock()
-	defer func() {
-		// Failed creation terminally drains the Manager; its reader may
-		// still need membership, so join only after releasing admission.
-		m.Unlock()
+	for {
+		req := createWalletReq{params, make(chan createWalletResp, 1)}
 
-		if m.lifetimeCtx.Err() != nil {
-			m.wg.Wait()
-		}
-	}()
-
-	err := m.checkCreate()
-	if err != nil {
-		return nil, err
-	}
-
-	// The existing active set rejects duplicates before backend work. Skip
-	// absent names so kvdb's unnamed startup entry cannot mask name validation.
-	if params.Name != "" && m.wallets[params.Name] != nil {
-		return nil, fmt.Errorf("wallet %q: %w", params.Name, ErrWalletExists)
-	}
-
-	// Durable preparation and private startup stay under the admission lock;
-	// Stop cannot close storage until the accepted creation has settled.
-	w, err := m.createWallet(params)
-	if err != nil {
-		// Backend occupancy gains one public identity; retain its cause and
-		// leave unrelated validation, constraint and write errors unchanged.
-		if errors.Is(err, db.ErrWalletExists) {
-			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
-		}
-
-		return nil, err
-	}
-
-	// Parameter validation permits initial accounts only in shell mode, so
-	// import any requested accounts before the Wallet starts.
-	if len(params.InitialAccounts) > 0 {
-		err = w.importInitialAccounts(
-			context.Background(), params.InitialAccounts,
-		)
+		err := m.sendReq(context.Background(), req)
 		if err != nil {
-			return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+			return nil, err
+		}
+
+		result := <-req.resp
+		if result.retry == nil {
+			return result.wallet, result.err
+		}
+		// Busy callers retain their own request instead of an owner queue.
+		select {
+		case <-result.retry:
+		case <-m.lifetimeCtx.Done():
+			return nil, ErrManagerStopped
 		}
 	}
-
-	err = w.start(context.Background(), m.backend.prepareLiveWatches)
-	if err != nil {
-		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
-	}
-
-	m.wallets[w.cfg.Name] = w
-
-	return w, nil
 }
 
 // checkCreate rejects terminal admission after Stop cancels the reader, even
@@ -777,12 +810,7 @@ func (m *Manager) checkCreate() error {
 	}
 
 	if !m.started.Load() {
-		err := ErrStateForbidden
-		if m.backend == nil {
-			err = ErrManagerStopped
-		}
-
-		return err
+		return ErrStateForbidden
 	}
 
 	return nil

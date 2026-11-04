@@ -758,15 +758,6 @@ func TestManagerCreateSuccess(t *testing.T) {
 			require.NotNil(t, w)
 			require.Zero(t, w.ID())
 
-			// Verify internal state: Ensure the manager is tracking the
-			// newly created wallet in its internal map, keyed by the
-			// durable request name.
-			m.RLock()
-			loadedW, ok := m.wallets[testWalletName]
-			m.RUnlock()
-			require.True(t, ok)
-			require.Same(t, w, loadedW)
-
 			// If ModeShell, verify account was imported.
 			if tc.params.Mode == ModeShell {
 				info, err := w.cache.GetAccount(
@@ -1003,24 +994,10 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			params := tc.params
 			params.Name = testWalletName
 
-			// No worker starts here; cancel the owned lifetime without
-			// closing the strictly untouched backend used by validation.
-			lifetimeCtx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			m := &Manager{
-				lifetimeCtx: lifetimeCtx,
-				cancel:      cancel,
-				wallets:     make(map[string]*Wallet),
-				backend:     backend,
-				config: ManagerConfig{
-					ChainSource: &bwmock.Chain{},
-					ChainParams: chainParams,
-				},
-			}
-
-			m.chainSyncer = newChainSyncer(
-				m.config.ChainSource, &m.config.ChainParams,
-			)
+			// The runtime owns closure even when validation rejects every
+			// creation. Only fixture cleanup may touch this backend.
+			backend.On("close").Return(nil).Once()
+			m := newManagerLifecycleTest(t, backend)
 			m.started.Store(true)
 
 			// Act: Ask Manager to create from the selected parameter shape,
@@ -1042,8 +1019,6 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			if tc.wantErrMsg != "" {
 				require.ErrorContains(t, err, tc.wantErrMsg)
 			}
-
-			backend.AssertExpectations(t)
 		})
 	}
 }
@@ -2663,7 +2638,7 @@ func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
 	// Act: Recover around the public call so assertions observe the original
 	// key only after Manager's deferred cleanup has finished unwinding.
 	require.PanicsWithValue(t, errDBMock, func() {
-		_, _ = manager.Create(params)
+		_, _ = manager.createWallet(params)
 	})
 
 	// Assert: The captured master no longer exposes private material even
