@@ -4,6 +4,8 @@ package itest
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"slices"
 	"sync"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2007,4 +2010,231 @@ func testFundPsbtRejectInputs(h *bwtest.HarnessTest) {
 			ctx, owner, funding.WalletOutpoints[0],
 		),
 	)
+}
+
+// psbtFundingWatchChain preserves the real chain fixture while allowing the
+// SQL funding case to refuse only its final watched-change registration.
+type psbtFundingWatchChain struct {
+	chain.Interface
+	mock.Mock
+}
+
+// The wrapper must retain the complete chain contract and its existing owner.
+var _ chain.Interface = (*psbtFundingWatchChain)(nil)
+
+// WatchAddrsFromTip forwards normal fixture watches and returns the configured
+// failure without installing a watch when the case arms its single refusal.
+func (c *psbtFundingWatchChain) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	args := c.Called(ctx, addrs)
+
+	err := args.Error(0)
+	if err != nil {
+		return err
+	}
+
+	return c.Interface.WatchAddrsFromTip(ctx, addrs)
+}
+
+// testFundPsbtSQLWatchFailure checks definitive registration failure against
+// real SQL Wallets, preserving committed allocation but no attempt reservation.
+func testFundPsbtSQLWatchFailure(h *bwtest.HarnessTest) {
+	// Arrange: Forward startup/funding to the real chain client. The harness
+	// still owns shutdown; this wrapper adds only one expected watch failure.
+	ctx := h.Context()
+	watcher := &psbtFundingWatchChain{Interface: h.ChainClient}
+	forward := watcher.On(
+		"WatchAddrsFromTip", mock.Anything, mock.Anything,
+	).Return(nil).Maybe()
+	h.Cleanup(
+		func() {
+			// Require funding to reach the armed registration boundary.
+			watcher.AssertExpectations(h)
+		},
+	)
+	h.ChainClient = watcher
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err)
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{oneBTC},
+		},
+	)
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	packet := fundPsbtPacket(h, payment, funding.WalletOutpoints...)
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	source := &wallet.ScopedAccount{
+		KeyScope:    scope,
+		AccountName: waddrmgr.DefaultAccountName,
+	}
+	before, err := w.GetAccount(ctx, scope, source.AccountName)
+	require.NoError(h, err)
+	addresses, err := w.ListAddresses(
+		ctx, source.AccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+
+	// Deriving public material does not allocate or watch the expected child;
+	// it gives the failure an exact address oracle without reading a Store.
+	key, err := w.DerivePubKey(
+		ctx, wallet.DerivePubKeyParams{
+			Account: wallet.NewAccountSelectorByName(
+				scope, source.AccountName,
+			),
+			Branch: 1,
+			Index:  before.InternalKeyCount,
+		},
+	)
+	require.NoError(h, err)
+	expected, err := txCreatorFundingType.AddrFromPubKeyBytes(
+		key.SerializeCompressed(), h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	injected := errors.New("injected funding change watch failure")
+
+	forward.Unset()
+	watcher.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{expected},
+	).Return(injected).Once()
+
+	// Act: Complete a caller-selected packet whose committed change cannot
+	// cross the real chain client's registration boundary.
+	result, err := w.FundPsbt(
+		ctx, &wallet.FundIntent{
+			Packet: packet, FeeRate: relayFeeRate,
+			ChangeSource: source,
+		},
+	)
+
+	// Assert: The wrapped definitive cause is returned with no packet or
+	// leases. Already committed change remains available for reconstruction.
+	require.ErrorIs(h, err, injected)
+	require.NotEqual(h, injected, err)
+	require.NotErrorIs(h, err, wallet.ErrIndeterminateCommit)
+	require.Nil(h, result)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+
+	leases, err := w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+	require.Empty(h, leases)
+
+	coin, err := w.GetUtxo(ctx, funding.WalletOutpoints[0])
+	require.NoError(h, err)
+	require.False(h, coin.Locked)
+
+	after, err := w.GetAccount(ctx, scope, source.AccountName)
+	require.NoError(h, err)
+	require.Equal(h, before.InternalKeyCount+1, after.InternalKeyCount)
+
+	info, err := w.GetAddressInfo(ctx, expected)
+	require.NoError(h, err)
+	require.True(h, info.Internal)
+
+	afterAddresses, err := w.ListAddresses(
+		ctx, source.AccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+	require.ElementsMatch(
+		h, append(
+			addresses, wallet.AddressProperty{
+				Address: expected,
+			},
+		), afterAddresses,
+	)
+}
+
+// testFundPsbtSQLWatchChange proves the sorted change returned by FundPsbt
+// receives a live payment before any block or restart could discover it.
+func testFundPsbtSQLWatchChange(h *bwtest.HarnessTest) {
+	// Neutrino exposes confirmed scanning rather than mempool delivery.
+	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
+		h.Skip("unmined change payments require a full node")
+	}
+
+	// Arrange: Fund explicit inputs with change, retaining the returned
+	// internal script as the destination for an independent miner payment.
+	ctx := h.Context()
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err)
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{oneBTC},
+		},
+	)
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	result, err := w.FundPsbt(
+		ctx, &wallet.FundIntent{
+			Packet: fundPsbtPacket(
+				h, payment, funding.WalletOutpoints...,
+			),
+			FeeRate: relayFeeRate,
+			ChangeSource: &wallet.ScopedAccount{
+				KeyScope:    scope,
+				AccountName: waddrmgr.DefaultAccountName,
+			},
+		},
+	)
+	require.NoError(h, err)
+	require.EqualValues(h, 0, result.ChangeIndex)
+	script := result.Packet.UnsignedTx.TxOut[result.ChangeIndex].PkScript
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, h.NetParams())
+	require.NoError(h, err)
+	info, err := w.GetAddressInfo(ctx, addrs[0])
+	require.NoError(h, err)
+	require.True(h, info.Internal)
+
+	// Act: Pay only after funding returns, so the incoming unmined credit
+	// must come from FundPsbt's completed live registration.
+	txid := h.SendOutput(
+		&wire.TxOut{
+			Value: oneBTC, PkScript: script,
+		}, bwtest.MinerFeeRate,
+	)
+
+	// Assert: Locate that exact payment in the public UTXO view before a
+	// block can reveal it; polling belongs only to real notification work.
+	tx := h.AssertTxInMempool(*txid)
+
+	paid := wire.OutPoint{Hash: *txid}
+	for index, output := range tx.TxOut {
+		if bytes.Equal(script, output.PkScript) {
+			paid.Index = uint32(index)
+		}
+	}
+
+	var coin *wallet.Utxo
+
+	err = wait.NoError(
+		func() error {
+			var err error
+
+			coin, err = w.GetUtxo(ctx, paid)
+
+			return err
+		}, pollTimeout,
+	)
+	require.NoError(h, err)
+	require.Equal(h, script, coin.PkScript)
+	require.Equal(h, btcutil.Amount(oneBTC), coin.Amount)
+	require.Zero(h, coin.Confirmations)
+
+	// Empty the shared mempool and relinquish the unsigned packet's inputs.
+	h.MineBlockWithTx(tx)
+
+	for _, input := range result.Packet.UnsignedTx.TxIn {
+		require.NoError(
+			h, w.ReleaseOutput(
+				ctx, result.LeaseID, input.PreviousOutPoint,
+			),
+		)
+	}
 }
