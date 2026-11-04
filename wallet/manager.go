@@ -291,6 +291,13 @@ type managerInfoReq struct {
 	resp chan string
 }
 
+// chainEventReq bounds intake until the owner finishes one source event.
+type chainEventReq struct {
+	event any
+	err   error
+	done  chan struct{}
+}
+
 // startManagerResultReq transfers startup candidates back to their owner.
 type startManagerResultReq struct {
 	req     startManagerReq
@@ -309,6 +316,10 @@ type createWalletResultReq struct {
 type managerRuntime struct {
 	manager   *Manager
 	operation chan struct{}
+	pending   *chainEventReq
+	wallets   []*Wallet
+	events    map[uint32]chainEvent
+	cursor    int
 }
 
 // mainLoop drains accepted I/O after legacy Stop cancels its lifetime.
@@ -316,7 +327,11 @@ func (m *Manager) mainLoop() {
 	runtime := managerRuntime{manager: m}
 	cancelled := m.lifetimeCtx.Done()
 	for cancelled != nil || runtime.operation != nil {
+		delivery, event := runtime.nextDelivery(m.lifetimeCtx)
 		select {
+		case delivery <- event:
+			runtime.cursor++
+
 		case req := <-m.requestChan:
 			runtime.handleReq(m.lifetimeCtx, req)
 
@@ -352,6 +367,8 @@ func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 			m.RUnlock()
 		}
 		req.resp <- fmt.Sprintf("active_wallets=%v", names)
+	case chainEventReq:
+		r.pending = &req
 	}
 }
 
@@ -392,6 +409,12 @@ func (r *managerRuntime) start(_ context.Context, req startManagerReq) {
 func (r *managerRuntime) create(ctx context.Context, req createWalletReq) {
 	if r.operation != nil {
 		req.resp <- createWalletResp{retry: r.operation}
+		return
+	}
+
+	// Finish preceding fanout before a native Create registration.
+	if r.pending != nil {
+		req.resp <- createWalletResp{retry: r.pending.done}
 		return
 	}
 
@@ -457,6 +480,52 @@ func (r *managerRuntime) completeCreate(req createWalletResultReq) {
 		req.err = fmt.Errorf("%w: %w", ErrWalletExists, req.err)
 	}
 	req.req.resp <- createWalletResp{wallet: req.wallet, err: req.err}
+}
+
+// prepareEvent reuses rollback ordering and the inherited recipient snapshot.
+func (r *managerRuntime) prepareEvent(ctx context.Context) {
+	if r.pending == nil {
+		return
+	}
+	if event, ok := r.pending.event.(chain.BlockDisconnected); ok {
+		_ = r.manager.handleRollbackEvent(ctx, event)
+		close(r.pending.done)
+		r.pending = nil
+		return
+	}
+	r.wallets = r.manager.chainRecipients()
+	r.events = r.manager.chainSyncer.routeChainEvent(r.pending.event, r.wallets)
+}
+
+// nextDelivery leaves a blocked mailbox selectable beside owner requests.
+func (r *managerRuntime) nextDelivery(ctx context.Context) (
+	chan chainEvent, chainEvent) {
+
+	if r.manager.lifetimeCtx.Err() != nil || r.operation != nil {
+		return nil, chainEvent{}
+	}
+
+	if r.events == nil {
+		r.prepareEvent(ctx)
+	}
+
+	for r.pending != nil && r.cursor < len(r.wallets) {
+		w := r.wallets[r.cursor]
+		event, relevant := r.events[w.id]
+
+		if relevant && w.lifetimeCtx.Err() == nil {
+			return w.chainEventChan, event
+		}
+
+		r.cursor++
+	}
+
+	if r.pending != nil {
+		close(r.pending.done)
+		r.pending, r.events, r.wallets, r.cursor = nil, nil, nil, 0
+	}
+
+	return nil, chainEvent{}
 }
 
 // sendReq transfers ownership only while the Manager and caller are live.
@@ -672,38 +741,23 @@ func (m *Manager) chainRecipients() []*Wallet {
 	return wallets
 }
 
-// dispatchChainEvent admits source-ordered events to existing Wallet workers.
-// Capacity-one mailboxes deliberately backpressure the sole reader; Wallet
-// and reader cancellation both release delivery during terminal shutdown.
-// Shared storage disconnects settle rollback before the next source event.
-func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
-	// A disconnect changes the history that Wallet workers are writing.
-	// Settle their earlier writes and rewind Store once before the next
-	// source event; independent Wallet delivery cannot order that rewind.
-	if disconnect, ok := n.(chain.BlockDisconnected); ok {
-		return m.handleRollbackEvent(ctx, disconnect)
+// dispatchChainEvent retains source order until the owner completes delivery.
+func (m *Manager) dispatchChainEvent(ctx context.Context, event any) error {
+	req := chainEventReq{event: event, done: make(chan struct{})}
+
+	err := m.sendReq(ctx, req)
+	if err != nil {
+		return err
 	}
 
-	wallets := m.chainRecipients()
-
-	events := m.chainSyncer.routeChainEvent(n, wallets)
-	log.Debugf("Routing chain event %T to %d Wallets", n, len(events))
-
-	for _, w := range wallets {
-		event, relevant := events[w.id]
-		if !relevant {
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-w.lifetimeCtx.Done():
-		case w.chainEventChan <- event:
-		}
+	select {
+	case <-req.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.lifetimeCtx.Done():
+		return ErrManagerStopped
 	}
-
-	return nil
 }
 
 // prepareWalletsForRollback waits for each worker to finish earlier chain
