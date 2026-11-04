@@ -1439,6 +1439,7 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("Notifications").Return((<-chan any)(nil)).Once()
 	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Once()
 	chain.On("NotifyBlocks").Return(nil).Once()
@@ -1518,6 +1519,9 @@ func TestManagerStartCancellationCleansUp(t *testing.T) {
 		close(closed)
 	}).Return(nil).Once()
 	manager := newManagerLifecycleTest(t, backend)
+	client, ok := manager.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	client.On("Notifications").Return((<-chan any)(nil)).Once()
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -2362,7 +2366,7 @@ func TestManagerDeriveFromSeed(t *testing.T) {
 		seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 		require.NoError(t, err)
 
-		key, err := m.deriveFromSeed(seed)
+		key, err := m.config.deriveFromSeed(seed)
 
 		// Verify we got a valid private extended key.
 		require.NoError(t, err)
@@ -2373,7 +2377,7 @@ func TestManagerDeriveFromSeed(t *testing.T) {
 	t.Run("Empty Seed", func(t *testing.T) {
 		t.Parallel()
 
-		key, err := m.deriveFromSeed(nil)
+		key, err := m.config.deriveFromSeed(nil)
 		require.ErrorIs(t, err, ErrWalletParams)
 		require.ErrorContains(t, err, "seed is required")
 		require.Nil(t, key)
@@ -2383,7 +2387,7 @@ func TestManagerDeriveFromSeed(t *testing.T) {
 		t.Parallel()
 
 		// Providing a seed that is too short for hdkeychain.NewMaster.
-		key, err := m.deriveFromSeed([]byte{0x01})
+		key, err := m.config.deriveFromSeed([]byte{0x01})
 		require.ErrorContains(t, err, "failed to derive master key")
 		require.Nil(t, key)
 	})
@@ -2403,7 +2407,7 @@ func TestManagerGenRootKey(t *testing.T) {
 
 	// Act: Supply the owned buffer through the production generator signature
 	// so the observation concerns the seed Manager receives, not a copy.
-	key, err := m.genRootKey(func(length uint8) ([]byte, error) {
+	key, err := m.config.genRootKey(func(length uint8) ([]byte, error) {
 		require.Equal(t, uint8(hdkeychain.RecommendedSeedLen), length)
 
 		return seed, nil
@@ -2452,12 +2456,13 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 				require.True(t, ok)
 				require.True(t, observedRoot.IsPrivate())
 			}).Once()
-			backend.On("close").Return(nil).Once()
-			manager := newManagerLifecycleTest(t, backend)
+			t.Cleanup(func() { backend.AssertExpectations(t) })
 
-			// Act: Prepare the candidate without unrelated runtime startup,
-			// before examining the captured preparation root and caller input.
-			wallet, err := manager.createWallet(params)
+			// Act: Prepare the candidate so its root-clearing defer runs before
+			// inspecting the captured key and the caller's borrowed input.
+			wallet, err := createWallet(
+				t.Context(), params, deps.manager.config, backend, nil,
+			)
 
 			// Assert: Derived roots no longer expose key material; borrowed
 			// roots and seeds retain their bytes and remain useful to callers.
@@ -2515,13 +2520,13 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 				require.True(t, ok)
 				require.True(t, observedRoot.IsPrivate())
 			}).Once()
-			backend.On("close").Return(nil).Once()
-			manager := newManagerLifecycleTest(t, backend)
-			manager.started.Store(true)
+			t.Cleanup(func() { backend.AssertExpectations(t) })
 
-			// Act: Let the public request return its backend failure before
+			cfg := ManagerConfig{ChainParams: chainParams}
+
+			// Act: Let preparation return its backend failure before
 			// inspecting the original root object and borrowed input bytes.
-			wallet, err := manager.createWallet(params)
+			wallet, err := createWallet(t.Context(), params, cfg, backend, nil)
 
 			// Assert: Failure preserves the original error and borrowed
 			// material, but leaves no usable Manager-derived root or Wallet.
@@ -2607,8 +2612,8 @@ func genesisCreateCases(t *testing.T) map[string]genesisCreateCase {
 	}
 }
 
-// TestManagerCreateBoundsGenesisSecretsOnPanic verifies that preparation
-// unwinding destroys the owned root even when backend creation panics.
+// TestManagerCreateBoundsGenesisSecretsOnPanic verifies the preparation
+// owner's defer clears its derived root even when backend creation panics.
 func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
 	t.Parallel()
 
@@ -2631,14 +2636,14 @@ func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
 		require.True(t, observedRoot.IsPrivate())
 		panic(errDBMock)
 	}).Once()
-	backend.On("close").Return(nil).Once()
-	manager := newManagerLifecycleTest(t, backend)
-	manager.started.Store(true)
+	t.Cleanup(func() { backend.AssertExpectations(t) })
 
-	// Act: Recover around the public call so assertions observe the original
-	// key only after Manager's deferred cleanup has finished unwinding.
+	cfg := ManagerConfig{ChainParams: chainParams}
+
+	// Act: Invoke the preparation owner directly so the test can recover
+	// its injected panic after the root-clearing defer finishes unwinding.
 	require.PanicsWithValue(t, errDBMock, func() {
-		_, _ = manager.createWallet(params)
+		_, _ = createWallet(t.Context(), params, cfg, backend, nil)
 	})
 
 	// Assert: The captured master no longer exposes private material even
@@ -2660,7 +2665,7 @@ func TestManagerDeriveRootKey(t *testing.T) {
 	t.Run("ModeShell", func(t *testing.T) {
 		t.Parallel()
 
-		key, err := m.deriveRootKey(CreateWalletParams{Mode: ModeShell})
+		key, err := m.config.deriveRootKey(CreateWalletParams{Mode: ModeShell})
 		require.NoError(t, err)
 		require.Nil(t, key)
 	})
@@ -2669,7 +2674,9 @@ func TestManagerDeriveRootKey(t *testing.T) {
 	t.Run("ModeGenSeed", func(t *testing.T) {
 		t.Parallel()
 
-		key, err := m.deriveRootKey(CreateWalletParams{Mode: ModeGenSeed})
+		key, err := m.config.deriveRootKey(
+			CreateWalletParams{Mode: ModeGenSeed},
+		)
 		require.NoError(t, err)
 		require.NotNil(t, key)
 		require.True(t, key.IsPrivate())

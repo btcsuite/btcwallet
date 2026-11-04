@@ -291,21 +291,38 @@ type managerInfoReq struct {
 	resp chan string
 }
 
-// managerRuntime holds one loop's state for its handlers, without shared locks.
-type managerRuntime struct {
-	manager *Manager
+// startManagerResultReq transfers startup candidates back to their owner.
+type startManagerResultReq struct {
+	req     startManagerReq
+	wallets []*Wallet
+	err     error
 }
 
-// mainLoop owns admitted requests; legacy Stop still cancels its lifetime.
+// createWalletResultReq transfers a prepared candidate and its startup outcome.
+type createWalletResultReq struct {
+	req    createWalletReq
+	wallet *Wallet
+	err    error
+}
+
+// managerRuntime holds one loop's state for its handlers, without shared locks.
+type managerRuntime struct {
+	manager   *Manager
+	operation chan struct{}
+}
+
+// mainLoop drains accepted I/O after legacy Stop cancels its lifetime.
 func (m *Manager) mainLoop() {
 	runtime := managerRuntime{manager: m}
-	for {
+	cancelled := m.lifetimeCtx.Done()
+	for cancelled != nil || runtime.operation != nil {
 		select {
 		case req := <-m.requestChan:
 			runtime.handleReq(m.lifetimeCtx, req)
 
-		case <-m.lifetimeCtx.Done():
-			return
+		case <-cancelled:
+			// Observe cancellation once while accepted results settle.
+			cancelled = nil
 		}
 	}
 }
@@ -316,94 +333,130 @@ func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 	case startManagerReq:
 		r.start(ctx, req)
 
+	case startManagerResultReq:
+		r.completeStart(req)
+
+	case createWalletResultReq:
+		r.completeCreate(req)
+
 	case createWalletReq:
 		r.create(ctx, req)
 
 	case managerInfoReq:
 		m := r.manager
-		m.RLock()
+		if r.operation == nil {
+			m.RLock()
+		}
 		names := slices.Sorted(maps.Keys(m.wallets))
-		m.RUnlock()
+		if r.operation == nil {
+			m.RUnlock()
+		}
 		req.resp <- fmt.Sprintf("active_wallets=%v", names)
 	}
 }
 
-// start preserves legacy Stop exclusion until all lifecycle requests migrate.
+// start captures startup inputs while retaining legacy Stop exclusion.
 func (r *managerRuntime) start(_ context.Context, req startManagerReq) {
 	m := r.manager
-	m.Lock()
-	defer m.Unlock()
-
 	var err error
 	switch {
 	case m.lifetimeCtx.Err() != nil:
 		err = ErrManagerStopped
-
 	case req.ctx.Err() != nil:
 		err = req.ctx.Err()
-
 	case m.started.Swap(true):
 		err = ErrStateForbidden
-	}
-	if err != nil {
-		req.resp <- startManagerResp{err: err}
+	default:
+		m.Lock()
+		if m.lifetimeCtx.Err() != nil {
+			m.started.Store(false)
+			m.Unlock()
+			req.resp <- startManagerResp{err: ErrManagerStopped}
+			return
+		}
+		r.operation = make(chan struct{})
+		cfg, backend, router := m.config, m.backend, m.chainSyncer
+		requests, wg := m.requestChan, &m.wg
+		wg.Add(1)
+		go m.startChainSyncer()
+		wg.Go(func() {
+			candidates, err := startWallets(req.ctx, cfg, backend, router)
+			requests <- startManagerResultReq{req, candidates, err}
+		})
 		return
 	}
-
-	wallets, err := m.startWallets(req.ctx)
-	if err != nil {
-		err = errors.Join(err, m.stopWallets(wallets))
-		m.cancel()
-		req.resp <- startManagerResp{err: err}
-		return
-	}
-
-	// Enrollment precedes launch so legacy Stop cannot miss the reader.
-	m.wg.Add(1)
-	go m.startChainSyncer()
-	req.resp <- startManagerResp{wallets: wallets}
+	req.resp <- startManagerResp{err: err}
 }
 
-// create keeps publication and legacy Stop under the same exclusion.
+// create reuses admission checks before launching the one accepted operation.
 func (r *managerRuntime) create(ctx context.Context, req createWalletReq) {
+	if r.operation != nil {
+		req.resp <- createWalletResp{retry: r.operation}
+		return
+	}
+
 	m := r.manager
 	m.Lock()
-	defer m.Unlock()
-
 	err := m.checkCreate()
 	if err != nil {
+		m.Unlock()
 		req.resp <- createWalletResp{err: err}
 		return
 	}
-
 	if req.params.Name != "" && m.wallets[req.params.Name] != nil {
+		m.Unlock()
 		req.resp <- createWalletResp{err: ErrWalletExists}
 		return
 	}
 
-	w, err := m.createWallet(req.params)
-	if err != nil {
-		if errors.Is(err, db.ErrWalletExists) {
-			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
-		}
-		req.resp <- createWalletResp{err: err}
-		return
-	}
-
-	// An accepted public Create retains its ordinary result through Stop.
+	r.operation = make(chan struct{})
+	cfg, backend, router := m.config, m.backend, m.chainSyncer
+	requests, wg := m.requestChan, &m.wg
 	ctx = context.WithoutCancel(ctx)
-	err = w.importInitialAccounts(ctx, req.params.InitialAccounts)
-	if err == nil {
-		err = w.start(ctx, m.backend.prepareLiveWatches)
-	}
-	if err != nil {
-		err = errors.Join(err, m.stopWallets([]*Wallet{w}))
-		req.resp <- createWalletResp{err: err}
+	wg.Go(func() {
+		w, err := createWallet(ctx, req.params, cfg, backend, router)
+		if err == nil {
+			err = w.importInitialAccounts(ctx, req.params.InitialAccounts)
+			if err == nil {
+				err = w.start(ctx, backend.prepareLiveWatches)
+			}
+		}
+		requests <- createWalletResultReq{req, w, err}
+	})
+}
+
+// completeStart settles candidates before releasing inherited Stop exclusion.
+func (r *managerRuntime) completeStart(req startManagerResultReq) {
+	m := r.manager
+	defer m.Unlock()
+	close(r.operation)
+	r.operation = nil
+	if req.err != nil {
+		req.err = errors.Join(req.err, m.stopWallets(req.wallets))
+		req.req.resp <- startManagerResp{err: req.err}
 		return
 	}
+	for _, w := range req.wallets {
+		m.wallets[w.cfg.Name] = w
+	}
+	req.req.resp <- startManagerResp{wallets: req.wallets}
+}
 
-	m.wallets[w.cfg.Name] = w
-	req.resp <- createWalletResp{wallet: w}
+// completeCreate publishes only a started candidate while Store remains open.
+func (r *managerRuntime) completeCreate(req createWalletResultReq) {
+	m := r.manager
+	defer m.Unlock()
+	close(r.operation)
+	r.operation = nil
+	if req.err != nil && req.wallet != nil {
+		req.err = errors.Join(req.err, m.stopWallets([]*Wallet{req.wallet}))
+		req.wallet = nil
+	} else if req.err == nil {
+		m.wallets[req.wallet.cfg.Name] = req.wallet
+	} else if errors.Is(req.err, db.ErrWalletExists) {
+		req.err = fmt.Errorf("%w: %w", ErrWalletExists, req.err)
+	}
+	req.req.resp <- createWalletResp{wallet: req.wallet, err: req.err}
 }
 
 // sendReq transfers ownership only while the Manager and caller are live.
@@ -420,24 +473,26 @@ func (m *Manager) sendReq(ctx context.Context, req any) error {
 }
 
 // startWallets assembles and starts durable Wallets in stable identifier order.
-// It publishes only the complete set while the caller holds the write lock.
-func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
-	data, err := m.backend.listWallets(ctx)
+// The runtime loop publishes only the complete set after startup succeeds.
+func startWallets(ctx context.Context, cfg ManagerConfig,
+	backend managerBackend, router chainRouter) ([]*Wallet, error) {
+
+	data, err := backend.listWallets(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	wallets := make([]*Wallet, 0, len(data))
 	for _, walletData := range data {
-		cfg, err := m.config.walletConfig(walletData.name)
+		walletCfg, err := cfg.walletConfig(walletData.name)
 		if err != nil {
 			return wallets, err
 		}
 
-		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
+		wallet := newManagedWallet(walletCfg, walletData, router)
 		wallets = append(wallets, wallet)
 
-		err = wallet.start(ctx, m.backend.prepareLiveWatches)
+		err = wallet.start(ctx, backend.prepareLiveWatches)
 		if err != nil {
 			return wallets, err
 		}
@@ -448,10 +503,6 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 	err = ctx.Err()
 	if err != nil {
 		return wallets, err
-	}
-
-	for _, wallet := range wallets {
-		m.wallets[wallet.cfg.Name] = wallet
 	}
 
 	return wallets, nil
@@ -816,9 +867,11 @@ func (m *Manager) checkCreate() error {
 	return nil
 }
 
-// createWallet prepares a durable candidate while Create holds the Manager
-// lock. A returned Wallet must be started or cleaned up before releasing it.
-func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
+// createWallet prepares an unpublished candidate for owner-controlled startup.
+func createWallet(ctx context.Context, params CreateWalletParams,
+	cfg ManagerConfig, backend managerBackend,
+	router chainRouter) (*Wallet, error) {
+
 	// Validate identity before key derivation or Store work can produce a less
 	// useful error or side effect.
 	err := validateManagedWalletName(params.Name)
@@ -826,19 +879,19 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	err = params.validate(&m.config.ChainParams)
+	err = params.validate(&cfg.ChainParams)
 	if err != nil {
 		return nil, err
 	}
 
 	// Reject bad import inputs before persistence can turn their errors into
 	// a shutdown of the Manager and its running Wallets.
-	err = m.validateInitialAccounts(params.InitialAccounts)
+	err = cfg.validateInitialAccounts(params.InitialAccounts)
 	if err != nil {
 		return nil, err
 	}
 
-	rootKey, err := m.deriveRootKey(params)
+	rootKey, err := cfg.deriveRootKey(params)
 	if err != nil {
 		return nil, err
 	}
@@ -850,24 +903,24 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		defer rootKey.Zero()
 	}
 
-	// The Manager mutex keeps runtime assembly, Store mutation, and cache
-	// publication atomic so no partial Wallet becomes observable.
-	walletCfg, err := m.config.walletConfig(params.Name)
+	// Loop ownership keeps runtime assembly, Store mutation and publication
+	// ordered so no partial Wallet becomes observable.
+	walletCfg, err := cfg.walletConfig(params.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := m.backend.create(context.Background(), params, rootKey)
+	data, err := backend.create(ctx, params, rootKey)
 	if err != nil {
 		return nil, err
 	}
 
-	return newManagedWallet(walletCfg, data, m.chainSyncer), nil
+	return newManagedWallet(walletCfg, data, router), nil
 }
 
 // validateInitialAccounts checks resolved scope and script ownership before
 // backend access, sharing import validation and the Store's collision rules.
-func (m *Manager) validateInitialAccounts(
+func (cfg ManagerConfig) validateInitialAccounts(
 	accounts []ImportAccountParams) error {
 
 	// These request-local indexes enforce occupied account slots and script
@@ -877,7 +930,7 @@ func (m *Manager) validateInitialAccounts(
 
 	for _, account := range accounts {
 		params, err := importAccountParams(
-			account, 0, &m.config.ChainParams, false,
+			account, 0, &cfg.ChainParams, false,
 		)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrWalletParams, err)
@@ -1072,15 +1125,15 @@ func validateInitialAccountKeys(accounts []ImportAccountParams) error {
 // deriveRootKey resolves the master extended key after creation parameters have
 // passed validation. The caller owns derived roots; imported XPrvs remain
 // borrowed.
-func (m *Manager) deriveRootKey(
+func (cfg ManagerConfig) deriveRootKey(
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
 
 	if params.Mode == ModeGenSeed {
-		return m.genRootKey(hdkeychain.GenerateSeed)
+		return cfg.genRootKey(hdkeychain.GenerateSeed)
 	}
 
 	if params.Mode == ModeImportSeed {
-		return m.deriveFromSeed(params.Seed)
+		return cfg.deriveFromSeed(params.Seed)
 	}
 
 	if params.Mode == ModeImportExtKey {
@@ -1095,7 +1148,7 @@ func (m *Manager) deriveRootKey(
 // genRootKey derives a master from an owned generated seed. generateSeed is
 // hdkeychain.GenerateSeed in production and exposes the original seed buffer
 // to cleanup tests. The caller owns the returned master.
-func (m *Manager) genRootKey(
+func (cfg ManagerConfig) genRootKey(
 	generateSeed func(uint8) ([]byte, error)) (*hdkeychain.ExtendedKey, error) {
 
 	seed, err := generateSeed(hdkeychain.RecommendedSeedLen)
@@ -1107,12 +1160,12 @@ func (m *Manager) genRootKey(
 	// finishes, including error or panic unwinding.
 	defer clear(seed)
 
-	return m.deriveFromSeed(seed)
+	return cfg.deriveFromSeed(seed)
 }
 
 // deriveFromSeed derives the master extended private key from the provided
 // seed.
-func (m *Manager) deriveFromSeed(seed []byte) (
+func (cfg ManagerConfig) deriveFromSeed(seed []byte) (
 	*hdkeychain.ExtendedKey, error) {
 
 	// Ensure a seed was provided for restoration.
@@ -1121,7 +1174,7 @@ func (m *Manager) deriveFromSeed(seed []byte) (
 	}
 
 	// Derive the master extended private key from the provided seed.
-	key, err := hdkeychain.NewMaster(seed, &m.config.ChainParams)
+	key, err := hdkeychain.NewMaster(seed, &cfg.ChainParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive master key: %w", err)
 	}
