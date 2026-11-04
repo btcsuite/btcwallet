@@ -1285,7 +1285,7 @@ func newManagerLifecycleTest(t *testing.T,
 func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Hold discovery to exercise overlapping Start admission, then
+	// Arrange: Hold discovery to exercise overlapping Start calls, then
 	// use real Wallet startup dependencies to verify ordered publication.
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -1440,7 +1440,7 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	firstResult := make(chan startOutcome, 1)
 
 	// Act: Reject another Start while the original attempt is held in
-	// cleanup, then collect its failure and check terminal admission.
+	// cleanup, then collect its failure and check terminal rejection.
 	go func() {
 		wallets, err := manager.Start(t.Context())
 		firstResult <- startOutcome{
@@ -1484,25 +1484,24 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 func TestManagerStartCancellationCleansUp(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Discovery waits on the supplied context. The close callback
-	// signals the cleanup boundary that must precede the caller's result.
-	entered := make(chan struct{})
-	closed := make(chan struct{})
+	// Arrange: Discovery waits on caller cancellation. The accepted Stop
+	// owns a held cleanup error, so the startup result must wait for closure.
+	entered, closing := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
 	backend := &managerBackendMock{}
 	backend.On("listWallets", mock.Anything).Run(func(args mock.Arguments) {
 		close(entered)
 		ctx, ok := args.Get(0).(context.Context)
 		if !ok {
 			t.Error("discovery requires a context")
-
 			return
 		}
-
 		<-ctx.Done()
 	}).Return(nil, context.Canceled).Once()
 	backend.On("close").Run(func(mock.Arguments) {
-		close(closed)
-	}).Return(nil).Once()
+		close(closing)
+		<-release
+	}).Return(errDBFail).Once()
 	manager := newManagerLifecycleTest(t, backend)
 	client, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
@@ -1511,29 +1510,30 @@ func TestManagerStartCancellationCleansUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	result := make(chan error, 1)
+	started := make(chan error, 1)
+	stopReq := stopManagerReq{resp: make(chan error, 1)}
 
-	// Act: Cancel only after discovery has begun, exercising cancellation
-	// of accepted work rather than a request rejected before admission.
+	// Act: Accept shutdown while discovery is held, cancel the caller, and
+	// release cleanup only after checking startup has not escaped it.
 	go func() {
 		_, err := manager.Start(ctx)
-		result <- err
+		started <- err
 	}()
 
 	<-entered
+	require.NoError(t, manager.sendReq(t.Context(), stopReq))
 	cancel()
+	<-closing
+	require.Empty(t, started)
+	close(release)
 
-	err := <-result
-
-	// Assert: The caller receives cancellation after synchronous cleanup,
-	// with no detached attempt left to hold the backend open.
+	// Assert: Start keeps its primary cancellation while Stop receives the
+	// cleanup error; both results follow the same one Store closure.
+	err := <-started
 	require.ErrorIs(t, err, context.Canceled)
-
-	select {
-	case <-closed:
-	default:
-		t.Fatal("Start returned before closing storage")
-	}
+	require.NotErrorIs(t, err, errDBFail)
+	require.ErrorIs(t, <-stopReq.resp, errDBFail)
+	require.NoError(t, manager.Stop())
 }
 
 // TestManagerStartCanceledBeforeAdmission verifies canceled startup leaves
@@ -1544,7 +1544,8 @@ func TestManagerStartCanceledBeforeAdmission(t *testing.T) {
 	// Arrange: Only the later live-context Start may discover Wallets. The
 	// fixture closes storage and verifies both strict expectations afterward.
 	backend := &managerBackendMock{}
-	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
 	backend.On("close").Return(nil).Once()
 	manager := newManagerLifecycleTest(t, backend)
 	client, ok := manager.config.ChainSource.(*bwmock.Chain)
@@ -1554,7 +1555,7 @@ func TestManagerStartCanceledBeforeAdmission(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	// Act: Reject cancellation before admission, then start the same Manager
+	// Act: Reject cancellation before startup, then start the same Manager
 	// with a live context to prove the rejected call left it usable.
 	canceledWallets, canceledErr := manager.Start(ctx)
 	wallets, err := manager.Start(t.Context())
@@ -1688,16 +1689,18 @@ func TestManagerStopWaitsForStart(t *testing.T) {
 
 		<-entered
 
-		// Legacy exclusion must settle before synctest can wait on shutdown.
-		close(release)
-		require.NoError(t, <-started)
 		go func() { stopped <- manager.Stop() }()
+
+		synctest.Wait()
+
+		close(release)
 
 		synctest.Wait()
 		releaseReaderWork()
 
 		// Assert: Accepted Start and Stop finish after their dependencies join.
 		// Other lifecycle tests cover subsequent terminal admission.
+		require.NoError(t, <-started)
 		require.NoError(t, <-stopped)
 	})
 }
@@ -1918,7 +1921,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	vaultLock := deps.vault.On("Lock").Return().Once()
 
 	backend := &managerBackendMock{}
-	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
 
 	params := managerLifecycleCreateParams("created")
 	backend.On("create", mock.Anything, params, mock.Anything).
@@ -1957,7 +1961,7 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Accept creation, queue Stop behind its lock, and advance startup
+	// Act: Accept creation, request Stop during startup, and release the watch
 	// into a real chain call before allowing that worker to drain.
 	go func() {
 		w, err := manager.Create(params)
@@ -1989,12 +1993,12 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 }
 
 // TestManagerCreateLifecycleStartFailureStopsManager preserves startup/cleanup
-// errors and releases membership before joining a reader waiting on that lock.
+// errors and joins a source reader held behind the failed Create operation.
 func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Hold the failing birthday read while Create owns admission,
-	// so the real reader can consume an event and wait on its membership lock.
+	// Arrange: Hold the failing birthday read while Create owns the loop,
+	// so the source reader consumes an event and waits at its runtime handoff.
 	_, deps := createTestWalletWithMocks(t)
 	createErr := errors.New("candidate birthday")
 	closeErr := errors.New("backend close")
@@ -2009,7 +2013,8 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 
 	params := managerLifecycleCreateParams("candidate")
 	backend := &managerBackendMock{}
-	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
 	backend.On("create", mock.Anything, params, mock.Anything).
 		Return(&walletData{
 			id:    1,
@@ -2052,8 +2057,8 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Once Create owns admission, give the reader an event before allowing
-	// startup to fail. A join under that same lock would deadlock its snapshot.
+	// Act: While Create holds the loop, give the source reader an event before
+	// startup fails. Cancellation must release its handoff before joining it.
 	go func() {
 		w, err := manager.Create(params)
 		created <- createOutcome{
@@ -2080,7 +2085,7 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	go func() { stopped <- manager.Stop() }()
 
 	// Assert: Neither the candidate nor its primary error escapes before the
-	// held cleanup finishes. Returning then requires an unlocked reader join.
+	// held cleanup finishes. Returning then requires a completed reader join.
 	select {
 	case result := <-created:
 		t.Fatalf("Create returned before cleanup completed: %v", result.err)
@@ -2093,7 +2098,7 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	select {
 	case outcome = <-created:
 	case <-time.After(5 * time.Second):
-		t.Fatal("failed Create did not release membership and join its reader")
+		t.Fatal("failed Create did not cancel the handoff and join its reader")
 	}
 
 	select {
@@ -3479,7 +3484,7 @@ func TestManagerChainEventMembership(t *testing.T) {
 }
 
 // TestManagerChainEventBlockedStop verifies terminal cancellation releases a
-// reader blocked on a real Wallet whose asynchronous initialization is pending.
+// runtime blocked on a Wallet whose initialization is pending.
 func TestManagerChainEventBlockedStop(t *testing.T) {
 	t.Parallel()
 
@@ -3520,7 +3525,7 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 		}, time.Second, time.Millisecond,
 	)
 
-	// Act: Stop while reader delivery has no available mailbox capacity.
+	// Act: Stop while runtime delivery has no available mailbox capacity.
 	stopped := make(chan error, 1)
 	go func() {
 		stopped <- manager.Stop()
