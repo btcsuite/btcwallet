@@ -164,6 +164,15 @@ func (w *Wallet) checkMempoolAcceptance(_ context.Context,
 // A backend that cannot answer the mempool acceptance check does not stop the
 // publish: the tx is sent without a verdict, so a nil return reports that it
 // was handed to the network, not that the network kept it.
+//
+// Preflight rejection records nothing new. After recording, publication-policy
+// failures and unknown outcomes retain history and input claims; recognized
+// malformed/mandatory-script rejections clean up. ErrTxRetained also wraps
+// readback failures after recording; later validation or explicit deletion can
+// still end active tracking.
+// DeleteUnconfirmedTx removes a retained unconfirmed branch. A changed witness
+// returns ErrTxWitnessMismatch before sending an unconfirmed retry.
+// TxStatusPublished tracks publication/rebroadcast, not successful delivery.
 func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
 
@@ -212,12 +221,7 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 
 	// First, we'll attempt to add the tx to our wallet's DB. This will
 	// allow us to track the tx's confirmation status, and also
-	// re-broadcast it upon startup. If any of the subsequent steps fail,
-	// this tx is removed via DeleteUnminedTx.
-	//
-	// recorded reports whether a tx row was actually written; it gates the
-	// removal below so a wallet-unrelated tx (never recorded) is not
-	// removed, which would clobber the publish error with ErrTxNotFound.
+	// re-broadcast it upon startup.
 	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
 	if err != nil {
 		r.respErrChan <- err
@@ -225,9 +229,8 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		return
 	}
 
-	// Now, we'll attempt to publish the tx. On successful attempt, we
-	// return immediately. On any failures, we remove it from the tx store
-	// to prevent subsequent attempts with stale transaction data.
+	// Cleanup depends on the refusal reason, not which attempt inserted
+	// the row. Publication-policy errors must never abandon a tracked spend.
 	err = w.publishTx(r.tx, ourAddrs)
 	if err == nil {
 		// Only recorded Wallet transactions have a detail to announce.
@@ -242,31 +245,27 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	}
 
 	txid := r.tx.TxHash()
-	log.Errorf("%v: broadcast failed: %v", txid, err)
+	if recorded && shouldRemoveTx(err) {
+		// A recognized malformed/script rejection keeps the existing
+		// cleanup behavior; policy and uncertain outcomes never enter it.
+		cleanupErr := w.deleteUnminedTx(r.ctx, r.tx)
+		// Absence means cleanup is complete; other failures retain the
+		// claims signal and remain inspectable beside the send error.
+		if errors.Is(cleanupErr, db.ErrTxNotFound) {
+			cleanupErr = nil
+		}
 
-	// If we never recorded this tx (it is wallet-unrelated), there is
-	// nothing to remove, so we return the original publish error as-is
-	// rather than overwriting it with cleanup context.
-	if !recorded {
-		r.respErrChan <- err
-
-		return
+		recorded = cleanupErr != nil
+		err = errors.Join(err, cleanupErr)
 	}
 
-	// If the tx was rejected for any other reason, then we'll remove it from
-	// the tx store, as otherwise, we'll attempt to continually re-broadcast
-	// it, and the UTXO state of the wallet won't be accurate.
-	removeErr := w.deleteUnminedTx(r.ctx, r.tx)
-	if removeErr != nil {
-		log.Warnf("Unable to remove tx %v after broadcast failed: %v",
-			txid, removeErr)
-
-		// Return a wrapped error to give the caller full context.
-		r.respErrChan <- fmt.Errorf("broadcast failed: %w; and failed to "+
-			"remove from wallet: %v", err, removeErr)
-
-		return
+	// Expose retained claims without hiding the publication/cleanup causes.
+	if recorded {
+		err = fmt.Errorf("%w: tx %v remains recorded: %w",
+			ErrTxRetained, txid, err)
 	}
+
+	log.Warnf("%v: broadcast failed: %v", txid, err)
 
 	r.respErrChan <- err
 }
@@ -280,6 +279,18 @@ var (
 	// function.
 	ErrTxCannotBeNil = errors.New("tx cannot be nil")
 
+	// ErrTxRetained wraps failures after recording when active history and
+	// input claims remain or a failed readback cannot establish their state.
+	// Later validation/conflict/deletion can release claims; leases cannot.
+	ErrTxRetained = errors.New("transaction retained after publication failure")
+
+	// ErrTxWitnessMismatch rejects unconfirmed retries with the same txid but
+	// different witness bytes. Explicitly remove the branch before recording
+	// another witness; stored bytes remain unchanged.
+	ErrTxWitnessMismatch = errors.New(
+		"transaction exists with a different witness",
+	)
+
 	// ErrTxRetainedInvalid is returned when a tx cannot be recorded for
 	// publishing because the store already retains a row for the same hash in
 	// a terminal invalid state (failed or replaced). The record-before-publish
@@ -288,8 +299,8 @@ var (
 	ErrTxRetainedInvalid = errors.New("tx exists in a retained invalid state")
 )
 
-// checkMempool is a helper function that checks if a tx is acceptable to the
-// mempool before broadcasting.
+// checkMempool checks acceptance before recording and reports any active
+// unconfirmed spend claims left in place when preflight refuses a retry.
 func (w *Wallet) checkMempool(ctx context.Context,
 	tx *wire.MsgTx) error {
 
@@ -324,7 +335,23 @@ func (w *Wallet) checkMempool(ctx context.Context,
 	// If the tx was rejected for any other reason, we'll return the error
 	// directly.
 	case err != nil:
-		return fmt.Errorf("tx rejected by mempool: %w", err)
+		err = fmt.Errorf("tx rejected by mempool: %w", err)
+
+		// Preflight writes nothing, but an earlier attempt may still
+		// claim the inputs. Report that fact without hiding a read failure.
+		existing, lookupErr := w.store.GetTx(ctx, db.GetTxQuery{
+			WalletID: w.id,
+			Txid:     tx.TxHash(),
+		})
+		switch {
+		case errors.Is(lookupErr, db.ErrTxNotFound):
+		case lookupErr != nil:
+			err = errors.Join(err, lookupErr)
+		case existing.Block == nil && db.IsUnminedStatus(existing.Status):
+			err = fmt.Errorf("%w: %w", ErrTxRetained, err)
+		}
+
+		return err
 
 	// Otherwise, the tx is valid and we can publish it.
 	default:
@@ -490,8 +517,6 @@ func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
 		}
 	}
 
-	txHash := tx.TxHash()
-
 	err := w.store.CreateTx(ctx, db.CreateTxParams{
 		WalletID: w.id,
 		Tx:       tx,
@@ -500,28 +525,28 @@ func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
 		Label:    label,
 		Credits:  credits,
 	})
-	if err == nil {
-		return nil
-	}
-
-	if !errors.Is(err, db.ErrTxAlreadyExists) {
+	if err != nil && !errors.Is(err, db.ErrTxAlreadyExists) {
 		return err
 	}
 
-	// A row already exists for this tx hash; reconcile against its stored
-	// status instead of assuming the duplicate is a live, tracked tx.
-	return w.handleExistingTx(ctx, txHash, label)
+	// SQL can replay successfully while KVDB reports a duplicate. Inspect
+	// the retained bytes in either case before sending a different witness.
+	err = w.handleExistingTx(ctx, tx, label)
+	if err == nil || errors.Is(err, ErrTxRetainedInvalid) {
+		return err
+	}
+
+	// Recording has committed or found a row. A reconciliation failure
+	// cannot establish that its input claims have been released; only known
+	// terminal history above can omit the retained-state signal.
+	return fmt.Errorf("%w: %w", ErrTxRetained, err)
 }
 
-// handleExistingTx reconciles a record-before-publish duplicate for txHash
-// against the stored row's status. Publication cleanup removes its rows, so a
-// duplicate here is normally a live, tracked tx. A terminal row can still
-// exist, left by conflict handling or a reorg, and reviving it would need the
-// spend edges those events cleared to be re-claimed as a graph-affecting
-// lifecycle change. Only treat the duplicate as success when the row is still
-// live for the publish flow.
-func (w *Wallet) handleExistingTx(ctx context.Context, txHash chainhash.Hash,
+// handleExistingTx checks live status and stored witness bytes before sending.
+func (w *Wallet) handleExistingTx(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
+
+	txHash := tx.TxHash()
 
 	existing, err := w.store.GetTx(ctx, db.GetTxQuery{
 		WalletID: w.id,
@@ -540,11 +565,19 @@ func (w *Wallet) handleExistingTx(ctx context.Context, txHash chainhash.Hash,
 			ErrTxRetainedInvalid, txHash, existing.Status)
 	}
 
+	// The immutable stored serialization includes the witness. An equal
+	// txid alone cannot make a changed unconfirmed witness an exact retry.
+	if existing.Block == nil &&
+		chainhash.DoubleHashH(existing.SerializedTx) != tx.WitnessHash() {
+
+		return fmt.Errorf("%w: tx %v", ErrTxWitnessMismatch, txHash)
+	}
+
 	// The existing row is still live, so recording is idempotent: its credits
 	// and spend edges are already claimed. If another workflow inserted the
 	// duplicate as pending, promote it to match the published state this
 	// record-before-publish path uses for new rows.
-	if len(label) == 0 {
+	if len(label) == 0 || label == existing.Label {
 		if existing.Status == db.TxStatusPending {
 			state := db.UpdateTxState{Status: db.TxStatusPublished}
 
@@ -871,4 +904,29 @@ func (w *Wallet) deleteUnminedTx(ctx context.Context,
 	}
 
 	return nil
+}
+
+// shouldRemoveTx reports whether a mapped publication error permits removing
+// the recorded branch. Policy and unknown outcomes keep the spend tracked.
+func shouldRemoveTx(err error) bool {
+	// Match only known malformed/mandatory-script identities. Subscription
+	// failures and unrecognized send errors provide no deletion verdict.
+	switch {
+	case errors.Is(err, chain.ErrEmptyOutput),
+		errors.Is(err, chain.ErrEmptyInput),
+		errors.Is(err, chain.ErrDuplicateInput),
+		errors.Is(err, chain.ErrEmptyPrevOut),
+		errors.Is(err, chain.ErrBelowOutValue),
+		errors.Is(err, chain.ErrNegativeOutput),
+		errors.Is(err, chain.ErrLargeOutput),
+		errors.Is(err, chain.ErrLargeTotalOutput),
+		errors.Is(err, chain.ErrScriptVerifyFlag),
+		errors.Is(err, chain.ErrInvalidOpcode),
+		errors.Is(err, chain.ErrOversizeTx):
+
+		return true
+
+	default:
+		return false
+	}
 }
