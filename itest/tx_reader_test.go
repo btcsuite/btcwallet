@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -1191,4 +1193,105 @@ func testBitcoindCompatibilityCheck(h *bwtest.HarnessTest) {
 	// Assert: Neither wallet's coin enumeration is filtered to match the
 	// other. Both must agree on tip, coins, balance and history.
 	require.Equal(h, expected, actual, "confirmed receive facts differ")
+
+	// Arrange: Keep one funding coin as a control and pay half a BTC outside
+	// both wallets. Import the returning script into Core before spending.
+	returnAddr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	returnScript, err := txscript.PayToAddrScript(returnAddr)
+	require.NoError(h, err)
+	h.ImportBitcoindWalletScripts(client, returnScript)
+
+	const witnessProgramSize = 20
+
+	foreignAddr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, witnessProgramSize), h.NetParams(),
+	)
+	require.NoError(h, err)
+	foreignScript, err := txscript.PayToAddrScript(foreignAddr)
+	require.NoError(h, err)
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{funding.WalletOutpoints[1]},
+		Outputs: []wire.TxOut{
+			{
+				Value:    halfBTC,
+				PkScript: foreignScript,
+			},
+			{
+				Value:    twoBTC - halfBTC - spendFee,
+				PkScript: returnScript,
+			},
+		},
+	})
+
+	// Act: Read btcwallet immediately after publication so later notifications
+	// cannot mask its committed view. Core observes the spend independently.
+	txid := tx.TxHash()
+	require.NoError(h, w.Broadcast(h.Context(), tx, ""))
+	info, err = w.Info(h.Context())
+	require.NoError(h, err, "read Wallet compatibility tip")
+	coins, err = w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "read Wallet compatibility coins")
+	details, err = w.ListTxns(h.Context(), 0, unminedHeight)
+	require.NoError(h, err, "read Wallet compatibility history")
+
+	actual = normalizeWalletCompatibilityFacts(info, coins, details)
+
+	// Wait only for Core's asynchronous wallet notification, not for the
+	// two snapshots to agree. A successful wallet lookup proves observation.
+	err = wait.NoError(func() error {
+		_, err := client.GetTransactionWatchOnly(&txid, true)
+		return err
+	}, pollTimeout)
+	require.NoError(h, err, "Core wallet did not observe spend")
+	history, err = client.ListSinceBlockMinConfWatchOnly(nil, 1, true)
+	require.NoError(h, err, "read Core wallet compatibility tip")
+	hash, err = chainhash.NewHashFromStr(history.LastBlock)
+	require.NoError(h, err, "parse Core wallet compatibility tip")
+	header, err = client.GetBlockHeaderVerbose(hash)
+	require.NoError(h, err, "read Core wallet tip height")
+	coreCoins, err = client.ListUnspentMinMax(0, maxConfsLimit)
+	require.NoError(h, err, "read Core wallet compatibility coins")
+	expected, err = normalizeBitcoindCompatibilityFacts(
+		*hash, header.Height, coreCoins, history,
+	)
+	require.NoError(h, err)
+
+	// Assert: Both wallet views must remove the spent input and include the
+	// returning coin and transaction with zero confirmations.
+	require.Equal(h, expected, actual, "unmined spend facts differ")
+
+	// Act: The existing mining helper waits for relay, confirms the spend,
+	// and crosses the exact committed Wallet tip before returning.
+	h.MineBlockWithTx(tx)
+	info, err = w.Info(h.Context())
+	require.NoError(h, err, "read Wallet compatibility tip")
+	coins, err = w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "read Wallet compatibility coins")
+	details, err = w.ListTxns(h.Context(), 0, unminedHeight)
+	require.NoError(h, err, "read Wallet compatibility history")
+
+	actual = normalizeWalletCompatibilityFacts(info, coins, details)
+
+	h.AssertBitcoindWalletSynced(client)
+	history, err = client.ListSinceBlockMinConfWatchOnly(nil, 1, true)
+	require.NoError(h, err, "read Core wallet compatibility tip")
+	hash, err = chainhash.NewHashFromStr(history.LastBlock)
+	require.NoError(h, err, "parse Core wallet compatibility tip")
+	header, err = client.GetBlockHeaderVerbose(hash)
+	require.NoError(h, err, "read Core wallet tip height")
+	coreCoins, err = client.ListUnspentMinMax(0, maxConfsLimit)
+	require.NoError(h, err, "read Core wallet compatibility coins")
+	expected, err = normalizeBitcoindCompatibilityFacts(
+		*hash, header.Height, coreCoins, history,
+	)
+	require.NoError(h, err)
+
+	// Assert: The same ownership fixture must now agree on the mined spend,
+	// its returning coin, and the advancing confirmations of the control.
+	require.Equal(h, expected, actual, "confirmed spend facts differ")
 }
