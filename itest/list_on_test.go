@@ -16,6 +16,11 @@ type testCase struct {
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
 	{
+		Name:     "bitcoind compatibility check",
+		TestFunc: testBitcoindCompatibilityCheck,
+	},
+
+	{
 		Name:     "address manager raw import tracking",
 		TestFunc: testAddressManagerRawImportTracking,
 	},
