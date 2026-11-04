@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -1265,6 +1266,25 @@ func testCreateTransactionConcurrentChange(h *bwtest.HarnessTest) {
 	)
 }
 
+// fundPsbtPacket keeps packet construction separate from the funding call so
+// cases can supply either caller-selected inputs or an empty automatic source.
+func fundPsbtPacket(h *bwtest.HarnessTest, payment wire.TxOut,
+	inputs ...wire.OutPoint) *psbt.Packet {
+
+	h.Helper()
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	for _, input := range inputs {
+		tx.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	}
+
+	tx.AddTxOut(&payment)
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(h, err)
+
+	return packet
+}
+
 // testFundPsbtDeferChange verifies that FundPsbt commits no change address
 // when the funded packet keeps no change. Each row leaves the coin with either
 // nothing or only dust over the payment and fee, so the account's committed
@@ -1280,7 +1300,9 @@ func testFundPsbtDeferChange(h *bwtest.HarnessTest) {
 	zeroChangeFee := txrules.FeeForSerializeSize(
 		relayFeeRate.Val(), txsizes.EstimateVirtualSize(
 			0, 0, 1, 0, []*wire.TxOut{{
-				PkScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+				PkScript: make(
+					[]byte, txsizes.P2WPKHPkScriptSize,
+				),
 			}}, txsizes.P2WPKHPkScriptSize,
 		),
 	)
@@ -1303,11 +1325,13 @@ func testFundPsbtDeferChange(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, funding := h.NewWallet(bwtest.WalletFixture{
-		AddrType: txCreatorFundingType,
-		Amounts:  []btcutil.Amount{coin, coin},
-		Unlocked: true,
-	})
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{coin, coin},
+			Unlocked: true,
+		},
+	)
 
 	for i, tc := range testCases {
 		// Arrange: Build a packet paying a fresh wallet address from the
@@ -1317,34 +1341,45 @@ func testFundPsbtDeferChange(h *bwtest.HarnessTest) {
 			h, w, txCreatorFundingType, tc.payment,
 		)
 
-		tx := wire.NewMsgTx(wire.TxVersion)
-		tx.AddTxIn(&wire.TxIn{
-			PreviousOutPoint: funding.WalletOutpoints[i],
-		})
-		tx.AddTxOut(&payment)
-
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(h, err, "failed to create packet")
+		packet := fundPsbtPacket(h, payment, funding.WalletOutpoints[i])
+		original, err := packet.B64Encode()
+		require.NoError(h, err)
 
 		before, err := w.GetAccount(
 			h.Context(), scope, waddrmgr.DefaultAccountName,
 		)
 		require.NoError(h, err, "failed to read account")
 
-		// Act: Fund the packet.
-		result, err := w.FundPsbt(h.Context(), &wallet.FundIntent{
-			Packet: packet,
-			ChangeSource: &wallet.ScopedAccount{
-				AccountName: waddrmgr.DefaultAccountName,
-				KeyScope:    scope,
+		// Act: Complete the caller-selected packet at the relay rate;
+		// the exact or dust surplus must be absorbed into its fee.
+		result, err := w.FundPsbt(
+			h.Context(), &wallet.FundIntent{
+				Packet: packet,
+				ChangeSource: &wallet.ScopedAccount{
+					AccountName: waddrmgr.DefaultAccountName,
+					KeyScope:    scope,
+				},
+				FeeRate: relayFeeRate,
 			},
-			FeeRate: relayFeeRate,
-		})
+		)
 
-		// Assert: No change is kept and no change address is
-		// committed.
+		// Assert: No change survives, so the decorated input's value minus
+		// the sole output must equal the row's independently chosen fee.
 		require.NoError(h, err, tc.name)
 		require.EqualValues(h, -1, result.ChangeIndex, tc.name)
+		require.Len(h, result.Packet.UnsignedTx.TxIn, 1)
+		require.Len(h, result.Packet.UnsignedTx.TxOut, 1)
+		require.EqualValues(
+			h, coin-tc.payment,
+			result.Packet.Inputs[0].WitnessUtxo.Value-
+				result.Packet.UnsignedTx.TxOut[0].Value,
+		)
+
+		// Funding returns a copy; even a no-change result must preserve
+		// the caller's serialized packet and committed allocation count.
+		unchanged, err := packet.B64Encode()
+		require.NoError(h, err)
+		require.Equal(h, original, unchanged)
 
 		after, err := w.GetAccount(
 			h.Context(), scope, waddrmgr.DefaultAccountName,
@@ -1354,53 +1389,103 @@ func testFundPsbtDeferChange(h *bwtest.HarnessTest) {
 			h, before.InternalKeyCount, after.InternalKeyCount,
 			tc.name,
 		)
+
+		// The caller releases exactly the inputs funding handed back.
+		require.NotEqual(h, wtxmgr.LockID{}, result.LeaseID)
+
+		for _, input := range result.Packet.UnsignedTx.TxIn {
+			require.NoError(
+				h, w.ReleaseOutput(
+					h.Context(), result.LeaseID,
+					input.PreviousOutPoint,
+				),
+			)
+		}
 	}
 }
 
-// testFundPsbtCommitChange verifies that FundPsbt commits exactly one change
-// address when the funded packet keeps change, and that the change output pays
-// that committed address.
+// testFundPsbtCommitChange checks the first accepted payment/fee values and
+// preserves caller metadata through sorting and input decoration. Its returned
+// change pays one committed internal address, and its caller-owned lease is
+// released without changing the original packet.
 func testFundPsbtCommitChange(h *bwtest.HarnessTest) {
-	// Arrange: Fund one coin, build a packet paying half of it to a fresh
-	// wallet address, and record the account's committed change key count.
+	// Arrange: Use the first accepted output and fee values, and attach
+	// caller choices that authoring and sorting must carry to the result.
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, funding := h.NewWallet(bwtest.WalletFixture{
-		AddrType: txCreatorFundingType,
-		Amounts:  []btcutil.Amount{oneBTC},
-		Unlocked: true,
-	})
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{oneBTC},
+			Unlocked: true,
+		},
+	)
 
-	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, 0)
+	payment.Value = int64(h.DustThreshold(payment.PkScript))
+	packet := fundPsbtPacket(h, payment, funding.WalletOutpoints...)
 
-	tx := wire.NewMsgTx(wire.TxVersion)
-	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: funding.WalletOutpoints[0]})
-	tx.AddTxOut(&payment)
-
-	packet, err := psbt.NewFromUnsignedTx(tx)
-	require.NoError(h, err, "failed to create packet")
+	// Non-default headers, replaceable sequence and output metadata expose
+	// accidental replacement. SigHashNone is supported without introducing
+	// the separate SIGHASH_SINGLE refusal covered by the unit matrix.
+	packet.UnsignedTx.Version = 3
+	packet.UnsignedTx.LockTime = 7
+	packet.UnsignedTx.TxIn[0].Sequence = wire.MaxTxInSequenceNum - 2
+	packet.Inputs[0].SighashType = txscript.SigHashNone
+	packet.Outputs[0].WitnessScript = []byte{0x54, 0x55}
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
 
 	before, err := w.GetAccount(
 		h.Context(), scope, waddrmgr.DefaultAccountName,
 	)
 	require.NoError(h, err, "failed to read account")
 
-	// Act: Fund the packet.
-	result, err := w.FundPsbt(h.Context(), &wallet.FundIntent{
-		Packet: packet,
-		ChangeSource: &wallet.ScopedAccount{
-			AccountName: waddrmgr.DefaultAccountName,
-			KeyScope:    scope,
+	// Act: Fund the packet without changing the caller's representation.
+	result, err := w.FundPsbt(
+		h.Context(), &wallet.FundIntent{
+			Packet: packet,
+			ChangeSource: &wallet.ScopedAccount{
+				AccountName: waddrmgr.DefaultAccountName,
+				KeyScope:    scope,
+			},
+			FeeRate: btcunit.NewSatPerKVByte(1),
 		},
-		FeeRate: relayFeeRate,
-	})
+	)
 
-	// Assert: One change address is committed, and the change output pays
-	// a change address of the wallet.
+	// Assert: Boundary funding returns the caller's payment and one sorted
+	// change output, with a reservation owned by the caller.
 	require.NoError(h, err, "failed to fund packet")
-	require.GreaterOrEqual(h, result.ChangeIndex, int32(0), "change not kept")
+	require.NotEqual(h, wtxmgr.LockID{}, result.LeaseID)
 
+	funded := result.Packet
+	require.Len(h, funded.UnsignedTx.TxIn, 1)
+	require.Len(h, funded.UnsignedTx.TxOut, 2)
+	// The small caller payment sorts before its much larger change.
+	require.EqualValues(h, 1, result.ChangeIndex)
+	require.Equal(h, &payment, funded.UnsignedTx.TxOut[0])
+
+	// Compare the original encoding and metadata separately: sorting must
+	// retain the caller's choices while decorating the returned input from
+	// its real parent transaction. The payment remains at sorted index zero.
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+	require.Equal(h, packet.UnsignedTx.Version, funded.UnsignedTx.Version)
+	require.Equal(h, packet.UnsignedTx.LockTime, funded.UnsignedTx.LockTime)
+	require.Equal(h, packet.UnsignedTx.TxIn[0], funded.UnsignedTx.TxIn[0])
+	require.Equal(
+		h, packet.Inputs[0].SighashType, funded.Inputs[0].SighashType,
+	)
+	require.Equal(h, packet.Outputs[0], funded.Outputs[0])
+	require.Equal(
+		h, funding.Tx.TxOut[funding.WalletOutpoints[0].Index],
+		funded.Inputs[0].WitnessUtxo,
+	)
+
+	// The new internal key must be committed once, and the returned change
+	// script must pay that wallet-owned internal branch.
 	after, err := w.GetAccount(
 		h.Context(), scope, waddrmgr.DefaultAccountName,
 	)
@@ -1420,4 +1505,92 @@ func testFundPsbtCommitChange(h *bwtest.HarnessTest) {
 	info, err := w.GetAddressInfo(h.Context(), addrs[0])
 	require.NoError(h, err, "change address not in wallet")
 	require.True(h, info.Internal, "change pays a non-change address")
+
+	// Release the caller's reservation without publishing the transaction.
+	for _, input := range funded.UnsignedTx.TxIn {
+		require.NoError(
+			h, w.ReleaseOutput(
+				h.Context(), result.LeaseID,
+				input.PreviousOutPoint,
+			),
+		)
+	}
+}
+
+// testFundPsbtWatchOnly checks unsigned funding with a complete public origin
+// while the Wallet has no private keys that could satisfy a signing request.
+func testFundPsbtWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: The existing shell fixture retains its explicit BIP84 scope
+	// and fingerprint, avoiding the unknown-origin work owned by Task 482.
+	keys := deterministicImportedAccountKeys(h)
+	fingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: keys.addrType,
+			Amounts:  []btcutil.Amount{oneBTC},
+			InitialAccounts: []wallet.ImportAccountParams{{
+				Scope:                &keys.scope,
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: &fingerprint,
+				Name:                 waddrmgr.DefaultAccountName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+	payment := deriveWalletPayment(h, w, keys.addrType, halfBTC)
+	packet := fundPsbtPacket(h, payment, funding.WalletOutpoints...)
+
+	// Observe the funded child's coordinates instead of assuming the
+	// account cursor has not advanced during historical discovery.
+	coin, err := w.GetUtxo(h.Context(), funding.WalletOutpoints[0])
+	require.NoError(h, err)
+	inputInfo, err := w.GetAddressInfo(h.Context(), coin.Address)
+	require.NoError(h, err)
+
+	// Act: Fund the explicit input without attempting to unlock or sign.
+	result, err := w.FundPsbt(
+		h.Context(), &wallet.FundIntent{
+			Packet: packet, FeeRate: relayFeeRate,
+			ChangeSource: &wallet.ScopedAccount{
+				KeyScope:    keys.scope,
+				AccountName: waddrmgr.DefaultAccountName,
+			},
+		},
+	)
+
+	// Assert: The packet carries the known public origin and a caller-owned
+	// lease that can be released without acquiring private signing material.
+	require.NoError(h, err)
+	require.NotEqual(h, wtxmgr.LockID{}, result.LeaseID)
+	require.True(h, w.IsWatchOnly())
+	require.Len(h, result.Packet.UnsignedTx.TxIn, 1)
+	require.Equal(
+		h, funding.WalletOutpoints[0],
+		result.Packet.UnsignedTx.TxIn[0].PreviousOutPoint,
+	)
+	require.Len(h, result.Packet.Inputs[0].Bip32Derivation, 1)
+	origin := result.Packet.Inputs[0].Bip32Derivation[0]
+	require.Equal(h, keys.masterKeyFingerprint, origin.MasterKeyFingerprint)
+	require.Equal(
+		h, []uint32{
+			keys.scope.Purpose + hdkeychain.HardenedKeyStart,
+			keys.scope.Coin + hdkeychain.HardenedKeyStart,
+			keys.accountKey.ChildIndex(),
+			inputInfo.Derivation.Branch, inputInfo.Derivation.Index,
+		}, origin.Bip32Path,
+	)
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err)
+	require.Len(h, leases, 1)
+	require.Equal(h, result.LeaseID, leases[0].LockID)
+	require.Equal(h, funding.WalletOutpoints[0], leases[0].OutPoint)
+
+	for _, input := range result.Packet.UnsignedTx.TxIn {
+		require.NoError(
+			h, w.ReleaseOutput(
+				h.Context(), result.LeaseID,
+				input.PreviousOutPoint,
+			),
+		)
+	}
 }
