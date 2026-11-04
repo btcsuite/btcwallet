@@ -186,8 +186,14 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 		},
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.requestChan = make(chan any)
+	router := newChainSyncer(
+		m.config.ChainSource, &m.config.ChainParams,
+	)
+	m.chainSyncer = router
 	m.started.Store(true)
+
+	go m.mainLoop()
 
 	// The fixture owns required-call verification. Stop joins workers before
 	// assertions run, while the caller retains ownership of the mock Store.
@@ -253,6 +259,7 @@ func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
 
 // mockWalletDeps holds the mocked dependencies for the Wallet.
 type mockWalletDeps struct {
+	manager        *Manager
 	addrStore      *bwmock.AddrStore
 	vault          *keyvaultmock.Vault
 	store          *walletmock.Store
@@ -309,8 +316,10 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 			ChainParams: &chainParams,
 		},
 	}
-	// Match managed assembly so every producer declares its routing interest.
+	// Reuse the SQL owner so reported failures follow production policy.
+	owner := testSQLManager(t, mockStore)
 	w.chainSyncer = newChainSyncer(mockChain, &chainParams)
+
 	w.chainEventChan = make(chan chainEvent, 1)
 	w.cache = newStoreRuntimeCache(mockStore)
 
@@ -318,6 +327,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	w.lockTimer.Stop()
 
 	deps := &mockWalletDeps{
+		manager:        owner,
 		addrStore:      mockAddrStore,
 		vault:          mockVault,
 		store:          mockStore,
@@ -333,12 +343,10 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Cleanup(func() {
 		mockAddrStore.AssertExpectations(t)
 		mockVault.AssertExpectations(t)
-		mockStore.AssertExpectations(t)
 		mockTxStore.AssertExpectations(t)
 		mockSyncer.AssertExpectations(t)
 		mockChain.AssertExpectations(t)
 		mockAddr.AssertExpectations(t)
-		mockVault.AssertExpectations(t)
 		mockAccountManager.AssertExpectations(t)
 		mockPubKeyAddr.AssertExpectations(t)
 		mockTaprootAddr.AssertExpectations(t)

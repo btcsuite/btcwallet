@@ -1272,11 +1272,12 @@ func (b *managerBackendMock) close() error {
 // newManagerLifecycleTest supplies strict backend and chain dependencies;
 // fixture cleanup joins runtime work before verifying their expected calls.
 func newManagerLifecycleTest(t *testing.T,
-	backend *managerBackendMock) *Manager {
+	backend *managerBackendMock, wallets ...*Wallet) *Manager {
 
 	t.Helper()
 
-	// Reuse SQL readiness instead of bypassing the real processor.
+	// Reuse concrete SQL policy so fixtures do not bypass readiness or
+	// terminal classification while each processor keeps strict expectations.
 	backend.On("prepareLiveWatches", mock.Anything, mock.Anything).
 		Return((&sqlManagerBackend{}).prepareLiveWatches).Maybe()
 
@@ -1294,7 +1295,18 @@ func newManagerLifecycleTest(t *testing.T,
 		},
 	}
 
-	manager.chainSyncer = newChainSyncer(chain, &manager.config.ChainParams)
+	manager.requestChan = make(chan any)
+	manager.chainSyncer = newChainSyncer(
+		chain, &manager.config.ChainParams,
+	)
+
+	for _, w := range wallets {
+		manager.wallets[w.cfg.Name] = w
+	}
+
+	manager.started.Store(len(wallets) != 0)
+
+	go manager.mainLoop()
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
 	t.Cleanup(func() {

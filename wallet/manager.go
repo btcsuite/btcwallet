@@ -168,6 +168,9 @@ type Manager struct {
 	// cancel signals terminal reader shutdown before draining Wallet work.
 	cancel context.CancelFunc
 
+	// requestChan transfers public operations to the runtime owner.
+	requestChan chan any
+
 	// wg joins routing after releasing the lock needed by recipient snapshots.
 	wg sync.WaitGroup
 }
@@ -242,11 +245,107 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		config:      cfg,
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
+		requestChan: make(chan any),
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.chainSyncer = newChainSyncer(
+		m.config.ChainSource, &m.config.ChainParams,
+	)
+
+	//nolint:contextcheck // Runtime work outlives the construction context.
+	go m.mainLoop()
 
 	return m, nil
+}
+
+// startManagerReq retains the caller's startup context until the loop settles
+// the operation, including any failed candidate cleanup.
+type startManagerReq struct {
+	reqCtx
+
+	resp chan startManagerResp
+}
+
+// startManagerResp returns only a complete published set or a startup error.
+type startManagerResp struct {
+	wallets []*Wallet
+	err     error
+}
+
+// managerRuntime holds one loop's state for its handlers, without shared locks.
+type managerRuntime struct {
+	manager *Manager
+}
+
+// mainLoop owns admitted requests; legacy Stop still cancels its lifetime.
+func (m *Manager) mainLoop() {
+	runtime := managerRuntime{manager: m}
+	for {
+		select {
+		case req := <-m.requestChan:
+			runtime.handleReq(m.lifetimeCtx, req)
+
+		case <-m.lifetimeCtx.Done():
+			return
+		}
+	}
+}
+
+// handleReq dispatches requests on the one runtime owner.
+func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
+	switch req := raw.(type) {
+	case startManagerReq:
+		r.start(ctx, req)
+	}
+}
+
+// start preserves legacy Stop exclusion until all lifecycle requests migrate.
+func (r *managerRuntime) start(_ context.Context, req startManagerReq) {
+	m := r.manager
+	m.Lock()
+	defer m.Unlock()
+
+	var err error
+	switch {
+	case m.lifetimeCtx.Err() != nil:
+		err = ErrManagerStopped
+
+	case req.ctx.Err() != nil:
+		err = req.ctx.Err()
+
+	case m.started.Swap(true):
+		err = ErrStateForbidden
+	}
+	if err != nil {
+		req.resp <- startManagerResp{err: err}
+		return
+	}
+
+	wallets, err := m.startWallets(req.ctx)
+	if err != nil {
+		err = errors.Join(err, m.stopWallets(wallets))
+		m.cancel()
+		req.resp <- startManagerResp{err: err}
+		return
+	}
+
+	// Enrollment precedes launch so legacy Stop cannot miss the reader.
+	m.wg.Add(1)
+	go m.startChainSyncer()
+	req.resp <- startManagerResp{wallets: wallets}
+}
+
+// sendReq transfers ownership only while the Manager and caller are live.
+// Accepted Start/Create callers wait for their buffered result to settle.
+func (m *Manager) sendReq(ctx context.Context, req any) error {
+	select {
+	case m.requestChan <- req:
+		return nil
+	case <-m.lifetimeCtx.Done():
+		return ErrManagerStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // startWallets assembles and starts durable Wallets in stable identifier order.
@@ -364,59 +463,32 @@ func translateDatabaseIdentityError(err error) error {
 
 // Start starts every durable Wallet and returns the complete active set in
 // stable Wallet-ID order. Another Start while starting, running, or stopping
-// returns ErrStateForbidden. Stop and admitted startup failure are terminal;
+// returns ErrStateForbidden. Stop and accepted startup failure are terminal;
 // construct a fresh Manager to reopen the database.
 // Cancellation or failure cleans up all candidates before returning an error.
 func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
-	// Reject without waiting for the lock held by startup or shutdown. Claim
-	// under that lock below so Stop cannot overtake an admitted startup.
+	// Preserve immediate rejection while another operation holds the loop.
 	if m.started.Load() {
 		return nil, fmt.Errorf(
 			"manager already started: %w", ErrStateForbidden,
 		)
 	}
 
-	m.Lock()
-	defer func() {
-		// A terminal startup must release membership before joining a
-		// reader; successful startup leaves that reader running.
-		m.Unlock()
+	req := startManagerReq{
+		reqCtx: reqCtx{ctx: ctx},
+		resp:   make(chan startManagerResp, 1),
+	}
 
-		if m.lifetimeCtx.Err() != nil {
-			m.wg.Wait()
-		}
-	}()
-
-	err := ctx.Err()
+	err := m.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	// Cleanup closes and clears the backend, making this Manager terminal.
-	if m.backend == nil {
-		return nil, ErrManagerStopped
-	}
+	// Startup cancellation must unwind candidates before returning; the
+	// caller cannot abandon accepted cleanup as ordinary Wallet calls can.
+	result := <-req.resp
 
-	if m.started.Swap(true) {
-		return nil, fmt.Errorf(
-			"manager already started: %w", ErrStateForbidden,
-		)
-	}
-
-	wallets, err := m.startWallets(ctx)
-	if err != nil {
-		// No candidate is published on failure; join its work before closing
-		// shared storage and making the Manager terminal.
-		return nil, errors.Join(err, m.stopWallets(wallets))
-	}
-
-	// Enroll under admission so shutdown cannot miss a reader whose
-	// goroutine has not yet been scheduled.
-	m.wg.Add(1)
-
-	go m.startChainSyncer()
-
-	return wallets, nil
+	return result.wallets, result.err
 }
 
 // Stop terminally drains every Wallet and closes the owned database.
