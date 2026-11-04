@@ -15,6 +15,9 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// errChainWatchRegistration identifies native watch loss for backend policy.
+var errChainWatchRegistration = errors.New("chain watch registration failed")
+
 // chainRouter supplies live subscriptions and prepared events while its caller
 // owns the reader lifetime and each Wallet owns transaction persistence.
 type chainRouter interface {
@@ -123,14 +126,14 @@ func (s *chainSyncer) watchAddresses(ctx context.Context, id uint32,
 
 	err := s.source.WatchAddrsFromTip(ctx, addrs)
 	if err != nil {
-		return fmt.Errorf("watch chain addresses: %w", err)
+		return fmt.Errorf("watch addresses: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
 }
 
-// watchOutpoints preserves input-only routing before NotifySpent can emit.
-// Native subscription errors remain on the existing processor retry path.
+// watchOutpoints records input ownership before native activation can emit.
 func (s *chainSyncer) watchOutpoints(ctx context.Context, id uint32,
 	points []*wire.OutPoint) error {
 
@@ -145,7 +148,8 @@ func (s *chainSyncer) watchOutpoints(ctx context.Context, id uint32,
 
 	err = s.source.NotifySpent(points)
 	if err != nil {
-		return fmt.Errorf("watch chain outpoints: %w", err)
+		return fmt.Errorf("watch outpoints: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
@@ -162,7 +166,8 @@ func (s *chainSyncer) notifyReceived(_ context.Context, id uint32,
 	// native API has no cancellation; Wallet's request join owns its drain.
 	err := s.source.NotifyReceived(addrs)
 	if err != nil {
-		return fmt.Errorf("notify received addresses: %w", err)
+		return fmt.Errorf("notify received: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
@@ -178,7 +183,8 @@ func (s *chainSyncer) notifyBlocks(ctx context.Context) error {
 
 	err = s.source.NotifyBlocks()
 	if err != nil {
-		return fmt.Errorf("notify chain blocks: %w", err)
+		return fmt.Errorf("notify blocks: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
