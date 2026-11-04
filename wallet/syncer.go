@@ -428,14 +428,8 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	return nil
 }
 
-// walletBirthday returns the wallet birthday from the active backend. SQL
-// wallets have no legacy address manager, so their birthday is sourced from
-// the runtime store.
+// walletBirthday reads durable birthday metadata through the Store boundary.
 func (s *syncer) walletBirthday(ctx context.Context) (time.Time, error) {
-	if s.addrStore != nil {
-		return s.addrStore.Birthday(), nil
-	}
-
 	info, err := s.store.GetWallet(ctx, s.cfg.Name)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("load wallet birthday: %w", err)
@@ -582,12 +576,7 @@ func (s *syncer) resolveMissingHistoricalBlock(listErr error,
 	syncedTo waddrmgr.BlockStamp) error {
 
 	if !errors.Is(listErr, db.ErrBlockNotFound) {
-		var managerErr waddrmgr.ManagerError
-		if !errors.As(listErr, &managerErr) ||
-			managerErr.ErrorCode != waddrmgr.ErrBlockNotFound {
-
-			return listErr
-		}
+		return listErr
 	}
 
 	remoteHash, err := s.cfg.Chain.GetBlockHash(int64(syncedTo.Height))

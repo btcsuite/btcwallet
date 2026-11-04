@@ -824,7 +824,7 @@ func TestResolveMissingHistoricalBlockChainLookupError(t *testing.T) {
 func TestResolveMissingHistoricalBlockLegacyManagerError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A legacy kvdb manager reports a missing historical block and the
+	// Arrange: The KVDB Store normalizes a missing historical block and the
 	// persisted synced tip matches the chain backend.
 	mockChain := &bwmock.Chain{}
 	s := newTestSyncer(Config{Chain: mockChain}, nil, nil, nil, nil, 0)
@@ -833,9 +833,10 @@ func TestResolveMissingHistoricalBlockLegacyManagerError(t *testing.T) {
 		&tip.Hash, nil,
 	).Once()
 
-	listErr := waddrmgr.ManagerError{ErrorCode: waddrmgr.ErrBlockNotFound}
+	listErr := fmt.Errorf("%w: %w", db.ErrBlockNotFound,
+		waddrmgr.ManagerError{ErrorCode: waddrmgr.ErrBlockNotFound})
 
-	// Act: Resolve the legacy missing historical block error.
+	// Act: Resolve the normalized legacy missing-history error.
 	err := s.resolveMissingHistoricalBlock(listErr, tip)
 
 	// Assert: The matching chain tip permits rollback initialization.
@@ -4514,7 +4515,6 @@ func TestSyncerFullRun(t *testing.T) {
 	)
 
 	// Mock initial chain sync sequence.
-	mockAddrStore.On("Birthday").Return(time.Now()).Once()
 	mockChain.On("IsCurrent").Return(true).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
@@ -4991,7 +4991,6 @@ func TestSyncerRun_InitError(t *testing.T) {
 		store, uint32(0),
 	)
 
-	addrStore.On("Birthday").Return(time.Now()).Once()
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
@@ -5806,12 +5805,14 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 		CS: mockCS,
 	}
 	mockAddrStore := &bwmock.AddrStore{}
-	// Birthday called by SetStartTime.
-	mockAddrStore.On("Birthday").Return(time.Time{}).Once()
+	// SetStartTime reads birthday metadata through the durable Store.
+	store := &walletmock.Store{}
+	store.On("GetWallet", mock.Anything, "").
+		Return(&db.WalletInfo{}, nil).Once()
 
 	s := newTestSyncer(
 		Config{Chain: nc}, mockAddrStore, nil, nil,
-		&walletmock.Store{}, 0,
+		store, 0,
 	)
 
 	// Cancel context immediately to abort waitUntilBackendSynced.
@@ -5821,9 +5822,9 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 	// Act: Attempt chain sync initialization.
 	err := s.initChainSync(ctx)
 
-	// Assert: Verify cancellation error and that Birthday was accessed.
+	// Assert: Initialization propagates cancellation after durable metadata.
 	require.Error(t, err)
-	mockAddrStore.AssertExpectations(t)
+	store.AssertExpectations(t)
 }
 
 // TestFetchAndFilterBlocks_HeaderScan verifies the optimization for empty scan

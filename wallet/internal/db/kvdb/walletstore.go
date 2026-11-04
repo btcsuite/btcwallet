@@ -193,7 +193,7 @@ func (s *Store) ListSyncedBlocks(_ context.Context,
 
 			hash, err := s.addrStore.BlockHash(ns, height32)
 			if err != nil {
-				return fmt.Errorf("get block hash %d: %w", height, err)
+				return syncedBlockError(height, err)
 			}
 
 			blocks = append(blocks, db.Block{
@@ -469,4 +469,13 @@ func (s *Store) UpdateWalletSecrets(ctx context.Context,
 	_ db.UpdateWalletSecretsParams) error {
 
 	return notImplemented(ctx, "UpdateWalletSecrets")
+}
+
+// syncedBlockError adapts native missing history to the shared Store contract.
+func syncedBlockError(height uint32, err error) error {
+	if waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) {
+		err = fmt.Errorf("%w: %w", db.ErrBlockNotFound, err)
+	}
+
+	return fmt.Errorf("get block hash %d: %w", height, err)
 }
