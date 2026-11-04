@@ -1038,20 +1038,29 @@ type bitcoindCompatibilityCoin struct {
 	Confirmations int64
 }
 
+// bitcoindCompatibilityTx normalizes wallet history without comparing account,
+// category or label semantics that the two wallets need not model alike.
+type bitcoindCompatibilityTx struct {
+	BlockHash     string
+	Confirmations int64
+}
+
 // bitcoindCompatibilityFacts contains only compatible public observations.
 // String outpoint keys keep a mismatched coin identifiable in comparison
 // failures.
 type bitcoindCompatibilityFacts struct {
-	Hash    chainhash.Hash
-	Height  int32
-	Coins   map[string]bitcoindCompatibilityCoin
-	Balance btcutil.Amount
+	Hash         chainhash.Hash
+	Height       int32
+	Coins        map[string]bitcoindCompatibilityCoin
+	Balance      btcutil.Amount
+	Transactions map[string]bitcoindCompatibilityTx
 }
 
 // normalizeWalletCompatibilityFacts projects already-read public results onto
 // compatible chain facts; it performs no wallet calls or test assertions.
 func normalizeWalletCompatibilityFacts(info *wallet.Info,
-	coins []*wallet.Utxo) bitcoindCompatibilityFacts {
+	coins []*wallet.Utxo,
+	details []*wallet.TxDetail) bitcoindCompatibilityFacts {
 
 	// Enumerate the Wallet's complete coin set independently of the fixture,
 	// so an unexpected output cannot disappear through fixture filtering.
@@ -1068,13 +1077,28 @@ func normalizeWalletCompatibilityFacts(info *wallet.Info,
 		facts.Balance += coin.Amount
 	}
 
+	// Normalize all returned history, including transactions still unmined.
+	facts.Transactions = make(map[string]bitcoindCompatibilityTx)
+	for _, detail := range details {
+		var blockHash string
+		if detail.Block != nil {
+			blockHash = detail.Block.Hash.String()
+		}
+
+		facts.Transactions[detail.Hash.String()] = bitcoindCompatibilityTx{
+			BlockHash:     blockHash,
+			Confirmations: int64(detail.Confirmations),
+		}
+	}
+
 	return facts
 }
 
 // normalizeBitcoindCompatibilityFacts projects already-read Core results onto
 // compatible chain facts, returning amount conversion errors to the case.
 func normalizeBitcoindCompatibilityFacts(hash chainhash.Hash, height int32,
-	coins []btcjson.ListUnspentResult) (bitcoindCompatibilityFacts, error) {
+	coins []btcjson.ListUnspentResult,
+	history *btcjson.ListSinceBlockResult) (bitcoindCompatibilityFacts, error) {
 
 	// Each wallet enumerates its complete coin set so missing and extra coins
 	// are both observable. Include zero-confirmation and unsafe Core outputs.
@@ -1097,6 +1121,16 @@ func normalizeBitcoindCompatibilityFacts(hash chainhash.Hash, height int32,
 			Confirmations: coin.Confirmations,
 		}
 		facts.Balance += amount
+	}
+
+	// Core reports per-output history rows. Normalize them by transaction ID
+	// while retaining the complete independently discovered wallet history.
+	facts.Transactions = make(map[string]bitcoindCompatibilityTx)
+	for _, tx := range history.Transactions {
+		facts.Transactions[tx.TxID] = bitcoindCompatibilityTx{
+			BlockHash:     tx.BlockHash,
+			Confirmations: tx.Confirmations,
+		}
 	}
 
 	return facts, nil
@@ -1135,8 +1169,10 @@ func testBitcoindCompatibilityCheck(h *bwtest.HarnessTest) {
 		MaxConfs: maxConfsLimit,
 	})
 	require.NoError(h, err, "read Wallet compatibility coins")
+	details, err := w.ListTxns(h.Context(), 0, unminedHeight)
+	require.NoError(h, err, "read Wallet compatibility history")
 
-	actual := normalizeWalletCompatibilityFacts(info, coins)
+	actual := normalizeWalletCompatibilityFacts(info, coins, details)
 
 	h.AssertBitcoindWalletSynced(client)
 	history, err := client.ListSinceBlockMinConfWatchOnly(nil, 1, true)
@@ -1148,11 +1184,11 @@ func testBitcoindCompatibilityCheck(h *bwtest.HarnessTest) {
 	coreCoins, err := client.ListUnspentMinMax(0, maxConfsLimit)
 	require.NoError(h, err, "read Core wallet compatibility coins")
 	expected, err := normalizeBitcoindCompatibilityFacts(
-		*hash, header.Height, coreCoins,
+		*hash, header.Height, coreCoins, history,
 	)
 	require.NoError(h, err)
 
 	// Assert: Neither wallet's coin enumeration is filtered to match the
-	// other. Both must agree on the tip, owned outputs and UTXO-sum balance.
+	// other. Both must agree on tip, coins, balance and history.
 	require.Equal(h, expected, actual, "confirmed receive facts differ")
 }
