@@ -379,7 +379,7 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Hold the backend rollback for one published Wallet. Return a
-	// second Wallet's dependencies only when Create obtains the Manager lock;
+	// second Wallet's dependencies only when the runtime handles Create;
 	// its existing startup mocks isolate publication from SQL persistence.
 	w, wDeps := createTestWalletWithMocks(t)
 	w.cfg.Name = testWalletName
@@ -400,12 +400,14 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 	w.chainEventChan = events
 
 	entered, release := make(chan struct{}), make(chan struct{})
+	settled := make(chan struct{})
 	releaseWork := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseWork)
 	backend.On("rollbackToBlock", mock.Anything, db.Block{Height: 8}).
 		Run(func(mock.Arguments) {
 			close(entered)
 			<-release
+			close(settled)
 		}).Return(nil).Once()
 
 	params := managerLifecycleCreateParams("created")
@@ -415,7 +417,14 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 			name:  params.Name,
 			store: createdDeps.store,
 			vault: createdDeps.vault,
-		}, nil).Once()
+		}, nil).Run(func(mock.Arguments) {
+		// A newly created writer must observe the completed shared rewind.
+		select {
+		case <-settled:
+		default:
+			t.Error("Create reached storage before rollback settled")
+		}
+	}).Once()
 	createdDeps.store.On("GetWallet", mock.Anything, params.Name).
 		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	createdDeps.store.On("ListAccounts", mock.Anything,
@@ -433,34 +442,20 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 	chainSource.On("NotifyBlocks").Return(nil).Once()
 	chainSource.On("IsCurrent").Return(false).Maybe()
 
-	// Act: Race Create against the held rollback. The direct mutex probe
-	// keeps this regression independent of when the Create goroutine is run.
-	rolled, created := make(chan error, 1), make(chan error, 1)
+	// Act: Hold rollback preparation and persistence while public Create
+	// waits for the runtime owner. Its backend call cannot precede settlement.
+	created := make(chan error, 1)
+
 	go func() {
-		rolled <- m.dispatchChainEvent(t.Context(),
-			chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+		_ = m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 8},
+		})
 	}()
 
 	req, ok := (<-events).notification.(prepareRollbackReq)
 	require.True(t, ok)
-
-	// The Manager lock must exclude new writers while the existing worker
-	// is still acknowledging, not only while Store rollback is held.
-	locked := m.TryLock()
-	if locked {
-		m.Unlock()
-	}
-
-	require.False(t, locked, "Create acquires lock before rollback readiness")
 	close(req.readyForRollback)
 	<-entered
-
-	locked = m.TryLock()
-	if locked {
-		m.Unlock()
-	}
-
-	require.False(t, locked, "rollback releases Manager lock early")
 
 	go func() {
 		_, err := m.Create(params)
@@ -471,7 +466,6 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 
 	// Assert: Successful publication follows rollback and the fully started
 	// created Wallet belongs to a Manager that remains Running.
-	require.NoError(t, <-rolled)
 	require.NoError(t, <-created)
 	require.Contains(t, m.String(), params.Name)
 	require.True(t, m.started.Load())
@@ -628,23 +622,15 @@ func TestManagerChainRollbackStopDuringPreparation(t *testing.T) {
 				m.started.Store(true)
 				m.wallets[w.cfg.Name] = w
 				w.chainEventChan = make(chan chainEvent, test.capacity)
-				notifications := make(chan any, 1)
-				source := &bwmock.Chain{}
-				source.On("Notifications").
-					Return((<-chan any)(notifications)).Once()
-				t.Cleanup(func() { source.AssertExpectations(t) })
-
-				m.chainSyncer = newChainSyncer(source, &chainParams, nil)
-
-				notifications <- chain.BlockDisconnected{
-					Block: wtxmgr.Block{Height: 8},
-				}
-
-				// Act: The source reader waits for rollback preparation. Stop
-				// must release it and join without the callback self-joining.
-				m.wg.Add(1)
-
-				go m.startChainSyncer()
+				// Act: Hold the writer barrier before accepting a Store
+				// write, then let ordinary Stop cancel preparation.
+				go func() {
+					_ = m.dispatchChainEvent(
+						t.Context(), chain.BlockDisconnected{
+							Block: wtxmgr.Block{Height: 8},
+						},
+					)
+				}()
 
 				synctest.Wait()
 

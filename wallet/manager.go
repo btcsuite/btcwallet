@@ -312,6 +312,12 @@ type createWalletResultReq struct {
 	err    error
 }
 
+// rollbackResultReq keeps prepared writers fenced until their owner decides.
+type rollbackResultReq struct {
+	barrier chan struct{}
+	receipt chan struct{}
+	err     error
+}
 // managerRuntime holds one loop's state for its handlers, without shared locks.
 type managerRuntime struct {
 	manager   *Manager
@@ -367,6 +373,9 @@ func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 			m.RUnlock()
 		}
 		req.resp <- fmt.Sprintf("active_wallets=%v", names)
+	case rollbackResultReq:
+		r.completeRollback(ctx, req)
+
 	case chainEventReq:
 		r.pending = &req
 	}
@@ -482,14 +491,59 @@ func (r *managerRuntime) completeCreate(req createWalletResultReq) {
 	req.req.resp <- createWalletResp{wallet: req.wallet, err: req.err}
 }
 
+// beginRollback gives the one I/O task a fixed backend and recipient snapshot.
+func (r *managerRuntime) beginRollback(ctx context.Context,
+	event chain.BlockDisconnected, recovery bool, receipt chan struct{}) {
+
+	m := r.manager
+	// Retain inherited Stop exclusion until lifecycle migration.
+	m.Lock()
+	if m.checkCreate() != nil {
+		m.Unlock()
+		close(receipt)
+		return
+	}
+	r.operation = make(chan struct{})
+	backend, wallets := m.backend, slices.Collect(maps.Values(m.wallets))
+	requests, wg := m.requestChan, &m.wg
+	barrier := make(chan struct{})
+
+	wg.Go(func() {
+		err := handleRollbackEvent(
+			ctx, backend, wallets, event, recovery, barrier,
+		)
+		requests <- rollbackResultReq{barrier, receipt, err}
+	})
+}
+
+// completeRollback settles writers before releasing inherited Stop exclusion.
+func (r *managerRuntime) completeRollback(ctx context.Context,
+	req rollbackResultReq) {
+
+	m := r.manager
+	defer m.Unlock()
+	close(r.operation)
+	r.operation = nil
+	if req.err != nil {
+		if ctx.Err() == nil {
+			log.Errorf("Unable to roll back chain: %v", req.err)
+			_ = m.stopWallets(nil)
+		}
+	} else {
+		close(req.barrier)
+	}
+	if req.receipt != nil {
+		close(req.receipt)
+	}
+}
+
 // prepareEvent reuses rollback ordering and the inherited recipient snapshot.
 func (r *managerRuntime) prepareEvent(ctx context.Context) {
 	if r.pending == nil {
 		return
 	}
 	if event, ok := r.pending.event.(chain.BlockDisconnected); ok {
-		_ = r.manager.handleRollbackEvent(ctx, event)
-		close(r.pending.done)
+		r.beginRollback(ctx, event, false, r.pending.done)
 		r.pending = nil
 		return
 	}
@@ -760,99 +814,48 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, event any) error {
 	}
 }
 
-// prepareWalletsForRollback waits for each worker to finish earlier chain
-// writes. The caller holds the Manager lock, keeping membership fixed;
-// Manager cancellation interrupts either request delivery or readiness wait.
-func (m *Manager) prepareWalletsForRollback(
+// prepareWalletsForRollback fences a fixed recipient set before shared writes.
+func prepareWalletsForRollback(ctx context.Context, wallets []*Wallet,
 	rollbackDone <-chan struct{}) error {
 
-	for _, wallet := range m.wallets {
-		req := prepareRollbackReq{
-			readyForRollback: make(chan struct{}),
-			rollbackDone:     rollbackDone,
-		}
-
+	for _, wallet := range wallets {
+		req := prepareRollbackReq{make(chan struct{}), rollbackDone}
 		select {
 		case wallet.chainEventChan <- chainEvent{notification: req}:
-		case <-m.lifetimeCtx.Done():
-			return ErrManagerStopped
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 
 		select {
 		case <-req.readyForRollback:
-		case <-m.lifetimeCtx.Done():
-			return ErrManagerStopped
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 
 	return nil
 }
 
-// handleRollbackEvent settles published writers around one backend rollback.
-// Success releases workers and lets the source reader dispatch its next event.
-// A rollback error stops every Wallet before any worker can write again.
-func (m *Manager) handleRollbackEvent(ctx context.Context,
-	event chain.BlockDisconnected) error {
+// handleRollbackEvent fences writers while the owner receives reports.
+func handleRollbackEvent(ctx context.Context, backend managerBackend,
+	wallets []*Wallet, event chain.BlockDisconnected, recovery bool,
+	barrier chan struct{}) error {
 
-	// Keep the Wallet set fixed, exclude Create's new writers, and prevent
-	// Stop from closing Store until rollback or terminal cleanup finishes.
-	m.Lock()
-	defer m.Unlock()
-
-	// Stop may have cleared backend before this callback acquired the lock.
-	// Reject that stopped Manager before using its storage.
-	err := m.checkCreate()
-	if err != nil {
-		return err
-	}
-
-	// Preserve hash and time as well as height for storage that needs to
-	// distinguish a stale disconnect from a replacement at the same height.
 	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
 	if err != nil {
 		return fmt.Errorf("disconnect block: %w", err)
 	}
 
-	err = ctx.Err()
+	err = prepareWalletsForRollback(ctx, wallets, barrier)
 	if err != nil {
-		return err
-	}
-
-	// Manager alone signals rollback completion. Terminal cleanup stops
-	// workers first, so a failed rewind cannot resume old writes.
-	rollbackDone := make(chan struct{})
-
-	err = m.prepareWalletsForRollback(rollbackDone)
-	if err != nil {
-		// Only Stop's lifetime cancellation interrupts preparation. Leave
-		// completion held and cleanup to that waiting caller so it receives
-		// close errors; prepared workers exit through Wallet cancellation.
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 
-	// Accepted persistence settles even if its caller or Stop cancels.
-	// The Manager lock keeps Store open until this one rollback completes.
-	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
+	// Accepted durable writes settle before the owner can close Store.
+	err = backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
 	if err != nil {
-		err = fmt.Errorf("rollback chain: %w", err)
-		if m.lifetimeCtx.Err() == nil {
-			// No Stop owns cleanup yet. Cancel and join writers on this
-			// reader without self-joining, then release its completion.
-			err = errors.Join(err, m.stopWallets(nil))
-
-			close(rollbackDone)
-		}
-
-		// If Stop already canceled, it owns cleanup and its close error.
-		// Otherwise cleanup canceled the reader's outer report, so include
-		// the joined close failure in this single persistence error log.
-		log.Errorf("Unable to roll back chain to height %d: %v",
-			block.Height, err)
-
-		return err
+		return fmt.Errorf("rollback chain: %w", err)
 	}
-
-	close(rollbackDone)
 
 	return nil
 }
