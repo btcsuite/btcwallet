@@ -586,6 +586,10 @@ var allTestCases = []*testCase{
 		TestFunc: testFundPsbtCommitChange,
 	},
 	{
+		Name:     "psbtmanager funding leases",
+		TestFunc: testFundPsbtFundingLeases,
+	},
+	{
 		Name:     "psbtmanager watchonly",
 		TestFunc: testFundPsbtWatchOnly,
 	},

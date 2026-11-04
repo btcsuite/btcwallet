@@ -1517,6 +1517,161 @@ func testFundPsbtCommitChange(h *bwtest.HarnessTest) {
 	}
 }
 
+// testFundPsbtFundingLeases checks the public reservation lifecycle across a
+// Manager reopen, including availability and fresh ownership after release.
+func testFundPsbtFundingLeases(h *bwtest.HarnessTest) {
+	// Arrange: The locked fixture has unequal coins, making largest-first
+	// selection observable without needing private signing material.
+	ctx := h.Context()
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err)
+	w, funding := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: txCreatorFundingType,
+			Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		},
+	)
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	intent := &wallet.FundIntent{
+		Packet: fundPsbtPacket(h, payment),
+		Policy: &wallet.InputsPolicy{
+			Strategy: wallet.CoinSelectionLargest,
+			MinConfs: 1,
+			Source: &wallet.ScopedAccount{
+				KeyScope:    scope,
+				AccountName: waddrmgr.DefaultAccountName,
+			},
+		},
+		FeeRate: wallet.DefaultMaxFeeRate,
+	}
+
+	// Act: Fund at the accepted maximum rate through automatic selection.
+	result, err := w.FundPsbt(ctx, intent)
+
+	// Assert: Only the largest coin backs the packet and its exact lease.
+	require.NoError(h, err)
+	require.Len(h, result.Packet.UnsignedTx.TxIn, 1)
+	op := result.Packet.UnsignedTx.TxIn[0].PreviousOutPoint
+	require.Equal(h, funding.WalletOutpoints[1], op)
+	require.NotEqual(h, wtxmgr.LockID{}, result.LeaseID)
+
+	// Size one P2WPKH input plus payment/change independently of FundPsbt;
+	// the returned values must pay that fee at the accepted maximum rate.
+	fee := txrules.FeeForSerializeSize(
+		intent.FeeRate.Val(), txsizes.EstimateVirtualSize(
+			0, 0, 1, 0, []*wire.TxOut{&payment},
+			txsizes.P2WPKHPkScriptSize,
+		),
+	)
+	require.Len(h, result.Packet.UnsignedTx.TxOut, 2)
+	change := result.Packet.UnsignedTx.TxOut[result.ChangeIndex]
+	require.EqualValues(h, fee, twoBTC-payment.Value-change.Value)
+
+	// The complete public lease set must name the exact selected outpoint
+	// and caller owner, rather than merely report that some coin is locked.
+	leases, err := w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+	require.Len(h, leases, 1)
+	require.Equal(h, op, leases[0].OutPoint)
+	require.Equal(h, result.LeaseID, leases[0].LockID)
+
+	// Both public coin views expose the lease through Locked. Match the
+	// list entry by outpoint identity so ordering is irrelevant to this check.
+	coin, err := w.GetUtxo(ctx, op)
+	require.NoError(h, err)
+	require.True(h, coin.Locked)
+
+	query := wallet.UtxoQuery{MaxConfs: maxConfsLimit}
+	coins, err := w.ListUnspent(ctx, query)
+	require.NoError(h, err)
+	require.Len(h, coins, 2)
+	index := slices.IndexFunc(
+		coins, func(coin *wallet.Utxo) bool {
+			return coin.OutPoint == op
+		},
+	)
+	require.NotEqual(h, -1, index)
+	require.True(h, coins[index].Locked)
+
+	// Keep complete account/address observations as the reopen baseline;
+	// losing either committed change fact must fail the durable comparison.
+	account, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err)
+	addresses, err := w.ListAddresses(
+		ctx, waddrmgr.DefaultAccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+
+	// Unsigned funding and reservation must not require unlocking the wallet.
+	info, err := w.Info(ctx)
+	require.NoError(h, err)
+	require.True(h, info.Locked)
+
+	// Act: Reopen both the Wallet and its Manager using the harness owner.
+	w = h.ReloadWallet(w)
+	h.AssertWalletSynced(w)
+
+	// Assert: Complete persisted observations agree after watch reconstruction.
+	reloadedLeases, err := w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+	require.Equal(h, leases, reloadedLeases)
+
+	reloadedCoins, err := w.ListUnspent(ctx, query)
+	require.NoError(h, err)
+	require.Equal(h, coins, reloadedCoins)
+
+	reloadedAccount, err := w.GetAccount(
+		ctx, scope, waddrmgr.DefaultAccountName,
+	)
+	require.NoError(h, err)
+	require.Equal(h, account, reloadedAccount)
+
+	reloadedAddresses, err := w.ListAddresses(
+		ctx, waddrmgr.DefaultAccountName, txCreatorFundingType,
+	)
+	require.NoError(h, err)
+	require.Equal(h, addresses, reloadedAddresses)
+
+	// Act: Release the persisted packet inputs, then fund the same caller
+	// packet again; its new owner must be independent of the first attempt.
+	for _, input := range result.Packet.UnsignedTx.TxIn {
+		require.NoError(
+			h, w.ReleaseOutput(
+				ctx, result.LeaseID, input.PreviousOutPoint,
+			),
+		)
+	}
+
+	coin, err = w.GetUtxo(ctx, op)
+	require.NoError(h, err)
+	require.False(h, coin.Locked)
+
+	retried, err := w.FundPsbt(ctx, intent)
+
+	// Assert: The released coin is available and receives a fresh lease ID.
+	require.NoError(h, err)
+	require.NotEqual(h, wtxmgr.LockID{}, retried.LeaseID)
+	require.NotEqual(h, result.LeaseID, retried.LeaseID)
+
+	leases, err = w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+	require.Len(h, leases, 1)
+	require.Equal(h, retried.LeaseID, leases[0].LockID)
+	require.Equal(h, op, leases[0].OutPoint)
+
+	for _, input := range retried.Packet.UnsignedTx.TxIn {
+		require.NoError(
+			h, w.ReleaseOutput(
+				ctx, retried.LeaseID, input.PreviousOutPoint,
+			),
+		)
+	}
+
+	leases, err = w.ListLeasedOutputs(ctx)
+	require.NoError(h, err)
+	require.Empty(h, leases)
+}
+
 // testFundPsbtWatchOnly checks unsigned funding with a complete public origin
 // while the Wallet has no private keys that could satisfy a signing request.
 func testFundPsbtWatchOnly(h *bwtest.HarnessTest) {
