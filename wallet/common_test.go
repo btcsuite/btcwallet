@@ -449,7 +449,9 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 	expectStopTeardown(deps)
 
 	// Start the wallet.
-	require.NoError(t, w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches))
+	require.NoError(t, w.start(
+		t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches,
+	))
 
 	t.Cleanup(func() {
 		require.NoError(t, w.stop())

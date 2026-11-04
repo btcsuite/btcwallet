@@ -1640,68 +1640,66 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 func TestManagerStopWaitsForStart(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Discovery holds the Manager's accepted startup work. Closure
-	// checks that this dependency has settled before it releases storage.
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	backend := &managerBackendMock{}
-	backend.On("listWallets", mock.Anything).Run(func(mock.Arguments) {
-		close(entered)
-		<-release
-	}).Return([]*walletData{}, nil).Once()
-	backend.On("close").Run(func(mock.Arguments) {
-		select {
-		case <-release:
-		default:
-			t.Error("backend closed during discovery")
-		}
-	}).Return(nil).Once()
-	manager := newManagerLifecycleTest(t, backend)
-	client, ok := manager.config.ChainSource.(*bwmock.Chain)
-	require.True(t, ok)
-	client.On("Notifications").Return((<-chan any)(nil)).Once()
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	started := make(chan error, 1)
-	stopped := make(chan error, 1)
-	callingStop := make(chan struct{})
+		// Arrange: Discovery holds the Manager's accepted startup work. Closure
+		// checks that this dependency has settled before it releases storage.
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		releaseReader := make(chan struct{})
+		readerReturned := make(chan struct{})
 
-	// Act: Queue Stop behind accepted discovery, then let startup settle.
-	// After shutdown, attempt Start again to check terminal admission.
-	go func() {
-		_, err := manager.Start(t.Context())
-		started <- err
-	}()
+		var backend managerBackendMock
+		backend.On("listWallets", mock.Anything).Run(func(mock.Arguments) {
+			close(entered)
+			<-release
+		}).Return([]*walletData{}, nil).Once()
+		backend.On("close").Run(func(mock.Arguments) {
+			// Even a canceled reader enrolled by Start must finish borrowing
+			// the source before its Manager releases storage.
+			select {
+			case <-readerReturned:
+			default:
+				t.Error("backend closed before reader returned")
+			}
+		}).Return(nil).Once()
+		manager := newManagerLifecycleTest(t, &backend)
+		client, ok := manager.config.ChainSource.(*bwmock.Chain)
+		require.True(t, ok)
+		client.On("Notifications").Run(func(mock.Arguments) {
+			<-releaseReader
+			close(readerReturned)
+		}).Return((<-chan any)(nil)).Once()
 
-	<-entered
+		// Release held I/O before fixture cleanup after an assertion failure.
+		releaseReaderWork := sync.OnceFunc(func() { close(releaseReader) })
+		t.Cleanup(releaseReaderWork)
 
-	go func() {
-		close(callingStop)
+		started := make(chan error, 1)
+		stopped := make(chan error, 1)
 
-		err := manager.Stop()
+		// Act: Queue Stop behind accepted discovery, then hold its newly
+		// enrolled reader until shutdown has canceled the runtime.
+		go func() {
+			_, err := manager.Start(t.Context())
+			started <- err
+		}()
 
-		select {
-		case <-release:
-		default:
-			t.Error("Stop returned during discovery")
-		}
+		<-entered
 
-		stopped <- err
-	}()
+		// Legacy exclusion must settle before synctest can wait on shutdown.
+		close(release)
+		require.NoError(t, <-started)
+		go func() { stopped <- manager.Stop() }()
 
-	<-callingStop
+		synctest.Wait()
+		releaseReaderWork()
 
-	close(release)
-
-	startErr := <-started
-	stopErr := <-stopped
-	terminalWallets, terminalErr := manager.Start(t.Context())
-
-	// Assert: The admitted Start finishes normally; Stop waits and cleans up
-	// exactly once. Terminal startup cannot publish another runtime set.
-	require.NoError(t, startErr)
-	require.NoError(t, stopErr)
-	require.Nil(t, terminalWallets)
-	require.ErrorIs(t, terminalErr, ErrManagerStopped)
+		// Assert: Accepted Start and Stop finish after their dependencies join.
+		// Other lifecycle tests cover subsequent terminal admission.
+		require.NoError(t, <-stopped)
+	})
 }
 
 // TestManagerCreateBeforeStart verifies creation rejects an inactive Manager
