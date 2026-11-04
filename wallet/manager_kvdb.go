@@ -345,3 +345,10 @@ func (b *kvdbManagerBackend) close() error {
 
 	return nil
 }
+
+// prepareLiveWatches applies this backend's pre-publication watch contract.
+func (b *kvdbManagerBackend) prepareLiveWatches(_ context.Context,
+	_ chainProcessor) error {
+
+	return nil
+}

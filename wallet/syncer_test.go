@@ -622,6 +622,7 @@ func TestSyncerRollbackDuringBackendSync(t *testing.T) {
 		client.On("IsCurrent").Unset()
 		client.On("IsCurrent").Return(false).Once()
 		client.On("IsCurrent").Return(true).Once()
+		client.On("NotifyBlocks").Unset()
 		client.On("NotifyBlocks").Return(nil).Once()
 		client.On("GetBestBlock").Unset()
 		client.On("GetBestBlock").Return(&hash, int32(1), nil).Once()
@@ -3515,6 +3516,23 @@ func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
 	require.NotNil(t, importedProps)
 	require.Equal(t, importedNumber, importedProps.AccountNumber)
 	require.True(t, importedProps.IsWatchOnly)
+}
+
+// expectEmptyLiveWatches requires one explicit SQL startup reconstruction.
+// Callers opt into exact reads; other Store mocks retain no defaults.
+func expectEmptyLiveWatches(store *walletmock.Store, walletID uint32,
+	addresses ...db.AddressInfo) {
+
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{Items: addresses},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, walletID).
+		Return([]db.UtxoInfo(nil), nil).Once()
 }
 
 // expectImportedScanAddressPage expects the Store scan path to page raw imports
@@ -7635,12 +7653,14 @@ func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet,
 	client.On("Notifications").Unset()
 	client.On("Notifications").Return((<-chan any)(notifications)).Once()
 	manager := testSQLiteManagerWithChain(t, client)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
-	client.On("NotifySpent", mock.Anything).Unset()
 
 	params := sqliteCreateParams(t)
 	w, err := manager.Create(params)
 	require.NoError(t, err)
+	// Startup consumes the fixture defaults; later tests own exact watches.
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	client.On("NotifySpent", mock.Anything).Unset()
+	client.On("NotifyBlocks").Unset()
 
 	// SQL creation persists the root but no receiving account. Prepare one
 	// through the maintained API before exercising address commits.

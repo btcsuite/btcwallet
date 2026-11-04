@@ -6,6 +6,7 @@ import (
 	"errors"
 	"iter"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -69,6 +70,7 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 			Return([]db.AccountInfo{}, nil).Once()
 		store.On("DeleteExpiredLeases", mock.Anything, walletID).
 			Return(nil).Once()
+		expectEmptyLiveWatches(store, walletID)
 	}
 
 	manager := testSQLManager(t, store)
@@ -423,10 +425,14 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 		Return([]db.AccountInfo{}, nil).Once()
 	createdDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
 		Return(nil).Once()
+	expectEmptyLiveWatches(createdDeps.store, uint32(2))
 	createdDeps.vault.On("Lock").Return().Once()
 
 	chainSource, ok := m.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chainSource.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chainSource.On("NotifyBlocks").Return(nil).Once()
 	chainSource.On("IsCurrent").Return(false).Maybe()
 
 	// Act: Race Create against the held rollback. The direct mutex probe
@@ -1207,6 +1213,20 @@ type managerBackendMock struct {
 // managerBackendMock implements managerBackend.
 var _ managerBackend = (*managerBackendMock)(nil)
 
+// prepareLiveWatches records synchronous readiness on the selected processor.
+func (b *managerBackendMock) prepareLiveWatches(ctx context.Context,
+	processor chainProcessor) error {
+
+	args := b.Called(ctx, processor)
+	prepare, ok := args.Get(0).(func(context.Context, chainProcessor) error)
+
+	if ok {
+		return prepare(ctx, processor)
+	}
+
+	return args.Error(0)
+}
+
 // listWallets returns the durable data configured by the current test.
 func (b *managerBackendMock) listWallets(
 	ctx context.Context) ([]*walletData, error) {
@@ -1255,6 +1275,10 @@ func newManagerLifecycleTest(t *testing.T,
 	backend *managerBackendMock) *Manager {
 
 	t.Helper()
+
+	// Reuse SQL readiness instead of bypassing the real processor.
+	backend.On("prepareLiveWatches", mock.Anything, mock.Anything).
+		Return((&sqlManagerBackend{}).prepareLiveWatches).Maybe()
 
 	chain := &bwmock.Chain{}
 	// Manager owns the service lifetime; fixture Stop joins before assertions.
@@ -1307,6 +1331,7 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 		}).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+		expectEmptyLiveWatches(deps.store, id)
 		deps.vault.On("Lock").Return().Once()
 		data = append(data, &walletData{
 			id:    id,
@@ -1327,6 +1352,11 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	require.True(t, ok)
 	chain.On("Notifications").Return((<-chan any)(nil)).Once()
 	chain.On("IsCurrent").Return(false).Maybe()
+	// Watches must precede publication even though backend catch-up is held.
+	var registered atomic.Int32
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) { registered.Add(1) }).Return(nil).Twice()
+	chain.On("NotifyBlocks").Return(nil).Twice()
 
 	// Carry both results so rejected calls cannot leak partially built sets.
 	type startOutcome struct {
@@ -1364,6 +1394,7 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	require.ErrorContains(t, repeatErr, "already started")
 	require.Nil(t, repeated)
 	require.NoError(t, first.err)
+	require.EqualValues(t, 2, registered.Load())
 	require.Len(t, first.wallets, 2)
 
 	for i, w := range first.wallets {
@@ -1391,6 +1422,7 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	firstDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
+	expectEmptyLiveWatches(firstDeps.store, uint32(1))
 	secondDeps.store.On("GetWallet", mock.Anything, "second").
 		Return(nil, startErr).Once()
 
@@ -1420,6 +1452,9 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chain.On("NotifyBlocks").Return(nil).Once()
 	chain.On("IsCurrent").Return(false).Maybe()
 
 	// Preserve both return values to detect any partial Wallet publication
@@ -1890,7 +1925,7 @@ func TestManagerCreatePreservesInitialAccountIdentity(t *testing.T) {
 func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block the candidate's runtime read and its chain worker at
+	// Arrange: Block the candidate's native watch and its chain worker at
 	// separate dependencies. Storage closure checks that both have returned.
 	_, deps := createTestWalletWithMocks(t)
 	startupEntered := make(chan struct{})
@@ -1899,15 +1934,13 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	releaseChain := make(chan struct{})
 
 	deps.store.On("GetWallet", mock.Anything, "created").
-		Run(func(mock.Arguments) {
-			close(startupEntered)
-			<-releaseStartup
-		}).Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
 		WalletID: 1,
 	}).Return([]db.AccountInfo{}, nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
+	expectEmptyLiveWatches(deps.store, uint32(1))
 	vaultLock := deps.vault.On("Lock").Return().Once()
 
 	backend := &managerBackendMock{}
@@ -1928,6 +1961,12 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 	chain.On("Notifications").Return((<-chan any)(nil)).Once()
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) {
+			close(startupEntered)
+			<-releaseStartup
+		}).Return(nil).Once()
+	chain.On("NotifyBlocks").Return(nil).Once()
 	chain.On("IsCurrent").Run(func(mock.Arguments) {
 		close(chainEntered)
 		<-releaseChain
@@ -2405,20 +2444,11 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			t.Parallel()
 
 			// Arrange: Capture the live root at the existing backend boundary
-			// and return mock-backed data with the required startup reads.
+			// and return a candidate without unrelated runtime startup.
 			params := tc.params
 			params.Name = testWalletName
 			params.PrivatePassphrase = []byte("private")
 			_, deps := createTestWalletWithMocks(t)
-			deps.store.On("GetWallet", mock.Anything, params.Name).
-				Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).
-				Once()
-			deps.store.On("ListAccounts", mock.Anything,
-				db.ListAccountsQuery{WalletID: 1}).
-				Return([]db.AccountInfo{}, nil).Once()
-			deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
-				Return(nil).Once()
-			deps.vault.On("Lock").Return().Once()
 
 			var observedRoot *hdkeychain.ExtendedKey
 
@@ -2437,14 +2467,10 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			}).Once()
 			backend.On("close").Return(nil).Once()
 			manager := newManagerLifecycleTest(t, backend)
-			manager.started.Store(true)
-			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
-			require.True(t, ok)
-			chain.On("IsCurrent").Return(false).Maybe()
 
-			// Act: Complete public creation, including private runtime startup,
+			// Act: Prepare the candidate without unrelated runtime startup,
 			// before examining the captured preparation root and caller input.
-			wallet, err := manager.Create(params)
+			wallet, err := manager.createWallet(params)
 
 			// Assert: Derived roots no longer expose key material; borrowed
 			// roots and seeds retain their bytes and remain useful to callers.
@@ -2508,7 +2534,7 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 
 			// Act: Let the public request return its backend failure before
 			// inspecting the original root object and borrowed input bytes.
-			wallet, err := manager.Create(params)
+			wallet, err := manager.createWallet(params)
 
 			// Assert: Failure preserves the original error and borrowed
 			// material, but leaves no usable Manager-derived root or Wallet.
@@ -2766,6 +2792,7 @@ func TestManagerCreateRejectsActiveDuplicate(t *testing.T) {
 		WalletID: 1,
 	}).Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).Return(nil).Once()
+	expectEmptyLiveWatches(store, uint32(1))
 	m := testSQLManager(t, store)
 	first, err := m.Create(params)
 	require.NoError(t, err)
@@ -3290,6 +3317,7 @@ func TestManagerChainSourceClosed(t *testing.T) {
 		).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+		expectEmptyLiveWatches(deps.store, id)
 		deps.vault.On("Lock").Return().Once()
 		data = append(
 			data, &walletData{
@@ -3315,6 +3343,9 @@ func TestManagerChainSourceClosed(t *testing.T) {
 
 	notifications := make(chan any)
 	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	client.On("NotifyBlocks").Return(nil).Twice()
 	client.On("IsCurrent").Return(false).Maybe()
 
 	wallets, err := manager.Start(t.Context())

@@ -170,3 +170,10 @@ func newSQLAddressDeriver(
 		return deriveAddressData(chainParams, params)
 	}
 }
+
+// prepareLiveWatches applies this backend's pre-publication watch contract.
+func (b *sqlManagerBackend) prepareLiveWatches(ctx context.Context,
+	processor chainProcessor) error {
+
+	return processor.prepareLiveWatches(ctx)
+}

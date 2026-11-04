@@ -168,7 +168,8 @@ type Controller interface {
 
 // start starts the background processes owned by a Wallet. Manager is its sole
 // caller and invokes it at most once for each Wallet instance.
-func (w *Wallet) start(startCtx context.Context) error {
+func (w *Wallet) start(startCtx context.Context,
+	prepare func(context.Context, chainProcessor) error) error {
 	// 1. Attempt to transition from Stopped to Starting.
 	err := w.state.toStarting()
 	if err != nil {
@@ -186,7 +187,7 @@ func (w *Wallet) start(startCtx context.Context) error {
 	// We use startCtx here because these operations must complete
 	// synchronously before the wallet is considered "started". If
 	// startCtx is canceled, the startup sequence aborts.
-	err = w.performRuntimeSetup(startCtx)
+	err = w.performRuntimeSetup(startCtx, prepare)
 	if err != nil {
 		// Cleanup resources.
 		w.cancel()
@@ -329,7 +330,8 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 // before the wallet's main loops can start. This includes sanity checking the
 // birthday block, fail-fast verifying that the wallet's accounts can be read
 // from the store, and cleaning up expired locks.
-func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
+func (w *Wallet) performRuntimeSetup(startCtx context.Context,
+	prepare func(context.Context, chainProcessor) error) error {
 	// Perform the birthday sanity check synchronously to ensure we are
 	// connected and our status is valid before starting the main loop.
 	//
@@ -359,7 +361,9 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 		return fmt.Errorf("delete expired leases: %w", err)
 	}
 
-	return nil
+	// The backend supplies only its applicable readiness work, keeping legacy
+	// initialization asynchronous while SQL watches precede publication.
+	return prepare(startCtx, w.sync)
 }
 
 // stop performs the Wallet's complete terminal teardown synchronously. The

@@ -18,6 +18,9 @@ const defaultWalletDBDirPerm = 0o700
 // managerBackend owns the database used by a Manager and resolves the storage
 // dependencies needed to assemble a Wallet.
 type managerBackend interface {
+	// prepareLiveWatches establishes applicable readiness before publication.
+	prepareLiveWatches(ctx context.Context, processor chainProcessor) error
+
 	// listWallets returns all durable Wallet data owned by this backend. SQL
 	// backends may return many entries, while kvdb returns at most one.
 	listWallets(ctx context.Context) ([]*walletData, error)

@@ -235,6 +235,9 @@ type prepareRollbackReq struct {
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
+	// prepareLiveWatches establishes operational SQL notification readiness.
+	prepareLiveWatches(ctx context.Context) error
+
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
@@ -369,21 +372,9 @@ func (s *syncer) syncState() syncState {
 // enabling block notifications. It returns an error if any of these setup
 // steps fail.
 func (s *syncer) initChainSync(ctx context.Context) error {
-	var err error
-
-	// Inform the backend about our birthday for optimization. For backends
-	// like Neutrino (SPV), this provides a starting point for the internal
-	// synchronization of block headers and compact filters. Without this
-	// hint, the backend might attempt to sync from genesis or its latest
-	// checkpoint, leading to unnecessary network I/O and delayed wallet
-	// readiness.
-	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
-		birthday, err := s.walletBirthday(ctx)
-		if err != nil {
-			return err
-		}
-
-		cc.SetStartTime(birthday)
+	err := s.setChainStartTime(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Wait for the backend to be synced to the network. We require the
@@ -402,27 +393,45 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 		return fmt.Errorf("unable to check for rollback: %w", err)
 	}
 
-	// A retry may follow a committed scan whose registration failed.
-	// Register stored addresses and outpoints even if the tip is current.
-	//
-	// TODO(yy): Avoid rereading and registering the full set on each retry
-	// while preserving registration that failed after a committed scan.
+	return s.prepareLiveWatches(ctx)
+}
+
+// prepareLiveWatches installs persisted subscriptions before SQL publication
+// and on recovery retries. It does not wait for backend currency or catch-up.
+func (s *syncer) prepareLiveWatches(ctx context.Context) error {
+	err := s.setChainStartTime(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Retry registrations that failed after a committed scan, even at tip.
 	err = s.refreshLiveWatches(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Explicitly request connected/disconnected block notifications. Only
-	// the bitcoind and neutrino wrappers enable block notifications as a
-	// side effect of NotifyReceived; btcd's NotifyReceived (the embedded
-	// rpcclient method) registers only address notifications, so without
-	// this call a btcd-backed wallet would stop receiving live block
-	// connect/disconnect events. The call is idempotent on the wrappers
-	// that already enabled notifications, so it is safe for all backends.
+	// Btcd address watches do not enable block notifications. Keep the
+	// explicit idempotent subscription on every supported backend.
 	err = s.chainSyncer.notifyBlocks(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start block "+
 			"notifications: %w", err)
+	}
+
+	return nil
+}
+
+// setChainStartTime preserves Neutrino's birthday hint both before its
+// initial backend wait and before synchronous SQL subscription installation.
+func (s *syncer) setChainStartTime(ctx context.Context) error {
+	// Neutrino uses this hint to avoid fetching filters before the birthday.
+	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
+		birthday, err := s.walletBirthday(ctx)
+		if err != nil {
+			return err
+		}
+
+		cc.SetStartTime(birthday)
 	}
 
 	return nil

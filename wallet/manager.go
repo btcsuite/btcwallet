@@ -267,7 +267,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
 		wallets = append(wallets, wallet)
 
-		err = wallet.start(ctx)
+		err = wallet.start(ctx, m.backend.prepareLiveWatches)
 		if err != nil {
 			return wallets, err
 		}
@@ -687,7 +687,7 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		}
 	}
 
-	err = w.start(context.Background())
+	err = w.start(context.Background(), m.backend.prepareLiveWatches)
 	if err != nil {
 		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
 	}

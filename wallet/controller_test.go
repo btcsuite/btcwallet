@@ -30,6 +30,8 @@ import (
 func TestPerformRuntimeSetupRoutesStoreStartup(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Keep exact Store startup reads and require the SQL policy to
+	// prepare native watches through its processor before setup finishes.
 	w, deps := createTestWalletWithMocks(t)
 	w.id = 51
 	birthdayBlock := &db.Block{
@@ -49,7 +51,14 @@ func TestPerformRuntimeSetupRoutesStoreStartup(t *testing.T) {
 	deps.store.On("DeleteExpiredLeases", mock.Anything, w.id).Return(nil).
 		Once()
 
-	err := w.performRuntimeSetup(t.Context())
+	deps.syncer.On("prepareLiveWatches", mock.Anything).Return(nil).Once()
+
+	// Act: Execute the synchronous setup used before Manager publication.
+	err := w.performRuntimeSetup(
+		t.Context(), (&sqlManagerBackend{}).prepareLiveWatches,
+	)
+
+	// Assert: Setup completes only after the exact readiness call returns.
 	require.NoError(t, err)
 }
 
@@ -685,7 +694,7 @@ func TestControllerStart(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify that Start returned no error and the wallet state is
 	// 'Started'.
@@ -1017,7 +1026,9 @@ func TestControllerStop(t *testing.T) {
 		<-release
 	}).Return(nil).Once()
 
-	require.NoError(t, w.start(t.Context()))
+	require.NoError(t, w.start(
+		t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches,
+	))
 	require.True(t, w.state.isStarted())
 
 	// Put the wallet in the unlocked state, mirroring a wallet that holds
@@ -1063,7 +1074,7 @@ func TestControllerStop(t *testing.T) {
 
 	// Act: Attempt to restart the terminal Wallet after both Stop calls
 	// have completed.
-	err = w.start(t.Context())
+	err = w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: A stopped Wallet cannot create a second runtime and returns
 	// the stable terminal sentinel.
@@ -1081,7 +1092,7 @@ func TestControllerStopBeforeStart(t *testing.T) {
 
 	// Act: Stop the fresh Wallet and then attempt its first Start.
 	stopErr := w.stop()
-	startErr := w.start(t.Context())
+	startErr := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Stop succeeds directly and permanently prevents the retained
 	// Wallet instance from starting later.
@@ -1107,7 +1118,9 @@ func TestControllerLock(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
-	require.NoError(t, w.start(t.Context()))
+	require.NoError(t, w.start(
+		t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches,
+	))
 
 	// Transition the wallet to the 'Unlocked' state for testing.
 	w.state.toUnlocked()
@@ -1152,7 +1165,9 @@ func TestControllerUnlock(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
-	require.NoError(t, w.start(t.Context()))
+	require.NoError(t, w.start(
+		t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches,
+	))
 	require.False(t, w.state.isUnlocked())
 
 	pass := []byte("password")
@@ -1328,7 +1343,9 @@ func TestControllerChangePassphrase(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
-	require.NoError(t, w.start(t.Context()))
+	require.NoError(t, w.start(
+		t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches,
+	))
 
 	req := ChangePassphraseRequest{
 		ChangePrivate: true,
@@ -1473,7 +1490,7 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify success.
 	require.NoError(t, err)
@@ -1921,7 +1938,9 @@ func TestControllerInfo(t *testing.T) {
 	// Allow Stop to clear secret material.
 	expectStopTeardown(deps)
 
-	require.NoError(t, w.start(t.Context()))
+	require.NoError(t, w.start(
+		t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches,
+	))
 
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{SyncedTo: syncedTo}, nil,
@@ -2528,7 +2547,7 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	).Return(nil, errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
@@ -2536,7 +2555,7 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 
 	// Act: Attempt to start again after setup canceled the Wallet-owned
 	// runtime and moved the lifecycle to terminal Stopped.
-	err = w.start(t.Context())
+	err = w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Startup failure is terminal for this Wallet instance.
 	require.ErrorIs(t, err, ErrWalletStopped)
@@ -2560,7 +2579,7 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 		Return([]db.AccountInfo(nil), errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
@@ -2611,7 +2630,7 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify success.
 	require.NoError(t, err)
@@ -2695,7 +2714,7 @@ func TestControllerStart_DeleteExpiredFail(t *testing.T) {
 		Return(errDBMock).Once()
 
 	// Act: Attempt to start.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
@@ -2811,7 +2830,7 @@ func TestControllerStart_AlreadyStarted(t *testing.T) {
 	require.NoError(t, w.state.toStarted())
 
 	// Act: Attempt to start again.
-	err := w.start(t.Context())
+	err := w.start(t.Context(), (&kvdbManagerBackend{}).prepareLiveWatches)
 
 	// Assert: Verify error.
 	require.ErrorIs(t, err, errWalletAlreadyStarted)
