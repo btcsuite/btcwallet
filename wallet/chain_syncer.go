@@ -42,7 +42,14 @@ type chainRouter interface {
 
 	// notifyBlocks enables the backend's existing block/control notifications.
 	notifyBlocks(ctx context.Context) error
+	// requestRollback offers a retry hint without waiting on its own worker.
+	requestRollback(ctx context.Context, event chainRecoveryRequest)
+
 }
+
+// chainRecoveryRequest preserves the first abandoned block's identity so a
+// delayed private hint cannot rewind a replacement branch recovered meanwhile.
+type chainRecoveryRequest chain.BlockDisconnected
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
 // Manager supplies its lifetime to the blocking reader instead of giving this
@@ -56,6 +63,7 @@ type chainSyncer struct {
 
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
+
 	// requestChan is the required inbox of the sole lifecycle owner.
 	requestChan chan<- any
 }
@@ -63,10 +71,8 @@ type chainSyncer struct {
 // chainSyncer implements the behavior shared by Manager and its Wallets.
 var _ chainRouter = (*chainSyncer)(nil)
 
-// watchRegistry indexes observed addresses/outpoints directly to Wallet ID
-// sets, so shared interests need no per-Wallet scan or second reverse index.
-// Interests remain additive for its Manager's lifetime: deleting on first
-// spend loses replacement/reorg spends, and an address can receive again.
+// watchRegistry indexes addresses/outpoints to Wallet IDs. Interests stay
+// additive so replacement spends and repeated payments remain routable.
 type watchRegistry struct {
 	// mu guards the mutable sets; no caller holds it during I/O or delivery.
 	mu sync.Mutex
@@ -90,6 +96,16 @@ func newChainSyncer(source chain.Interface,
 			addresses: make(map[string]map[uint32]struct{}),
 			outpoints: make(map[wire.OutPoint]map[uint32]struct{}),
 		},
+	}
+}
+
+// requestRollback waits only for acceptance, never for its own writer barrier.
+func (s *chainSyncer) requestRollback(ctx context.Context,
+	event chainRecoveryRequest) {
+
+	select {
+	case s.requestChan <- recoveryReq{event: event}:
+	case <-ctx.Done():
 	}
 }
 

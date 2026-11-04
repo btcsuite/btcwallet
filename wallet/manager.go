@@ -295,11 +295,16 @@ type stopManagerReq struct {
 	resp chan error
 }
 
-// chainEventReq bounds intake until the owner finishes one source event.
+// chainEventReq bounds intake until the owner finishes this source event.
 type chainEventReq struct {
 	event any
 	err   error
 	done  chan struct{}
+}
+
+// recoveryReq offers one proven-fork identity without waiting for its writer.
+type recoveryReq struct {
+	event chainRecoveryRequest
 }
 
 // startManagerResultReq transfers startup candidates back to their owner.
@@ -322,6 +327,7 @@ type rollbackResultReq struct {
 	receipt chan struct{}
 	err     error
 }
+
 // managerRuntime holds one loop's state for its handlers, without shared locks.
 type managerRuntime struct {
 	manager               *Manager
@@ -331,6 +337,7 @@ type managerRuntime struct {
 	wallets               []*Wallet
 	events                map[uint32]chainEvent
 	cursor                int
+	hint                  *chainRecoveryRequest
 	stopReply             chan error
 	failedStart           *startManagerResultReq
 	failedCreate          *createWalletResultReq
@@ -415,6 +422,12 @@ func (r *managerRuntime) handleChainReq(ctx context.Context, raw any) {
 
 		r.pending = &req
 
+	case recoveryReq:
+		// A terminal owner never consumes the retained hint; otherwise one
+		// slot coalesces workers that recheck committed history on retry.
+		if r.hint == nil {
+			r.hint = &req.event
+		}
 	}
 }
 
@@ -581,6 +594,10 @@ func (r *managerRuntime) completeRollback(ctx context.Context,
 // prepareEvent starts recovery or matches one source event after publication.
 func (r *managerRuntime) prepareEvent(ctx context.Context) {
 	if r.pending == nil {
+		if r.hint != nil {
+			r.beginRollback(ctx, chain.BlockDisconnected(*r.hint), true, nil)
+			r.hint = nil
+		}
 
 		return
 	}
@@ -624,6 +641,9 @@ func (r *managerRuntime) nextDelivery(ctx context.Context) (
 	if r.pending != nil {
 		close(r.pending.done)
 		r.pending, r.events, r.wallets, r.cursor = nil, nil, nil, 0
+
+		// Recovery accepted during fanout must run before the next wait.
+		r.prepareEvent(ctx)
 	}
 
 	return nil, chainEvent{}
@@ -897,6 +917,19 @@ func handleRollbackEvent(ctx context.Context, backend managerBackend,
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 
+	if recovery {
+		needed, err := recoveryStillNeeded(ctx, wallets, *block)
+		if err != nil {
+			log.Warnf("Unable to check recovery hint: %v", err)
+
+			needed = false
+		}
+
+		if !needed {
+			return nil
+		}
+	}
+
 	// Accepted durable writes settle before the owner can close Store.
 	err = backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
 	if err != nil {
@@ -904,6 +937,27 @@ func handleRollbackEvent(ctx context.Context, backend managerBackend,
 	}
 
 	return nil
+}
+
+// recoveryStillNeeded rejects hints for absent or replaced stored blocks.
+func recoveryStillNeeded(ctx context.Context, wallets []*Wallet,
+	block db.Block) (bool, error) {
+
+	if len(wallets) == 0 {
+		return false, nil
+	}
+
+	wallet := wallets[0]
+	blocks, err := wallet.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		StartHeight: block.Height,
+		EndHeight:   block.Height,
+	})
+
+	if errors.Is(err, db.ErrBlockNotFound) {
+		return false, nil
+	}
+
+	return len(blocks) != 0 && blocks[0].Hash == block.Hash, err
 }
 
 // String returns a summary of the active wallets managed by the Manager.

@@ -126,9 +126,8 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		t.Helper()
 
-		// Arrange: Capacity-one mailboxes first accept an ordinary event.
-		// An exact block receipt exposes rollback before both workers
-		// acknowledge and detects any lost block hash or timestamp.
+		// Arrange: Full mailboxes hold delivery; both workers must fence
+		// the exact disconnected identity before the one shared rollback.
 		first, firstDeps := createTestWalletWithMocks(t)
 		first.cfg.Name = testWalletName
 		first.id = 1
@@ -138,14 +137,15 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 		second, secondDeps := createTestWalletWithMocks(t)
 		second.cfg.Name = "second"
 		second.id = 2
+		// Both SQL recipients use one shared chain table. Reading either
+		// Store must see the replacement installed after the first rewind.
+		second.store = first.store
 		startLoadedWalletForTest(t, second)
 		secondDeps.vault.On("Lock").Return().Once()
 
 		backend := &managerBackendMock{}
 		backend.On("close").Return(nil).Once()
-		m := newManagerLifecycleTest(t, backend)
-		m.started.Store(true)
-		m.wallets[first.cfg.Name], m.wallets[second.cfg.Name] = first, second
+		m := newManagerLifecycleTest(t, backend, first, second)
 		firstEvents := make(chan chainEvent, 1)
 		secondEvents := make(chan chainEvent, 1)
 		first.chainEventChan, second.chainEventChan = firstEvents, secondEvents
@@ -159,39 +159,62 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 		backend.On("rollbackToBlock", mock.Anything, expected).
 			Run(func(mock.Arguments) { close(persisted) }).Return(nil).Once()
 
-		// Act: One source caller accepts the prior event before rollback;
-		// each simulated worker acknowledges only after that event is read.
-		require.NoError(t, m.dispatchChainEvent(t.Context(), event))
-		require.Equal(t, event, (<-firstEvents).notification)
-		require.Equal(t, event, (<-secondEvents).notification)
+		query := db.ListSyncedBlocksQuery{StartHeight: 8, EndHeight: 8}
+		firstDeps.store.On("ListSyncedBlocks", mock.Anything, query).
+			Return([]db.Block{expected}, nil).Once()
+		replacement := expected
+		replacement.Hash = chainhash.Hash{9}
+		firstDeps.store.On("ListSyncedBlocks", mock.Anything, query).
+			Return([]db.Block{replacement}, nil).Once()
 
-		rolled := make(chan error, 1)
-		go func() {
-			rolled <- m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+		// Act: Hold fanout while offering recovery, then drain preceding work.
+		// No unrelated request may be needed; the repeated hint is stale.
+		firstEvents <- chainEvent{}
+
+		secondEvents <- chainEvent{}
+
+		go func() { _ = m.dispatchChainEvent(t.Context(), event) }()
+
+		synctest.Wait()
+
+		for attempt := range 2 {
+			m.chainSyncer.requestRollback(t.Context(), chainRecoveryRequest{
 				Block: wtxmgr.Block{Height: 8, Hash: expected.Hash},
 				Time:  expected.Timestamp,
 			})
-		}()
 
-		for range 2 {
-			var raw chainEvent
-			select {
-			case raw = <-firstEvents:
-			case raw = <-secondEvents:
+			if attempt == 0 {
+				<-firstEvents
+				<-secondEvents
+				require.Equal(t, event, (<-firstEvents).notification)
+				require.Equal(t, event, (<-secondEvents).notification)
 			}
 
-			req, ok := raw.notification.(prepareRollbackReq)
-			require.True(t, ok)
+			for range 2 {
+				synctest.Wait()
+
+				var raw chainEvent
+				select {
+				case raw = <-firstEvents:
+				case raw = <-secondEvents:
+				default:
+					t.Fatal("accepted recovery hint stalled after fanout")
+				}
+
+				req, ok := raw.notification.(prepareRollbackReq)
+				require.True(t, ok)
+
+				if attempt == 0 {
+					require.Empty(t, persisted)
+				}
+
+				close(req.readyForRollback)
+			}
+
 			synctest.Wait()
-			require.Empty(t, persisted)
-			close(req.readyForRollback)
 		}
 
-		// Assert: The sole rollback completes after both receipts; no raw
-		// disconnect reaches a Wallet, its full identity matches the backend
-		// expectation, and later full fanout still succeeds.
-		require.NoError(t, <-rolled)
-		require.True(t, m.started.Load())
+		// Assert: Only the live identity rewinds, and later fanout still works.
 		require.NoError(t, m.dispatchChainEvent(t.Context(), event))
 		require.Equal(t, event, (<-firstEvents).notification)
 		require.Equal(t, event, (<-secondEvents).notification)

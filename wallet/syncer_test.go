@@ -901,18 +901,22 @@ func TestCheckRollbackDetected(t *testing.T) {
 	header := &wire.BlockHeader{Timestamp: time.Now()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// Expect a single atomic rollback to the common ancestor: rewindToBlock
-	// rolls transaction state back and rewinds the sync tip together via
-	// RollbackToBlock for the rollback boundary (fork height 95 + 1).
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
-	).Return(nil).Once()
+	// A proven SQL fork loads the first abandoned identity and offers it
+	// to Manager; no direct RollbackToBlock write is permitted here.
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 96,
+		EndHeight:   96,
+	}).Return([]db.Block{localBlocks[5]}, nil).Once()
 
-	// Act & Assert: Verify that checkRollback correctly identifies the
-	// fork and performs the rollback.
+	// Act: Prove the fork through Store history and offer its identity to
+	// the Manager runtime instead of writing shared rollback from this worker.
 	err := s.checkRollback(t.Context())
-	require.NoError(t, err)
+
+	// Assert: The worker requests a retry after its exact metadata reads;
+	// the strict Store permits no direct rollback before the Manager barrier.
+	require.ErrorIs(t, err, ErrStateChanged)
 	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestInitChainSync verifies the initial synchronization sequence.
@@ -6332,23 +6336,34 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 func TestRewindToBlockRoutesStore(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: The Store supplies the first abandoned block's identity;
+	// the strict mock permits no rewind beside the owner's writer barrier.
 	store := &walletmock.Store{}
-	s := newTestSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
-	s.store = store
-	s.walletID = 99
-
-	fork := waddrmgr.BlockStamp{
+	s := newTestSyncer(Config{}, nil, nil, nil, store, 99)
+	requests := make(chan any, 1)
+	s.chainSyncer = newChainSyncer(nil, &chainParams, requests)
+	abandoned := db.Block{
 		Hash:      chainhash.Hash{99},
-		Height:    100,
+		Height:    101,
 		Timestamp: time.Unix(1710003900, 0),
 	}
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 101,
+		EndHeight:   101,
+	}).Return([]db.Block{abandoned}, nil).Once()
 
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(101),
-	).Return(nil).Once()
+	// Act: Offer a fork without waiting for this worker's own rollback barrier.
+	err := s.rewindToBlock(t.Context(), waddrmgr.BlockStamp{Height: 100})
 
-	err := s.rewindToBlock(t.Context(), fork)
-	require.NoError(t, err)
+	// Assert: The owner receives the durable identity and the worker retries;
+	// storage mutation remains exclusively behind the existing Manager barrier.
+	require.ErrorIs(t, err, ErrStateChanged)
+
+	req, ok := (<-requests).(recoveryReq)
+	require.True(t, ok)
+	require.Equal(t, abandoned.Hash, req.event.Hash)
+	require.EqualValues(t, abandoned.Height, req.event.Height)
+	require.Equal(t, abandoned.Timestamp, req.event.Time)
 	store.AssertExpectations(t)
 }
 
@@ -7357,20 +7372,18 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	header := &wire.BlockHeader{Timestamp: time.Unix(95, 0).UTC()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// The rollback is written atomically through the Store to the fork
-	// height plus one (96). RollbackToBlock derives the new sync tip from
-	// the stored fork-point block, so the caller only supplies the rollback
-	// boundary.
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
-	).Return(nil).Once()
+	// The worker offers the first abandoned identity to its Manager owner.
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 96,
+		EndHeight:   96,
+	}).Return([]db.Block{localBlocks[5]}, nil).Once()
 
 	// Act: run the rollback check.
 	err := s.checkRollback(t.Context())
 
 	// Assert: the reorg was detected from the Store tip and rolled back
 	// without ever consulting the legacy addrStore.
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrStateChanged)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
 }

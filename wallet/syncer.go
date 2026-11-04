@@ -612,17 +612,31 @@ func (s *syncer) rewindToBlock(ctx context.Context,
 		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
 	}
 
-	// Roll transaction state back and rewind the wallet sync tip to the same
-	// fork point in one atomic store call so a failure cannot leave the sync
-	// tip rewound while transaction state still references the abandoned
-	// chain. RollbackToBlock derives the new sync tip from the stored
-	// fork-point block, so the caller only supplies the rollback boundary.
-	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	// The owner serializes a proven fork against this Wallet and any siblings.
+	blocks, err := s.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		StartHeight: rollbackHeight,
+		EndHeight:   rollbackHeight,
+	})
 	if err != nil {
-		return fmt.Errorf("rollback to block: %w", err)
+		return fmt.Errorf("read recovery boundary: %w", err)
 	}
 
-	return nil
+	if len(blocks) != 0 {
+		boundary, err := db.BlockStampFromBlock(&blocks[0])
+		if err != nil {
+			return err
+		}
+
+		s.chainSyncer.requestRollback(ctx, chainRecoveryRequest{
+			Block: wtxmgr.Block{
+				Height: boundary.Height,
+				Hash:   blocks[0].Hash,
+			},
+			Time: blocks[0].Timestamp,
+		})
+	}
+
+	return ErrStateChanged
 }
 
 // rewindWallet rewinds this wallet's sync and transaction state for a manual
