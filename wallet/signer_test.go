@@ -471,26 +471,39 @@ func TestECDHSuccess(t *testing.T) {
 	}
 
 	// The ECDH key is resolved through the store account secret; take the
-	// leaf private key the signer will derive so we can compute the
-	// expected shared secret independently.
-	privKey, _ := expectStoreSignerPrivKey(
+	// leaf public key the signer will derive so the remote side can compute
+	// the expected shared secret independently.
+	_, walletPubKey := expectStoreSignerPrivKey(
 		t, mocks, w.id, path.KeyScope, path.DerivationPath,
 	)
 
-	// Compute the expected shared secret before ECDH runs, since ECDH
-	// zeroes the private key it derived internally (a separate copy from
-	// this one).
-	expectedSecret := btcec.GenerateSharedSecret(privKey, remotePubKey)
-
-	var expectedSecretArray [32]byte
-	copy(expectedSecretArray[:], expectedSecret)
+	expectedSecret, _ := expectedECDHSecret(t, remoteKey, walletPubKey)
 
 	// Act: Perform the ECDH operation.
 	sharedSecret, err := w.ECDH(t.Context(), path, remotePubKey)
 
 	// Assert: Check that the correct shared secret is returned.
 	require.NoError(t, err)
-	require.Equal(t, expectedSecretArray, sharedSecret)
+	require.Equal(t, expectedSecret, sharedSecret)
+}
+
+// expectedECDHSecret independently computes the ECDH result from the remote
+// side: sha256 of the compressed encoding of remoteKey*walletPub. Agreement
+// with the wallet's own walletKey*remotePub proves both the multiplication and
+// the encoding. It also returns the compressed point's parity prefix.
+func expectedECDHSecret(t *testing.T, remoteKey *btcec.PrivateKey,
+	walletPub *btcec.PublicKey) ([32]byte, byte) {
+
+	t.Helper()
+
+	var walletPoint, shared btcec.JacobianPoint
+	walletPub.AsJacobian(&walletPoint)
+	btcec.ScalarMultNonConst(&remoteKey.Key, &walletPoint, &shared)
+	shared.ToAffine()
+
+	compressed := btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed()
+
+	return sha256.Sum256(compressed), compressed[0]
 }
 
 // TestECDHFails tests the failure case where the key derivation fails during
@@ -3331,7 +3344,7 @@ func TestECDHRejectsNilRemoteKey(t *testing.T) {
 
 // TestECDHRejectsOffCurveRemoteKey verifies that a remote key which is not a
 // curve point is refused rather than multiplied to the point at infinity,
-// whose X coordinate would be returned as an all-zero shared secret.
+// whose hash would be returned as a fixed shared secret.
 func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
 	t.Parallel()
 
@@ -3349,9 +3362,8 @@ func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
 
 	// Assert: The key is refused before the account secret is read, which the
 	// strict mock enforces by failing on an unexpected call. Reaching the
-	// multiplication instead yields a nil error and 32 zero bytes: the X
-	// coordinate of the point at infinity, which both sides could agree on
-	// while holding no key at all.
+	// multiplication instead yields a nil error and the hash of the point at
+	// infinity, which both sides could agree on while holding no key at all.
 	require.ErrorIs(t, err, ErrInvalidSignParam)
 	require.Equal(t, [32]byte{}, secret)
 }
