@@ -646,6 +646,34 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerCombineRejectInternalKey,
 	},
 	{
+		Name:     "psbtmanager sign owned inputs",
+		TestFunc: testPsbtManagerSignOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager sign already signed",
+		TestFunc: testPsbtManagerSignAlreadySigned,
+	},
+	{
+		Name:     "psbtmanager sign finalized packet",
+		TestFunc: testPsbtManagerSignFinalizedPacket,
+	},
+	{
+		Name:     "psbtmanager sign partial ownership",
+		TestFunc: testPsbtManagerSignPartialOwnership,
+	},
+	{
+		Name:     "psbtmanager sign multisig partial",
+		TestFunc: testPsbtManagerSignMultisigPartial,
+	},
+	{
+		Name:     "psbtmanager sign unrecognized script",
+		TestFunc: testPsbtManagerSignUnrecognizedScript,
+	},
+	{
+		Name:     "psbtmanager sign tapscript",
+		TestFunc: testPsbtManagerSignTapscript,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
