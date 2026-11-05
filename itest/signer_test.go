@@ -2469,3 +2469,184 @@ func testSignPsbtTapscript(h *bwtest.HarnessTest) {
 	require.NoError(h, psbt.MaybeFinalizeAll(packet))
 	h.AssertPsbtExecutes(packet)
 }
+
+// testSignPsbtRejectPacket verifies that an invalid packet is refused with its
+// stable error and that the caller's packet is left unchanged.
+func testSignPsbtRejectPacket(h *bwtest.HarnessTest) {
+	// Arrange: Each packet would be signable but for its one defect.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC, oneBTC},
+		Unlocked: true,
+	})
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+	segwitCoin := funding.WalletOutpoints[0]
+	taprootCoin := taproot.WalletOutpoints[0]
+
+	conflictingPrevOut := newDecoratedPsbt(h, w, segwitCoin)
+	prevOut := conflictingPrevOut.Inputs[0].WitnessUtxo
+	conflictingPrevOut.Inputs[0].WitnessUtxo = wire.NewTxOut(
+		prevOut.Value+1, prevOut.PkScript,
+	)
+
+	missingInputs := newDecoratedPsbt(h, w, segwitCoin)
+	missingInputs.Inputs = nil
+
+	shortPath := newDecoratedPsbt(h, w, segwitCoin)
+	shortPath.Inputs[0].Bip32Derivation[0].Bip32Path = []uint32{0}
+
+	// The first input is signable, so its signature must not leak when the
+	// second input is refused.
+	laterDefect := newDecoratedPsbt(
+		h, w, segwitCoin, funding.WalletOutpoints[1],
+	)
+	laterDefect.Inputs[1].Bip32Derivation[0].Bip32Path = []uint32{0}
+
+	twoOrigins := newDecoratedPsbt(h, w, segwitCoin)
+	secondOrigin := *twoOrigins.Inputs[0].Bip32Derivation[0]
+	secondOrigin.PubKey = psbtExternalKey().PubKey().SerializeCompressed()
+	twoOrigins.Inputs[0].Bip32Derivation = append(
+		twoOrigins.Inputs[0].Bip32Derivation, &secondOrigin,
+	)
+
+	// The output pays the other signer's key, which the record pairs with a
+	// Wallet path, so only the key the Wallet derives there can disagree.
+	foreignKey := newSignerPsbt(h, unknownOutpoint())
+	addExternalPsbtInput(h, &foreignKey.Inputs[0])
+	walletInput := newDecoratedPsbt(h, w, segwitCoin).Inputs[0]
+	walletPath := *walletInput.Bip32Derivation[0]
+	walletPath.PubKey = psbtExternalKey().PubKey().SerializeCompressed()
+	foreignKey.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{&walletPath}
+
+	mixedOrigins := newDecoratedPsbt(h, w, segwitCoin)
+	mixedOrigins.Inputs[0].TaprootBip32Derivation = newDecoratedPsbt(
+		h, w, taprootCoin,
+	).Inputs[0].TaprootBip32Derivation
+
+	unknownSighash := newDecoratedPsbt(h, w, segwitCoin)
+	unknownSighash.Inputs[0].SighashType = txscript.SigHashType(0x55)
+
+	unknownTaprootSighash := newDecoratedPsbt(h, w, taprootCoin)
+	unknownTaprootSighash.Inputs[0].SighashType = txscript.SigHashType(0x55)
+
+	missingLeaf := newTapscriptPsbt(h, w)
+	missingLeaf.Inputs[0].TaprootLeafScript = nil
+
+	// A real Wallet signature, but over a different transaction.
+	wrongDigest := newDecoratedPsbt(h, w, segwitCoin)
+	otherTx := newDecoratedPsbt(h, w, segwitCoin)
+	otherTx.UnsignedTx.TxOut[0].Value--
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: otherTx})
+	require.NoError(h, err)
+
+	wrongDigest.Inputs[0].PartialSigs = otherTx.Inputs[0].PartialSigs
+
+	testCases := []struct {
+		name   string
+		packet *psbt.Packet
+		err    error
+	}{
+		{
+			name:   "conflicting previous output",
+			packet: conflictingPrevOut,
+			err:    wallet.ErrConflictingUtxo,
+		},
+		{
+			name:   "missing input records",
+			packet: missingInputs,
+			err:    wallet.ErrPacketMalformed,
+		},
+		{
+			name:   "short derivation path",
+			packet: shortPath,
+			err:    wallet.ErrInvalidBip32Path,
+		},
+		{
+			name:   "defect after a signable input",
+			packet: laterDefect,
+			err:    wallet.ErrInvalidBip32Path,
+		},
+		{
+			name:   "two derivation records",
+			packet: twoOrigins,
+			err:    wallet.ErrUnsupportedMultipleBip32Derivation,
+		},
+		{
+			name:   "foreign key at a wallet path",
+			packet: foreignKey,
+			err:    wallet.ErrSigningKeyMismatch,
+		},
+		{
+			name:   "taproot and bip32 records",
+			packet: mixedOrigins,
+			err:    wallet.ErrAmbiguousDerivation,
+		},
+		{
+			name:   "unknown segwit sighash",
+			packet: unknownSighash,
+			err:    wallet.ErrUnsafeSighash,
+		},
+		{
+			name:   "unknown taproot sighash",
+			packet: unknownTaprootSighash,
+			err:    wallet.ErrUnsafeSighash,
+		},
+		{
+			name:   "missing taproot leaf",
+			packet: missingLeaf,
+			err:    wallet.ErrMissingTaprootLeafScript,
+		},
+		{
+			name:   "signature over another transaction",
+			packet: wrongDigest,
+			err:    wallet.ErrInvalidSignatureRecord,
+		},
+	}
+	for _, tc := range testCases {
+		original, err := tc.packet.B64Encode()
+		require.NoError(h, err, tc.name)
+
+		// Act: Ask the Wallet to sign the defective packet.
+		result, err := w.SignPsbt(
+			ctx, &wallet.SignPsbtParams{Packet: tc.packet},
+		)
+
+		// Assert: The defect is named and the caller's packet is intact.
+		require.ErrorIs(h, err, tc.err, tc.name)
+		require.Nil(h, result, tc.name)
+
+		unchanged, err := tc.packet.B64Encode()
+		require.NoError(h, err, tc.name)
+		require.Equal(h, original, unchanged, tc.name)
+	}
+
+	// Arrange: The psbt library reports a missing previous output with no
+	// error identity, so this refusal can only assert that one occurred.
+	noPrevOut := newDecoratedPsbt(h, w, segwitCoin)
+	noPrevOut.Inputs[0].WitnessUtxo = nil
+	noPrevOut.Inputs[0].NonWitnessUtxo = nil
+	original, err := noPrevOut.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Sign a packet that does not say what it spends.
+	result, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: noPrevOut})
+
+	// Assert: The refusal leaves the caller's packet intact.
+	require.Error(h, err)
+	require.Nil(h, result)
+
+	unchanged, err := noPrevOut.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+
+	// Act: Omit the request and then its packet.
+	nilParams, nilParamsErr := w.SignPsbt(ctx, nil)
+	nilPacket, nilPacketErr := w.SignPsbt(ctx, &wallet.SignPsbtParams{})
+
+	// Assert: Neither reaches signing.
+	require.ErrorIs(h, nilParamsErr, wallet.ErrNilArguments)
+	require.Nil(h, nilParams)
+	require.ErrorIs(h, nilPacketErr, wallet.ErrPacketNil)
+	require.Nil(h, nilPacket)
+}
