@@ -2668,3 +2668,100 @@ func testFinalizePsbtRejectIncomplete(h *bwtest.HarnessTest) {
 	require.NoError(h, err)
 	require.Equal(h, original, unchanged)
 }
+
+// testPsbtSigningRejectLocked verifies that a locked Wallet refuses both
+// signing entry points and leaves the caller's packet unchanged.
+func testPsbtSigningRejectLocked(h *bwtest.HarnessTest) {
+	// Arrange: Decorate a Wallet spend while unlocked, then lock.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(h, w, funding.WalletOutpoints[0])
+	require.NoError(h, w.Lock(ctx))
+
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Request a signature, then finalization.
+	result, signErr := w.SignPsbt(
+		ctx, &wallet.SignPsbtParams{Packet: packet},
+	)
+	finalizeErr := w.FinalizePsbt(ctx, packet)
+
+	// Assert: Both report the Wallet state and change nothing.
+	require.ErrorIs(h, signErr, wallet.ErrStateForbidden)
+	require.Nil(h, result)
+	require.ErrorIs(h, finalizeErr, wallet.ErrStateForbidden)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+}
+
+// testPsbtSigningRejectWatchOnly verifies that a watch-only Wallet refuses both
+// signing entry points for an output it tracks and leaves the packet unchanged.
+func testPsbtSigningRejectWatchOnly(h *bwtest.HarnessTest) {
+	// Arrange: Track an account from public material alone. The input names
+	// the Wallet's own address and path, so only key availability is missing.
+	// Rootless kvdb Wallets cannot unlock, so the shared contract ends at
+	// admission.
+	const accountName = "psbt watchonly account"
+
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+	fingerprint := wallet.MasterFingerprint(keys.masterKeyFingerprint)
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		InitialAccounts: []wallet.ImportAccountParams{
+			{
+				XPub:                 keys.accountKey,
+				Name:                 accountName,
+				AddrType:             keys.addrType,
+				MasterKeyFingerprint: &fingerprint,
+			},
+		},
+	})
+	require.True(h, w.IsWatchOnly())
+
+	info, err := w.NewAddress(
+		ctx, wallet.NewAccountSelectorByName(keys.scope, accountName), false,
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(info.Addr)
+	require.NoError(h, err)
+
+	// Imported accounts report no derivation, but the first allocated address
+	// is the account's first external child.
+	packet := newSignerPsbt(h, unknownOutpoint())
+	packet.Inputs[0].WitnessUtxo = wire.NewTxOut(int64(oneBTC), pkScript)
+	packet.Inputs[0].SighashType = txscript.SigHashAll
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               info.PubKey.SerializeCompressed(),
+		MasterKeyFingerprint: keys.masterKeyFingerprint,
+		Bip32Path: createPsbtBip32Path(&wallet.AddressDerivation{
+			KeyScope: keys.scope,
+		}),
+	}}
+
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Request a signature, then finalization.
+	result, signErr := w.SignPsbt(
+		ctx, &wallet.SignPsbtParams{Packet: packet},
+	)
+	finalizeErr := w.FinalizePsbt(ctx, packet)
+
+	// Assert: Both report the Wallet state and change nothing.
+	require.ErrorIs(h, signErr, wallet.ErrStateForbidden)
+	require.Nil(h, result)
+	require.ErrorIs(h, finalizeErr, wallet.ErrStateForbidden)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+}

@@ -534,6 +534,14 @@ var allTestCases = []*testCase{
 		TestFunc: testFinalizePsbtRejectIncomplete,
 	},
 	{
+		Name:     "psbtmanager signing reject locked",
+		TestFunc: testPsbtSigningRejectLocked,
+	},
+	{
+		Name:     "psbtmanager signing reject watchonly",
+		TestFunc: testPsbtSigningRejectWatchOnly,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
