@@ -3905,10 +3905,10 @@ func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
 		walletInfo.SyncedTo.Timestamp.Unix())
 }
 
-// TestApplyTxBatchRejectsStaleDuplicateTx verifies that a duplicate batch
-// observation is not skipped when the existing row is terminal history. A blind
-// ErrTxAlreadyExists skip would leave the failed row in place while reporting a
-// successful batch application.
+// TestApplyTxBatchRejectsStaleDuplicateTx keeps Pending requests strict when
+// the stored row has failed. Only Published network echoes may be ignored
+// against terminal history inside the batch transaction; a Pending request
+// must not report a successful creation without recording its requested state.
 func TestApplyTxBatchRejectsStaleDuplicateTx(t *testing.T) {
 	t.Parallel()
 
@@ -5104,7 +5104,8 @@ func TestApplyTxBatchDuplicate(t *testing.T) {
 	})
 }
 
-// TestApplyTxBatchAcceptedReplacement keeps Pending claims and block winners.
+// TestApplyTxBatchAcceptedReplacement keeps Pending claims, queued terminal
+// echoes and confirmation of either competing hash consistent.
 func TestApplyTxBatchAcceptedReplacement(t *testing.T) {
 	t.Parallel()
 
@@ -5166,6 +5167,11 @@ func TestApplyTxBatchAcceptedReplacement(t *testing.T) {
 			childParams.Tx = child
 			require.NoError(t, store.CreateTx(ctx, childParams))
 
+			// Queue the published observation before replacement; the batch
+			// must reconcile the terminal history it finds when delivered.
+			observation := originalParams
+			tip := NewBlockFixture(259)
+
 			replacement := original.Copy()
 			replacement.TxOut[0].Value = 7000
 			batch := db.TxBatchParams{
@@ -5190,7 +5196,17 @@ func TestApplyTxBatchAcceptedReplacement(t *testing.T) {
 			batch.Transactions[0].Status = db.TxStatusPublished
 			err = store.ApplyTxBatch(ctx, batch)
 
-			// Assert: Only accepted admission displaces the original credit.
+			require.NoError(t, err)
+
+			// Act: Deliver the older echo after replacement has committed.
+			err = store.ApplyTxBatch(ctx, db.TxBatchParams{
+				WalletID:     id,
+				Transactions: []db.CreateTxParams{observation},
+				SyncedTo:     &tip,
+			})
+
+			// Assert: The echo preserves replacement history and permits sync
+			// progress; only the accepted replacement's credit is spendable.
 			require.NoError(t, err)
 			old, err = store.GetTx(ctx, query)
 			require.NoError(t, err)
@@ -5199,6 +5215,14 @@ func TestApplyTxBatchAcceptedReplacement(t *testing.T) {
 			creditQuery.OutPoint.Hash = original.TxHash()
 			_, err = store.GetUtxo(ctx, creditQuery)
 			require.ErrorIs(t, err, db.ErrUtxoNotFound)
+
+			creditQuery.OutPoint.Hash = replacement.TxHash()
+			_, err = store.GetUtxo(ctx, creditQuery)
+			require.NoError(t, err)
+			info, err := store.GetWallet(ctx, "accepted-replacement")
+			require.NoError(t, err)
+			require.NotNil(t, info.SyncedTo)
+			require.Equal(t, tip.Hash, info.SyncedTo.Hash)
 
 			// Act: Block truth may confirm either hash and the original's
 			// displaced descendant, restoring its actual credits and claims.
