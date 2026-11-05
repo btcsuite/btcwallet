@@ -23,7 +23,7 @@ require (
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/jrick/logrotate v1.1.2
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf
-	github.com/lightninglabs/neutrino v0.18.1-0.20261105002821-75e0a8f94585
+	github.com/lightninglabs/neutrino v0.18.1-0.20261105004227-2e8b20374290
 	github.com/lightninglabs/neutrino/cache v1.1.4
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/lightningnetwork/lnd/ticker v1.1.1
