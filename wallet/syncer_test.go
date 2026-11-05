@@ -548,13 +548,14 @@ func TestSyncerRun(t *testing.T) {
 	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
 
+	store := &walletmock.Store{}
+
 	s := newTestSyncer(
 		Config{Chain: mockChain}, mockAddrStore, nil, mockPublisher,
-		&walletmock.Store{}, 0,
+		store, 0,
 	)
 
 	// context cancellation.
-	mockAddrStore.On("Birthday").Return(time.Now()).Maybe()
 	mockChain.On("IsCurrent").Return(false).Maybe()
 	mockAddrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	mockChain.On("NotifyBlocks").Return(nil).Maybe()
@@ -7628,6 +7629,9 @@ func TestLiveWatchTargetedCommitUncertainty(t *testing.T) {
 	w.state = newWalletState(s)
 	s.state.Store(uint32(syncStateRescanning))
 	startLoadedWalletForTest(t, w)
+	w.addrStore = nil
+
+	deps.vault.On("Lock").Return().Once()
 
 	fixture := newStoreScanBatchFixture(t)
 	scanState := NewRecoveryState(0, &chainParams, nil)
@@ -7651,11 +7655,30 @@ func TestLiveWatchTargetedCommitUncertainty(t *testing.T) {
 	)
 
 	// Assert: Preserve the classified failure for the worker and keep public
-	// readiness false until initialization rereads the durable watch set.
+	// readiness false before the owning worker handles the ambiguous outcome.
 	require.ErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
-	info, err := w.Info(t.Context())
-	require.NoError(t, err)
+	info, infoErr := w.Info(t.Context())
+	require.NoError(t, infoErr)
 	require.False(t, info.Synced)
+
+	// Arrange: Forward this actual write outcome through the existing worker
+	// interface, with a real Manager runtime and its normal terminal cleanup.
+	manager := deps.manager
+	manager.wallets[w.cfg.Name] = w
+
+	deps.syncer.On("run", mock.Anything).Return(err).Once()
+	w.sync = deps.syncer
+
+	// Act: Let the owning run loop classify the ambiguous outcome.
+	w.wg.Go(w.runSyncLoop)
+
+	// Assert: Reopening is required; the worker cannot retry unknown effects
+	// or leave the public Wallet available after Manager's joined teardown.
+	require.Eventually(t, func() bool {
+		return manager.lifetimeCtx.Err() != nil
+	}, time.Second, time.Millisecond)
+	_, err = w.Info(t.Context())
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // newLiveWatchManager creates a SQLite wallet with mocked chain notifications
@@ -7725,18 +7748,6 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	require.NoError(t, block.AddTransaction(funding))
 	hash := block.BlockHash()
 	point := wire.OutPoint{Hash: funding.TxHash()}
-	external, err := address.NewAddressWitnessPubKeyHash(
-		bytes.Repeat([]byte{9}, 20), &chainParams,
-	)
-	require.NoError(t, err)
-	externalScript, err := txscript.PayToAddrScript(external)
-	require.NoError(t, err)
-
-	spend := wire.NewMsgTx(2)
-	spend.AddTxIn(wire.NewTxIn(&point, nil, nil))
-	spend.AddTxOut(&wire.TxOut{Value: 900, PkScript: externalScript})
-	record, err := wtxmgr.NewTxRecordFromMsgTx(spend, time.Now())
-	require.NoError(t, err)
 
 	// Hold registration after the new tip commits so Info can observe the
 	// gap before its failure and retry. Cleanup releases a failed assertion.
@@ -7748,50 +7759,25 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	// Registration rejects the committed credit once. Only its successful
 	// replay admits the spend notification; no receiving output can match it.
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Times(3)
-	client.On("NotifyBlocks").Return(nil).Twice()
+		Return(nil).Twice()
+	client.On("NotifyBlocks").Return(nil).Once()
 	client.On("NotifySpent", []*wire.OutPoint{&point}).
 		Run(func(mock.Arguments) {
 			close(registering)
 			<-release
 		}).Return(errors.New("registration rejected")).Once()
-	client.On("NotifySpent", []*wire.OutPoint{&point}).
-		Run(func(mock.Arguments) {
-			notifications <- chain.RelevantTx{TxRecord: record}
-		}).Return(nil).Once()
 	client.On("GetBestBlock").Unset()
 	client.On("GetBestBlock").Return(chainParams.GenesisHash, int32(0), nil)
 	client.On("GetBlockHashes", int64(1), int64(1)).
 		Return([]chainhash.Hash{hash}, nil).Once()
 	client.On("GetBlocks", []chainhash.Hash{hash}).
 		Return([]*wire.MsgBlock{block}, nil).Once()
-	client.On("GetBlockHashes", int64(0), int64(1)).
-		Return([]chainhash.Hash{*chainParams.GenesisHash, hash}, nil).Once()
-
-	// Delivery can race Stop before its normal rebroadcast. Keep that
-	// optional call local to the existing publisher mock, without writing
-	// the spend through the Wallet's publish API before the assertion.
-	publisher := &mockTxPublisher{}
-	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
-		func(tx *wire.MsgTx) bool {
-			return tx.TxHash() == record.Hash
-		},
-	), "").Return(nil).Maybe()
 
 	s, ok := w.sync.(*syncer)
 	require.True(t, ok)
 
 	s.cfg.SyncMethod = SyncMethodFullBlocks
 
-	// Preserve real Wallet notification while replacing only rebroadcast
-	// for this retry scenario's existing publication mock.
-	s.txManager = struct {
-		TxPublisher
-		txNotifier
-	}{
-		TxPublisher: publisher,
-		txNotifier:  w,
-	}
 
 	// Declare both readiness calls before releasing the worker; the retry
 	// uses the same already-open gate and the existing backoff path.
@@ -7800,7 +7786,7 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	client.On("IsCurrent").Unset()
 	client.On("IsCurrent").Run(func(mock.Arguments) {
 		<-ready
-	}).Return(true).Twice()
+	}).Return(true).Once()
 
 	// Finish initial synchronization at genesis before introducing the small
 	// gap; a startup-only test would never begin in the ready state.
@@ -7831,21 +7817,11 @@ func TestLiveWatchScanRetry(t *testing.T) {
 
 	release <- struct{}{}
 
-	// The public transaction view eventually receives the unmined
-	// external spend through replay. Stop joins the worker before the shared
-	// fixture checks expectations, including the single historical block read.
+	// Assert: SQL watch loss joins its owner instead of retrying stale watches.
 	require.Eventually(t, func() bool {
-		_, err := w.GetTx(t.Context(), record.Hash)
-		return err == nil
-	}, 5*time.Second, time.Millisecond)
-	got, err := w.GetTx(t.Context(), record.Hash)
-	require.NoError(t, err)
-	require.Nil(t, got.Block)
-	info, err = w.Info(t.Context())
-	require.NoError(t, err)
-	require.True(t, info.Synced)
+		return manager.lifetimeCtx.Err() != nil
+	}, time.Second, time.Millisecond)
 	require.NoError(t, manager.Stop())
-	publisher.AssertExpectations(t)
 }
 
 // TestLiveWatchTargetedScanFailure keeps readiness revoked when registration
@@ -7937,16 +7913,12 @@ func TestLiveWatchTargetedScanFailure(t *testing.T) {
 	// Act: Consume the queued scan through the live worker's event handler.
 	err = s.waitForEvent(t.Context())
 
-	// Assert: The registration error escapes for retry, and neither pending
-	// registration nor cleanup can report readiness or admit transactions.
+	// Assert: The committed tip is visible with readiness revoked, and the
+	// native error reaches the worker boundary. ScanRetry covers owner shutdown
+	// for this same watch classification through the active run loop.
 	require.ErrorIs(t, err, errChainMock)
 	require.False(t, pending.Synced)
-	info, err := w.Info(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, hash, info.SyncedTo.Hash)
-	require.False(t, info.Synced)
-	_, err = w.CreateTransaction(t.Context(), &TxIntent{})
-	require.ErrorIs(t, err, ErrStateForbidden)
+	require.Equal(t, hash, pending.SyncedTo.Hash)
 }
 
 // TestScanBatchAncestry preserves rollback evidence and rejects broken interior

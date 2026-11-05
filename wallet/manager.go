@@ -307,6 +307,12 @@ type recoveryReq struct {
 	event chainRecoveryRequest
 }
 
+// chainFailureReq returns policy before terminal cleanup joins its reporter.
+type chainFailureReq struct {
+	err  error
+	resp chan bool
+}
+
 // startManagerResultReq transfers startup candidates back to their owner.
 type startManagerResultReq struct {
 	req     startManagerReq
@@ -390,6 +396,12 @@ func (r *managerRuntime) handleReq(ctx context.Context, raw any) {
 		}
 
 		r.stopping = true
+
+	case chainFailureReq:
+		terminal := r.manager.backend.chainFailure(req.err) != nil
+		r.stopping = r.stopping || terminal
+
+		req.resp <- r.stopping
 
 	default:
 		r.handleChainReq(ctx, raw)

@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -176,4 +177,18 @@ func (b *sqlManagerBackend) prepareLiveWatches(ctx context.Context,
 	processor chainProcessor) error {
 
 	return processor.prepareLiveWatches(ctx)
+}
+
+// chainFailure classifies reported processing failures at the runtime owner.
+func (b *sqlManagerBackend) chainFailure(err error) error {
+	// SQL cannot recover lost unmined notifications or unknown write outcomes
+	// without reopening watches and committed checkpoints.
+	if errors.Is(err, errChainWatchRegistration) ||
+		errors.Is(err, errUnminedObservation) ||
+		errors.Is(err, db.ErrIndeterminateCommit) {
+
+		return err
+	}
+
+	return nil
 }

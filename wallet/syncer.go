@@ -1954,6 +1954,15 @@ func (s *syncer) processChainEvent(ctx context.Context,
 	event chainEvent) error {
 
 	switch n := event.notification.(type) {
+	case chain.ClientConnected:
+		// A matching SQL reconnect keeps this worker in place. Only a
+		// current backend can prove a fork for the Manager's shared rewind.
+		if s.cfg.Chain.IsCurrent() {
+			return s.checkRollback(ctx)
+		}
+
+		return nil
+
 	case prepareRollbackReq:
 		// Acknowledge only from the worker so historical and live writes
 		// are both quiescent until Manager releases this operation.
@@ -1968,7 +1977,7 @@ func (s *syncer) processChainEvent(ctx context.Context,
 		}
 
 	case chain.RelevantTx:
-		return s.putTxNotifications(ctx, event.matches, n.Block)
+		return s.processRelevantTxEvent(ctx, n, event.matches)
 
 	case chain.FilteredBlockConnected:
 		return s.putBlockNotifications(ctx, event.matches, n.Block)
@@ -1978,6 +1987,31 @@ func (s *syncer) processChainEvent(ctx context.Context,
 
 		return nil
 	}
+}
+
+// processRelevantTxEvent retains determinate Store rejections for retry while
+// unexpected unmined failures revoke SQL readiness through the existing owner.
+func (s *syncer) processRelevantTxEvent(ctx context.Context,
+	event chain.RelevantTx, matches TxEntries) error {
+
+	err := s.putTxNotifications(ctx, matches, event.Block)
+	// Raw coinbase observations lack block metadata, and input arbitration
+	// can reject an external replacement. Reopening cannot change either
+	// definite Store decision; keep their maintained retry/catch-up path.
+	if errors.Is(err, db.ErrInvalidParam) ||
+		errors.Is(err, db.ErrTxInputConflict) ||
+		errors.Is(err, db.ErrTxInputInvalidParent) {
+
+		return err
+	}
+
+	if err != nil && event.Block == nil && ctx.Err() == nil {
+		// Scanning cannot recreate a lost mempool observation; preserve its
+		// cause and let the owning backend decide whether retry is safe.
+		return fmt.Errorf("%w: %w", errUnminedObservation, err)
+	}
+
+	return err
 }
 
 // handleScanReq processes a user-initiated rescan request.

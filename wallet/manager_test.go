@@ -1210,6 +1210,16 @@ func (b *managerBackendMock) prepareLiveWatches(ctx context.Context,
 	return args.Error(0)
 }
 
+// chainFailure exposes the configured policy without replacing its owner.
+func (b *managerBackendMock) chainFailure(err error) error {
+	args := b.Called(err)
+	if policy, ok := args.Get(0).(func(error) error); ok {
+		return policy(err)
+	}
+
+	return args.Error(0)
+}
+
 // listWallets returns the durable data configured by the current test.
 func (b *managerBackendMock) listWallets(
 	ctx context.Context) ([]*walletData, error) {
@@ -1263,6 +1273,8 @@ func newManagerLifecycleTest(t *testing.T,
 	// terminal classification while each processor keeps strict expectations.
 	backend.On("prepareLiveWatches", mock.Anything, mock.Anything).
 		Return((&sqlManagerBackend{}).prepareLiveWatches).Maybe()
+	backend.On("chainFailure", mock.Anything).
+		Return((&sqlManagerBackend{}).chainFailure).Maybe()
 
 	chain := &bwmock.Chain{}
 	// Manager owns the service lifetime; fixture Stop joins before assertions.

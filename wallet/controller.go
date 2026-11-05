@@ -253,7 +253,16 @@ func (w *Wallet) runSyncLoop() {
 			return
 		}
 
-		log.Errorf("Chain sync loop exited with error: %v", err)
+		// Owner policy decides whether retry may borrow Store.
+		if w.chainSyncer.reportFailure(w.lifetimeCtx, err) {
+			return
+		}
+
+		if errors.Is(err, ErrStateChanged) {
+			log.Debugf("Chain sync restarting after state change: %v", err)
+		} else {
+			log.Errorf("Chain sync loop exited with error: %v", err)
+		}
 
 		var shouldContinue bool
 
@@ -302,7 +311,14 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 				return 0, false
 			}
 
-			if err != nil {
+			// Retry observations use the active worker's owner policy.
+			if w.chainSyncer.reportFailure(w.lifetimeCtx, err) {
+				return 0, false
+			}
+
+			if errors.Is(err, ErrStateChanged) {
+				log.Debugf("Chain state changed during retry: %v", err)
+			} else if err != nil {
 				// Retain the scheduled retry after an observation fails, just
 				// as a failed sync attempt returns here instead of stopping.
 				log.Errorf("Chain event processing failed during retry: %v",
@@ -312,9 +328,7 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 		case <-retry:
 			// Increase backoff for the next attempt, capping it.
 			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
+			backoff = min(backoff, maxBackoff)
 
 			return backoff, true
 

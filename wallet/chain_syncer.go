@@ -18,6 +18,9 @@ import (
 // errChainWatchRegistration identifies native watch loss for backend policy.
 var errChainWatchRegistration = errors.New("chain watch registration failed")
 
+// errUnminedObservation identifies loss that scanning cannot recover.
+var errUnminedObservation = errors.New("unmined observation failed")
+
 // chainRouter supplies live subscriptions and prepared events while its caller
 // owns the reader lifetime and each Wallet owns transaction persistence.
 type chainRouter interface {
@@ -42,9 +45,12 @@ type chainRouter interface {
 
 	// notifyBlocks enables the backend's existing block/control notifications.
 	notifyBlocks(ctx context.Context) error
+
 	// requestRollback offers a retry hint without waiting on its own worker.
 	requestRollback(ctx context.Context, event chainRecoveryRequest)
 
+	// reportFailure obtains owner policy before the caller can be joined.
+	reportFailure(ctx context.Context, err error) bool
 }
 
 // chainRecoveryRequest preserves the first abandoned block's identity so a
@@ -106,6 +112,27 @@ func (s *chainSyncer) requestRollback(ctx context.Context,
 	select {
 	case s.requestChan <- recoveryReq{event: event}:
 	case <-ctx.Done():
+	}
+}
+
+// reportFailure returns classification before cleanup can join this caller.
+func (s *chainSyncer) reportFailure(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+
+	req := chainFailureReq{err: err, resp: make(chan bool, 1)}
+	select {
+	case s.requestChan <- req:
+	case <-ctx.Done():
+		return true
+	}
+
+	select {
+	case terminal := <-req.resp:
+		return terminal
+	case <-ctx.Done():
+		return true
 	}
 }
 
