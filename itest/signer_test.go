@@ -7,6 +7,7 @@
 package itest
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"testing"
 
@@ -387,8 +388,16 @@ func testSignerECDHAgreement(h *bwtest.HarnessTest) {
 	})
 	require.NoError(h, err, "failed to derive the wallet's public key")
 
-	var want [32]byte
-	copy(want[:], btcec.GenerateSharedSecret(peerKey, walletPub))
+	// The peer computes peerKey*walletPub, the same point the wallet reaches
+	// as walletKey*peerPub, and hashes its compressed encoding.
+	var walletPoint, shared btcec.JacobianPoint
+	walletPub.AsJacobian(&walletPoint)
+	btcec.ScalarMultNonConst(&peerKey.Key, &walletPoint, &shared)
+	shared.ToAffine()
+
+	want := sha256.Sum256(
+		btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed(),
+	)
 
 	// Act: Compute the same secret from the wallet's side.
 	secret, err := w.ECDH(ctx, path, peerKey.PubKey())
