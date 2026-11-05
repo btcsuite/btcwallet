@@ -586,6 +586,42 @@ var allTestCases = []*testCase{
 		TestFunc: testFundPsbtCommitChange,
 	},
 	{
+		Name:     "psbtmanager decorate owned inputs",
+		TestFunc: testPsbtManagerDecorateOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager decorate skip unknown",
+		TestFunc: testPsbtManagerDecorateSkipUnknown,
+	},
+	{
+		Name:     "psbtmanager decorate reject unknown",
+		TestFunc: testPsbtManagerDecorateRejectUnknown,
+	},
+	{
+		Name:     "psbtmanager decorate reject malformed",
+		TestFunc: testPsbtManagerDecorateRejectMalformed,
+	},
+	{
+		Name:     "psbtmanager combine packets",
+		TestFunc: testPsbtManagerCombinePackets,
+	},
+	{
+		Name:     "psbtmanager combine reject transactions",
+		TestFunc: testPsbtManagerCombineRejectTransactions,
+	},
+	{
+		Name:     "psbtmanager combine reject empty",
+		TestFunc: testPsbtManagerCombineRejectEmpty,
+	},
+	{
+		Name:     "psbtmanager combine reject malformed",
+		TestFunc: testPsbtManagerCombineRejectMalformed,
+	},
+	{
+		Name:     "psbtmanager combine reject conflict",
+		TestFunc: testPsbtManagerCombineRejectConflict,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
