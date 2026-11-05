@@ -1340,3 +1340,49 @@ func testPsbtManagerFinalizeFinalizedPacket(h *bwtest.HarnessTest) {
 
 	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
 }
+
+// testPsbtManagerFinalizeRejectIncomplete verifies that a packet the Wallet
+// cannot complete is refused, and that an owned input FinalizePsbt can
+// complete does not reach the caller final.
+func testPsbtManagerFinalizeRejectIncomplete(h *bwtest.HarnessTest) {
+	// Arrange: A Wallet coin beside the other signer's unsigned input.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(
+		h, w, funding.WalletOutpoints[0], unknownOutpoint(),
+	)
+	addExternalPsbtInput(h, &packet.Inputs[1])
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Ask the Wallet to complete the packet.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The foreign input is not finalizable, and the owned input
+	// does not reach the caller final.
+	require.ErrorIs(h, err, psbt.ErrNotFinalizable)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
+
+// testPsbtManagerFinalizeRejectUnsignedTapscript verifies that FinalizePsbt
+// refuses an unsigned Taproot script-path input. It signs only outputs that
+// pay a key directly, so the leaf needs SignPsbt first.
+func testPsbtManagerFinalizeRejectUnsignedTapscript(h *bwtest.HarnessTest) {
+	// Arrange: A script-path input whose leaf checks a Wallet key.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet := newTapscriptPsbt(h, w)
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Finalize without signing first.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The input is named as needing a signature and is unchanged.
+	require.ErrorIs(h, err, wallet.ErrInputNeedsSignature)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}

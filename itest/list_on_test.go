@@ -710,6 +710,14 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerFinalizeFinalizedPacket,
 	},
 	{
+		Name:     "psbtmanager finalize reject incomplete",
+		TestFunc: testPsbtManagerFinalizeRejectIncomplete,
+	},
+	{
+		Name:     "psbtmanager finalize reject unsigned tapscript",
+		TestFunc: testPsbtManagerFinalizeRejectUnsignedTapscript,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
