@@ -718,6 +718,14 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerFinalizeRejectUnsignedTapscript,
 	},
 	{
+		Name:     "psbtmanager signing reject locked",
+		TestFunc: testPsbtManagerSigningRejectLocked,
+	},
+	{
+		Name:     "psbtmanager signing reject watchonly",
+		TestFunc: testPsbtManagerSigningRejectWatchOnly,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
