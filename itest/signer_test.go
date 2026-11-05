@@ -9,14 +9,17 @@ package itest
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -2008,4 +2011,461 @@ func testSignerSignAfterReload(h *bwtest.HarnessTest) {
 	)
 	require.NoError(h, err)
 	require.NoError(h, engine.Execute())
+}
+
+// newSignerPsbt builds an unsigned one-output packet spending the outpoints.
+// The caller supplies any previous outputs and derivation records.
+func newSignerPsbt(h *bwtest.HarnessTest,
+	inputs ...wire.OutPoint) *psbt.Packet {
+
+	h.Helper()
+
+	outpoints := make([]*wire.OutPoint, len(inputs))
+	sequences := make([]uint32, len(inputs))
+
+	for i := range inputs {
+		outpoints[i] = &inputs[i]
+		sequences[i] = wire.MaxTxInSequenceNum
+	}
+
+	output := wire.NewTxOut(int64(halfBTC), []byte{txscript.OP_TRUE})
+	packet, err := psbt.New(
+		outpoints, []*wire.TxOut{output}, 2, 0, sequences,
+	)
+	require.NoError(h, err)
+
+	return packet
+}
+
+// newDecoratedPsbt builds a packet spending the outpoints, with the Wallet's
+// own records on the inputs it owns and nothing on the others.
+func newDecoratedPsbt(h *bwtest.HarnessTest, w *wallet.Wallet,
+	inputs ...wire.OutPoint) *psbt.Packet {
+
+	h.Helper()
+
+	packet, err := w.DecorateInputs(
+		h.Context(), newSignerPsbt(h, inputs...), true,
+	)
+	require.NoError(h, err)
+
+	return packet
+}
+
+// createPsbtBip32Path returns the full key path of a Wallet address.
+func createPsbtBip32Path(derivation *wallet.AddressDerivation) []uint32 {
+	return []uint32{
+		hdkeychain.HardenedKeyStart + derivation.KeyScope.Purpose,
+		hdkeychain.HardenedKeyStart + derivation.KeyScope.Coin,
+		hdkeychain.HardenedKeyStart + derivation.Account,
+		derivation.Branch,
+		derivation.Index,
+	}
+}
+
+// psbtExternalKey returns the key of another signer, which no Wallet holds.
+func psbtExternalKey() *btcec.PrivateKey {
+	key, _ := btcec.PrivKeyFromBytes(
+		chainhash.HashB([]byte("psbt external signer")),
+	)
+
+	return key
+}
+
+// addExternalPsbtInput gives an input the other signer's P2WPKH previous output
+// and returns the script code that signer commits to.
+func addExternalPsbtInput(h *bwtest.HarnessTest, input *psbt.PInput) []byte {
+	h.Helper()
+
+	hash := address.Hash160(psbtExternalKey().PubKey().SerializeCompressed())
+	witnessAddr, err := address.NewAddressWitnessPubKeyHash(hash, h.NetParams())
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(witnessAddr)
+	require.NoError(h, err)
+
+	keyAddr, err := address.NewAddressPubKeyHash(hash, h.NetParams())
+	require.NoError(h, err)
+
+	scriptCode, err := txscript.PayToAddrScript(keyAddr)
+	require.NoError(h, err)
+
+	input.WitnessUtxo = wire.NewTxOut(int64(oneBTC), pkScript)
+	input.SighashType = txscript.SigHashAll
+
+	return scriptCode
+}
+
+// addExternalPsbtSig adds the other signer's partial signature to an input.
+// The signature is computed here, without any Wallet code.
+func addExternalPsbtSig(h *bwtest.HarnessTest, packet *psbt.Packet, idx int,
+	scriptCode []byte) {
+
+	h.Helper()
+
+	fetcher, err := wallet.PsbtPrevOutputFetcher(packet)
+	require.NoError(h, err)
+
+	key := psbtExternalKey()
+	sig, err := txscript.RawTxInWitnessSignature(
+		packet.UnsignedTx, txscript.NewTxSigHashes(packet.UnsignedTx, fetcher),
+		idx, packet.Inputs[idx].WitnessUtxo.Value, scriptCode,
+		txscript.SigHashAll, key,
+	)
+	require.NoError(h, err)
+
+	packet.Inputs[idx].PartialSigs = append(
+		packet.Inputs[idx].PartialSigs, &psbt.PartialSig{
+			PubKey:    key.PubKey().SerializeCompressed(),
+			Signature: sig,
+		},
+	)
+}
+
+// newMultisigPsbt builds a packet spending a 2-of-2 P2WSH output shared by the
+// Wallet and the other signer, and returns the witness script. Only the
+// Wallet's key has a derivation record.
+func newMultisigPsbt(h *bwtest.HarnessTest, w *wallet.Wallet) (*psbt.Packet,
+	[]byte) {
+
+	h.Helper()
+
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	pubKey := info.PubKey.SerializeCompressed()
+	script, err := txscript.NewScriptBuilder().
+		AddOp(txscript.OP_2).
+		AddData(pubKey).
+		AddData(psbtExternalKey().PubKey().SerializeCompressed()).
+		AddOp(txscript.OP_2).
+		AddOp(txscript.OP_CHECKMULTISIG).
+		Script()
+	require.NoError(h, err)
+
+	witnessHash := sha256.Sum256(script)
+	witnessAddr, err := address.NewAddressWitnessScriptHash(
+		witnessHash[:], h.NetParams(),
+	)
+	require.NoError(h, err)
+
+	pkScript, err := txscript.PayToAddrScript(witnessAddr)
+	require.NoError(h, err)
+
+	packet := newSignerPsbt(h, unknownOutpoint())
+	packet.Inputs[0].WitnessUtxo = wire.NewTxOut(int64(oneBTC), pkScript)
+	packet.Inputs[0].WitnessScript = script
+	packet.Inputs[0].SighashType = txscript.SigHashAll
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               pubKey,
+		MasterKeyFingerprint: info.Derivation.MasterKeyFingerprint,
+		Bip32Path:            createPsbtBip32Path(info.Derivation),
+	}}
+
+	return packet, script
+}
+
+// newTapscriptPsbt builds a packet spending a one-leaf Taproot output through
+// its CHECKSIG leaf, which commits to a Wallet key.
+func newTapscriptPsbt(h *bwtest.HarnessTest, w *wallet.Wallet) *psbt.Packet {
+	h.Helper()
+
+	addr := h.NewWalletAddressOfType(w, waddrmgr.TaprootPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	xOnlyKey := schnorr.SerializePubKey(info.PubKey)
+	script, err := txscript.NewScriptBuilder().
+		AddData(xOnlyKey).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(h, err)
+
+	leaf := txscript.NewBaseTapLeaf(script)
+	leafHash := leaf.TapHash()
+	tree := txscript.AssembleTaprootScriptTree(leaf)
+	root := tree.RootNode.TapHash()
+	outputKey := txscript.ComputeTaprootOutputKey(info.PubKey, root[:])
+
+	pkScript, err := txscript.PayToTaprootScript(outputKey)
+	require.NoError(h, err)
+
+	control := tree.LeafMerkleProofs[0].ToControlBlock(info.PubKey)
+	controlBytes, err := control.ToBytes()
+	require.NoError(h, err)
+
+	packet := newSignerPsbt(h, unknownOutpoint())
+	packet.Inputs[0].WitnessUtxo = wire.NewTxOut(int64(oneBTC), pkScript)
+	packet.Inputs[0].TaprootInternalKey = xOnlyKey
+	packet.Inputs[0].TaprootMerkleRoot = root[:]
+	packet.Inputs[0].TaprootLeafScript = []*psbt.TaprootTapLeafScript{{
+		ControlBlock: controlBytes,
+		Script:       script,
+		LeafVersion:  txscript.BaseLeafVersion,
+	}}
+	packet.Inputs[0].TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
+		XOnlyPubKey:          xOnlyKey,
+		LeafHashes:           [][]byte{leafHash[:]},
+		MasterKeyFingerprint: info.Derivation.MasterKeyFingerprint,
+		Bip32Path:            createPsbtBip32Path(info.Derivation),
+	}}
+
+	return packet
+}
+
+// testSignPsbtOwnedInputs verifies that the Wallet signs every input it owns,
+// without finalizing, and that the signatures alone satisfy the scripts.
+func testSignPsbtOwnedInputs(h *bwtest.HarnessTest) {
+	// Arrange: Own one coin of each spend type in a single packet.
+	w, legacy := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.PubKeyHash,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	nested := h.FundWalletOfType(w, waddrmgr.NestedWitnessPubKey, oneBTC)
+	segwit := h.FundWalletOfType(w, waddrmgr.WitnessPubKey, oneBTC)
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+	packet := newDecoratedPsbt(
+		h, w, legacy.WalletOutpoints[0], nested.WalletOutpoints[0],
+		segwit.WalletOutpoints[0], taproot.WalletOutpoints[0],
+	)
+
+	// Act: Sign without finalizing.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: No input is final. The library finalizer and script engine
+	// then check the signatures without Wallet code.
+	require.NoError(h, err)
+	require.Equal(h, []uint32{0, 1, 2, 3}, result.SignedInputs)
+	require.Same(h, packet, result.Packet)
+
+	for i := range packet.Inputs {
+		require.Empty(h, packet.Inputs[i].FinalScriptSig)
+		require.Empty(h, packet.Inputs[i].FinalScriptWitness)
+	}
+
+	// The library finalizer is the oracle, not the subject. It treats any
+	// input with a witness UTXO as SegWit, and decoration records one on
+	// the legacy input too, so the oracle needs it cleared.
+	packet.Inputs[0].WitnessUtxo = nil
+
+	require.NoError(h, psbt.MaybeFinalizeAll(packet))
+	h.AssertPsbtExecutes(packet)
+}
+
+// testSignPsbtAlreadySigned verifies that signing a signed packet again adds
+// nothing and reports no input as signed.
+func testSignPsbtAlreadySigned(h *bwtest.HarnessTest) {
+	// Arrange: Hold the Wallet's records on a SegWit and a Taproot input.
+	ctx := h.Context()
+	w, segwit := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+	packet := newDecoratedPsbt(
+		h, w, segwit.WalletOutpoints[0], taproot.WalletOutpoints[0],
+	)
+
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: packet})
+	require.NoError(h, err)
+
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Sign the same packet a second time.
+	result, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: packet})
+
+	// Assert: The packet keeps its records byte for byte.
+	require.NoError(h, err)
+	require.Empty(h, result.SignedInputs)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+}
+
+// testSignPsbtFinalizedPacket verifies that signing a final packet adds nothing
+// and reports no input as signed.
+func testSignPsbtFinalizedPacket(h *bwtest.HarnessTest) {
+	// Arrange: Finalize a Wallet spend.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(h, w, funding.WalletOutpoints[0])
+	require.NoError(h, w.FinalizePsbt(ctx, packet))
+
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Sign the final packet.
+	result, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: packet})
+
+	// Assert: No input is signed and the packet is byte for byte the same.
+	require.NoError(h, err)
+	require.Empty(h, result.SignedInputs)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+}
+
+// testSignPsbtPartialOwnership verifies that the Wallet signs only its own
+// input, skips inputs it does not own, and keeps another signer's signatures.
+func testSignPsbtPartialOwnership(h *bwtest.HarnessTest) {
+	// Arrange: One Wallet coin and two inputs of the other signer: one already
+	// signed with no origin, and one unsigned whose origin names an account
+	// the Wallet lacks in a scope it holds.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(
+		h, w, funding.WalletOutpoints[0], unknownOutpoint(),
+		wire.OutPoint{Hash: chainhash.Hash{0xbb}},
+	)
+
+	scriptCode := addExternalPsbtInput(h, &packet.Inputs[1])
+	addExternalPsbtInput(h, &packet.Inputs[2])
+	packet.Inputs[2].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               psbtExternalKey().PubKey().SerializeCompressed(),
+		MasterKeyFingerprint: 0xdeadbeef,
+		Bip32Path: createPsbtBip32Path(&wallet.AddressDerivation{
+			KeyScope: waddrmgr.KeyScopeBIP0084,
+			Account:  55,
+		}),
+	}}
+	addExternalPsbtSig(h, packet, 1, scriptCode)
+
+	before, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Sign as the owner of the first input only.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: Only the Wallet's input gains a signature, under its own key.
+	// The other signer's inputs, signed and unsigned, are unchanged; both
+	// sides are decoded so the comparison sees only serialized records.
+	require.NoError(h, err)
+	require.Equal(h, []uint32{0}, result.SignedInputs)
+	require.Len(h, packet.Inputs[0].PartialSigs, 1)
+	require.Equal(
+		h, packet.Inputs[0].Bip32Derivation[0].PubKey,
+		packet.Inputs[0].PartialSigs[0].PubKey,
+	)
+
+	after, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	original, err := psbt.NewFromRawBytes(strings.NewReader(before), true)
+	require.NoError(h, err)
+	signed, err := psbt.NewFromRawBytes(strings.NewReader(after), true)
+	require.NoError(h, err)
+	require.Equal(h, original.Inputs[1:], signed.Inputs[1:])
+}
+
+// testSignPsbtMultisigPartial verifies that the Wallet adds its partial
+// signature to a shared script without disturbing the other signer's.
+func testSignPsbtMultisigPartial(h *bwtest.HarnessTest) {
+	// Arrange: The other signer has already signed the 2-of-2 input.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet, script := newMultisigPsbt(h, w)
+	addExternalPsbtSig(h, packet, 0, script)
+
+	// Act: Add the Wallet's signature.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: The input is not final, and the two signatures together
+	// satisfy the script.
+	require.NoError(h, err)
+	require.Equal(h, []uint32{0}, result.SignedInputs)
+	require.Empty(h, packet.Inputs[0].FinalScriptWitness)
+
+	require.NoError(h, psbt.MaybeFinalizeAll(packet))
+	h.AssertPsbtExecutes(packet)
+}
+
+// testSignPsbtUnrecognizedScript verifies that the Wallet signs its key's input
+// even when it does not recognize the output script, leaving the script to the
+// script engine.
+func testSignPsbtUnrecognizedScript(h *bwtest.HarnessTest) {
+	// Arrange: A Wallet record on a legacy output that pays OP_TRUE.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	addr := h.NewWalletAddressOfType(w, waddrmgr.WitnessPubKey)
+	info, err := w.GetAddressInfo(h.Context(), addr)
+	require.NoError(h, err)
+
+	parentIn := unknownOutpoint()
+	parent := wire.NewMsgTx(2)
+	parent.AddTxIn(wire.NewTxIn(&parentIn, nil, nil))
+	parent.AddTxOut(wire.NewTxOut(int64(oneBTC), []byte{txscript.OP_TRUE}))
+
+	pubKey := info.PubKey.SerializeCompressed()
+	packet := newSignerPsbt(h, wire.OutPoint{Hash: parent.TxHash()})
+	packet.Inputs[0].NonWitnessUtxo = parent
+	packet.Inputs[0].SighashType = txscript.SigHashAll
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               pubKey,
+		MasterKeyFingerprint: info.Derivation.MasterKeyFingerprint,
+		Bip32Path:            createPsbtBip32Path(info.Derivation),
+	}}
+
+	// Act: Sign the input.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: The Wallet key signed the legacy digest of the output script.
+	require.NoError(h, err)
+	require.Equal(h, []uint32{0}, result.SignedInputs)
+	require.Len(h, packet.Inputs[0].PartialSigs, 1)
+
+	partial := packet.Inputs[0].PartialSigs[0]
+	require.Equal(h, pubKey, partial.PubKey)
+
+	sigLen := len(partial.Signature) - 1
+	require.Equal(
+		h, byte(txscript.SigHashAll), partial.Signature[sigLen],
+	)
+
+	sig, err := ecdsa.ParseDERSignature(partial.Signature[:sigLen])
+	require.NoError(h, err)
+
+	digest, err := txscript.CalcSignatureHash(
+		parent.TxOut[0].PkScript, txscript.SigHashAll, packet.UnsignedTx, 0,
+	)
+	require.NoError(h, err)
+	require.True(h, sig.Verify(digest, info.PubKey))
+}
+
+// testSignPsbtTapscript verifies that a Taproot script-path input receives a
+// signature that spends its leaf.
+func testSignPsbtTapscript(h *bwtest.HarnessTest) {
+	// Arrange: The packet commits to one leaf checking a Wallet key.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet := newTapscriptPsbt(h, w)
+
+	// Act: Sign the script-path input.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: The signature spends the output through the leaf.
+	require.NoError(h, err)
+	require.Equal(h, []uint32{0}, result.SignedInputs)
+
+	require.NoError(h, psbt.MaybeFinalizeAll(packet))
+	h.AssertPsbtExecutes(packet)
 }
