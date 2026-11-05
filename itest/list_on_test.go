@@ -510,6 +510,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignPsbtTapscript,
 	},
 	{
+		Name:     "psbtmanager sign reject packet",
+		TestFunc: testSignPsbtRejectPacket,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
