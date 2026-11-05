@@ -8154,15 +8154,15 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 	}
 }
 
-// TestTxSubscriptionCommitFailure verifies a failed Store commit preserves its
-// error and never attempts notification reads or closes the public stream.
+// TestTxSubscriptionCommitFailure preserves input arbitration while unexpected
+// unmined commit failure terminates its owner without notifying subscribers.
 func TestTxSubscriptionCommitFailure(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Subscribe before injecting a failed Store commit. Expect only
 	// the transaction lookup and write; fixture cleanup checks these once and
 	// any unexpected notification read fails through the existing Store mock.
-	w, deps := createStartedWalletWithMocks(t)
+	w, deps := createStartedSQLWalletWithMocks(t)
 	s := newSyncer(
 		w.cfg, w.addrStore, w.txStore, w,
 		deps.store, w.id, w.chainSyncer, w.chainEventChan,
@@ -8176,27 +8176,45 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	deps.store.On("GetTx", mock.Anything, db.GetTxQuery{
 		WalletID: w.id,
 		Txid:     tx.TxHash(),
-	}).Return(nil, db.ErrTxNotFound).Once()
+	}).Return(nil, db.ErrTxNotFound).Twice()
+	rejected := deps.store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Return(db.ErrTxInputConflict).Once()
 	deps.store.On("ApplyTxBatch", mock.Anything, mock.Anything).
-		Return(errDBMock).Once()
+		Return(errDBMock).Once().NotBefore(rejected)
 
-	// Act: Attempt the batch through the existing syncer path, stopping at its
-	// failed persistence boundary before notification preparation can begin.
-	err = s.applyStoreTxBatch(t.Context(), TxEntries{
-		{
-			Rec: record,
-		},
-	}, nil, nil)
+	manager := deps.manager
+	manager.wallets[w.cfg.Name] = w
 
-	// Assert: The caller receives the original write error and the live public
-	// stream has no event for the transaction that failed to commit.
-	require.ErrorIs(t, err, errDBMock)
-
-	select {
-	case notification := <-events:
-		t.Fatalf("failed commit delivered or closed stream: %v", notification)
-	default:
+	// Act: First process a definite Store arbitration rejection, as for an
+	// external mempool replacement that conflicts with a recorded spend.
+	event := chainEvent{
+		notification: chain.RelevantTx{TxRecord: record},
+		matches:      liveMatches(record),
 	}
+	err = s.processChainEvent(t.Context(), event)
+
+	// Assert: Expected arbitration retains its error and the owning Manager.
+	// The existing Store regression supplies the transaction conflict proof.
+	require.ErrorIs(t, err, db.ErrTxInputConflict)
+	require.NoError(t, manager.lifetimeCtx.Err())
+
+	// Act: Process the unmined observation through its maintained handler;
+	// failure must reach the owner because history cannot replay this event.
+	err = s.processChainEvent(t.Context(), event)
+
+	// Assert: Retain the write error, terminate the owner, and close the
+	// subscription without ever delivering an event for the failed commit.
+	require.ErrorIs(t, err, errDBMock)
+	// Let the worker report this exact result, preserving owner classification.
+	deps.syncer.On("run", mock.Anything).Return(err).Once()
+	w.wg.Go(w.runSyncLoop)
+
+	require.Eventually(t, func() bool {
+		return manager.lifetimeCtx.Err() != nil
+	}, time.Second, time.Millisecond)
+
+	_, open := <-events
+	require.False(t, open)
 }
 
 // TestManagerRollbackKvdbSparseFork resolves a canonical retained header

@@ -2712,6 +2712,8 @@ func TestManagerDeriveRootKey(t *testing.T) {
 func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: The actual KVDB backend owns one rootless watch-only Wallet.
+	m := testKVDBManager(t)
 	params := CreateWalletParams{
 		Name:          testWalletName,
 		Mode:          ModeShell,
@@ -2720,7 +2722,7 @@ func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
 		Birthday:      time.Now(),
 	}
 
-	w, err := testKVDBManager(t).Create(params)
+	w, err := m.Create(params)
 	require.NoError(t, err)
 	require.NotNil(t, w)
 	require.True(t, w.IsWatchOnly())
@@ -2729,6 +2731,33 @@ func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
 	// is unobservable on a watch-only wallet regardless: it is reported only
 	// for derived accounts, which such a wallet cannot have.
 	require.Zero(t, w.masterFingerprint)
+	key, _ := importAccountTestKey(t, 84)
+	_, err = w.ImportAccount(t.Context(), ImportAccountParams{
+		Name:     "watched",
+		XPub:     key,
+		Scope:    &waddrmgr.KeyScopeBIP0084,
+		AddrType: waddrmgr.WitnessPubKey,
+	}, false)
+	require.NoError(t, err)
+
+	client, ok := m.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	client.On("NotifyReceived", mock.Anything).Return(errChainMock).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+
+	selector := NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "watched")
+
+	// Act: Fail one committed address registration, then request the next
+	// destination through the same public Wallet and borrowed source.
+	_, err = w.NewAddress(t.Context(), selector, false)
+	require.ErrorIs(t, err, errChainMock)
+	_, err = w.NewAddress(t.Context(), selector, false)
+
+	// Assert: KVDB's maintained retry policy leaves its Manager and Wallet
+	// usable, in contrast to the separately covered terminal SQL policy.
+	require.NoError(t, err)
+	_, err = w.Info(t.Context())
+	require.NoError(t, err)
 }
 
 // TestManagerKVDBRejectsSecondCreate verifies cached names and other aliases
