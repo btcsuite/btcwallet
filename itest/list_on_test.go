@@ -490,6 +490,26 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerSignAfterReload,
 	},
 	{
+		Name:     "psbtmanager sign owned inputs",
+		TestFunc: testSignPsbtOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager sign already signed",
+		TestFunc: testSignPsbtAlreadySigned,
+	},
+	{
+		Name:     "psbtmanager sign partial ownership",
+		TestFunc: testSignPsbtPartialOwnership,
+	},
+	{
+		Name:     "psbtmanager sign multisig partial",
+		TestFunc: testSignPsbtMultisigPartial,
+	},
+	{
+		Name:     "psbtmanager sign tapscript",
+		TestFunc: testSignPsbtTapscript,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
