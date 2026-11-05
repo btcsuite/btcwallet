@@ -327,7 +327,7 @@ func TestManagerChainRollbackWithoutWallet(t *testing.T) {
 }
 
 // TestManagerChainRollbackDuringInitializationRetry keeps ordered rollback
-// admission live when a stored tip above the backend makes initialization fail.
+// available when a stored tip above the backend makes initialization fail.
 func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 	t.Parallel()
 
@@ -342,7 +342,7 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		w.cfg.WalletSyncRetryInterval = time.Hour
 		w.id = 1
 		processor := newSyncer(
-			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+			w.cfg, nil, w.txStore, w, w.store, w.id,
 			w.chainSyncer, w.chainEventChan,
 		)
 		w.sync = processor
@@ -358,40 +358,60 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		deps.store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{StartHeight: 0, EndHeight: 2}).
 			Return([]db.Block{tip}, nil).Once()
-		deps.chain.On("GetBestBlock").
-			Return((*chainhash.Hash)(nil), int32(0), errChainMock).Once()
-		priorWrite := deps.store.On("ApplyTxBatch", mock.Anything,
-			db.TxBatchParams{
-				WalletID:     w.id,
-				Transactions: []db.CreateTxParams{},
-			}).Return(nil).Once()
+		deps.chain.On("GetBestBlock").Return(&tip.Hash, int32(2), nil).Once()
+
+		releaseCheck := make(chan struct{})
+		rewindResult := make(chan error, 1)
+		deps.chain.On("GetBlockHashes", int64(0), int64(2)).
+			Run(func(mock.Arguments) {
+				<-releaseCheck
+
+				// The held owner must accept this worker's hint.
+				var fork waddrmgr.BlockStamp
+				fork.Height = 1
+				rewindResult <- processor.rewindToBlock(t.Context(), fork)
+			}).Return([]chainhash.Hash(nil), errChainMock).Once()
+
+		boundary := db.ListSyncedBlocksQuery{StartHeight: 2, EndHeight: 2}
+		deps.store.On("ListSyncedBlocks", mock.Anything, boundary).
+			Return([]db.Block{tip}, nil).Once()
+
+		deps.store.On("ListSyncedBlocks", mock.Anything, boundary).
+			Return([]db.Block(nil), db.ErrBlockNotFound).Once()
 
 		backend := &managerBackendMock{}
 		backend.On("close").Return(nil).Once()
 		backend.On("rollbackToBlock", mock.Anything, tip).
-			Return(nil).Once().NotBefore(priorWrite)
+			Return(nil).Once()
 		m := newManagerLifecycleTest(t, backend)
 		m.started.Store(true)
 		m.wallets[w.cfg.Name] = w
 
-		// Act: Queue a filtered event before the disconnect, then let the
-		// same worker enter retry. No second initialization is permitted by
-		// the strict mocks; it must drain this mailbox in its existing wait.
-		require.NoError(t, m.dispatchChainEvent(t.Context(),
-			chain.FilteredBlockConnected{
-				Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 3}},
-			}))
+		releaseWork := sync.OnceFunc(func() { close(releaseCheck) })
+		t.Cleanup(releaseWork)
+
+		w.chainSyncer, processor.chainSyncer = m.chainSyncer, m.chainSyncer
+
+		// Act: Hold initialization while the owner fences this same worker.
+		// Its proven-fork hint must be accepted before it can acknowledge.
+
 		w.wg.Go(w.runSyncLoop)
+
+		go func() {
+			_ = m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+				Block: wtxmgr.Block{Height: 2, Hash: tip.Hash},
+				Time:  tip.Timestamp,
+			})
+		}()
+
 		synctest.Wait()
 
-		err := m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
-			Block: wtxmgr.Block{Height: int32(tip.Height), Hash: tip.Hash},
-		})
+		releaseWork()
+		synctest.Wait()
 
-		// Assert: The prior observation is persisted without advancing the
-		// scan checkpoint, then the one full-identity rollback settles while
+		// Assert: A mined mismatch keeps the tip; one rollback settles while
 		// Manager remains available instead of blocking behind retry forever.
-		require.NoError(t, err)
+		require.ErrorIs(t, <-rewindResult, ErrStateChanged)
 		require.True(t, m.started.Load())
 	})
 }
