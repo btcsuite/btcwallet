@@ -674,6 +674,26 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerSignTapscript,
 	},
 	{
+		Name:     "psbtmanager sign reject packet",
+		TestFunc: testPsbtManagerSignRejectPacket,
+	},
+	{
+		Name:     "psbtmanager sign reject nil",
+		TestFunc: testPsbtManagerSignRejectNil,
+	},
+	{
+		Name:     "psbtmanager sign reject after signing",
+		TestFunc: testPsbtManagerSignRejectAfterSigning,
+	},
+	{
+		Name:     "psbtmanager sign reject missing leaf",
+		TestFunc: testPsbtManagerSignRejectMissingLeaf,
+	},
+	{
+		Name:     "psbtmanager sign reject mismatched signature",
+		TestFunc: testPsbtManagerSignRejectMismatchedSignature,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},

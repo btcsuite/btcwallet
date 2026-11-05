@@ -1055,3 +1055,195 @@ func testPsbtManagerSignTapscript(h *bwtest.HarnessTest) {
 	require.NoError(h, psbt.MaybeFinalizeAll(packet))
 	h.AssertPsbtExecutes(packet)
 }
+
+// testPsbtManagerSignRejectPacket verifies that a Wallet spend with one invalid
+// field is refused with its stable error and that the caller's packet is left
+// unchanged.
+func testPsbtManagerSignRejectPacket(h *bwtest.HarnessTest) {
+	// Arrange: Each packet is the Wallet's SegWit spend with one field
+	// changed.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	coin := funding.WalletOutpoints[0]
+
+	conflictingPrevOut := newDecoratedPsbt(h, w, coin)
+	prevOut := conflictingPrevOut.Inputs[0].WitnessUtxo
+	conflictingPrevOut.Inputs[0].WitnessUtxo = wire.NewTxOut(
+		prevOut.Value+1, prevOut.PkScript,
+	)
+
+	missingInputs := newDecoratedPsbt(h, w, coin)
+	missingInputs.Inputs = nil
+
+	twoOrigins := newDecoratedPsbt(h, w, coin)
+	secondOrigin := *twoOrigins.Inputs[0].Bip32Derivation[0]
+	secondOrigin.PubKey = psbtExternalKey().PubKey().SerializeCompressed()
+	twoOrigins.Inputs[0].Bip32Derivation = append(
+		twoOrigins.Inputs[0].Bip32Derivation, &secondOrigin,
+	)
+
+	// Each sighash is refused by one check alone: an undefined flag on a
+	// known base type, and an undefined base type with no flags.
+	unknownFlags := newDecoratedPsbt(h, w, coin)
+	unknownFlags.Inputs[0].SighashType = txscript.SigHashAll | 0x40
+
+	unknownBase := newDecoratedPsbt(h, w, coin)
+	unknownBase.Inputs[0].SighashType = txscript.SigHashType(0x04)
+
+	testCases := []struct {
+		name   string
+		packet *psbt.Packet
+		err    error
+	}{
+		{
+			name:   "conflicting previous output",
+			packet: conflictingPrevOut,
+			err:    wallet.ErrConflictingUtxo,
+		},
+		{
+			name:   "missing input records",
+			packet: missingInputs,
+			err:    wallet.ErrPacketMalformed,
+		},
+		{
+			name:   "two derivation records",
+			packet: twoOrigins,
+			err:    wallet.ErrUnsupportedMultipleBip32Derivation,
+		},
+		{
+			name:   "unknown sighash flags",
+			packet: unknownFlags,
+			err:    wallet.ErrUnsafeSighash,
+		},
+		{
+			name:   "unknown sighash base type",
+			packet: unknownBase,
+			err:    wallet.ErrUnsafeSighash,
+		},
+	}
+	for _, tc := range testCases {
+		h.Run(tc.name, func(t *testing.T) {
+			original := psbtTestSnapshot(t, tc.packet)
+
+			// Act: Ask the Wallet to sign the defective packet.
+			result, err := w.SignPsbt(
+				h.Context(), &wallet.SignPsbtParams{Packet: tc.packet},
+			)
+
+			// Assert: The defect is named and the caller's packet is
+			// intact.
+			require.ErrorIs(t, err, tc.err)
+			require.Nil(t, result)
+			require.Equal(t, original, psbtTestSnapshot(t, tc.packet))
+		})
+	}
+}
+
+// testPsbtManagerSignRejectNil verifies that SignPsbt refuses a request with
+// no packet before it reaches signing.
+func testPsbtManagerSignRejectNil(h *bwtest.HarnessTest) {
+	// Arrange: An unlocked Wallet, so only the missing packet is refused.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	// Act: Sign a request without a packet.
+	result, err := w.SignPsbt(h.Context(), &wallet.SignPsbtParams{})
+
+	// Assert: The missing packet is named.
+	require.ErrorIs(h, err, wallet.ErrPacketNil)
+	require.Nil(h, result)
+}
+
+// testPsbtManagerSignRejectAfterSigning verifies that a record pairing another
+// signer's key with a Wallet path is refused, even after the Wallet has signed
+// an earlier input, and that the caller's packet is left unchanged. The
+// output pays that key, so only the key the Wallet derives at the path can
+// disagree, and it is checked only while signing.
+func testPsbtManagerSignRejectAfterSigning(h *bwtest.HarnessTest) {
+	// Arrange: A Wallet coin, then the other signer's input with a record
+	// naming its key at a Wallet path.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(
+		h, w, funding.WalletOutpoints[0], unknownOutpoint(),
+	)
+	addExternalPsbtInput(h, &packet.Inputs[1])
+
+	record := *packet.Inputs[0].Bip32Derivation[0]
+	record.PubKey = psbtExternalKey().PubKey().SerializeCompressed()
+	packet.Inputs[1].Bip32Derivation = []*psbt.Bip32Derivation{&record}
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Sign both inputs.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: The second input is refused, and the first input's signature
+	// does not reach the caller.
+	require.ErrorIs(h, err, wallet.ErrSigningKeyMismatch)
+	require.Nil(h, result)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
+
+// testPsbtManagerSignRejectMissingLeaf verifies that a Taproot script-path
+// record is refused when the packet omits the leaf script it names.
+func testPsbtManagerSignRejectMissingLeaf(h *bwtest.HarnessTest) {
+	// Arrange: The Wallet's script-path spend without its leaf script.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet := newTapscriptPsbt(h, w)
+	packet.Inputs[0].TaprootLeafScript = nil
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Sign the input.
+	result, err := w.SignPsbt(
+		h.Context(), &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: The missing leaf is named and the caller's packet is intact.
+	require.ErrorIs(h, err, wallet.ErrMissingTaprootLeafScript)
+	require.Nil(h, result)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
+
+// testPsbtManagerSignRejectMismatchedSignature verifies that a real Wallet
+// signature over a different transaction is refused, not kept or replaced.
+func testPsbtManagerSignRejectMismatchedSignature(h *bwtest.HarnessTest) {
+	// Arrange: Sign a copy that pays one satoshi less, then move its
+	// signature into the packet.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	coin := funding.WalletOutpoints[0]
+	packet := newDecoratedPsbt(h, w, coin)
+
+	otherTx := newDecoratedPsbt(h, w, coin)
+	otherTx.UnsignedTx.TxOut[0].Value--
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: otherTx})
+	require.NoError(h, err)
+
+	packet.Inputs[0].PartialSigs = otherTx.Inputs[0].PartialSigs
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Sign the packet.
+	result, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: packet})
+
+	// Assert: The signature is named invalid and the caller's packet is
+	// intact.
+	require.ErrorIs(h, err, wallet.ErrInvalidSignatureRecord)
+	require.Nil(h, result)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
