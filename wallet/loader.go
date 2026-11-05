@@ -45,6 +45,8 @@ var (
 // loaderConfig contains the configuration options for the loader.
 type loaderConfig struct {
 	walletSyncRetryInterval time.Duration
+	createPublicScrypt      *waddrmgr.ScryptOptions
+	createPrivateScrypt     *waddrmgr.ScryptOptions
 }
 
 // defaultLoaderConfig returns the default configuration options for the loader.
@@ -62,6 +64,30 @@ type LoaderOption func(*loaderConfig)
 func WithWalletSyncRetryInterval(interval time.Duration) LoaderOption {
 	return func(c *loaderConfig) {
 		c.walletSyncRetryInterval = interval
+	}
+}
+
+// WithCreateScryptOptions configures independent public and private scrypt
+// parameters for wallets created by the loader. It does not affect existing
+// wallets, whose parameters are persisted in the wallet database.
+func WithCreateScryptOptions(public,
+	private *waddrmgr.ScryptOptions) LoaderOption {
+
+	return func(c *loaderConfig) {
+		setCreateScryptOptions(c, public, private)
+	}
+}
+
+func setCreateScryptOptions(c *loaderConfig, public,
+	private *waddrmgr.ScryptOptions) {
+
+	if public != nil {
+		publicCopy := *public
+		c.createPublicScrypt = &publicCopy
+	}
+	if private != nil {
+		privateCopy := *private
+		c.createPrivateScrypt = &privateCopy
 	}
 }
 
@@ -177,6 +203,24 @@ func (l *Loader) OnWalletCreated(fn func(walletdb.ReadWriteTx) error) {
 	l.walletCreated = fn
 }
 
+// SetCreateScryptOptions configures independent public and private scrypt
+// parameters for a subsequent wallet creation. It returns ErrLoaded after the
+// loader has already created or opened a wallet.
+func (l *Loader) SetCreateScryptOptions(public,
+	private *waddrmgr.ScryptOptions) error {
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.wallet != nil {
+		return ErrLoaded
+	}
+
+	setCreateScryptOptions(l.cfg, public, private)
+
+	return nil
+}
+
 // CreateNewWallet creates a new wallet using the provided public and private
 // passphrases.  The seed is optional.  If non-nil, addresses are derived from
 // this seed.  If nil, a secure random seed is generated.
@@ -278,9 +322,10 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 			return nil, err
 		}
 	} else {
-		err := CreateWithCallback(
+		err := CreateWithCallbackAndScryptOptions(
 			l.db, pubPassphrase, privPassphrase, rootKey,
-			l.chainParams, bday, l.walletCreated,
+			l.chainParams, l.cfg.createPublicScrypt,
+			l.cfg.createPrivateScrypt, bday, l.walletCreated,
 		)
 		if err != nil {
 			return nil, err
