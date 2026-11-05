@@ -514,6 +514,22 @@ var allTestCases = []*testCase{
 		TestFunc: testSignPsbtRejectPacket,
 	},
 	{
+		Name:     "psbtmanager finalize owned inputs",
+		TestFunc: testFinalizePsbtOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager finalize signed inputs",
+		TestFunc: testFinalizePsbtSignedInputs,
+	},
+	{
+		Name:     "psbtmanager finalize external signatures",
+		TestFunc: testFinalizePsbtExternalSignatures,
+	},
+	{
+		Name:     "psbtmanager finalize finalized packet",
+		TestFunc: testFinalizePsbtFinalizedPacket,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},

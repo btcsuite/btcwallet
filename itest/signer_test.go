@@ -2463,3 +2463,126 @@ func testSignPsbtRejectPacket(h *bwtest.HarnessTest) {
 	require.ErrorIs(h, nilPacketErr, wallet.ErrPacketNil)
 	require.Nil(h, nilPacket)
 }
+
+// testFinalizePsbtOwnedInputs verifies that FinalizePsbt signs and finalizes
+// wallet-owned inputs of every spend type on its own.
+func testFinalizePsbtOwnedInputs(h *bwtest.HarnessTest) {
+	// Arrange: Own one coin of each spend type, with no signature yet.
+	w, legacy := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.PubKeyHash,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	nested := h.FundWalletOfType(w, waddrmgr.NestedWitnessPubKey, oneBTC)
+	segwit := h.FundWalletOfType(w, waddrmgr.WitnessPubKey, oneBTC)
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+	packet := newDecoratedPsbt(
+		h, w, legacy.WalletOutpoints[0], nested.WalletOutpoints[0],
+		segwit.WalletOutpoints[0], taproot.WalletOutpoints[0],
+	)
+
+	// Act: Finalize directly.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The transaction it produced spends every previous output.
+	require.NoError(h, err)
+	h.AssertPsbtExecutes(packet)
+}
+
+// testFinalizePsbtSignedInputs verifies that FinalizePsbt completes a packet
+// SignPsbt has signed, including a script-path spend it could not sign itself.
+func testFinalizePsbtSignedInputs(h *bwtest.HarnessTest) {
+	// Arrange: Sign one packet of key spends and one script-path packet.
+	ctx := h.Context()
+	w, segwit := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+	keySpend := newDecoratedPsbt(
+		h, w, segwit.WalletOutpoints[0], taproot.WalletOutpoints[0],
+	)
+	scriptSpend := newTapscriptPsbt(h, w)
+
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: keySpend})
+	require.NoError(h, err)
+	_, err = w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: scriptSpend})
+	require.NoError(h, err)
+
+	// Act: Finalize both.
+	keySpendErr := w.FinalizePsbt(ctx, keySpend)
+	scriptSpendErr := w.FinalizePsbt(ctx, scriptSpend)
+
+	// Assert: Both transactions spend their previous outputs.
+	require.NoError(h, keySpendErr)
+	h.AssertPsbtExecutes(keySpend)
+	require.NoError(h, scriptSpendErr)
+	h.AssertPsbtExecutes(scriptSpend)
+}
+
+// testFinalizePsbtExternalSignatures verifies that FinalizePsbt completes
+// inputs signed by another party, alongside the Wallet's own contribution.
+func testFinalizePsbtExternalSignatures(h *bwtest.HarnessTest) {
+	// Arrange: One packet mixes a Wallet coin with the other signer's signed
+	// input. The other holds both signatures of a 2-of-2 input.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	mixed := newDecoratedPsbt(
+		h, w, funding.WalletOutpoints[0], unknownOutpoint(),
+	)
+	scriptCode := addExternalPsbtInput(h, &mixed.Inputs[1])
+	addExternalPsbtSig(h, mixed, 1, scriptCode)
+
+	multisig, script := newMultisigPsbt(h, w)
+	addExternalPsbtSig(h, multisig, 0, script)
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: multisig})
+	require.NoError(h, err)
+
+	// Act: Finalize both.
+	mixedErr := w.FinalizePsbt(ctx, mixed)
+	multisigErr := w.FinalizePsbt(ctx, multisig)
+
+	// Assert: Both transactions spend their previous outputs.
+	require.NoError(h, mixedErr)
+	h.AssertPsbtExecutes(mixed)
+	require.NoError(h, multisigErr)
+	h.AssertPsbtExecutes(multisig)
+}
+
+// testFinalizePsbtFinalizedPacket verifies that neither finalizing nor signing
+// changes a packet that is already final.
+func testFinalizePsbtFinalizedPacket(h *bwtest.HarnessTest) {
+	// Arrange: Finalize a Wallet spend.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(h, w, funding.WalletOutpoints[0])
+	require.NoError(h, w.FinalizePsbt(ctx, packet))
+
+	original, err := packet.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Run both operations over the final packet.
+	finalizeErr := w.FinalizePsbt(ctx, packet)
+	result, signErr := w.SignPsbt(
+		ctx, &wallet.SignPsbtParams{Packet: packet},
+	)
+
+	// Assert: Both accept it and add nothing.
+	require.NoError(h, finalizeErr)
+	require.NoError(h, signErr)
+	require.Empty(h, result.SignedInputs)
+
+	unchanged, err := packet.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+}
