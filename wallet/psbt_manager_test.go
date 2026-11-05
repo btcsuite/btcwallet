@@ -1223,8 +1223,7 @@ func TestDecorateInputsErrDecorationFailed(t *testing.T) {
 
 // TestFundPsbtImportedAccountSchema verifies strict and hybrid BIP49 change
 // from numberless XPub accounts uses the account's branch type without
-// inventing an origin. The input has a known origin; Task 482 owns funding
-// imported inputs whose origin is unknown.
+// inventing an origin. The funding input has a known origin.
 func TestFundPsbtImportedAccountSchema(t *testing.T) {
 	t.Parallel()
 

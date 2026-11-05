@@ -1788,8 +1788,8 @@ func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
 
 // testAccountManagerPreserveImportedSchema verifies strict and hybrid BIP49
 // imports sharing a scope retain their branch schemas across address allocation
-// and manager reopen, with BIP84/BIP86 controls. Imported-input PSBT funding is
-// Task 482/470's contract; this case observes persisted address script types.
+// and manager reopen, with BIP84/BIP86 controls. This case observes persisted
+// address script types.
 func testAccountManagerPreserveImportedSchema(h *bwtest.HarnessTest) {
 	// Versioned BIP49 keys distinguish hybrid scope selection from a native
 	// BIP84 request. The conflicting initial schema exposes scope fallback in

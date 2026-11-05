@@ -970,8 +970,8 @@ func TestAddTxToWallet(t *testing.T) {
 	})
 }
 
-// TestSpendsWalletOutputConflictingNoChangeSpend is the task-173 regression:
-// a no-change transaction re-spends a wallet output that is already consumed by
+// TestSpendsWalletOutputConflictingNoChangeSpend checks a no-change
+// transaction that re-spends a wallet output already consumed by
 // another unmined wallet transaction. That output is no longer in the current
 // UTXO set, so GetUtxo misses it, but it remains a wallet-owned output of its
 // recorded parent transaction.
