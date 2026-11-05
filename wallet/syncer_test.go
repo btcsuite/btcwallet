@@ -2296,10 +2296,28 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		Time: blockTime,
 	}
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 100}}, nil,
+	).Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchBlockTxBatch(walletID, tx, addr, received, block),
 	).Return(nil).Once()
+
+	// Supplemental effects must not write the checkpoint again.
+	lateTx := tx.Copy()
+	lateTx.TxOut[0].Value++
+	late, err := wtxmgr.NewTxRecordFromMsgTx(lateTx, received)
+	require.NoError(t, err)
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 101, Hash: block.Hash}}, nil,
+	).Once()
+	store.On("ApplyTxBatch", mock.Anything, mock.MatchedBy(
+		func(params db.TxBatchParams) bool {
+			return params.WalletID == walletID && params.SyncedTo == nil &&
+				len(params.Transactions) == 1 &&
+				params.Transactions[0].Tx.TxHash() == late.Hash
+		},
+	)).Return(nil).Once()
 
 	mailbox := make(chan chainEvent, 1)
 
@@ -2316,7 +2334,18 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	// mailbox path, preserving its atomic transaction/checkpoint boundary.
 	err = s.waitForEvent(t.Context())
 
-	// Assert: The block transaction and sync tip were written together.
+	// Assert: The first representation writes effects and checkpoint together.
+	require.NoError(t, err)
+
+	// Act: Deliver the supplemental representation through the same mailbox.
+	mailbox <- chainEvent{
+		notification: chain.FilteredBlockConnected{Block: block},
+		matches:      liveMatches(late),
+	}
+
+	err = s.waitForEvent(t.Context())
+
+	// Assert: Its distinct transaction commits without another checkpoint.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
@@ -7777,7 +7806,6 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	require.True(t, ok)
 
 	s.cfg.SyncMethod = SyncMethodFullBlocks
-
 
 	// Declare both readiness calls before releasing the worker; the retry
 	// uses the same already-open gate and the existing backoff path.

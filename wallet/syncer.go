@@ -925,10 +925,9 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 		return err
 	}
 
-	// A filtered notification may remain queued after advanceChainSync has
-	// already scanned past it. Only the exact next block may move the tip
-	// forward; the sync loop handles gaps and rollback handles rewinds.
-	if blockMeta.Height != current.Height+1 {
+	// Only the exact next block may advance the checkpoint. Catch-up handles
+	// gaps, while later representations may supplement committed payloads.
+	if blockMeta.Height > current.Height+1 {
 		return nil
 	}
 
@@ -937,7 +936,46 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 		return err
 	}
 
-	return s.applyStoreTxBatch(ctx, matches, block, block)
+	if blockMeta.Height == current.Height+1 {
+		return s.applyStoreTxBatch(ctx, matches, block, block)
+	}
+
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Supplemental payloads may add effects only on the committed branch.
+	onBranch, err := s.blockMatchesCheckpoint(ctx, *block, current)
+	if err != nil || !onBranch {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// blockMatchesCheckpoint validates a supplemental payload against the saved
+// tip or older shared history. Missing history contributes no new effects.
+func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
+	current waddrmgr.BlockStamp) (bool, error) {
+
+	committedHash := current.Hash
+	if int64(block.Height) < int64(current.Height) {
+		blocks, err := s.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+			StartHeight: block.Height,
+			EndHeight:   block.Height,
+		})
+		if errors.Is(err, db.ErrBlockNotFound) {
+			return false, nil
+		}
+
+		if err != nil || len(blocks) == 0 {
+			return false, err
+		}
+
+		committedHash = blocks[0].Hash
+	}
+
+	return block.Hash == committedHash, nil
 }
 
 // applyStoreTxBatch writes transaction matches through the store batch API.
