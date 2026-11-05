@@ -1157,6 +1157,174 @@ func deleteAccountIDIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	return nil
 }
 
+// deleteAccountRow removes the given account's row from the account bucket of
+// the database.
+func deleteAccountRow(ns walletdb.ReadWriteBucket, scope *KeyScope,
+	account uint32) error {
+
+	scopedBucket, err := fetchWriteScopeBucket(ns, scope)
+	if err != nil {
+		return err
+	}
+
+	bucket := scopedBucket.NestedReadWriteBucket(acctBucketName)
+
+	err = bucket.Delete(uint32ToBytes(account))
+	if err != nil {
+		str := fmt.Sprintf("failed to delete account %d", account)
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// deleteAddressByHash removes the address row identified by the given address
+// hash from the address bucket, along with its used-address marker, if any.
+func deleteAddressByHash(ns walletdb.ReadWriteBucket, scope *KeyScope,
+	addrHash []byte) error {
+
+	scopedBucket, err := fetchWriteScopeBucket(ns, scope)
+	if err != nil {
+		return err
+	}
+
+	bucket := scopedBucket.NestedReadWriteBucket(addrBucketName)
+	if err := bucket.Delete(addrHash); err != nil {
+		str := fmt.Sprintf("failed to delete address hash %x", addrHash)
+		return managerError(ErrDatabase, str, err)
+	}
+
+	bucket = scopedBucket.NestedReadWriteBucket(usedAddrBucketName)
+	if err := bucket.Delete(addrHash); err != nil {
+		str := fmt.Sprintf("failed to delete used address marker %x",
+			addrHash)
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// deleteAddrAccountIndex removes the given account's entries from the address
+// account index: the per-address entries recorded for the account's addresses
+// as well as the account's own sub-bucket. The hashes of the account's
+// addresses are returned so that the caller can remove the address rows they
+// key.
+func deleteAddrAccountIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
+	account uint32) ([][]byte, error) {
+
+	scopedBucket, err := fetchWriteScopeBucket(ns, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	bucket := scopedBucket.NestedReadWriteBucket(addrAcctIdxBucketName)
+
+	// If the index has no sub-bucket for the account, no addresses were
+	// ever recorded for it.
+	acctKey := uint32ToBytes(account)
+	acctBucket := bucket.NestedReadWriteBucket(acctKey)
+	if acctBucket == nil {
+		return nil, nil
+	}
+
+	// Collect the address hashes first: the bucket cannot be mutated
+	// while it is being iterated.
+	var addrHashes [][]byte
+	err = acctBucket.ForEach(func(k, v []byte) error {
+		// Skip buckets.
+		if v == nil {
+			return nil
+		}
+
+		addrHash := make([]byte, len(k))
+		copy(addrHash, k)
+		addrHashes = append(addrHashes, addrHash)
+		return nil
+	})
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+
+	// Remove the per-address entries of the account's addresses, then the
+	// account's sub-bucket itself.
+	for _, addrHash := range addrHashes {
+		if err := bucket.Delete(addrHash); err != nil {
+			str := fmt.Sprintf("failed to delete address account "+
+				"index key %x", addrHash)
+			return nil, managerError(ErrDatabase, str, err)
+		}
+	}
+	if err := bucket.DeleteNestedBucket(acctKey); err != nil {
+		str := fmt.Sprintf("failed to delete address account index "+
+			"bucket for account %d", account)
+		return nil, managerError(ErrDatabase, str, err)
+	}
+
+	return addrHashes, nil
+}
+
+// fetchSharedAddrAccount reports whether any address recorded in the address
+// account index for the given account is also recorded for another account,
+// and if so, returns that other account. The same address can belong to two
+// accounts when both derive it, such as when the same account public key is
+// imported twice.
+func fetchSharedAddrAccount(ns walletdb.ReadBucket, scope *KeyScope,
+	account uint32) (uint32, bool, error) {
+
+	scopedBucket, err := fetchReadScopeBucket(ns, scope)
+	if err != nil {
+		return 0, false, err
+	}
+
+	bucket := scopedBucket.NestedReadBucket(addrAcctIdxBucketName)
+
+	acctKey := uint32ToBytes(account)
+	acctBucket := bucket.NestedReadBucket(acctKey)
+	if acctBucket == nil {
+		return 0, false, nil
+	}
+
+	// Collect the sub-buckets of every other account. Values are nil only
+	// for nested buckets, whose keys are account numbers.
+	otherAccts := make(map[uint32]walletdb.ReadBucket)
+	err = bucket.ForEach(func(k, v []byte) error {
+		if v != nil || bytes.Equal(k, acctKey) {
+			return nil
+		}
+
+		otherAccts[binary.LittleEndian.Uint32(k)] =
+			bucket.NestedReadBucket(k)
+		return nil
+	})
+	if err != nil {
+		return 0, false, maybeConvertDbError(err)
+	}
+	if len(otherAccts) == 0 {
+		return 0, false, nil
+	}
+
+	var (
+		sharedAcct uint32
+		shared     bool
+	)
+	err = acctBucket.ForEach(func(k, v []byte) error {
+		if v == nil || shared {
+			return nil
+		}
+
+		for otherAcct, otherBucket := range otherAccts {
+			if otherBucket.Get(k) != nil {
+				sharedAcct, shared = otherAcct, true
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, false, maybeConvertDbError(err)
+	}
+
+	return sharedAcct, shared, nil
+}
+
 // putAccountNameIndex stores the given key to the account name index of the
 // database.
 func putAccountNameIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
