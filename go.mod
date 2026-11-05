@@ -23,7 +23,7 @@ require (
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/jrick/logrotate v1.1.2
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf
-	github.com/lightninglabs/neutrino v0.18.1-0.20261030000508-af3416b2e235
+	github.com/lightninglabs/neutrino v0.18.1-0.20261105002821-75e0a8f94585
 	github.com/lightninglabs/neutrino/cache v1.1.4
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/lightningnetwork/lnd/ticker v1.1.1
@@ -74,9 +74,9 @@ require (
 	github.com/kcalvinalvin/anet v0.0.0-20251112173137-d8ddc1f6dbee // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
-	github.com/lightningnetwork/lnd/actor v0.0.5 // indirect
+	github.com/lightningnetwork/lnd/actor v0.0.8 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
-	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
+	github.com/lightningnetwork/lnd/queue v1.2.1 // indirect
 	github.com/lightningnetwork/lnd/sqldb/v2 v2.0.0-20260504151100-6fd5b7bb27d7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
