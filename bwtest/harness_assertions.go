@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
@@ -16,6 +19,40 @@ var (
 	// tip.
 	ErrWalletNotSynced = errors.New("wallet not synced")
 )
+
+// AssertPsbtExecutes extracts a finalized packet's transaction and runs every
+// input through the script engine, against the previous outputs the packet
+// records. It shares no code with the Wallet's signing or finalization paths.
+func (h *HarnessTest) AssertPsbtExecutes(packet *psbt.Packet) {
+	h.Helper()
+
+	tx, err := psbt.Extract(packet)
+	require.NoError(h, err, "failed to extract final transaction")
+
+	fetcher := txscript.NewMultiPrevOutFetcher(nil)
+	prevOuts := make([]*wire.TxOut, len(tx.TxIn))
+
+	for i, txIn := range tx.TxIn {
+		prevOuts[i] = packet.Inputs[i].WitnessUtxo
+		if prevOuts[i] == nil {
+			parent := packet.Inputs[i].NonWitnessUtxo
+			prevOuts[i] = parent.TxOut[txIn.PreviousOutPoint.Index]
+		}
+
+		fetcher.AddPrevOut(txIn.PreviousOutPoint, prevOuts[i])
+	}
+
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+
+	for i, prevOut := range prevOuts {
+		engine, err := txscript.NewEngine(
+			prevOut.PkScript, tx, i, txscript.StandardVerifyFlags,
+			nil, hashes, prevOut.Value, fetcher,
+		)
+		require.NoError(h, err, "failed to create engine for input %d", i)
+		require.NoError(h, engine.Execute(), "input %d failed to execute", i)
+	}
+}
 
 // AssertWalletSynced polls until the wallet reports it is synced to the
 // miner's exact best block. Once this returns, wallet reads for that block may
