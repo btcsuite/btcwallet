@@ -2768,3 +2768,85 @@ func testFinalizePsbtFinalizedPacket(h *bwtest.HarnessTest) {
 	require.NoError(h, err)
 	require.Equal(h, original, unchanged)
 }
+
+// testFinalizePsbtRejectIncomplete verifies that a packet the Wallet cannot
+// complete is refused and that the caller's packet is left unchanged.
+func testFinalizePsbtRejectIncomplete(h *bwtest.HarnessTest) {
+	// Arrange: Each packet lacks what its only input needs, and no input is
+	// one FinalizePsbt could sign itself.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	unsignedExternal := newSignerPsbt(h, unknownOutpoint())
+	addExternalPsbtInput(h, &unsignedExternal.Inputs[0])
+
+	oneOfTwo, _ := newMultisigPsbt(h, w)
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: oneOfTwo})
+	require.NoError(h, err)
+
+	unsignedTapscript := newTapscriptPsbt(h, w)
+
+	unsupportedScript := newSignerPsbt(h, unknownOutpoint())
+	unsupportedScript.Inputs[0].WitnessUtxo = wire.NewTxOut(
+		int64(oneBTC), []byte{txscript.OP_TRUE},
+	)
+
+	// The psbt finalizer reports a multisig input short of signatures as an
+	// unsupported script rather than as not finalizable.
+	testCases := []struct {
+		name   string
+		packet *psbt.Packet
+		err    error
+	}{
+		{
+			name:   "unsigned external input",
+			packet: unsignedExternal,
+			err:    psbt.ErrNotFinalizable,
+		},
+		{
+			name:   "one of two multisig signatures",
+			packet: oneOfTwo,
+			err:    psbt.ErrUnsupportedScriptType,
+		},
+		{
+			name:   "unsigned tapscript input",
+			packet: unsignedTapscript,
+			err:    psbt.ErrNotFinalizable,
+		},
+		{
+			name:   "unsupported previous output script",
+			packet: unsupportedScript,
+			err:    psbt.ErrNotFinalizable,
+		},
+	}
+	for _, tc := range testCases {
+		original, err := tc.packet.B64Encode()
+		require.NoError(h, err, tc.name)
+
+		// Act: Ask the Wallet to complete the packet.
+		err = w.FinalizePsbt(ctx, tc.packet)
+
+		// Assert: The cause is named and the caller's packet is intact.
+		require.ErrorIs(h, err, tc.err, tc.name)
+
+		unchanged, err := tc.packet.B64Encode()
+		require.NoError(h, err, tc.name)
+		require.Equal(h, original, unchanged, tc.name)
+	}
+
+	// Arrange: The psbt library reports a missing previous output with no
+	// error identity, so this refusal can only assert that one occurred.
+	noPrevOut := newSignerPsbt(h, unknownOutpoint())
+	original, err := noPrevOut.B64Encode()
+	require.NoError(h, err)
+
+	// Act: Finalize a packet that does not say what it spends.
+	err = w.FinalizePsbt(ctx, noPrevOut)
+
+	// Assert: The refusal leaves the caller's packet intact.
+	require.Error(h, err)
+
+	unchanged, err := noPrevOut.B64Encode()
+	require.NoError(h, err)
+	require.Equal(h, original, unchanged)
+}
