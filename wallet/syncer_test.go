@@ -8603,3 +8603,60 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	require.Len(t, history, 1)
 	require.Equal(t, coinbase.Hash, history[0].Hash)
 }
+
+// TestProcessRelevantTxKeepsTerminalHistory leaves failed history unchanged
+// when a queued mempool echo reaches the real Store and notification path.
+func TestProcessRelevantTxKeepsTerminalHistory(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse the SQLite Wallet fixture, then invalidate a published
+	// owned transaction before subscribing. The queued echo must neither
+	// revive its stored history nor announce it as a published transaction.
+	w, _, script := subscriptionWallet(t)
+	tx := subscriptionTx(script, 93)
+	record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Unix(456, 0).UTC())
+	require.NoError(t, err)
+	require.NoError(t, w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: record.Received,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	}))
+	require.NoError(t, w.store.InvalidateUnminedTx(
+		t.Context(), db.InvalidateUnminedTxParams{
+			WalletID: w.id,
+			Txid:     record.Hash,
+		},
+	))
+	events, _, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+
+	s := newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		w.chainSyncer, w.chainEventChan,
+	)
+
+	// Act: Process the prepared observation through the same batch commit
+	// and post-commit notifier used by live relevant transactions.
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{TxRecord: record},
+		matches:      liveMatches(record),
+	})
+
+	// Assert: Successful replay keeps failed history and an open, empty
+	// subscription. Fixture cleanup remains the sole mock/lifecycle owner.
+	require.NoError(t, err)
+	info, err := w.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     record.Hash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusFailed, info.Status)
+
+	select {
+	case event := <-events:
+		t.Fatalf("terminal replay delivered or closed stream: %v", event)
+	default:
+	}
+}

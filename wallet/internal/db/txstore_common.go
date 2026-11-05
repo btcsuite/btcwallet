@@ -1370,12 +1370,23 @@ func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
 // transaction. An absent observation label preserves existing user metadata;
 // explicit labels retain the same strict comparison as direct creation.
 // Published entries may displace an unmined branch; Pending entries cannot.
+// Terminal history ignores unmined echoes; only a block may restore it.
 func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
 
 	existing, err := loadCreateTxExisting(ctx, req, ops)
 	if err != nil {
 		return err
+	}
+
+	// A queued network echo may outlive its branch. The batch owns current
+	// terminal history, so ignore that echo without aborting sync progress;
+	// only an actual confirming block can restore the stored transaction.
+	if existing != nil && req.Params.Block == nil &&
+		req.Params.Status == TxStatusPublished &&
+		!IsUnminedStatus(existing.Status) {
+
+		return nil
 	}
 
 	// Resolve the label from the same metadata replay will validate. Existing
