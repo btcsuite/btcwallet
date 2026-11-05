@@ -530,6 +530,10 @@ var allTestCases = []*testCase{
 		TestFunc: testFinalizePsbtFinalizedPacket,
 	},
 	{
+		Name:     "psbtmanager finalize reject incomplete",
+		TestFunc: testFinalizePsbtRejectIncomplete,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
