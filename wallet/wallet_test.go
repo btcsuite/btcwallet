@@ -315,6 +315,48 @@ func TestGetTransaction(t *testing.T) {
 	}
 }
 
+// TestResolveBlockRangeBitcoindEndHash ensures hash-based start and end
+// identifiers are assigned to their respective range boundaries.
+func TestResolveBlockRangeBitcoindEndHash(t *testing.T) {
+	t.Parallel()
+
+	startHash := chainhash.Hash{1}
+	endHash := chainhash.Hash{2}
+	resolveHash := func(hash *chainhash.Hash) (int32, error) {
+		switch *hash {
+		case startHash:
+			return 20, nil
+		case endHash:
+			return 10, nil
+		default:
+			return 0, fmt.Errorf("unknown block hash %v", hash)
+		}
+	}
+
+	start, end, err := resolveBlockRange(
+		NewBlockIdentifierFromHash(&startHash),
+		NewBlockIdentifierFromHash(&endHash),
+		resolveHash,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int32(20), start)
+	require.Equal(t, int32(10), end)
+
+	start, end, err = resolveBlockRange(
+		NewBlockIdentifierFromHeight(7), nil, resolveHash,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int32(7), start)
+	require.Equal(t, int32(-1), end)
+
+	resolveErr := fmt.Errorf("block lookup failed")
+	_, _, err = resolveBlockRange(
+		NewBlockIdentifierFromHash(&startHash), nil,
+		func(*chainhash.Hash) (int32, error) { return 0, resolveErr },
+	)
+	require.ErrorIs(t, err, resolveErr)
+}
+
 // TestGetTransactionConfirmations tests that GetTransaction correctly
 // calculates confirmations for both confirmed and unconfirmed transactions.
 // This is a regression test for a bug where confirmations were set to the
