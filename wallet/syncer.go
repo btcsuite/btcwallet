@@ -627,6 +627,39 @@ func (s *syncer) rewindToBlock(ctx context.Context,
 	return nil
 }
 
+// requestRollback lets the existing Manager reader own shared reconciliation.
+// Servicing the mailbox releases source backpressure and acknowledges this
+// worker's own preparation, so Manager can pause every writer before mutation.
+func (s *syncer) requestRollback(ctx context.Context, block db.Block) error {
+	req := rollbackReq{
+		walletName: s.cfg.Name,
+		block:      block,
+		result:     make(chan error, 1),
+	}
+	requests := s.chainSyncer.rollbackRequests()
+
+	for {
+		select {
+		case requests <- req:
+			// Disable admission once Manager owns the request; waiting
+			// still services its barrier and earlier observations.
+			requests = nil
+
+		case err := <-req.result:
+			return err
+
+		case event := <-s.chainEventChan:
+			err := s.processChainEventBeforeSync(ctx, event)
+			if err != nil {
+				return err
+			}
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // rewindWallet rewinds this wallet's sync and transaction state for a manual
 // rescan without requiring a DB-wide block rollback.
 func (s *syncer) rewindWallet(ctx context.Context,
