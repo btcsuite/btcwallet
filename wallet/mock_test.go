@@ -7,7 +7,6 @@ package wallet
 import (
 	"context"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -42,16 +41,16 @@ type mockSpendDetails struct {
 // SpendDetails interface.
 var _ SpendDetails = (*mockSpendDetails)(nil)
 
-// Sign implements the SpendDetails interface.
-func (m *mockSpendDetails) Sign(params *RawSigParams,
-	privKey *btcec.PrivateKey) (RawSignature, error) {
+// inputSigHash implements the SpendDetails interface.
+func (m *mockSpendDetails) inputSigHash(params *RawSigParams) (*inputSigHash,
+	error) {
 
-	args := m.Called(params, privKey)
+	args := m.Called(params)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 
-	return args.Get(0).(RawSignature), args.Error(1)
+	return args.Get(0).(*inputSigHash), args.Error(1)
 }
 
 // isSpendDetails implements the SpendDetails interface.
