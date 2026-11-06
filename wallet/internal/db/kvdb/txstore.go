@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -37,23 +38,13 @@ var errLegacyTxStatusUnexpectedSize = errors.New(
 	"legacy tx status bucket value has unexpected byte width",
 )
 
-// CreateTx records an unmined transaction through the legacy wtxmgr path.
+// CreateTx records an unmined transaction through the native wtxmgr path.
 //
-// Unlike the SQL backends, kvdb does NOT route through the shared
-// db.CreateTxWithOps orchestration, and this divergence is deliberate. That
-// shared flow owns the full CreateTx contract: confirmed-transaction inserts,
-// input-conflict discovery, invalidation/replacement of the displaced unmined
-// branch, and wallet-owned spent-input marking. The legacy wtxmgr data model
-// underneath kvdb is unmined-only and has no representation for that
-// confirmed-history, replacement, or spend-edge bookkeeping, so an adapter for
-// the shared ops would collapse most stages to notImplemented and add
-// boilerplate without sharing meaningful logic.
-//
-// kvdb therefore implements only the unmined-insertion path directly and
-// returns an explicit unsupported error for confirmed inserts (Block != nil)
-// below. It still reuses the shared, backend-independent request preparation
-// (db.NewCreateTxRequest) so parameter validation stays uniform across
-// backends; only the post-validation write sequencing is bespoke.
+// Competing spends are refused here. Published batch observations retain
+// native input claims because an accepted SPV send may still be an orphan.
+// Confirmation resolves conflicts. Confirmed inserts remain unsupported here
+// and are recorded through the batch notification path. Shared request
+// validation still keeps backend-independent parameter rules uniform.
 func (s *Store) CreateTx(ctx context.Context,
 	params db.CreateTxParams) error {
 
@@ -117,6 +108,14 @@ func (s *Store) createTxWithTx(tx walletdb.ReadWriteTx,
 		return db.ErrTxAlreadyExists
 	}
 
+	// Duplicates must reach Wallet's stored-witness check before conflict
+	// admission. A refused new write rolls back this native insertion and
+	// its input claims with the enclosing update.
+	err = s.reconcileUnminedConflicts(txmgrNs, txRec)
+	if err != nil {
+		return err
+	}
+
 	err = putLegacyTxStatus(txmgrNs, txRec.Hash, params.Status)
 	if err != nil {
 		return fmt.Errorf("put tx status: %w", err)
@@ -134,6 +133,42 @@ func (s *Store) createTxWithTx(tx walletdb.ReadWriteTx,
 	return s.addCreateTxCredits(
 		addrmgrNs, txmgrNs, txRec, params.Credits,
 	)
+}
+
+// reconcileUnminedConflicts rejects competing writes while leaving native
+// wtxmgr claims intact until confirmation or explicit branch deletion.
+func (s *Store) reconcileUnminedConflicts(ns walletdb.ReadWriteBucket,
+	rec *wtxmgr.TxRecord) error {
+
+	// The legacy store exposes its unmined set rather than a conflict index.
+	// Match its inputs against this request without adding persistent state.
+	unmined, err := s.txStore.UnminedTxs(ns)
+	if err != nil {
+		return fmt.Errorf("list unmined conflicts: %w", err)
+	}
+
+	inputs := make(map[wire.OutPoint]struct{}, len(rec.MsgTx.TxIn))
+	for _, input := range rec.MsgTx.TxIn {
+		inputs[input.PreviousOutPoint] = struct{}{}
+	}
+
+	for _, pending := range unmined {
+		hash := pending.TxHash()
+		if hash == rec.Hash {
+			continue
+		}
+
+		conflict := slices.ContainsFunc(pending.TxIn,
+			func(input *wire.TxIn) bool {
+				_, ok := inputs[input.PreviousOutPoint]
+				return ok
+			})
+		if conflict {
+			return db.ErrTxInputConflict
+		}
+	}
+
+	return nil
 }
 
 // addCreateTxCredits records wallet-owned outputs for a legacy transaction.
@@ -556,8 +591,8 @@ func (s *Store) resolveLegacyCreditCandidates(
 	return params, nil
 }
 
-// ownedLegacyCreditCandidate returns the first candidate address owned by the
-// legacy address manager.
+// ownedLegacyCreditCandidate returns the first owned candidate eligible for
+// automatic credits under the native scan scope and branch selection.
 func (s *Store) ownedLegacyCreditCandidate(
 	addrmgrNs walletdb.ReadBucket, params db.CreateTxParams, index uint32,
 	candidates []address.Address) (address.Address, error) {
@@ -576,13 +611,23 @@ func (s *Store) ownedLegacyCreditCandidate(
 			return nil, err
 		}
 
-		_, err = s.addrStore.Address(addrmgrNs, candidate)
-		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+		info, err := resolvedAddressInfo(addrmgrNs, s.addrStore, candidate)
+		if errors.Is(err, db.ErrAddressNotFound) {
 			continue
 		}
 
 		if err != nil {
 			return nil, fmt.Errorf("lookup candidate address: %w", err)
+		}
+
+		// Custom external HD children remain signing keys but do not belong
+		// to native receiving scans; raw imports have no derivation path.
+		if !waddrmgr.IsReceivingAddress(
+			info.HasDerivationPath, waddrmgr.KeyScope(info.KeyScope),
+			info.Branch,
+		) {
+
+			continue
 		}
 
 		return candidate, nil
@@ -591,7 +636,8 @@ func (s *Store) ownedLegacyCreditCandidate(
 	return nil, nil //nolint:nilnil // A nil address means no candidate matched.
 }
 
-// legacyCreditScriptOwned reports whether script resolves to a wallet address.
+// legacyCreditScriptOwned reports whether script resolves to an address in
+// the native automatic receiving set.
 func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
 	script []byte) (bool, error) {
 
@@ -600,8 +646,8 @@ func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
 		return false, nil
 	}
 
-	_, err := s.addrStore.Address(addrmgrNs, addr)
-	if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+	info, err := resolvedAddressInfo(addrmgrNs, s.addrStore, addr)
+	if errors.Is(err, db.ErrAddressNotFound) {
 		return false, nil
 	}
 
@@ -609,7 +655,11 @@ func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
 		return false, fmt.Errorf("lookup script address: %w", err)
 	}
 
-	return true, nil
+	// The fallback must not re-admit a candidate excluded by scope policy.
+	return waddrmgr.IsReceivingAddress(
+		info.HasDerivationPath, waddrmgr.KeyScope(info.KeyScope),
+		info.Branch,
+	), nil
 }
 
 // applyLegacyTxNotification records one relevant transaction notification using
@@ -754,6 +804,16 @@ func (s *Store) applyUnconfirmedLegacyTx(
 		return s.applyUnconfirmedDuplicate(
 			addrmgrNs, txmgrNs, existing, txRec.Hash, req,
 		)
+	}
+
+	// Only Published observations authorize competing unmined claims.
+	// Pending admission preserves existing spenders; native insertion keeps
+	// accepted claims until confirmation or explicit branch deletion.
+	if req.Params.Status != db.TxStatusPublished {
+		err = s.reconcileUnminedConflicts(txmgrNs, txRec)
+		if err != nil {
+			return err
+		}
 	}
 
 	credits, err := s.legacyCreditEntries(addrmgrNs, req)

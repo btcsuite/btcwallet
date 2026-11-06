@@ -2489,15 +2489,18 @@ func (s *syncer) storeImportedScanAddresses(
 
 // storeScanAddressRelevant reports whether a stored address row belongs in the
 // recovery scan set for its account shape and key scope.
-func (s *syncer) storeScanAddressRelevant(isRawImported, isDefaultScope bool,
+func (s *syncer) storeScanAddressRelevant(isRawImported bool, scope db.KeyScope,
 	info db.AddressInfo) bool {
 
 	// SQL has no legacy branch restriction on persisted account addresses.
-	if s.addrStore == nil || isRawImported || isDefaultScope {
+	if s.addrStore == nil {
 		return true
 	}
 
-	return info.Branch == waddrmgr.InternalBranch
+	// Account facts also cover raw-import rows that lack HD metadata.
+	return waddrmgr.IsReceivingAddress(
+		!isRawImported, waddrmgr.KeyScope(scope), info.Branch,
+	)
 }
 
 // storeAccountScanAddresses pages through a single account's addresses,
@@ -2513,12 +2516,6 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 		return nil, err
 	}
 
-	// In KVDB, outside the default key scopes only the internal (change)
-	// branch is relevant, matching ForEachRelevantActiveAddress's handling of
-	// change addresses that a since-fixed bug created in non-default scopes.
-	isDefaultScope := waddrmgr.IsDefaultScope(
-		waddrmgr.KeyScope(account.KeyScope),
-	)
 	isRawImported := keylessImportedAccount(account)
 
 	query := db.ListAddressesQuery{
@@ -2544,7 +2541,7 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 			// Retain legacy branch relevance only for KVDB. SQL must
 			// watch persisted external children in custom scopes too.
 			if !s.storeScanAddressRelevant(
-				isRawImported, isDefaultScope, info,
+				isRawImported, account.KeyScope, info,
 			) {
 
 				continue

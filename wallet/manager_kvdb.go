@@ -17,7 +17,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Register bdb.
 )
 
 // kvdbManagerBackend owns the legacy walletdb database and the one legacy
@@ -78,10 +77,10 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 }
 
 // create initializes and opens the one legacy wallet served by the backend.
-// Native initialization owns its default scopes; account batching is SQL-only.
+// Initial account batching completes before the unpublished managers escape.
 func (b *kvdbManagerBackend) create(ctx context.Context,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey,
-	_ []db.CreateDerivedAccountParams) (
+	accounts []db.CreateDerivedAccountParams) (
 	*walletData, error) {
 
 	if b.store != nil {
@@ -105,7 +104,38 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
-	return b.open(ctx, params.Name, adapterCfg)
+	data, err := b.open(ctx, params.Name, adapterCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(accounts) == 0 {
+		return data, nil
+	}
+
+	// No Wallet or worker can observe these native managers yet. Close them
+	// on refusal so rolled-back account keys cannot survive in their caches.
+	defer data.vault.Lock()
+
+	err = data.vault.Unlock(ctx, params.PrivatePassphrase)
+	if err != nil {
+		b.addressMgr.Close()
+
+		return nil, fmt.Errorf("unlock initial accounts: %w", err)
+	}
+
+	err = b.store.CreateInitialDerivedAccounts(
+		ctx, data.id, accounts,
+		newAccountDeriveFn(rootKey, data.vault, data.masterFingerprint),
+	)
+	if err != nil {
+		b.addressMgr.Close()
+
+		return nil, fmt.Errorf("create initial accounts: %w",
+			newAccountErr(err))
+	}
+
+	return data, nil
 }
 
 // listWallets loads the sole legacy Wallet once. A pristine database is the

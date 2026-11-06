@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/davecgh/go-spew/spew"
 )
@@ -766,9 +767,8 @@ func (w *Wallet) filterOwnedAddresses(ctx context.Context,
 	}
 
 	for scriptKey, info := range owned {
-		// Retain key ownership for signing without opting excluded
-		// accounts into automatic receiving credits or watches.
-		if info.NoChainSync {
+		// Keep ownership lookup intact while admitting only receiving credits.
+		if !w.addressReceivesCredits(info) {
 			continue
 		}
 
@@ -777,6 +777,19 @@ func (w *Wallet) filterOwnedAddresses(ctx context.Context,
 	}
 
 	return ownedAddrs, nil
+}
+
+// addressReceivesCredits applies receiving policy after ownership lookup.
+// SQL uses NoChainSync; native wallets also retain their scope/branch scan set.
+// Neither restriction changes access to the owned key for signing.
+func (w *Wallet) addressReceivesCredits(info *db.AddressInfo) bool {
+	if info.NoChainSync {
+		return false
+	}
+
+	return w.addrStore == nil || waddrmgr.IsReceivingAddress(
+		info.HasDerivationPath, waddrmgr.KeyScope(info.KeyScope), info.Branch,
+	)
 }
 
 // spendsWalletOutput reports whether the transaction spends at least one output
