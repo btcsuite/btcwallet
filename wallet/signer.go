@@ -921,6 +921,11 @@ func (w *Wallet) handleSignDigest(r signDigestReq) {
 func (w *Wallet) signDigest(ctx context.Context, path BIP32Path,
 	intent *SignDigestIntent) (Signature, error) {
 
+	signingVault, ok := w.keyVault.(keyvault.SigningVault)
+	if ok {
+		return w.signDigestInVault(ctx, signingVault, path, intent)
+	}
+
 	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
 		return nil, err
