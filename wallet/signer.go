@@ -837,6 +837,17 @@ func (w *Wallet) handleECDH(r ecdhReq) {
 func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
+	// A SQL vault computes the digest itself, so the key stays inside it.
+	signingVault, ok := w.keyVault.(keyvault.SigningVault)
+	if ok {
+		secret, err := signingVault.ECDH(ctx, pathKeySelector(path), pub)
+		if err != nil {
+			return [32]byte{}, mapDerivedKeyErr(err)
+		}
+
+		return secret, nil
+	}
+
 	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
 		return [32]byte{}, err
@@ -941,6 +952,11 @@ func (w *Wallet) handleSignDigest(r signDigestReq) {
 // signDigest signs the requested digest and zeroes its key before completion.
 func (w *Wallet) signDigest(ctx context.Context, path BIP32Path,
 	intent *SignDigestIntent) (Signature, error) {
+
+	signingVault, ok := w.keyVault.(keyvault.SigningVault)
+	if ok {
+		return w.signDigestInVault(ctx, signingVault, path, intent)
+	}
 
 	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
