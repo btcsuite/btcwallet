@@ -9,7 +9,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// LegacyWalletVault adapts the legacy address manager to keyvault.Vault.
+// LegacyWalletVault adapts the legacy address manager to keyvault.UnsafeVault.
 //
 // Deprecated: remove this adapter with kvdb support.
 type LegacyWalletVault struct {
@@ -17,8 +17,8 @@ type LegacyWalletVault struct {
 	mgr *waddrmgr.Manager
 }
 
-// Compile-time assertion that LegacyWalletVault satisfies keyvault.Vault.
-var _ keyvault.Vault = (*LegacyWalletVault)(nil)
+// Compile-time assertion that LegacyWalletVault satisfies keyvault.UnsafeVault.
+var _ keyvault.UnsafeVault = (*LegacyWalletVault)(nil)
 
 // NewLegacyWalletVault creates a Vault backed by a legacy walletdb address
 // manager.
