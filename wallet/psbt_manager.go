@@ -114,8 +114,8 @@ var (
 		"unsupported multiple BIP0032 derivation info found",
 	)
 
-	// ErrAmbiguousDerivation is returned when an input has both Taproot and
-	// BIP32 derivation information, which is an ambiguous state.
+	// ErrAmbiguousDerivation is returned when an input's Taproot and BIP32
+	// records describe conflicting origins.
 	ErrAmbiguousDerivation = errors.New(
 		"both Taproot and BIP32 derivation info found",
 	)
@@ -157,6 +157,10 @@ var (
 	// flow (skipping inputs that don't belong to this wallet) and should
 	// not be exposed to the caller.
 	errComputeRawSig = errors.New("cannot compute raw signature")
+
+	// errForeignSigningKey marks only a base-key mismatch, keeping caller
+	// tweak failures out of the internal ownership-skip path.
+	errForeignSigningKey = errors.New("foreign signing key")
 
 	// errTxOutputIndexOutOfRange is returned when a transaction output is
 	// missing the referenced index.
@@ -398,13 +402,17 @@ type PsbtManager interface {
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
 	//
-	// Owned Taproot inputs receive the Wallet's internal key. A conflicting
-	// caller internal key, or one on a non-Taproot input, returns
-	// ErrConflictingInputMetadata.
+	// Owned key-path Taproot inputs receive the Wallet's internal key. A
+	// conflicting caller internal key, or one on a non-Taproot input,
+	// returns ErrConflictingInputMetadata.
 	//
-	// When the origin is unknown, no new derivation records are added.
-	// Caller origins for the spending key are retained without authenticating
-	// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
+	// Owned imported Taproot scripts receive verified witness UTXO facts.
+	// Caller internal keys, merkle roots, leaf scripts and derivations remain
+	// unverified for the signer to validate when selecting a spending path.
+	//
+	// For key-based inputs with unknown root origin, no new derivations are
+	// added. Origins for the known key are retained without checking
+	// unknown paths. Wrong keys or families return ErrConflictingInputMetadata.
 	DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		skipUnknown bool) (*psbt.Packet, error)
 
@@ -524,13 +532,17 @@ type finalizePsbtReq struct {
 //     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
 //
-// Owned Taproot inputs receive the Wallet's internal key. A conflicting
-// caller internal key, or one on a non-Taproot input, returns
-// ErrConflictingInputMetadata.
+// Owned key-path Taproot inputs receive the Wallet's internal key. A
+// conflicting caller internal key, or one on a non-Taproot input,
+// returns ErrConflictingInputMetadata.
 //
-// When the origin is unknown, no new derivation records are added.
-// Caller origins for the spending key are retained without authenticating
-// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
+// Owned imported Taproot scripts receive verified witness UTXO facts.
+// Caller internal keys, merkle roots, leaf scripts and derivations remain
+// unverified for the signer to validate when selecting a spending path.
+//
+// For key-based inputs with unknown root origin, no new derivations are
+// added. Origins for the known key are retained without checking
+// unknown paths. Wrong keys or families return ErrConflictingInputMetadata.
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
@@ -613,16 +625,49 @@ func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
 		// If we own the UTXO, we'll proceed to decorate the
 		// corresponding PSBT input with detailed information from the
 		// wallet.
-		spends[i], err = w.decorateInput(
-			ctx, &packet.Inputs[i], tx, utxo,
+		spend, err := w.decorateTaprootScriptInput(
+			ctx, &packet.Inputs[i], utxo,
 		)
+		if err == nil && spend == waddrmgr.SpendTypeUnknown {
+			spend, err = w.decorateInput(ctx, &packet.Inputs[i], tx, utxo)
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("error decorating input %d: %w",
 				i, err)
 		}
+
+		spends[i] = spend
 	}
 
 	return spends, nil
+}
+
+// decorateTaprootScriptInput supplies verified output facts for script imports.
+// SpendTypeUnknown leaves ordinary inputs on the existing decoration path.
+func (w *Wallet) decorateTaprootScriptInput(ctx context.Context,
+	input *psbt.PInput, utxo *wire.TxOut) (waddrmgr.SpendType, error) {
+
+	if !txscript.IsPayToTaproot(utxo.PkScript) {
+		return waddrmgr.SpendTypeUnknown, nil
+	}
+
+	addr := extractAddrFromPKScript(utxo.PkScript, w.cfg.ChainParams)
+
+	info, err := w.getAddressInfo(ctx, addr)
+	if err != nil {
+		return waddrmgr.SpendTypeUnknown, err
+	}
+
+	if !isScriptSpendAddress(info) {
+		return waddrmgr.SpendTypeUnknown, nil
+	}
+
+	// Keep caller signing records unverified and carry the actual spend type
+	// into existing funding validation; the signer owns leaf authorization.
+	addInputInfoSegWitV1(input, utxo, nil)
+
+	return info.AddrType.SpendType(), nil
 }
 
 // decorateInput is a helper function that decorates a single PSBT input with
@@ -1539,6 +1584,17 @@ func (w *Wallet) signPsbtInput(ctx context.Context, packet *psbt.Packet,
 		return false, err
 	}
 
+	// Matching records can also accompany a SegWit v0 pay-join input. The
+	// actual prevout determines which of the reconciled origins to use.
+	if isTaproot && len(pInput.Bip32Derivation) != 0 {
+		utxo, err := fetchPsbtUtxo(packet, i)
+		if err != nil {
+			return false, err
+		}
+
+		isTaproot = txscript.IsPayToTaproot(utxo.PkScript)
+	}
+
 	// Based on the validated derivation information, we dispatch
 	// the signing task to the appropriate helper function. If the
 	// input is identified as Taproot, we use
@@ -1579,7 +1635,9 @@ func (w *Wallet) signPsbtInput(ctx context.Context, packet *psbt.Packet,
 // conventions):
 //  1. Path length must be exactly 5.
 //  2. First 3 elements must be hardened.
-//  3. Coin type must match the wallet's chain parameters.
+//
+// The coin type identifies a stored account scope, independently of the
+// address network. Signing resolves the exact scope and account from storage.
 //
 // NOTE: While the underlying cryptographic derivation is defined by BIP32, the
 // specific requirement for a 5-level path with hardened prefixes is strictly a
@@ -1610,13 +1668,6 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	account := path[2] - hdkeychain.HardenedKeyStart
 	branch := path[3]
 	index := path[4]
-
-	// Verify that the coin type matches the wallet's chain parameters.
-	if coinType != w.cfg.ChainParams.HDCoinType {
-		return BIP32Path{}, fmt.Errorf("%w: expected coin type %d, "+
-			"got %d", ErrInvalidBip32Path,
-			w.cfg.ChainParams.HDCoinType, coinType)
-	}
 
 	scope := waddrmgr.KeyScope{
 		Purpose: purpose,
@@ -1709,7 +1760,8 @@ func shouldSkipSigningError(err error, idx int) bool {
 	// operational Store, vault, tweaking and signing errors must reach the
 	// caller.
 	missingSigningKey := errors.Is(err, ErrAccountNotInStore) ||
-		errors.Is(err, ErrWatchOnlyAccount)
+		errors.Is(err, ErrWatchOnlyAccount) ||
+		errors.Is(err, errForeignSigningKey)
 	if errors.Is(err, errComputeRawSig) && missingSigningKey {
 		log.Debugf("Skipping input %d: %v", idx, err)
 		return true
@@ -1730,8 +1782,8 @@ func shouldSkipSigningError(err error, idx int) bool {
 //
 // It enforces the following rules:
 //  1. Only one derivation path per type is supported.
-//  2. Taproot and BIP32 derivation information cannot be present
-//     simultaneously. This avoids ambiguity about which signing path to take.
+//  2. Simultaneous Taproot and BIP32 records must describe the same origin.
+//     Matching records select Taproot signing; conflicting records fail.
 //
 // It returns a boolean indicating whether the input is a Taproot input (true)
 // or a legacy/SegWit input (false), and an error if the validation fails.
@@ -1750,9 +1802,20 @@ func validateDerivation(pInput *psbt.PInput, idx int) (bool, error) {
 	}
 
 	if tapCount == 1 && bip32Count == 1 {
-		// This is ambiguous/invalid state in the PSBT.
-		return false, fmt.Errorf("input %d: %w", idx,
-			ErrAmbiguousDerivation)
+		// A redundant compressed-key record is unambiguous only when its
+		// x-only key, complete path and root fingerprint agree. Preserve
+		// both records for callers while choosing Taproot signing.
+		tap := pInput.TaprootBip32Derivation[0]
+		bip := pInput.Bip32Derivation[0]
+
+		if len(bip.PubKey) != btcec.PubKeyBytesLenCompressed ||
+			!bytes.Equal(bip.PubKey[1:], tap.XOnlyPubKey) ||
+			!slices.Equal(bip.Bip32Path, tap.Bip32Path) ||
+			bip.MasterKeyFingerprint != tap.MasterKeyFingerprint {
+
+			return false, fmt.Errorf("input %d: %w", idx,
+				ErrAmbiguousDerivation)
+		}
 	}
 
 	// If we have Taproot info, it's a Taproot input.
@@ -2076,8 +2139,24 @@ func (w *Wallet) signTaprootPsbtInput(ctx context.Context, packet *psbt.Packet,
 		SigHashes:  sigHashes,
 		HashType:   pInput.SighashType,
 		Path:       path,
-		Tweaker:    tweaker,
 		Details:    details,
+	}
+
+	// A path can exist in several participants' wallets. Verify the base
+	// key against the x-only origin before a caller tweak or signature so
+	// collaborative signing cannot add another owner's invalid record.
+	params.Tweaker = func(key *btcec.PrivateKey) (*btcec.PrivateKey, error) {
+		if !bytes.Equal(key.PubKey().SerializeCompressed()[1:],
+			tapDerivation.XOnlyPubKey) {
+
+			return nil, errForeignSigningKey
+		}
+
+		if tweaker != nil {
+			return tweaker(key)
+		}
+
+		return key, nil
 	}
 
 	// Compute the raw signature.
@@ -2149,8 +2228,27 @@ func (w *Wallet) signBip32PsbtInput(ctx context.Context, packet *psbt.Packet,
 		SigHashes:  sigHashes,
 		HashType:   pInput.SighashType,
 		Path:       path,
-		Tweaker:    tweaker,
 		Details:    details,
+	}
+
+	// Verify ownership during the existing key lookup: another participant
+	// can use this same path under a different root. Authorize the base key
+	// before any caller tweak, preserving the caller's key encoding.
+	params.Tweaker = func(key *btcec.PrivateKey) (*btcec.PrivateKey, error) {
+		origin, err := btcec.ParsePubKey(derivation.PubKey)
+		if err != nil {
+			return nil, fmt.Errorf("parse origin: %w", err)
+		}
+
+		if !key.PubKey().IsEqual(origin) {
+			return nil, errForeignSigningKey
+		}
+
+		if tweaker != nil {
+			return tweaker(key)
+		}
+
+		return key, nil
 	}
 
 	// Compute the raw signature.

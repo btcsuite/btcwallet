@@ -902,6 +902,8 @@ func TestDecorateInputsInternalKey(t *testing.T) {
 		Txid:     validUTXO.Hash,
 	}).Return(testStoreTxDetail(validUTXO.Hash, utxo), nil).Once()
 	expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+	// Script ownership is probed before ordinary key-path validation.
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Twice()
 
 	packet := testFundingPacket(validUTXO)
 	packet.Inputs[0].TaprootInternalKey = schnorr.SerializePubKey(testKey(1))
@@ -1104,6 +1106,99 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	require.NotNil(t, packet.Inputs[2].WitnessUtxo)
 	require.Equal(t, int64(2000), packet.Inputs[2].WitnessUtxo.Value)
 	require.Len(t, packet.Inputs[2].Bip32Derivation, 1)
+}
+
+// TestDecorateInputsTaprootScript preserves imported spending metadata through
+// public funding, whose field validation depends on the actual spend type.
+func TestDecorateInputsTaprootScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit two real signature leaves and retain caller internal
+	// key metadata. The owned script import has no single root origin.
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(key.Zero)
+
+	alternate, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(alternate.Zero)
+
+	firstScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(key.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	secondScript, err := txscript.NewScriptBuilder().
+		AddData(schnorr.SerializePubKey(alternate.PubKey())).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	tree := txscript.AssembleTaprootScriptTree(
+		txscript.NewBaseTapLeaf(firstScript),
+		txscript.NewBaseTapLeaf(secondScript),
+	)
+	rootHash := tree.RootNode.TapHash()
+	root := rootHash[:]
+	outputKey := txscript.ComputeTaprootOutputKey(key.PubKey(), root)
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(outputKey), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	w, deps := createStartedSQLWalletWithMocks(t)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outpoint := wire.OutPoint{
+		Hash: chainhash.Hash{1},
+	}
+	output := expectFundingSourcesForAddress(t, w, deps, outpoint, addr)
+	packet := testFundingPacket(outpoint)
+	packet.UnsignedTx.AddTxOut(wire.NewTxOut(400_000, script))
+	packet.Outputs = make([]psbt.POutput, 1)
+
+	origin := &psbt.TaprootBip32Derivation{
+		XOnlyPubKey: schnorr.SerializePubKey(key.PubKey()),
+		LeafHashes:  [][]byte{},
+		Bip32Path:   []uint32{1, 0},
+	}
+	packet.Inputs[0].TaprootBip32Derivation =
+		[]*psbt.TaprootBip32Derivation{origin}
+	packet.Inputs[0].TaprootMerkleRoot = root
+	packet.Inputs[0].TaprootInternalKey = origin.XOnlyPubKey
+
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: script,
+	}).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		HasScript:    true,
+		ScriptPubKey: script,
+	}, nil).Once()
+
+	expectFundingLease(w, deps, []wire.OutPoint{outpoint}, nil)
+
+	// Act: Fund publicly so decoration's spend classification reaches the
+	// existing caller-field checks without selecting or loading a leaf.
+	result, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: Funding accepts script-path metadata and preserves the real
+	// UTXO and caller signing facts. Fixture cleanup checks the Store calls.
+	require.NoError(t, err)
+
+	input := result.Packet.Inputs[0]
+	require.Equal(t, output, input.WitnessUtxo)
+	require.Empty(t, input.Bip32Derivation)
+	require.Equal(
+		t, []*psbt.TaprootBip32Derivation{origin},
+		input.TaprootBip32Derivation,
+	)
+	require.Equal(t, root, input.TaprootMerkleRoot)
+	require.Equal(t, origin.XOnlyPubKey, input.TaprootInternalKey)
 }
 
 // TestDecorateInputsErrUnknownRequired tests that DecorateInputs returns
@@ -2203,7 +2298,9 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 func TestParseBip32Path(t *testing.T) {
 	t.Parallel()
 
-	// Use mainnet params for testing (HDCoinType = 0).
+	// Arrange: Use mainnet address parameters while including an explicit
+	// coin-1 account scope. A stored scope need not use the address network's
+	// default coin type; malformed path prefixes must still be rejected.
 	chainParams := &chaincfg.MainNetParams
 	w := &Wallet{
 		cfg: Config{
@@ -2281,11 +2378,22 @@ func TestParseBip32Path(t *testing.T) {
 			expectedErr: ErrInvalidBip32Path,
 		},
 		{
-			name: "coin type mismatch",
+			name: "explicit account coin scope",
 			path: []uint32{
 				hardened(84), hardened(1), hardened(0), 0, 0,
 			},
-			expectedErr: ErrInvalidBip32Path,
+			wantPath: BIP32Path{
+				KeyScope: waddrmgr.KeyScope{
+					Purpose: 84,
+					Coin:    1,
+				},
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: 0,
+					Account:         0,
+					Branch:          0,
+					Index:           0,
+				},
+			},
 		},
 		{
 			name: "unknown purpose (now allowed in parseBip32Path)",
@@ -2311,7 +2419,7 @@ func TestParseBip32Path(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Act: Call parseBip32Path with the test path.
+			// Act: Parse the supplied path before any Store account lookup.
 			gotPath, err := w.parseBip32Path(tc.path)
 
 			// Assert: Verify that the function returns the expected
@@ -3278,11 +3386,11 @@ func TestCreateBip32SpendDetails(t *testing.T) {
 func TestSignTaprootPsbtInput(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup keys.
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
+	// Arrange: Match the origin to the real fixture key returned by the
+	// Store signer, so a successful signature proves ownership of that key.
+	privKey, pubKey := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	t.Cleanup(privKey.Zero)
 
-	pubKey := privKey.PubKey()
 	xOnlyPubKey := schnorr.SerializePubKey(pubKey)
 
 	// Arrange: Define the BIP32 derivation path and Taproot derivation
@@ -3321,8 +3429,7 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 
 	// Arrange: Program the store-routed signer key lookup for the BIP-86
 	// path (purpose 86, coin type 1 for RegressionNet, account 0, branch 0,
-	// index 0). The key-path signature is not validated against a specific
-	// key here, so the derived leaf keys are discarded.
+	// index 0), matching the declared key origin above.
 	_, _ = expectStoreSignerPrivKey(
 		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
 		waddrmgr.DerivationPath{
@@ -3351,11 +3458,11 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 func TestSignBip32PsbtInput(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup keys.
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
+	// Arrange: Match the origin to the real fixture key returned by the
+	// Store signer, so a successful signature proves ownership of that key.
+	privKey, pubKey := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	t.Cleanup(privKey.Zero)
 
-	pubKey := privKey.PubKey()
 	pubKeyBytes := pubKey.SerializeCompressed()
 
 	// Arrange: Define the BIP32 derivation path for the input key (BIP-84
@@ -3401,8 +3508,7 @@ func TestSignBip32PsbtInput(t *testing.T) {
 
 	// Arrange: Program the store-routed signer key lookup for the BIP-84
 	// path (purpose 84, coin type 1 for RegressionNet, account 0, branch 0,
-	// index 0). The resulting PartialSig echoes the derivation entry's
-	// public key, so the derived leaf keys are discarded.
+	// index 0), matching the declared key origin above.
 	_, _ = expectStoreSignerPrivKey(
 		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
 		waddrmgr.DerivationPath{
@@ -3450,31 +3556,46 @@ func TestSignPsbt(t *testing.T) {
 
 	// The store account-secret lookup keys on InternalAccount, so a path
 	// that leaves it unset would silently resolve account 0 and sign with
-	// the wrong key. Both the default and a non-zero account are exercised.
+	// the wrong key. Exercise both account selection and a stored coin-0
+	// scope on regtest, whose address network defaults to coin 1.
 	tests := []struct {
 		name    string
 		account uint32
+		coin    uint32
 	}{
-		{name: "default account", account: 0},
-		{name: "non-zero account", account: 2},
+		{
+			name:    "default account",
+			account: 0,
+			coin:    1,
+		},
+		{
+			name:    "non-zero account",
+			account: 2,
+			coin:    1,
+		},
+		{
+			name:    "stored coin scope differs from network",
+			account: 0,
+			coin:    0,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Setup keys.
-			privKey, err := btcec.NewPrivateKey()
-			require.NoError(t, err)
+			// Arrange: Use the real fixture key returned by the Store
+			// signer, so a successful signature proves ownership.
+			privKey, pubKey := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+			t.Cleanup(privKey.Zero)
 
-			pubKey := privKey.PubKey()
 			pubKeyBytes := pubKey.SerializeCompressed()
 
 			// Arrange: Define the BIP32 derivation path for the
-			// input key (RegressionNet, P2WKH, coin type 1).
+			// input key, using its stored coin scope on regtest.
 			derivationPath := []uint32{
 				hdkeychain.HardenedKeyStart + 84,
-				hdkeychain.HardenedKeyStart + 1,
+				hdkeychain.HardenedKeyStart + test.coin,
 				hdkeychain.HardenedKeyStart + test.account,
 				0, 0,
 			}
@@ -3514,12 +3635,11 @@ func TestSignPsbt(t *testing.T) {
 			w, mocks := createUnlockedWalletWithMocks(t)
 
 			// Arrange: Program the store-routed signer key lookup
-			// for the resolved account. The derived leaf keys are
-			// discarded because the PartialSig echoes the
-			// derivation entry's public key.
+			// for the resolved account, deriving the same leaf key as
+			// the packet's declared public key.
 			_, _ = expectStoreSignerPrivKey(
 				t, mocks, w.id,
-				waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+				waddrmgr.KeyScope{Purpose: 84, Coin: test.coin},
 				waddrmgr.DerivationPath{
 					InternalAccount: test.account,
 					Branch:          0,
@@ -3537,7 +3657,6 @@ func TestSignPsbt(t *testing.T) {
 			require.Len(t, result.SignedInputs, 1)
 			require.Equal(t, uint32(0), result.SignedInputs[0])
 			require.Len(t, packet.Inputs[0].PartialSigs, 1)
-			mocks.store.AssertExpectations(t)
 		})
 	}
 }
@@ -3737,8 +3856,8 @@ func testP2WPKHSignPacket(t *testing.T, accounts ...uint32) *psbt.Packet {
 func TestSignPsbtLeavesCallerPacketOnSignError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: input 0 signs, and the store fails the key lookup for
-	// input 1's account.
+	// Arrange: Input 0 signs and both owned keys resolve. Input 1's caller
+	// tweak returns a public key error that must remain a fatal callback error.
 	packet := testP2WPKHSignPacket(t, 0, 1)
 	before := clonePacket(packet)
 
@@ -3747,21 +3866,25 @@ func TestSignPsbtLeavesCallerPacketOnSignError(t *testing.T) {
 		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
 		waddrmgr.DerivationPath{InternalAccount: 0},
 	)
-	mocks.store.On(
-		"GetAccountSecret", mock.Anything,
-		db.GetAccountSecretQuery{
-			WalletID:      w.id,
-			Scope:         db.KeyScope{Purpose: 84, Coin: 1},
-			AccountNumber: 1,
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+		waddrmgr.DerivationPath{InternalAccount: 1},
+	)
+	tweakers := map[int]PrivKeyTweaker{
+		1: func(*btcec.PrivateKey) (*btcec.PrivateKey, error) {
+			return nil, ErrNoAssocPrivateKey
 		},
-	).Return((*db.AccountSecret)(nil), errDb).Once()
+	}
 
-	// Act: sign the packet.
-	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+	// Act: Sign both inputs, reaching the caller hook after key matching.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{
+		Packet:        packet,
+		InputTweakers: tweakers,
+	})
 
-	// Assert: the store error is returned and input 0's signature did not
-	// reach the caller's packet.
-	require.ErrorIs(t, err, errDb)
+	// Assert: Callback provenance remains fatal even for a public ownership
+	// sentinel, and the earlier signature never reaches the caller's packet.
+	require.ErrorIs(t, err, ErrNoAssocPrivateKey)
 	require.Equal(t, before, packet)
 }
 
@@ -3915,6 +4038,18 @@ func TestSignPsbtSkipsWalletRecord(t *testing.T) {
 	// Arrange: a packet the wallet has already signed once. The store
 	// lookup is programmed for that first pass only.
 	packet := testP2WPKHSignPacket(t, 0)
+
+	// A pay-join participant can provide both formats even for a SegWit v0
+	// prevout. Matching origins must not switch its signing algorithm.
+	origin := packet.Inputs[0].Bip32Derivation[0]
+	packet.Inputs[0].TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{
+		{
+			XOnlyPubKey:          origin.PubKey[1:],
+			MasterKeyFingerprint: origin.MasterKeyFingerprint,
+			Bip32Path:            origin.Bip32Path,
+		},
+	}
+
 	derivations := clonePacket(packet).Inputs[0].Bip32Derivation
 
 	w, mocks := createUnlockedWalletWithMocks(t)
@@ -3965,6 +4100,17 @@ func TestSignPsbtSkipsWalletKeySpendRecord(t *testing.T) {
 				0, 0,
 			},
 		}}
+
+	// lnd can include both origin formats for the same key. Keep the
+	// redundant base record through both public signing passes.
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{
+		{
+			PubKey: walletPub.SerializeCompressed(),
+			Bip32Path: packet.Inputs[0].
+				TaprootBip32Derivation[0].Bip32Path,
+		},
+	}
+
 	derivations := clonePacket(packet).Inputs[0].TaprootBip32Derivation
 
 	w, mocks := createUnlockedWalletWithMocks(t)
@@ -5851,6 +5997,7 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 
 	tests := []struct {
 		name          string
+		reads         int
 		addrType      db.AddressType
 		origin        []*psbt.Bip32Derivation
 		taprootOrigin []*psbt.TaprootBip32Derivation
@@ -5859,22 +6006,26 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 	}{
 		{
 			name:     "omit unknown origin",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			parent:   true,
 		},
 		{
 			name:     "retain matching native origin",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			origin:   origin,
 			parent:   true,
 		},
 		{
 			name:        "omit unknown taproot origin",
+			reads:       2,
 			addrType:    db.TaprootPubKey,
 			internalKey: stored.PubKey[1:],
 		},
 		{
 			name:          "retain matching taproot origin",
+			reads:         2,
 			addrType:      db.TaprootPubKey,
 			taprootOrigin: taprootOrigin,
 			internalKey:   stored.PubKey[1:],
@@ -5898,6 +6049,9 @@ func TestFundPsbtImportedInputOrigins(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 			expectFundingLease(w, mocks, []wire.OutPoint{validUTXO}, nil)
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -5956,11 +6110,13 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		reads    int
 		addrType db.AddressType
 		caller   psbt.PInput
 	}{
 		{
 			name:     "contradict taproot internal key",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
@@ -5968,6 +6124,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot derivation on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: taprootOrigin,
@@ -5975,6 +6132,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot internal key on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: stored.PubKey[1:],
@@ -5982,6 +6140,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "bip32 derivation on taproot input",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: origin,
@@ -5989,6 +6148,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "foreign native derivation",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: testWalletDerivation(),
@@ -5996,6 +6156,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "foreign taproot derivation",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -6003,6 +6164,7 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 		},
 		{
 			name:     "taproot script-path derivation",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: leafOrigin,
@@ -6027,6 +6189,9 @@ func TestFundPsbtRejectsImportedInputKey(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -6061,11 +6226,13 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 	// The family rows must not become Wallet facts merely by being seeded.
 	tests := []struct {
 		name     string
+		reads    int
 		addrType db.AddressType
 		caller   psbt.PInput
 	}{
 		{
 			name:     "conflicting taproot internal key",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				TaprootInternalKey: schnorr.SerializePubKey(testKey(1)),
@@ -6073,6 +6240,7 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 		},
 		{
 			name:     "taproot derivation on native input",
+			reads:    1,
 			addrType: db.WitnessPubKey,
 			caller: psbt.PInput{
 				TaprootBip32Derivation: testWalletTaprootDerivation(),
@@ -6080,6 +6248,7 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 		},
 		{
 			name:     "native derivation on taproot input",
+			reads:    2,
 			addrType: db.TaprootPubKey,
 			caller: psbt.PInput{
 				Bip32Derivation: testWalletDerivation(),
@@ -6102,6 +6271,9 @@ func TestFundPsbtKnownInputMetadata(t *testing.T) {
 				t, w, mocks, validUTXO, inputAddr,
 			)
 			expectStoreAddressInfo(t, w, mocks, inputAddr, &stored)
+			// Taproot probes script ownership before key-path decoration.
+			mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].
+				Times(test.reads)
 
 			packet := testFundingPacket(validUTXO)
 			packet.UnsignedTx.AddTxOut(
@@ -6621,7 +6793,8 @@ func TestFundPsbtKeepsTaprootParentTx(t *testing.T) {
 	expectSignerDerivedAddressInfo(
 		t, w, mocks, inputAddr, db.TaprootPubKey, inputKey.PubKey(),
 	)
-	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Once()
+	// Probe script ownership before ordinary key-path decoration.
+	mocks.store.ExpectedCalls[len(mocks.store.ExpectedCalls)-1].Twice()
 	expectFundingLease(w, mocks, []wire.OutPoint{outPoint}, nil)
 
 	tx := wire.NewMsgTx(2)
@@ -7201,4 +7374,219 @@ func TestFundPsbtAmbiguousReservationCleanupJoinedByStop(t *testing.T) {
 	require.ErrorIs(t, <-resultChan, ErrIndeterminateCommit)
 	require.NoError(t, <-stoppedChan)
 	require.NoError(t, releaseCtxErr)
+}
+
+// TestSignPsbtSkipsForeignOrigin checks that matching account coordinates do
+// not authorize signing an input whose key belongs to another participant.
+func TestSignPsbtSkipsForeignOrigin(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit real foreign keys in the UTXOs while the signer has a
+	// different root at the same coordinates. Only metadata varies by row.
+	foreign, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(foreign.Zero)
+	pub := foreign.PubKey()
+	tapScript, err := txscript.PayToTaprootScript(
+		txscript.ComputeTaprootKeyNoScript(pub),
+	)
+	require.NoError(t, err)
+
+	v0Path := []uint32{
+		hdkeychain.HardenedKeyStart + 84,
+		hdkeychain.HardenedKeyStart + 1,
+		hdkeychain.HardenedKeyStart, 0, 0,
+	}
+	v1Path := append([]uint32(nil), v0Path...)
+	v1Path[0] = hdkeychain.HardenedKeyStart + 86
+
+	tests := []struct {
+		name     string
+		purpose  uint32
+		script   []byte
+		hashType txscript.SigHashType
+		bip32    []*psbt.Bip32Derivation
+		taproot  []*psbt.TaprootBip32Derivation
+	}{
+		{
+			name:     "SegWit v0",
+			purpose:  84,
+			script:   testP2WPKHScript(t, pub),
+			hashType: txscript.SigHashAll,
+			bip32: []*psbt.Bip32Derivation{
+				{
+					PubKey:    pub.SerializeCompressed(),
+					Bip32Path: v0Path,
+				},
+			},
+		},
+		{
+			name:     "Taproot",
+			purpose:  86,
+			script:   tapScript,
+			hashType: txscript.SigHashDefault,
+			taproot: []*psbt.TaprootBip32Derivation{
+				{
+					XOnlyPubKey: schnorr.SerializePubKey(pub),
+					Bip32Path:   v1Path,
+				},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			_, _ = expectStoreSignerPrivKey(
+				t, mocks, w.id, waddrmgr.KeyScope{
+					Purpose: tc.purpose,
+					Coin:    1,
+				}, waddrmgr.DerivationPath{},
+			)
+			packet, _, _ := testAuthPacket(
+				t, wire.NewTxOut(1000, tc.script), tc.hashType,
+			)
+			packet.Inputs[0].Bip32Derivation = tc.bip32
+			packet.Inputs[0].TaprootBip32Derivation = tc.taproot
+			before := clonePacket(packet)
+
+			// Act: Ask this Wallet to contribute through public signing
+			// to the foreign participant's otherwise signable input.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: An ownership miss adds no false signature and
+			// leaves every caller record unchanged for its actual signer.
+			require.NoError(t, err)
+			require.Empty(t, result.SignedInputs)
+			require.Equal(t, before, packet)
+		})
+	}
+}
+
+// TestSignPsbtOwnsUncompressedLegacyKey preserves an owned legacy origin's
+// encoding while matching its curve point and producing an authorized record.
+func TestSignPsbtOwnsUncompressedLegacyKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Match the fixture's real uncompressed key to a legacy output
+	// and its parent transaction for signature-record authorization.
+	priv, pub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	t.Cleanup(priv.Zero)
+
+	encoded := pub.SerializeUncompressed()
+	addr, err := address.NewAddressPubKeyHash(
+		address.Hash160(encoded), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	utxo := wire.NewTxOut(1000, pkScript)
+	parent := wire.NewMsgTx(2)
+	parent.AddTxIn(&wire.TxIn{})
+	parent.AddTxOut(utxo)
+	packet, _, _ := testAuthPacket(t, utxo, txscript.SigHashAll)
+	packet.UnsignedTx.TxIn[0].PreviousOutPoint = wire.OutPoint{
+		Hash: parent.TxHash(),
+	}
+	packet.Inputs[0].WitnessUtxo = nil
+	packet.Inputs[0].NonWitnessUtxo = parent
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{
+		{
+			PubKey: encoded,
+			Bip32Path: []uint32{
+				hdkeychain.HardenedKeyStart + 44,
+				hdkeychain.HardenedKeyStart + 1,
+				hdkeychain.HardenedKeyStart, 0, 0,
+			},
+		},
+	}
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 44, Coin: 1},
+		waddrmgr.DerivationPath{},
+	)
+
+	// Act: Sign the owned origin through public admission.
+	result, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: Ownership is independent of encoding. A second public pass
+	// validates the real signature record without another private-key lookup.
+	require.NoError(t, err)
+	require.Equal(t, []uint32{0}, result.SignedInputs)
+	require.Len(t, packet.Inputs[0].PartialSigs, 1)
+	require.Equal(t, encoded, packet.Inputs[0].PartialSigs[0].PubKey)
+	_, err = w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+	require.NoError(t, err)
+}
+
+// TestSignPsbtRejectsConflictingOrigins preserves strict metadata authorization
+// when valid BIP32 and Taproot records disagree about one origin fact.
+func TestSignPsbtRejectsConflictingOrigins(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start from an owned, signable input and vary exactly one
+	// well-formed origin fact. No Store lookup is authorized for any row.
+	base := testP2WPKHSignPacket(t, 0)
+	origin := base.Inputs[0].Bip32Derivation[0]
+	foreign, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(foreign.Zero)
+
+	otherPath := append([]uint32(nil), origin.Bip32Path...)
+	otherPath[4]++
+
+	tests := []struct {
+		name   string
+		origin psbt.TaprootBip32Derivation
+	}{
+		{
+			name: "different public key",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey: schnorr.SerializePubKey(foreign.PubKey()),
+				Bip32Path:   origin.Bip32Path,
+			},
+		},
+		{
+			name: "different path",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey: origin.PubKey[1:],
+				Bip32Path:   otherPath,
+			},
+		},
+		{
+			name: "different fingerprint",
+			origin: psbt.TaprootBip32Derivation{
+				XOnlyPubKey:          origin.PubKey[1:],
+				Bip32Path:            origin.Bip32Path,
+				MasterKeyFingerprint: 1,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, _ := createUnlockedWalletWithMocks(t)
+			packet := clonePacket(base)
+			packet.Inputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{&tc.origin}
+			before := packetSnapshot(t, packet)
+
+			// Act: Submit conflicting origins to public signing before
+			// selecting either signing algorithm or looking up a key.
+			result, err := w.SignPsbt(
+				t.Context(), &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: Ambiguity remains fatal, returns no result and
+			// leaves the participant's original packet unchanged.
+			require.ErrorIs(t, err, ErrAmbiguousDerivation)
+			require.Nil(t, result)
+			require.Equal(t, before, packetSnapshot(t, packet))
+		})
+	}
 }
