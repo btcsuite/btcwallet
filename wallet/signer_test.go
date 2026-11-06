@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1809,77 +1810,9 @@ func TestScriptForOutputScriptClasses(t *testing.T) {
 func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Use a stub deriver and real identity for the imported address.
-	deriveAddress := func(context.Context,
-		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
-
-		return nil, errDerivationFailed
-	}
-	identity, err := db.NewDatabaseIdentity(&chainParams, nil)
-	require.NoError(t, err)
-	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
-		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
-		DeriveAddress: deriveAddress,
-		Identity:      identity,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	// Real watch-only wallet secrets, so the vault derives its script key
-	// from the passphrase exactly as production does.
-	passphrase := []byte("watch-only-passphrase")
-	secrets, err := keyvault.CreateWalletSecrets(passphrase, nil, true)
-	require.NoError(t, err)
-
-	walletInfo, err := store.CreateWallet(
-		t.Context(), db.CreateWalletParams{
-			Name:                "sql-watch-only-taproot",
-			ManagerVersion:      1,
-			MasterKeyPrivParams: secrets.MasterPrivParams,
-			EncryptedCryptoScriptKey: secrets.
-				EncryptedCryptoScriptKey,
-			IsWatchOnly: true,
-		},
-	)
-	require.NoError(t, err)
-
-	vault := keyvault.NewWalletVault(store, walletInfo.ID, true)
-	require.NoError(t, vault.Unlock(t.Context(), passphrase))
-	t.Cleanup(vault.Lock)
-
-	chain := &bwmock.Chain{}
-	// This fixture assembles its own runtime; the shared start helper
-	// only starts the request loop and joins it before storage cleanup.
-	ctx, cancel := context.WithCancel(t.Context())
-
-	w := &Wallet{
-		lifetimeCtx: ctx,
-		cancel:      cancel,
-		requestChan: make(chan any),
-		lockTimer:   time.NewTimer(time.Hour),
-		store:       store,
-		keyVault:    vault,
-		unsafeVault: vault,
-		cache:       newStoreRuntimeCache(store),
-		state:       newWalletState(nil),
-		isWatchOnly: true,
-		cfg: Config{
-			Chain:       chain,
-			ChainParams: &chainParams,
-		},
-		id: walletInfo.ID,
-	}
-
-	// Supply the same routing dependency as Manager assembly before address
-	// or import calls can activate native notifications on this fixture.
-	w.chainSyncer = newChainSyncer(chain, &chainParams)
-	w.chainEventChan = make(chan chainEvent, 1)
-
-	// Disable auto-lock timing so this fixture exercises only its API call.
-	w.lockTimer.Stop()
-	startLoadedWalletForTest(t, w)
+	// Arrange: A watch-only SQLite wallet with the production vault.
+	store, vault, walletID := newSQLScriptVault(t)
+	w, chain := startSQLScriptWallet(t, store, vault, walletID)
 
 	tapscript := newTestTapscript(t)
 	leafScript := tapscript.Leaves[0].Script
@@ -1914,7 +1847,7 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 
 	secret, err := store.GetAddressSecret(
 		t.Context(), db.GetAddressSecretQuery{
-			WalletID:     walletInfo.ID,
+			WalletID:     walletID,
 			ScriptPubKey: pkScript,
 		},
 	)
@@ -3404,4 +3337,644 @@ func TestSignerRejectsUnsetRequiredParams(t *testing.T) {
 	// Assert: The unset interface is reported before any key is derived.
 	require.ErrorIs(t, err, ErrNilArguments)
 	require.Nil(t, rawSig)
+}
+
+// newSQLScriptVault returns a SQLite store with one watch-only wallet and the
+// production vault for that wallet, already unlocked. A watch-only wallet still
+// derives the script key that seals script bodies.
+func newSQLScriptVault(t *testing.T) (db.Store, *keyvault.WalletVault,
+	uint32) {
+
+	t.Helper()
+
+	// Script imports derive no addresses, so the deriver only fails.
+	deriveAddress := func(context.Context,
+		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		return nil, errDerivationFailed
+	}
+	identity, err := db.NewDatabaseIdentity(&chainParams, nil)
+	require.NoError(t, err)
+
+	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
+		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
+		DeriveAddress: deriveAddress,
+		Identity:      identity,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	passphrase := []byte("watch-only-passphrase")
+	secrets, err := keyvault.CreateWalletSecrets(passphrase, nil, true)
+	require.NoError(t, err)
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), db.CreateWalletParams{
+			Name:                "sql-watch-only-scripts",
+			ManagerVersion:      1,
+			MasterKeyPrivParams: secrets.MasterPrivParams,
+			EncryptedCryptoScriptKey: secrets.
+				EncryptedCryptoScriptKey,
+			IsWatchOnly: true,
+		},
+	)
+	require.NoError(t, err)
+
+	vault := keyvault.NewWalletVault(store, walletInfo.ID, true)
+	require.NoError(t, vault.Unlock(t.Context(), passphrase))
+	t.Cleanup(vault.Lock)
+
+	return store, vault, walletInfo.ID
+}
+
+// startSQLScriptWallet starts a watch-only wallet over store and vault. The
+// store and vault may be spies that wrap the ones from newSQLScriptVault.
+func startSQLScriptWallet(t *testing.T, store db.Store,
+	vault keyvault.UnsafeVault, walletID uint32) (*Wallet, *bwmock.Chain) {
+
+	t.Helper()
+
+	chain := &bwmock.Chain{}
+
+	// This fixture assembles its own runtime; the shared start helper
+	// only starts the request loop and joins it before storage cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+
+	w := &Wallet{
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+		lockTimer:   time.NewTimer(time.Hour),
+		store:       store,
+		keyVault:    vault,
+		unsafeVault: vault,
+		cache:       newStoreRuntimeCache(store),
+		state:       newWalletState(nil),
+		isWatchOnly: true,
+		cfg: Config{
+			Chain:       chain,
+			ChainParams: &chainParams,
+		},
+		id: walletID,
+	}
+
+	// Supply the same routing dependency as Manager assembly before address
+	// or import calls can activate native notifications on this fixture.
+	w.chainSyncer = newChainSyncer(chain, &chainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
+
+	// Disable auto-lock timing so this fixture exercises only its API call.
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
+
+	return w, chain
+}
+
+// secretSpyStore counts the address secret reads that reach the Store through
+// the wallet, so a test can prove that the wallet never sees one.
+type secretSpyStore struct {
+	db.Store
+
+	secretReads atomic.Int32
+}
+
+// GetAddressSecret counts the read and forwards it.
+//
+//nolint:wrapcheck
+func (s *secretSpyStore) GetAddressSecret(ctx context.Context,
+	query db.GetAddressSecretQuery) (*db.AddressSecret, error) {
+
+	s.secretReads.Add(1)
+
+	return s.Store.GetAddressSecret(ctx, query)
+}
+
+// decryptSpyVault counts raw Decrypt calls on a production vault. It keeps the
+// DecryptScript operation of the vault that it wraps.
+type decryptSpyVault struct {
+	*keyvault.WalletVault
+
+	decrypts atomic.Int32
+}
+
+// Decrypt counts the call and forwards it.
+//
+//nolint:wrapcheck
+func (v *decryptSpyVault) Decrypt(keyType waddrmgr.CryptoKeyType,
+	ciphertext []byte) ([]byte, error) {
+
+	v.decrypts.Add(1)
+
+	return v.WalletVault.Decrypt(keyType, ciphertext)
+}
+
+// sqlScriptVector is one stored script output and the script that
+// ScriptForOutput must return for it.
+type sqlScriptVector struct {
+	name         string
+	addrType     db.AddressType
+	scriptPubKey []byte
+	stored       []byte
+	want         []byte
+}
+
+// sqlScriptVectors returns a P2SH, a P2WSH, and a Taproot output. Each stores
+// the body that the import path would encrypt for it.
+func sqlScriptVectors(t *testing.T) []sqlScriptVector {
+	t.Helper()
+
+	_, pubKey := deterministicPrivKey(t)
+
+	redeemScript, err := txscript.NewScriptBuilder().
+		AddOp(txscript.OP_1).
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_1).
+		AddOp(txscript.OP_CHECKMULTISIG).
+		Script()
+	require.NoError(t, err)
+
+	p2sh, err := address.NewAddressScriptHash(redeemScript, &chainParams)
+	require.NoError(t, err)
+
+	witnessScript, err := txscript.NewScriptBuilder().
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(t, err)
+
+	scriptHash := sha256.Sum256(witnessScript)
+	p2wsh, err := address.NewAddressWitnessScriptHash(
+		scriptHash[:], &chainParams,
+	)
+	require.NoError(t, err)
+
+	tapscript := newTestTapscript(t)
+	encodedTapscript, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	taprootKey, err := tapscript.TaprootKey()
+	require.NoError(t, err)
+
+	p2tr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(taprootKey), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript := func(addr address.Address) []byte {
+		script, err := txscript.PayToAddrScript(addr)
+		require.NoError(t, err)
+
+		return script
+	}
+
+	return []sqlScriptVector{{
+		name:         "p2sh redeem script",
+		addrType:     db.ScriptHash,
+		scriptPubKey: pkScript(p2sh),
+		stored:       redeemScript,
+		want:         redeemScript,
+	}, {
+		name:         "p2wsh witness script",
+		addrType:     db.WitnessScript,
+		scriptPubKey: pkScript(p2wsh),
+		stored:       witnessScript,
+		want:         witnessScript,
+	}, {
+		name:         "taproot leaf script",
+		addrType:     db.TaprootPubKey,
+		scriptPubKey: pkScript(p2tr),
+		stored:       encodedTapscript,
+		want:         tapscript.Leaves[0].Script,
+	}}
+}
+
+// importSQLScript persists one script output with its body encrypted by the
+// production vault, as the import path does. A nil body imports the output
+// without a script.
+func importSQLScript(t *testing.T, store db.Store,
+	vault *keyvault.WalletVault, walletID uint32, addrType db.AddressType,
+	scriptPubKey, body []byte) {
+
+	t.Helper()
+
+	var encrypted []byte
+	if body != nil {
+		var err error
+
+		encrypted, err = vault.Encrypt(waddrmgr.CKTScript, body)
+		require.NoError(t, err)
+	}
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			AddressType:     addrType,
+			ScriptPubKey:    scriptPubKey,
+			EncryptedScript: encrypted,
+		},
+	)
+	require.NoError(t, err)
+}
+
+// TestScriptForOutputSQLVaultVectors verifies that a SQL wallet resolves P2SH,
+// P2WSH, and Taproot scripts through the vault operation. The wallet must not
+// read the encrypted address secret or call raw Decrypt, and a caller that
+// changes a returned script must not change a later result.
+func TestScriptForOutputSQLVaultVectors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Spy on the Store that the wallet sees and on the vault.
+	store, vault, walletID := newSQLScriptVault(t)
+	spyStore := &secretSpyStore{Store: store}
+	spyVault := &decryptSpyVault{WalletVault: vault}
+	w, _ := startSQLScriptWallet(t, spyStore, spyVault, walletID)
+
+	vectors := sqlScriptVectors(t)
+	for _, vector := range vectors {
+		importSQLScript(
+			t, store, vault, walletID, vector.addrType,
+			vector.scriptPubKey, vector.stored,
+		)
+	}
+
+	for _, vector := range vectors {
+		output := wire.TxOut{PkScript: vector.scriptPubKey}
+
+		// Act: Resolve the script, change it, and resolve it again.
+		first, err := w.ScriptForOutput(t.Context(), output)
+		require.NoError(t, err, vector.name)
+		require.Equal(t, vector.want, first.Script, vector.name)
+
+		for i := range first.Script {
+			first.Script[i] ^= 0xff
+		}
+
+		second, err := w.ScriptForOutput(t.Context(), output)
+
+		// Assert: The second result still holds the stored script.
+		require.NoError(t, err, vector.name)
+		require.Equal(t, vector.want, second.Script, vector.name)
+	}
+
+	// Assert: The secret stayed inside the vault.
+	require.Zero(t, spyStore.secretReads.Load())
+	require.Zero(t, spyVault.decrypts.Load())
+}
+
+// TestScriptForOutputSQLVaultErrors verifies the not-mine, missing-script, and
+// locked results of a SQL wallet, and that a missing script wins over the lock
+// state as it did before the vault operation.
+func TestScriptForOutputSQLVaultErrors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: One output with a script, one without, and one unknown.
+	store, vault, walletID := newSQLScriptVault(t)
+	spyStore := &secretSpyStore{Store: store}
+	spyVault := &decryptSpyVault{WalletVault: vault}
+	w, _ := startSQLScriptWallet(t, spyStore, spyVault, walletID)
+
+	vectors := sqlScriptVectors(t)
+	withScript, withoutScript := vectors[1], vectors[0]
+	importSQLScript(
+		t, store, vault, walletID, withScript.addrType,
+		withScript.scriptPubKey, withScript.stored,
+	)
+	importSQLScript(
+		t, store, vault, walletID, withoutScript.addrType,
+		withoutScript.scriptPubKey, nil,
+	)
+
+	unknown := vectors[2]
+
+	// Act: Resolve each output while unlocked, then while locked.
+	_, notMineErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: unknown.scriptPubKey},
+	)
+	_, missingErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: withoutScript.scriptPubKey},
+	)
+
+	vault.Lock()
+
+	_, lockedErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: withScript.scriptPubKey},
+	)
+	_, lockedMissingErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: withoutScript.scriptPubKey},
+	)
+
+	// Assert: Each result keeps its public error.
+	require.ErrorIs(t, notMineErr, ErrAddressNotFound)
+	require.ErrorIs(t, missingErr, ErrNoAssocPrivateKey)
+	require.ErrorIs(t, lockedErr, keyvault.ErrVaultLocked)
+	require.ErrorIs(t, lockedMissingErr, ErrNoAssocPrivateKey)
+	require.Zero(t, spyStore.secretReads.Load())
+	require.Zero(t, spyVault.decrypts.Load())
+}
+
+// TestScriptForOutputVaultResults verifies that the wallet maps each result of
+// the vault script operation to its existing public result, and that it does
+// not read the address secret or call raw Decrypt.
+func TestScriptForOutputVaultResults(t *testing.T) {
+	t.Parallel()
+
+	vectors := sqlScriptVectors(t)
+	p2wsh, p2tr := vectors[1], vectors[2]
+
+	twoLeaves := newTestTapscript(t)
+	twoLeaves.Leaves = append(twoLeaves.Leaves, newTestTapscript(t).Leaves...)
+	ambiguous, err := waddrmgr.EncodeTaprootScript(&twoLeaves)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		vector   sqlScriptVector
+		stored   []byte
+		vaultErr error
+		wantErr  error
+		wantMsg  string
+	}{{
+		name:   "p2wsh witness script",
+		vector: p2wsh,
+		stored: p2wsh.stored,
+	}, {
+		name:   "taproot leaf script",
+		vector: p2tr,
+		stored: p2tr.stored,
+	}, {
+		name:     "script not found",
+		vector:   p2wsh,
+		vaultErr: keyvault.ErrScriptNotFound,
+		wantErr:  ErrNoAssocPrivateKey,
+	}, {
+		name:     "vault locked",
+		vector:   p2wsh,
+		vaultErr: keyvault.ErrVaultLocked,
+		wantErr:  keyvault.ErrVaultLocked,
+		wantMsg:  "decrypt script",
+	}, {
+		name:    "malformed tapscript",
+		vector:  p2tr,
+		stored:  []byte{0xff, 0xff, 0xff},
+		wantMsg: "decode tapscript",
+	}, {
+		name:    "tapscript without unique leaf",
+		vector:  p2tr,
+		stored:  ambiguous,
+		wantErr: ErrDerivationPathNotFound,
+		wantMsg: "addr ",
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: A stored output and a vault result.
+			w, deps := createUnlockedSQLWalletWithMocks(t)
+			vector := test.vector
+
+			addr := extractAddrFromPKScript(
+				vector.scriptPubKey, w.cfg.ChainParams,
+			)
+			expectStoreAddressInfo(t, w, deps, addr, &db.AddressInfo{
+				ScriptPubKey: vector.scriptPubKey,
+				AddrType:     vector.addrType,
+				IsImported:   true,
+				HasScript:    true,
+			})
+
+			stored := bytes.Clone(test.stored)
+			deps.vault.On(
+				"DecryptScript", mock.Anything, vector.scriptPubKey,
+			).Return(stored, test.vaultErr).Once()
+
+			// Act: Resolve the output.
+			info, err := w.ScriptForOutput(
+				t.Context(), wire.TxOut{PkScript: vector.scriptPubKey},
+			)
+
+			// Assert: The vault result maps to the public result.
+			deps.store.AssertNotCalled(
+				t, "GetAddressSecret", mock.Anything, mock.Anything,
+			)
+			deps.vault.AssertNotCalled(
+				t, "Decrypt", mock.Anything, mock.Anything,
+			)
+
+			if test.wantErr == nil && test.wantMsg == "" {
+				require.NoError(t, err)
+				require.Equal(t, vector.want, info.Script)
+
+				return
+			}
+
+			require.Nil(t, info.Script)
+
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+			}
+
+			require.ErrorContains(t, err, test.wantMsg)
+		})
+	}
+}
+
+// scriptAddressInfo returns address metadata of the given type for the
+// spending script helpers.
+func scriptAddressInfo(t *testing.T, vector sqlScriptVector) AddressInfo {
+	t.Helper()
+
+	info, err := addressInfoFromStoreAddress(&db.AddressInfo{
+		ScriptPubKey: vector.scriptPubKey,
+		AddrType:     vector.addrType,
+		IsImported:   true,
+		HasScript:    true,
+	}, &chainParams)
+	require.NoError(t, err)
+
+	return info
+}
+
+// TestSpendingScriptFromStoredOwnership verifies that a redeem or witness
+// script is handed to the caller as decrypted, while a Taproot leaf is a new
+// copy and the decrypted Tapscript and its decoded form are cleared.
+func TestSpendingScriptFromStoredOwnership(t *testing.T) {
+	t.Parallel()
+
+	vectors := sqlScriptVectors(t)
+
+	// Arrange: Decrypted P2WSH and Taproot scripts.
+	p2wshStored := bytes.Clone(vectors[1].stored)
+	p2trStored := bytes.Clone(vectors[2].stored)
+
+	// Act: Resolve the spending scripts.
+	p2wshScript, p2wshErr := spendingScriptFromStored(
+		scriptAddressInfo(t, vectors[1]), p2wshStored,
+	)
+	p2trScript, p2trErr := spendingScriptFromStored(
+		scriptAddressInfo(t, vectors[2]), p2trStored,
+	)
+
+	// Assert: The witness script is the caller's buffer. The Taproot
+	// leaf is a copy, and the decrypted Tapscript was cleared.
+	require.NoError(t, p2wshErr)
+	require.Equal(t, vectors[1].want, p2wshScript)
+	require.Same(t, &p2wshStored[0], &p2wshScript[0])
+
+	require.NoError(t, p2trErr)
+	require.Equal(t, vectors[2].want, p2trScript)
+	requireZeroed(t, p2trStored)
+}
+
+// TestScriptForOutputLegacyVaultFallback verifies that a vault without the
+// script operation, the legacy kvdb vault, keeps the Store-and-Decrypt path.
+func TestScriptForOutputLegacyVaultFallback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A vault that does not implement DecryptScript, and a Store
+	// that holds the encrypted witness script.
+	w, deps := createUnlockedSQLWalletWithMocks(t)
+	vector := sqlScriptVectors(t)[1]
+
+	addr := extractAddrFromPKScript(vector.scriptPubKey, w.cfg.ChainParams)
+	expectStoreAddressInfo(t, w, deps, addr, &db.AddressInfo{
+		ScriptPubKey: vector.scriptPubKey,
+		AddrType:     vector.addrType,
+		IsImported:   true,
+		HasScript:    true,
+	})
+	deps.vault.On(
+		"DecryptScript", mock.Anything, vector.scriptPubKey,
+	).Return(nil, keyvault.ErrNotImplemented).Once()
+	deps.store.On("GetAddressSecret", mock.Anything,
+		db.GetAddressSecretQuery{
+			WalletID:     w.id,
+			ScriptPubKey: vector.scriptPubKey,
+		}).Return(&db.AddressSecret{
+		EncryptedScript: vector.stored,
+		ScriptIsSecret:  true,
+	}, nil).Once()
+	deps.vault.On("Decrypt", waddrmgr.CKTScript, vector.stored).Return(
+		identityDecrypt, nil,
+	).Once()
+
+	// Act: Resolve the output.
+	info, err := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: vector.scriptPubKey},
+	)
+
+	// Assert: The legacy path returned the witness script.
+	require.NoError(t, err)
+	require.Equal(t, vector.want, info.Script)
+}
+
+// requireZeroed asserts that every byte of a work buffer was cleared.
+func requireZeroed(t *testing.T, buf []byte) {
+	t.Helper()
+
+	for i, b := range buf {
+		require.Zerof(t, b, "byte %d of %d not cleared", i, len(buf))
+	}
+}
+
+// installTapscriptProbe replaces Tapscript decoding for one test. decode runs
+// in place of the real decoder, and the probe records its result.
+//
+// Tests that call this must not run in parallel, because the decoder is
+// package state.
+func installTapscriptProbe(t *testing.T,
+	decode func([]byte) (*waddrmgr.Tapscript, error)) **waddrmgr.Tapscript {
+
+	t.Helper()
+
+	var decoded *waddrmgr.Tapscript
+
+	oldDecode := decodeStoredTapscript
+	t.Cleanup(func() {
+		decodeStoredTapscript = oldDecode
+	})
+
+	decodeStoredTapscript = func(stored []byte) (*waddrmgr.Tapscript,
+		error) {
+
+		tapscript, err := decode(stored)
+		decoded = tapscript
+
+		return tapscript, err
+	}
+
+	return &decoded
+}
+
+// TestSpendingScriptFromStoredClearsWorkBuffers verifies that the decrypted
+// Tapscript and its decoded form are cleared on success, error, and panic. It
+// replaces package state, so it does not run in parallel.
+//
+//nolint:paralleltest
+func TestSpendingScriptFromStoredClearsWorkBuffers(t *testing.T) {
+	vector := sqlScriptVectors(t)[2]
+
+	t.Run("success", func(t *testing.T) {
+		// Arrange: Record the decoded Tapscript.
+		decoded := installTapscriptProbe(t, waddrmgr.DecodeTaprootScript)
+		stored := bytes.Clone(vector.stored)
+
+		// Act: Resolve the leaf.
+		script, err := spendingScriptFromStored(
+			scriptAddressInfo(t, vector), stored,
+		)
+
+		// Assert: The leaf survives the cleared work buffers.
+		require.NoError(t, err)
+		require.Equal(t, vector.want, script)
+		requireZeroed(t, stored)
+		require.Len(t, (*decoded).Leaves, 1)
+		requireZeroed(t, (*decoded).Leaves[0].Script)
+	})
+
+	t.Run("decode error", func(t *testing.T) {
+		// Arrange: Fail decoding after it created a partial result.
+		decoded := installTapscriptProbe(t,
+			func(stored []byte) (*waddrmgr.Tapscript, error) {
+				tapscript, err := waddrmgr.DecodeTaprootScript(stored)
+				require.NoError(t, err)
+
+				return tapscript, errDerivationFailed
+			},
+		)
+		stored := bytes.Clone(vector.stored)
+
+		// Act: Resolve the leaf.
+		_, err := spendingScriptFromStored(
+			scriptAddressInfo(t, vector), stored,
+		)
+
+		// Assert: The stored and partial decoded scripts were cleared.
+		require.ErrorIs(t, err, errDerivationFailed)
+		requireZeroed(t, stored)
+		requireZeroed(t, (*decoded).Leaves[0].Script)
+	})
+
+	t.Run("panic", func(t *testing.T) {
+		// Arrange: Panic inside decoding.
+		stored := bytes.Clone(vector.stored)
+
+		installTapscriptProbe(t,
+			func([]byte) (*waddrmgr.Tapscript, error) {
+				panic(errDerivationFailed)
+			},
+		)
+
+		// Act: Resolve the leaf and catch the panic.
+		require.PanicsWithValue(t, errDerivationFailed, func() {
+			_, _ = spendingScriptFromStored(
+				scriptAddressInfo(t, vector), stored,
+			)
+		})
+
+		// Assert: The stored script was cleared.
+		requireZeroed(t, stored)
+	})
 }

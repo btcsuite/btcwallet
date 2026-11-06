@@ -5,6 +5,9 @@ import (
 
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	bwmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -252,4 +255,214 @@ func TestWalletVaultPublicMapsToScriptKey(t *testing.T) {
 	got, err = vault.Decrypt(waddrmgr.CKTScript, ciphertext)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
+}
+
+// scriptWalletID is the wallet the script fixtures belong to.
+const scriptWalletID = 7
+
+// scriptFixture is a vault whose Store mock serves one encrypted script for
+// one script pubkey.
+type scriptFixture struct {
+	vault        *WalletVault
+	scriptPubKey []byte
+	secret       *db.AddressSecret
+}
+
+// newScriptFixture returns an unlocked vault and a Store mock that returns
+// script, encrypted under the vault's script key, once for scriptPubKey. The
+// Store call asserts that the vault guard is free, because the guard must
+// never wait for the Store.
+func newScriptFixture(t *testing.T, script []byte) *scriptFixture {
+	t.Helper()
+
+	store := &bwmock.Store{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+	})
+
+	vault := NewWalletVault(store, scriptWalletID, false)
+	vault.unlockedState = makeUnlockedState(t)
+	t.Cleanup(vault.Lock)
+
+	encrypted, err := vault.unlockedState.cryptoKeyScript.Encrypt(script)
+	require.NoError(t, err)
+
+	secret := &db.AddressSecret{
+		EncryptedPrivKey: []byte("encrypted private key"),
+		EncryptedScript:  encrypted,
+		ScriptIsSecret:   true,
+	}
+	scriptPubKey := []byte("script pubkey selector")
+
+	store.On("GetAddressSecret", mock.Anything, db.GetAddressSecretQuery{
+		WalletID:     scriptWalletID,
+		ScriptPubKey: scriptPubKey,
+	}).Run(func(mock.Arguments) {
+		require.True(t, vault.mtx.TryLock(), "store called under guard")
+		vault.mtx.Unlock()
+	}).Return(secret, nil).Once()
+
+	return &scriptFixture{
+		vault:        vault,
+		scriptPubKey: scriptPubKey,
+		secret:       secret,
+	}
+}
+
+// requireZeroed asserts that every byte of a work buffer was cleared.
+func requireZeroed(t *testing.T, buf []byte) {
+	t.Helper()
+
+	for i, b := range buf {
+		require.Zerof(t, b, "byte %d of %d not cleared", i, len(buf))
+	}
+}
+
+// requireSecretZeroed asserts that the vault cleared the encrypted address
+// secret that it read from the Store.
+func requireSecretZeroed(t *testing.T, secret *db.AddressSecret) {
+	t.Helper()
+
+	requireZeroed(t, secret.EncryptedPrivKey)
+	requireZeroed(t, secret.EncryptedScript)
+}
+
+// TestWalletVaultDecryptScript verifies that DecryptScript returns the stored
+// script bytes uninterpreted, as a copy the caller can change without
+// changing a later result, and that it clears the encrypted Store copy.
+func TestWalletVaultDecryptScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store one encrypted script.
+	stored := []byte("opaque stored script")
+	f := newScriptFixture(t, stored)
+
+	// Act: Decrypt the script.
+	script, err := f.vault.DecryptScript(t.Context(), f.scriptPubKey)
+
+	// Assert: The bytes match, and the encrypted copy was cleared.
+	require.NoError(t, err)
+	require.Equal(t, stored, script)
+	requireSecretZeroed(t, f.secret)
+}
+
+// TestWalletVaultDecryptScriptNotFound verifies that an output without a
+// stored script returns ErrScriptNotFound, and that this Store result comes
+// before the lock check.
+func TestWalletVaultDecryptScriptNotFound(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		secret   *db.AddressSecret
+		storeErr error
+	}{{
+		name:     "address not found",
+		storeErr: db.ErrAddressNotFound,
+	}, {
+		name:     "secret not found",
+		storeErr: db.ErrSecretNotFound,
+	}, {
+		name: "watch-only import without script",
+		secret: &db.AddressSecret{
+			EncryptedPrivKey: []byte("encrypted private key"),
+		},
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: A locked vault whose Store has no script.
+			scriptPubKey := []byte("script pubkey selector")
+			store := &bwmock.Store{}
+			store.On("GetAddressSecret", mock.Anything,
+				db.GetAddressSecretQuery{
+					WalletID:     scriptWalletID,
+					ScriptPubKey: scriptPubKey,
+				}).Return(test.secret, test.storeErr).Once()
+
+			vault := NewWalletVault(store, scriptWalletID, false)
+
+			// Act: Decrypt the missing script.
+			script, err := vault.DecryptScript(t.Context(), scriptPubKey)
+
+			// Assert: The missing script wins over the lock state.
+			require.Nil(t, script)
+			require.ErrorIs(t, err, ErrScriptNotFound)
+			require.NotErrorIs(t, err, ErrVaultLocked)
+			store.AssertExpectations(t)
+
+			if test.secret != nil {
+				requireSecretZeroed(t, test.secret)
+			}
+		})
+	}
+}
+
+// TestWalletVaultDecryptScriptLocked verifies that a stored script cannot be
+// decrypted while the vault is locked, and that the encrypted copy is
+// cleared.
+func TestWalletVaultDecryptScriptLocked(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Store a script, then lock the vault.
+	f := newScriptFixture(t, []byte("stored script"))
+	f.vault.Lock()
+
+	// Act: Decrypt the script.
+	script, err := f.vault.DecryptScript(t.Context(), f.scriptPubKey)
+
+	// Assert: The vault reports that it is locked.
+	require.Nil(t, script)
+	require.ErrorIs(t, err, ErrVaultLocked)
+	require.ErrorContains(t, err, "wallet 7 vault DecryptScript")
+	requireSecretZeroed(t, f.secret)
+}
+
+// TestWalletVaultDecryptScriptStoreError verifies that an unexpected Store
+// failure is wrapped and not reported as a missing script.
+func TestWalletVaultDecryptScriptStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A Store that fails the secret lookup.
+	store := &bwmock.Store{}
+	store.On("GetAddressSecret", mock.Anything, mock.Anything).Return(
+		nil, errStoreUnavailable,
+	).Once()
+
+	vault := NewWalletVault(store, scriptWalletID, false)
+	vault.unlockedState = makeUnlockedState(t)
+	t.Cleanup(vault.Lock)
+
+	// Act: Decrypt the script.
+	script, err := vault.DecryptScript(t.Context(), []byte("selector"))
+
+	// Assert: The Store error is kept and is not a missing script.
+	require.Nil(t, script)
+	require.ErrorIs(t, err, errStoreUnavailable)
+	require.NotErrorIs(t, err, ErrScriptNotFound)
+	store.AssertExpectations(t)
+}
+
+// TestWalletVaultDecryptScriptWrongKey verifies that ciphertext that the
+// script key cannot open fails, and that the encrypted copy is cleared.
+func TestWalletVaultDecryptScriptWrongKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Replace the stored ciphertext with one under another key.
+	f := newScriptFixture(t, []byte("stored script"))
+	otherKey, err := snacl.GenerateCryptoKey()
+	require.NoError(t, err)
+
+	f.secret.EncryptedScript, err = otherKey.Encrypt([]byte("other"))
+	require.NoError(t, err)
+
+	// Act: Decrypt the script.
+	script, err := f.vault.DecryptScript(t.Context(), f.scriptPubKey)
+
+	// Assert: Decryption fails without a script.
+	require.Nil(t, script)
+	require.ErrorContains(t, err, "decrypt script")
+	requireSecretZeroed(t, f.secret)
 }
