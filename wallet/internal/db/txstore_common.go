@@ -914,10 +914,13 @@ func checkReuseCreateTx(req CreateTxRequest,
 		return req.IsCoinbase && existing.Status == TxStatusOrphaned
 	}
 
-	// Non-coinbase rows only reuse the current unmined states.
-	// Once a row is invalidated, UpdateTx/DeleteTx no longer
-	// treat it as a live unmined target.
-	if !IsUnminedStatus(existing.Status) {
+	// A real block is authoritative even when an unmined replacement
+	// previously displaced this hash. Reuse the same graph reconciliation
+	// so confirmation restores the actual winner's spend edges atomically.
+	if !IsUnminedStatus(existing.Status) &&
+		existing.Status != TxStatusReplaced &&
+		existing.Status != TxStatusFailed {
+
 		return false
 	}
 
@@ -1097,8 +1100,8 @@ func handleTxDescendants(ctx context.Context, walletID int64,
 	return nil
 }
 
-// handleTxConflicts discovers the direct conflicting roots of a new confirmed
-// tx, rewrites them to replaced state, and marks their descendants failed.
+// handleTxConflicts rewrites conflicts of a confirmed or network-accepted
+// replacement to replaced state and marks their descendants failed.
 //
 // The replacement algorithm is intentionally ordered:
 //   - load the direct conflicting roots first
@@ -1112,10 +1115,11 @@ func handleTxDescendants(ctx context.Context, walletID int64,
 // still invalidating the dependent branch atomically inside one SQL
 // transaction.
 func handleTxConflicts(ctx context.Context, req CreateTxRequest,
-	replacementTxID int64, ops CreateTxOps) error {
+	replacementTxID int64, accepted bool, ops CreateTxOps) error {
 
-	// Only confirmed inserts can replace an active unmined branch.
-	if req.Params.Block == nil {
+	// A prepublication attempt must leave the original branch intact. Only
+	// confirmation or an explicitly accepted replacement can displace it.
+	if req.Params.Block == nil && !accepted {
 		return nil
 	}
 
@@ -1210,7 +1214,7 @@ func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
 //   - claim wallet-owned parent inputs last, because that rewires the shared
 //     spend edges to the new winner row
 func insertCreateTx(ctx context.Context, req CreateTxRequest,
-	ops CreateTxOps) error {
+	accepted bool, ops CreateTxOps) error {
 
 	// Insert the winner row first so every later write can point at its stable
 	// primary key. In particular, replacement-history edges need the new tx ID.
@@ -1223,7 +1227,7 @@ func insertCreateTx(ctx context.Context, req CreateTxRequest,
 	// parent inputs. Conflict discovery looks at the current spend edges on
 	// those parents; once MarkInputsSpent rewires them to this new row, the old
 	// branch is no longer discoverable as the direct conflict root.
-	err = handleTxConflicts(ctx, req, txID, ops)
+	err = handleTxConflicts(ctx, req, txID, accepted, ops)
 	if err != nil {
 		return err
 	}
@@ -1288,7 +1292,7 @@ func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
 		return fmt.Errorf("confirm existing tx: %w", err)
 	}
 
-	err = handleTxConflicts(ctx, req, existing.ID, ops)
+	err = handleTxConflicts(ctx, req, existing.ID, false, ops)
 	if err != nil {
 		return err
 	}
@@ -1329,7 +1333,7 @@ func replayIdempotentCreateTx(ctx context.Context, req CreateTxRequest,
 // createTxWithExisting reuses loaded metadata to continue creation or replay.
 // The entry points can resolve label policy without a second database read.
 func createTxWithExisting(ctx context.Context, req CreateTxRequest,
-	existing *CreateTxExistingTarget, ops CreateTxOps) error {
+	existing *CreateTxExistingTarget, accepted bool, ops CreateTxOps) error {
 
 	if existing != nil {
 		return handleExistingCreateTx(ctx, req, *existing, ops)
@@ -1340,16 +1344,15 @@ func createTxWithExisting(ctx context.Context, req CreateTxRequest,
 		return fmt.Errorf("prepare create block assignment: %w", err)
 	}
 
-	return insertCreateTx(ctx, req, ops)
+	return insertCreateTx(ctx, req, accepted, ops)
 }
 
 // CreateTxWithOps runs the backend-independent CreateTx orchestration once the
 // caller has opened a backend-specific SQL transaction.
 //
 // The helper can either confirm an existing unmined row or Insert a new row.
-// For confirmed inserts it also reconciles any current direct conflict branch
-// before the new row claims wallet-owned inputs. The helper owns that ordering
-// so the backends only need to supply query wiring and type conversion.
+// Only confirmed inserts reconcile conflicts before claiming wallet inputs;
+// accepted unmined observations use ApplyBatchTxWithOps instead.
 // Direct creation keeps strict label comparison; scan batches instead use
 // ApplyBatchTxWithOps to preserve labels omitted by chain observations.
 func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
@@ -1360,12 +1363,13 @@ func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
 		return err
 	}
 
-	return createTxWithExisting(ctx, req, existing, ops)
+	return createTxWithExisting(ctx, req, existing, false, ops)
 }
 
 // ApplyBatchTxWithOps ingests a transaction using the caller's batch SQL
 // transaction. An absent observation label preserves existing user metadata;
 // explicit labels retain the same strict comparison as direct creation.
+// Published entries may displace an unmined branch; Pending entries cannot.
 func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
 
@@ -1380,7 +1384,9 @@ func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
 		req.Params.Label = existing.Label
 	}
 
-	return createTxWithExisting(ctx, req, existing, ops)
+	return createTxWithExisting(
+		ctx, req, existing, req.Params.Status == TxStatusPublished, ops,
+	)
 }
 
 // validateUpdateTxParams checks that UpdateTx received at least one mutable

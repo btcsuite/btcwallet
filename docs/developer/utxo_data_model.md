@@ -112,8 +112,9 @@ stateDiagram-v2
     %% Coinbase can re-enter the best chain after a reorg.
     Orphaned --> Published : Reconfirmed
     
-    Replaced --> [*]
-    Failed --> [*]
+    %% A real confirming block overrides an earlier unmined conflict.
+    Replaced --> Published : Confirmed in Block
+    Failed --> Published : Confirmed in Block
     Orphaned --> [*]
 ```
 
@@ -131,8 +132,8 @@ We distinguish between a transaction's **Validity** (Status) and its **Confirmat
 | :--- | :--- | :--- |
 | `0` (`pending`) | Created locally, before publication tracking. | **Yes** (Factual) |
 | `1` (`published`) | Active wallet history recorded for publication or observed from the chain. | **Yes** (If valid) |
-| `2` (`replaced`) | Replaced by a higher-fee transaction (RBF). | **No** |
-| `3` (`failed`) | Invalidated by a conflicting transaction (Double-Spend). | **No** |
+| `2` (`replaced`) | Displaced by an accepted competing spend; block confirmation can restore it. | **No** |
+| `3` (`failed`) | Invalidated by a conflict or invalid ancestor; block confirmation can restore it. | **No** |
 | `4` (`orphaned`) | Coinbase tx that was reorged out (Invalid). | **No** |
 
 The wallet records `published` before notification registration or sending.
@@ -189,6 +190,8 @@ stateDiagram-v2
     Unspent --> Dead : Parent Invalidated
     Immature --> Dead : Parent Orphaned
     Dead --> Immature : Parent Reconfirmed (Coinbase)
+    %% Restored regular history derives availability from its actual spends.
+    Dead --> Unspent : Parent Confirmed (Regular)
 ```
 
 ### 4.2 Derivation Logic
@@ -201,7 +204,7 @@ A UTXO does not store its own status field. Its status is calculated dynamically
 | **Unconfirmed** | `1` (`published`) | `NULL` | `NULL` | Incoming funds, risk of RBF. |
 | **Immature** | `1` (`published`) coinbase | `NOT NULL` | `NULL` | Mined coins, must wait 100 blocks. |
 | **Spent** | `1` (`published`) | `NOT NULL` | `NOT NULL` | History. We used this money. |
-| **Dead (Permanent)** | `3` / `2` (`failed` / `replaced`) | *Any* | *Any* | Permanently invalid output from a failed attempt. |
+| **Invalid unmined** | `3` / `2` (`failed` / `replaced`) | `NULL` | *Any* | Excluded until a real block restores its creating transaction and spend edges. |
 | **Dead (Recoverable)** | `4` (`orphaned`) coinbase | `NULL` | *Any* | Orphaned coinbase output. Can become `Immature` if parent is reconfirmed. |
 
 ---
@@ -253,10 +256,14 @@ graph TD
     TxA -->|Status: Replaced| Archive
 ```
 
-When the wallet detects a replacement transaction (Tx B) for an existing unconfirmed transaction (Tx A):
+SQL records a replacement after a full-node send succeeds. Neutrino refuses conflicting replacement sends. Rejection leaves the original claim intact.
+
+When an accepted replacement transaction (Tx B) displaces an unconfirmed transaction (Tx A):
 1.  **Detection:** Tx B spends the same inputs as Tx A.
 2.  **Update:** The input UTXOs are updated to point to Tx B (`SpentBy = TxB`).
 3.  **Archive:** Tx A is marked as `status = 2` (`replaced`). It remains in the DB for history but is ignored by balance queries.
+
+A real confirming block may restore either hash to `published`; unmined echoes cannot.
 
 ### 5.3 Upstream Double-Spend (Invalidation)
 

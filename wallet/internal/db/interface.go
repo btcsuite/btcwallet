@@ -462,6 +462,10 @@ type TxStore interface {
 	// The create path does not infer whether an unmined transaction should
 	// start in TxStatusPending or TxStatusPublished; callers must provide that
 	// choice explicitly in CreateTxParams.
+	// Unmined CreateTx calls preserve existing input claims; accepted competing
+	// observations use ApplyTxBatch instead.
+	// A confirming block may restore replaced or failed regular rows and
+	// their actual credits and spend edges atomically; unmined replay cannot.
 	CreateTx(ctx context.Context, params CreateTxParams) error
 
 	// UpdateTx patches the mutable metadata for one existing wallet-scoped
@@ -479,7 +483,10 @@ type TxStore interface {
 	UpdateTx(ctx context.Context, params UpdateTxParams) error
 
 	// ApplyTxBatch atomically records a batch of transaction records and an
-	// optional wallet sync-tip update.
+	// optional wallet sync-tip update. Published entries are accepted network
+	// observations: SQL reconciles unmined conflicts, while native KVDB retains
+	// competing claims until confirmation. Pending entries preserve existing
+	// claims. A confirming block remains authoritative for either hash.
 	//
 	// Replayed transactions with an empty Label preserve their stored label,
 	// whether confirmed or unmined. Use UpdateTx to change or clear a label.

@@ -414,6 +414,10 @@ type Wallet struct {
 	// lifecycle and authentication requests.
 	requestChan chan any
 
+	// broadcastMu keeps node acceptance and recording in the same order
+	// when callers concurrently publish competing transactions.
+	broadcastMu sync.Mutex
+
 	// txSubscribersMu coordinates registration, delivery and closure because
 	// producer and subscription lifetime handlers run concurrently.
 	txSubscribersMu sync.Mutex

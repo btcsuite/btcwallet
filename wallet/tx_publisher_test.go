@@ -608,7 +608,7 @@ func TestRecordTxAndCredits(t *testing.T) {
 						index: 0,
 						addr:  addr,
 					},
-				},
+				}, false,
 			)
 
 			// Assert: A live row needs no redundant update; terminal
@@ -666,7 +666,9 @@ func TestRecordTxAndCreditsUpdatesDuplicate(t *testing.T) {
 			).Return(nil).Once()
 
 			// Act: Retry recording through the legacy duplicate outcome.
-			err := w.recordTxAndCredits(t.Context(), tx, label, nil)
+			err := w.recordTxAndCredits(
+				t.Context(), tx, label, nil, false,
+			)
 
 			// Assert: The unchanged Store API still supports both updates;
 			// fixture cleanup checks each required call once.
@@ -758,7 +760,7 @@ func TestRecordTxAndCreditsDeterministicMultiOwned(t *testing.T) {
 			// Act: Record the two members in the current table
 			// ordering.
 			err := w.recordTxAndCredits(
-				t.Context(), tx, "", tc.credits,
+				t.Context(), tx, "", tc.credits, false,
 			)
 
 			// Assert: Require the same canonical credit mapping for
@@ -847,7 +849,7 @@ func TestAddTxToWallet(t *testing.T) {
 		// Act: Resolve wallet relevance and record the resulting owned
 		// credits.
 		ourAddrs, recorded, err := w.addTxToWallet(
-			t.Context(), tx, label,
+			t.Context(), tx, label, false,
 		)
 
 		// Assert: Check recording and returned addresses while the
@@ -900,7 +902,7 @@ func TestAddTxToWallet(t *testing.T) {
 		// Act: Resolve wallet relevance and record the resulting owned
 		// credits.
 		ourAddrs, recorded, err := w.addTxToWallet(
-			t.Context(), tx, label,
+			t.Context(), tx, label, false,
 		)
 
 		// Assert: Check recording and returned addresses while the
@@ -955,7 +957,7 @@ func TestAddTxToWallet(t *testing.T) {
 		// Act: Resolve wallet relevance and record the resulting owned
 		// credits.
 		ourAddrs, recorded, err := w.addTxToWallet(
-			t.Context(), tx, label,
+			t.Context(), tx, label, false,
 		)
 
 		// Assert: Check recording and returned addresses while the
