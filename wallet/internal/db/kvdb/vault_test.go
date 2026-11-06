@@ -308,3 +308,15 @@ func TestLegacyWalletVaultForwardsExplicitKeyClass(t *testing.T) {
 		})
 	}
 }
+
+// TestLegacyWalletVaultKeepsWalletSigning verifies that the kvdb vault does
+// not serve the SQL signing operations, so kvdb wallets keep their legacy
+// signing and ECDH path.
+func TestLegacyWalletVaultKeepsWalletSigning(t *testing.T) {
+	t.Parallel()
+
+	var vault keyvault.Vault = &LegacyWalletVault{}
+
+	_, ok := vault.(keyvault.SigningVault)
+	require.False(t, ok)
+}
