@@ -7338,14 +7338,16 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	walletID := uint32(0)
 	store := kvdb.NewStore(db, txMgr, addrMgr)
+	vault := kvdb.NewLegacyWalletVault(db, addrMgr)
 
 	w := &Wallet{
-		id:        walletID,
-		addrStore: addrMgr,
-		store:     store,
-		cache:     newStoreRuntimeCache(store),
-		keyVault:  kvdb.NewLegacyWalletVault(db, addrMgr),
-		txStore:   txMgr,
+		id:          walletID,
+		addrStore:   addrMgr,
+		store:       store,
+		cache:       newStoreRuntimeCache(store),
+		keyVault:    vault,
+		unsafeVault: vault,
+		txStore:     txMgr,
 
 		// The shared Wallet reads its network from cfg, so the routed
 		// address and signing paths this constructor still serves
