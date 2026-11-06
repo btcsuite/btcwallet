@@ -25,7 +25,8 @@ type managerBackend interface {
 	// create persists only identity and initialization data; runtime policy
 	// remains outside the backend and is applied by Manager assembly.
 	create(ctx context.Context, params CreateWalletParams,
-		rootKey *hdkeychain.ExtendedKey) (*walletData, error)
+		rootKey *hdkeychain.ExtendedKey,
+		accounts []db.CreateDerivedAccountParams) (*walletData, error)
 
 	// rollbackToBlock removes history starting at the disconnected block.
 	// Manager holds its lock and keeps Wallet workers ready for rollback.

@@ -115,6 +115,11 @@ type CreateWalletParams struct {
 	// honored for ModeShell.
 	InitialAccounts []ImportAccountParams
 
+	// InitialDerivedAccounts installs SQL root-derived accounts before the
+	// first scan. Spendable modes only; native KVDB initialization does not
+	// accept this option.
+	InitialDerivedAccounts []NewAccountParams
+
 	// WatchOnly requests a watch-only wallet and is valid only for ModeShell.
 	WatchOnly bool
 
@@ -637,6 +642,7 @@ func validateManagedWalletName(name string) error {
 // Create persists, starts, and publishes one Wallet while Manager is running.
 // Duplicate creation returns no Wallet and ErrWalletExists while preserving
 // the existing Wallet and its credentials, including all aliases on kvdb.
+// SQL initial derived accounts are installed before startup and publication.
 //
 // TODO(yy): Add a context parameter once wallet creation uses a single atomic
 // database transaction.
@@ -676,8 +682,8 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	// Parameter validation permits initial accounts only in shell mode, so
-	// import any requested accounts before the Wallet starts.
+	// Imported initial accounts belong to shell mode and must also be ready
+	// before the Wallet starts its first recovery scan.
 	if len(params.InitialAccounts) > 0 {
 		err = w.importInitialAccounts(
 			context.Background(), params.InitialAccounts,
@@ -738,6 +744,11 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
+	accounts, err := m.initialDerivedAccounts(params.InitialDerivedAccounts)
+	if err != nil {
+		return nil, err
+	}
+
 	rootKey, err := m.deriveRootKey(params)
 	if err != nil {
 		return nil, err
@@ -757,12 +768,82 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	data, err := m.backend.create(context.Background(), params, rootKey)
+	data, err := m.backend.create(
+		context.Background(), params, rootKey, accounts,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	return newManagedWallet(walletCfg, data, m.chainSyncer), nil
+}
+
+// initialDerivedAccounts normalizes the requested SQL accounts before any
+// identity is persisted, sharing ordinary scope policy and Store allocation.
+func (m *Manager) initialDerivedAccounts(initial []NewAccountParams) (
+	[]db.CreateDerivedAccountParams, error) {
+
+	// Preserve the existing nil backend handoff for an omitted request.
+	if len(initial) == 0 {
+		return nil, nil
+	}
+
+	// Native initialization keeps its existing scope owner until PR1 adds
+	// the separately owned native batch.
+	if m.config.Backend == DBBackendKVDB {
+		return nil, ErrAccountOperationUnsupported
+	}
+
+	accounts := make(
+		[]db.CreateDerivedAccountParams, 0, len(initial),
+	)
+
+	for _, account := range initial {
+		err := validateAccountName(account.Name)
+		if err != nil {
+			return nil, err
+		}
+
+		storeParams := db.CreateDerivedAccountParams{
+			Scope:         db.KeyScope(account.Scope),
+			Name:          account.Name,
+			AccountNumber: (*uint32)(account.AccountNumber),
+			NoChainSync:   account.NoChainSync,
+		}
+
+		err = validateNewAccountSchema(&storeParams, account.AddrSchema)
+		if err != nil {
+			return nil, newAccountErr(err)
+		}
+
+		if storeParams.NoChainSync && storeParams.AccountNumber == nil {
+			return nil, ErrAccountOperationUnsupported
+		}
+
+		// Earlier entries establish this unpublished scope's schema, just
+		// as persisted metadata governs ordinary account creation.
+		var storedSchema *db.ScopeAddrSchema
+
+		index := slices.IndexFunc(
+			accounts,
+			func(previous db.CreateDerivedAccountParams) bool {
+				return previous.Scope == storeParams.Scope
+			},
+		)
+		if index >= 0 {
+			storedSchema = accounts[index].AddrSchema
+		}
+
+		schema, err := validateDerivedAccountScope(&storeParams, storedSchema)
+		if err != nil {
+			return nil, newAccountErr(err)
+		}
+
+		storeParams.AddrSchema = &schema
+		accounts = append(accounts, storeParams)
+	}
+
+	return accounts, nil
 }
 
 // validateInitialAccounts checks resolved scope and script ownership before
@@ -853,6 +934,13 @@ func (w *Wallet) importInitialAccounts(ctx context.Context,
 //
 //nolint:cyclop
 func (p *CreateWalletParams) validate(chainParams *chaincfg.Params) error {
+	// A shell has no private root from which constructor accounts can be
+	// derived; refuse the incompatible request before any persistence.
+	if p.Mode == ModeShell && len(p.InitialDerivedAccounts) > 0 {
+		return fmt.Errorf("%w: initial derived accounts require a root",
+			ErrWalletParams)
+	}
+
 	if p.Mode != ModeShell && len(p.InitialAccounts) > 0 {
 		return fmt.Errorf("%w: initial accounts should only be set "+
 			"for ModeShell", ErrWalletParams)
