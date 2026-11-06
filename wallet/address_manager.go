@@ -201,6 +201,9 @@ type OutputScriptInfo struct {
 	// script-path imports, is the single revealed leaf script. It is nil
 	// for single-key (pubkey-spend) outputs, whose subscript is derived
 	// from the public key instead.
+	//
+	// On a SQL wallet, Script is a new copy that the caller owns. Changing
+	// it does not change wallet data, and Lock does not clear it.
 	Script []byte
 }
 
@@ -1649,10 +1652,10 @@ func (w *Wallet) scriptForOutput(ctx context.Context, output wire.TxOut) (
 
 	// Script-based outputs (P2SH multisig, P2WSH, taproot script-path) have
 	// no single spending public key; their subscript is the stored,
-	// encrypted redeem or witness script. Resolve it through the store and
-	// key vault rather than the pubkey-derived script path below.
+	// encrypted redeem or witness script. Resolve it through the key vault
+	// rather than the pubkey-derived script path below.
 	if isScriptSpendAddress(addressInfo) {
-		script, err := w.scriptForAddressInfo(
+		script, err := w.storedScriptForOutput(
 			ctx, addressInfo, output.PkScript,
 		)
 		if err != nil {

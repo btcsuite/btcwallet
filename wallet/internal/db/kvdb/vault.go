@@ -9,7 +9,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// LegacyWalletVault adapts the legacy address manager to keyvault.Vault.
+// LegacyWalletVault adapts the legacy address manager to keyvault.UnsafeVault.
 //
 // Deprecated: remove this adapter with kvdb support.
 type LegacyWalletVault struct {
@@ -17,8 +17,8 @@ type LegacyWalletVault struct {
 	mgr *waddrmgr.Manager
 }
 
-// Compile-time assertion that LegacyWalletVault satisfies keyvault.Vault.
-var _ keyvault.Vault = (*LegacyWalletVault)(nil)
+// Compile-time assertion that LegacyWalletVault satisfies keyvault.UnsafeVault.
+var _ keyvault.UnsafeVault = (*LegacyWalletVault)(nil)
 
 // NewLegacyWalletVault creates a Vault backed by a legacy walletdb address
 // manager.
@@ -102,6 +102,16 @@ func (v *LegacyWalletVault) Decrypt(keyType waddrmgr.CryptoKeyType,
 	ciphertext []byte) ([]byte, error) {
 
 	return v.crypt(v.mgr.Decrypt, keyType, ciphertext, "decrypt")
+}
+
+// DecryptScript returns keyvault.ErrNotImplemented. kvdb callers resolve
+// scripts through the legacy Store lookup and Decrypt.
+//
+// Deprecated: remove this method with kvdb support.
+func (v *LegacyWalletVault) DecryptScript(context.Context, []byte) ([]byte,
+	error) {
+
+	return nil, keyvault.ErrNotImplemented
 }
 
 // crypt forwards a cipher operation to the address manager and maps its
