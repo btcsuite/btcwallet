@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -2141,4 +2142,250 @@ func TestBroadcastReorgPublishFailureRetainsSpend(t *testing.T) {
 			require.Equal(t, untouched, utxos[0].OutPoint)
 		})
 	}
+}
+
+// TestBroadcastReplacement keeps refused sends out of the graph and records an
+// accepted replacement even when its caller cancels while the node replies.
+func TestBroadcastReplacement(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A real SQLite graph retains A's funding claim while B competes
+	// for it. Reject B once, then cancel its caller during the accepted send;
+	// the existing fixture owns shutdown and each chain mock assertion.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	original := wire.NewMsgTx(wire.TxVersion)
+	original.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	original.AddTxOut(wire.NewTxOut(19_000, script))
+	err := w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       original,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	replacement := original.Copy()
+	replacement.TxOut[0].Value = 18_000
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client.On("BackEnd").Unset()
+	client.On("BackEnd").Return("btcd").Twice()
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Twice()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Twice()
+	refused := client.On("SendRawTransaction", replacement, false).
+		Return((*chainhash.Hash)(nil), errPublish).Once()
+	client.On("SendRawTransaction", replacement, false).
+		Return((*chainhash.Hash)(nil), nil).Once().NotBefore(refused).
+		Run(func(mock.Arguments) {
+			cancel()
+		})
+
+	originalQuery := db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     original.TxHash(),
+	}
+	replacementQuery := db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     replacement.TxHash(),
+	}
+
+	// Act: Attempt B while the node refuses its publication.
+	err = w.Broadcast(t.Context(), replacement, testTxLabel)
+
+	// Assert: The actual send error leaves A active and no B history. These
+	// reads use the live test context so later caller cancellation cannot hide
+	// an incorrect graph mutation.
+	require.ErrorIs(t, err, errPublish)
+	stored, err := w.store.GetTx(t.Context(), originalQuery)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, stored.Status)
+	_, err = w.store.GetTx(t.Context(), replacementQuery)
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+
+	// Act: Retry B; the node accepts it and cancels the caller before the
+	// synchronous handler can persist that irreversible network outcome.
+	err = w.Broadcast(ctx, replacement, testTxLabel)
+
+	// Assert: Accepted publication completes the graph despite cancellation:
+	// A is replaced and B is tracked, rather than a later known-tx retry
+	// silently succeeding while only A remains recorded.
+	require.NoError(t, err)
+	stored, err = w.store.GetTx(t.Context(), originalQuery)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, stored.Status)
+	stored, err = w.store.GetTx(t.Context(), replacementQuery)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, stored.Status)
+}
+
+// TestBroadcastReplacementRequiresAcceptance refuses a competing Neutrino
+// publication before it can queue an unverified replacement for rebroadcast.
+func TestBroadcastReplacementRequiresAcceptance(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A already owns the input in a real SQLite graph. Neutrino has
+	// no acceptance verdict, so no send or watch registration is expected;
+	// the existing chain fixture verifies only the required preflight calls.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	original := wire.NewMsgTx(wire.TxVersion)
+	original.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	original.AddTxOut(wire.NewTxOut(19_000, script))
+	err := w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       original,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	replacement := original.Copy()
+	replacement.TxOut[0].Value = 18_000
+
+	client.On("BackEnd").Unset()
+	client.On("BackEnd").Return("neutrino").Once()
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Once()
+
+	// Act: Request a replacement without a backend that can prove acceptance.
+	publishErr := w.Broadcast(t.Context(), replacement, testTxLabel)
+
+	// Assert: Refusal keeps A active, leaves B absent and reports the original
+	// admission conflict. Any unexpected send fails the fixture's strict mock
+	// rather than handing an untracked competitor to Neutrino's rebroadcaster.
+	stored, err := w.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     original.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, stored.Status)
+	_, err = w.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     replacement.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+	require.ErrorIs(t, publishErr, db.ErrTxInputConflict)
+}
+
+// TestBroadcastSerializesReplacements keeps a delayed first publication reply
+// from allowing another competing send to overtake its persisted graph update.
+func TestBroadcastSerializesReplacements(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A owns a real SQLite input; B and C compete for it. Hold B's
+	// accepted reply while a second caller requests C. The deadline releases
+	// blocked callbacks on failure, and fixture cleanup owns mock assertions.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	original := wire.NewMsgTx(wire.TxVersion)
+	original.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	original.AddTxOut(wire.NewTxOut(19_000, script))
+	err := w.store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       original,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	first := original.Copy()
+	first.TxOut[0].Value = 18_000
+
+	second := original.Copy()
+	second.TxOut[0].Value = 17_000
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	firstSent := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondSent := make(chan struct{})
+	firstResult := make(chan error, 1)
+	secondResult := make(chan error, 1)
+
+	client.On("BackEnd").Unset()
+	client.On("BackEnd").Return("btcd").Twice()
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Twice()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Twice()
+	firstSend := client.On("SendRawTransaction", first, false).
+		Return((*chainhash.Hash)(nil), nil).Once().
+		Run(func(mock.Arguments) {
+			close(firstSent)
+
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+			}
+		})
+	client.On("SendRawTransaction", second, false).
+		Return((*chainhash.Hash)(nil), nil).Once().NotBefore(firstSend).
+		Run(func(mock.Arguments) {
+			close(secondSent)
+		})
+
+	// Act: Admit C while B's accepted reply is held. A bounded observation
+	// window gives the second caller time to expose an overlapping send;
+	// release the reply and join both results before checking the outcome.
+	go func() {
+		firstResult <- w.Broadcast(ctx, first, "")
+	}()
+
+	select {
+	case <-firstSent:
+	case <-ctx.Done():
+		t.Fatal("first publication did not reach its send")
+	}
+
+	go func() {
+		secondResult <- w.Broadcast(ctx, second, "")
+	}()
+
+	overlapped := false
+	select {
+	case <-secondSent:
+		overlapped = true
+	case <-time.After(time.Second):
+	}
+
+	close(releaseFirst)
+
+	var publishErrors [2]error
+
+	for i, result := range []<-chan error{firstResult, secondResult} {
+		select {
+		case publishErrors[i] = <-result:
+		case <-ctx.Done():
+			t.Fatal("publications did not finish after releasing the reply")
+		}
+	}
+
+	// Assert: The next send waits for the previous attempt, and the real
+	// graph retains the last accepted competitor rather than the last reply.
+	// The uncanceled test context makes both persisted states observable.
+	require.NoError(t, publishErrors[0])
+	require.NoError(t, publishErrors[1])
+	require.False(t, overlapped, "competing publications overlapped")
+	stored, err := w.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     first.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, stored.Status)
+	stored, err = w.store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     second.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, stored.Status)
 }
