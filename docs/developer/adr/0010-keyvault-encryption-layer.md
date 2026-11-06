@@ -1,190 +1,174 @@
 # ADR 0010: Keyvault Encryption Layer
 
+## Status
+
+- **Status:** Accepted
+- **Date:** 2026-02-06
+
+## Relationships
+
+- **Amends:** None.
+- **Supersedes:** None.
+- **Amended by:** None.
+- **Superseded by:** None.
+
 ## 1. Context
 
-The encryption model defined in ADR 0009 and the cryptographic primitive
-migration proposed in ADR 0007 require a clear boundary between wallet domain
-logic and database persistence.
+The legacy `waddrmgr` design combines storage, lock state, key derivation,
+and encryption. The SQL migration needs a boundary between secret use and
+persistence. ADR 0009 defines the encryption model, and ADR 0007 defines
+the planned cryptographic primitives.
 
-The legacy `waddrmgr` design couples storage, locking, key derivation, and
-encryption. This makes the SQL migration harder, spreads encryption behavior
-across persistence code, and makes lock state difficult to test in isolation.
+Raw decryption alone does not give the vault control of secret lifetime.
+Wallet code can hold a decrypted key after the vault releases its mutex.
+Thus `Lock` can return while another operation still uses that key.
 
-We need a dedicated component that owns lock state, key derivation, secret
-material lifetime, and encryption. The database layer should remain encryption
-agnostic and store encrypted key material as opaque bytes.
-
-The `db.Store` remains available to other wallet code for non-cryptographic
-queries and updates.
+Account creation also needs secret operations inside a Store transaction.
+Passphrase rotation must not take the Store and vault locks in the opposite
+order. Otherwise, the two operations can wait for each other.
 
 ## 2. Decision
 
-We will introduce a dedicated `wallet/internal/keyvault` package. This package
-defines the encryption boundary between wallet domain code and the store layer.
+### Wallet Scope and Persistence
 
-A wallet facing `keyvault.Vault` is scoped to exactly one wallet at construction
-time. It receives a `db.Store` and a wallet identifier during wiring, then keeps
-persistence routing internal. Callers that hold a vault do not pass a wallet ID
-to each lock, unlock, encrypt, decrypt, or derivation operation.
+Each `wallet/internal/keyvault.Vault` belongs to one wallet. Construction
+supplies its `db.Store` and wallet ID. Vault methods do not take wallet IDs.
+The vault accesses persistence only through the Store, which stores opaque
+ciphertext. Wallet code can use the Store directly for nonsecret data.
 
-Keyvault accesses persistence through `db.Store`. It does not talk directly to
-SQL backends.
+Vault selectors use a key scope with an account name or optional BIP44
+account number, a derivation path, or a script pubkey. They do not contain
+SQL row IDs or kvdb adapter IDs.
 
-```mermaid
-flowchart TD
-    wallet[Wallet]
+### Secret Operations
 
-    subgraph support[Supporting libraries]
-        hd[btcutil/hdkeychain<br/>BIP32 and BIP44 derivation]
-        crypto[AEAD crypto<br/>current and migrated primitives]
-    end
+The vault owns private derivation, primitive signing, ECDH, and secret
+encryption and decryption. It follows ADR 0009 and adopts ADR 0007's
+primitives when implemented. Use narrow typed operations rather than raw
+decryption or caller callbacks. `UnsafeVault.Decrypt` remains only for
+existing callers during migration.
 
-    subgraph vault_boundary[keyvault boundary]
-        vault[keyvault.Vault<br/>wallet scoped lock state<br/>key lifecycle<br/>secret material API]
-        cache[(In memory secret cache<br/>unlocked keys<br/>derived keys)]
-    end
+The Wallet owns these responsibilities:
 
-    subgraph store_boundary[db.Store boundary]
-        store[db.Store<br/>multi wallet persistence API]
+- Transaction, PSBT, and script-commitment checks.
+- Digest and sighash construction.
+- Witness assembly, signature serialization, and signature-record policy.
+- Public-only derivation and ordinary nonsecret script construction.
+- Request admission and the auto-lock schedule.
 
-        subgraph backends[Persistence backends]
-            sql[(SQL backend<br/>rows scoped by wallet_id)]
-            kvdb[(kvdb backend<br/>legacy storage)]
-        end
-    end
+Public-only derivation stays available while the wallet is locked.
 
-    wallet -->|owns wallet scoped vault| vault
-    wallet -->|uses store for non cryptographic data| store
-    vault -->|persists encrypted key material| store
-    vault -->|loads encrypted key material| store
-    vault -->|keeps unlocked material| cache
-    vault -->|derives HD keys| hd
-    vault -->|encrypts and decrypts secrets| crypto
-    store -->|routes by wallet_id| sql
-    store -->|adapts legacy layout| kvdb
-```
+The vault receives multiplication and addition coefficients through
+`KeyTweak`, introduced by PR #1437. It applies `mul*d + add` internally,
+where `d` is the wallet private key.
 
-This is a structural boundary diagram, not a runtime call sequence.
+### Synchronization and Lock Order
 
-The `Wallet` struct holds two related dependencies:
+A secret operation holds the vault guard from its lock-state check through
+its secret use and cleanup. `Lock` waits for active operations, then clears
+runtime secrets and any secret cache. Until a later `Unlock`, operations
+that need unlocked secrets fail with `ErrVaultLocked`.
 
-1. A wallet scoped `keyvault.Vault`
-2. A multi wallet `db.Store`
+The guard is not reentrant. Guarded code must not call a public vault
+method, submit a Wallet request, or run caller-supplied code. Internal
+helpers use the state of the operation without taking the guard again.
 
-Encrypted key material flows through the vault. Non-cryptographic wallet data
-may still flow directly through the store.
+The lock order is Store transaction, then vault guard. The vault must not
+call the Store while it holds the guard. Load persisted inputs before
+taking the guard. An account-derivation operation inside a Store transaction
+must use available runtime state or previously loaded ciphertext, without
+nested Store access.
 
-The store remains the persistence boundary for wallet data and keeps wallet ID
-routing inside the store or adapter layer. The vault hides that routing from
-wallet facing lock, unlock, encryption, decryption, and derivation APIs.
+`Unlock` and passphrase rotation must serialize credential reads and state
+changes. No Store transaction can wait for that credential exclusion.
+`Unlock` installs complete runtime state or leaves none; it must not
+authenticate against credentials that a completed rotation replaced.
 
-### Responsibilities
+Rotation re-wraps the crypto keys without changing them. Thus account
+ciphertext remains valid across rotation. Account creation keeps allocation,
+derivation, and persistence atomic in its Store transaction. If the secret
+operation fails, the transaction rolls back its allocation. This needs no
+new compare-and-swap or preparation protocol.
 
-1. **Own lock state and key lifecycle**
-   Keyvault manages lock state, key material lifetime, and secure memory
-   zeroing.
+### Ownership and Cleanup
 
-2. **Expose typed domain interfaces**
-   Keyvault returns domain types such as `*btcec.PrivateKey`,
-   `*btcec.PublicKey`, and `btcutil.Address` instead of exposing encrypted byte
-   slices to wallet code.
+The vault owns its runtime secrets and temporary work copies. It clears
+temporary secrets on success, error, and panic. Runtime secrets remain
+only while unlocked. The caller owns supplied passphrases, plaintext, and
+tweak data. Tweak data can contain secrets; the vault owns and clears its
+work copies, not the caller's originals. Do not log secrets or include them
+in errors.
 
-3. **Handle HD derivation**
-   Keyvault uses `btcutil/hdkeychain` for BIP32 and BIP44 derivation and returns
-   or persists derived key material as needed.
+Safe operations return results, not wallet private keys, and never give
+those keys to caller code. Private-key export belongs exclusively to
+`UnsafeSigner`. There are two explicit copy exceptions:
 
-4. **Maintain an in memory secret cache**
-   Keyvault may cache account level keys and derived keys while unlocked to
-   avoid repeated derivation and database reads.
+- `UnsafeSigner` key returns are independent caller-owned copies. The
+  caller must clear them after use.
+- The safe vault operation `DecryptScript(ctx, scriptPubKey)` returns an
+  independent caller-owned copy of the decrypted script. Wallet code uses
+  this operation for `AddressManager.ScriptForOutput`.
 
-5. **Keep wallet facing APIs scoped to one wallet**
-   A wallet facing `keyvault.Vault` is configured for one wallet during
-   construction. Callers do not pass a wallet ID to every vault method.
+After either return, the vault cannot control the copy's lifetime. `Lock`
+does not clear it. Callers also own returned signatures, public keys, and
+ECDH results.
 
-6. **Track current and planned cryptographic primitives**
-   Keyvault follows the single passphrase model accepted in ADR 0009 and adopts
-   the ADR 0007 primitive migration once implemented.
+Legacy `waddrmgr` paths can coexist during migration. Existing deprecated
+key exports and private-key callbacks are not part of the safe surface.
+Do not add such exposure to new safe operations. Any new operation that a
+legacy vault supports must follow this contract.
 
-7. **Coexist with `waddrmgr` during migration**
-   New code uses keyvault while legacy code continues to rely on `waddrmgr`
-   until the migration is complete.
+## 3. Alternatives
 
-## 3. Consequences
+### Return Private Keys to Wallet Code
 
-The wallet facing `keyvault.Vault` API intentionally does not expose wallet ID
-parameters on methods such as `Unlock`, `Lock`, `IsLocked`, `Encrypt`,
-`Decrypt`, or key derivation methods.
+Wallet code could decrypt and use keys itself. The vault would then have no
+control over when those keys are cleared. This defeats operation-scoped
+ownership except for the explicit export boundary above.
 
-Code that holds a vault already holds the vault selected for that wallet.
-Requiring every method call to pass a wallet ID would push database routing into
-controllers, accounts, addresses, and tests. It would also make cross wallet
-mistakes possible at every call site.
+### Pass a Private Key to a Caller Callback
 
-The SQL and store layers remain multi wallet aware through `wallet_id` fields
-and parameters, consistent with ADR 0001. That routing is handled inside store
-implementations or keyvault adapters, not repeated throughout wallet domain
-code.
+A callback can retain the key after the operation returns. The vault cannot
+enforce its lifetime guarantee. Typed operations express the supported uses
+without giving keys to caller code. Callbacks can also reenter the vault or
+invert its lock order.
 
-Auto lock timeout scheduling is a wallet or controller lifecycle policy, not
-part of `keyvault.Vault`.
+### Expose Backend Locators and a Second Public Signing API
 
-### Pros
+PR #1279 shares the digest-level signing boundary, but its `AccountID`
+locator exposes backend identity. Semantic selectors keep callers portable.
+A second public signature hierarchy adds no ownership guarantee. The PR
+can align with this decision; it need not close first and is not accepted
+implementation evidence.
 
-1. **Separation of concerns**
-   Database code stores opaque encrypted bytes without knowing about
-   cryptography, lock state, or key derivation.
+### Add a Credential Preparation Protocol
 
-2. **Type safety**
-   Wallet code works with typed keys and addresses instead of raw encrypted
-   blobs.
+Rotation preserves the crypto keys, so it does not invalidate account
+ciphertext. A new preparation or compare-and-swap protocol adds states and
+failure paths without solving another consistency problem here.
 
-3. **Centralized lock management**
-   Lock state and secret zeroing are owned by one component, while timeout and
-   auto lock scheduling stay outside the vault.
+## 4. Tradeoffs
 
-4. **Extensible responsibility boundary**
-   Keyvault centralizes secret and key responsibilities, making it easier to
-   add future responsibilities behind the same boundary without spreading
-   changes across wallet callers.
+The boundary isolates secret use from persistence and Wallet policy. Tests
+can replace the Store or vault independently. Typed operations require more
+internal methods, and migration temporarily keeps both keyvault and legacy
+paths. `Lock` can wait for a slow operation.
 
-5. **Lower call site complexity**
-   Wallet, account, address, and controller code can use a vault without
-   threading wallet IDs through every encryption or key access operation.
+Memory cleanup has limits. Some parsers require temporary immutable
+strings. Such parsing must be bounded, retain no string reference, and
+clear wipeable sources and work copies. The vault cannot erase immutable
+strings or guarantee erasure of compiler, runtime, or library copies.
 
-6. **Better testability**
-   Keyvault can be tested against mock stores, and wallet domain code can be
-   tested against mock vault implementations.
+## References
 
-7. **Per wallet isolation**
-   Each wallet has its own vault instance, lock state, cache, and secret
-   material lifetime.
-
-8. **Migration support**
-   Keyvault can coexist with `waddrmgr`, allowing new SQL backed paths to move
-   behind the new boundary before legacy paths are removed.
-
-### Cons
-
-1. **Additional abstraction**
-   The design introduces a new package boundary that must be maintained.
-
-2. **Migration cost**
-   Existing code paths must be refactored to use the new keyvault API.
-
-3. **Temporary dual systems**
-   `waddrmgr` and keyvault will coexist during the migration, increasing
-   temporary complexity.
-
-4. **Boundary discipline**
-   Implementations must keep wallet ID routing inside constructors, adapters, or
-   store methods. Exposing wallet ID on every vault method is rejected.
-
-5. **Constructor and adapter indirection**
-   Wiring a vault from `db.Store` plus wallet ID adds an adapter boundary
-   between wallet domain code and persistence. That boundary is intentional, but
-   future changes must keep it aligned with store methods that remain multi
-   wallet aware.
-
-## 4. Status
-
-Accepted.
+- [ADR 0001: Multi-Wallet Architecture](0001-multi-wallet-architecture.md)
+- [ADR 0007: XChaCha20-Poly1305
+  Encryption](0007-xchacha20-poly1305-encryption.md)
+- [ADR 0009: Single-Passphrase Encryption
+  Model](0009-single-passphrase-encryption.md)
+- PR [#1279](https://github.com/btcsuite/btcwallet/pull/1279): vault
+  signing proposal.
+- PR [#1437](https://github.com/btcsuite/btcwallet/pull/1437): typed key
+  tweaks and effective-key signing.
+- PR [#1485](https://github.com/btcsuite/btcwallet/pull/1485): the ECDH
+  result contract.
