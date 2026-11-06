@@ -452,8 +452,8 @@ func TestTaprootOutputTweakMatchesTxscript(t *testing.T) {
 	for _, key := range []*btcec.PrivateKey{even, odd} {
 		for _, scriptRoot := range [][]byte{{}, root[:]} {
 			// Arrange: Fold the tweak from the public key only.
-			tweak, outputKey, err := taprootOutputTweak(
-				key.PubKey(), scriptRoot,
+			tweak, outputKey, err := foldKeyTweak(
+				key.PubKey(), KeyTweak{}, true, scriptRoot,
 			)
 			require.NoError(t, err)
 

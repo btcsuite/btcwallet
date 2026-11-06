@@ -1161,6 +1161,15 @@ func (w *Wallet) computeUnlockingScript(ctx context.Context,
 		return nil, err
 	}
 
+	// A SQL vault signs and the wallet assembles the witness from public
+	// data, so no private key reaches Wallet code.
+	signingVault, ok := w.keyVault.(keyvault.SigningVault)
+	if ok {
+		return unlockingScriptInVault(
+			ctx, signingVault, params, &scriptInfo,
+		)
+	}
+
 	privKey, err := w.privKeyForOutput(ctx, scriptInfo)
 	if err != nil {
 		return nil, err
@@ -1774,6 +1783,13 @@ func (w *Wallet) handleComputeRawSig(r rawSigReq) {
 // it signs.
 func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
 	signer []byte) (RawSignature, error) {
+
+	// A SQL vault signs without giving the key to Wallet code. PSBT
+	// signing, which names the signer, keeps the legacy path for now.
+	signingVault, ok := w.keyVault.(keyvault.SigningVault)
+	if ok && signer == nil {
+		return w.computeRawSigInVault(ctx, signingVault, params)
+	}
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
