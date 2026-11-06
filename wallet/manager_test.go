@@ -40,16 +40,19 @@ func TestWalletID(t *testing.T) {
 }
 
 // TestManagerBuildsWalletsFromRuntimePolicy verifies sibling SQL Wallets use
-// identical Manager policy while retaining independent mutable snapshots.
+// inherited and explicit policy while retaining independent mutable snapshots.
 func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Configure two exact Store creations and a distinctive Manager
-	// snapshot shared by both identity-only creation requests.
-	const secondWalletName = "second"
+	// Arrange: Configure exact Store creations for inherited, disabled and
+	// explicit lookahead policies using the same Manager snapshot.
+	const (
+		secondWalletName = "second"
+		thirdWalletName  = "third"
+	)
 
 	store := &walletmock.Store{}
-	for i, name := range []string{"first", secondWalletName} {
+	for i, name := range []string{"first", secondWalletName, thirdWalletName} {
 		walletID := uint32(i + 1)
 		store.On(
 			"CreateWallet", mock.Anything,
@@ -85,20 +88,28 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 		PrivatePassphrase: []byte("private"),
 	}
 
-	// Act: Create two Wallets with different durable names, then mutate one
-	// Wallet's network snapshot after both are assembled.
+	// Act: Create Wallets with inherited, zero and nonzero lookahead, then
+	// mutate one network snapshot after all three are assembled.
 	params.Name = "first"
 	first, err := manager.Create(params)
 	require.NoError(t, err)
 
+	zero := uint32(0)
 	params.Name = secondWalletName
+	params.RecoveryWindow = &zero
 	second, err := manager.Create(params)
+	require.NoError(t, err)
+
+	window := uint32(32)
+	params.Name = thirdWalletName
+	params.RecoveryWindow = &window
+	third, err := manager.Create(params)
 	require.NoError(t, err)
 
 	first.cfg.ChainParams.Name = "mutated"
 
 	// Assert: Verify the caller-owned source is shared while scalar policy is
-	// identical, network snapshots are independent, and each Store call occurs
+	// copied, explicit overrides stay local, and each Store call occurs
 	// exactly once.
 	require.Same(t, chainSource, first.cfg.Chain)
 	require.Same(t, chainSource, second.cfg.Chain)
@@ -108,13 +119,39 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 	require.Equal(t, first.cfg.WalletSyncRetryInterval,
 		second.cfg.WalletSyncRetryInterval)
 	require.Equal(t, uint32(12), first.cfg.RecoveryWindow)
-	require.Equal(t, first.cfg.RecoveryWindow, second.cfg.RecoveryWindow)
+	require.Zero(t, second.cfg.RecoveryWindow)
+	require.Equal(t, window, third.cfg.RecoveryWindow)
+	require.Equal(t, uint32(12), manager.config.RecoveryWindow)
 	require.Equal(t, 3*time.Minute, first.cfg.AutoLockDuration)
 	require.Equal(t, first.cfg.AutoLockDuration, second.cfg.AutoLockDuration)
 	require.Equal(t, uint32(50), first.cfg.MaxCFilterItems)
 	require.Equal(t, first.cfg.MaxCFilterItems, second.cfg.MaxCFilterItems)
 	require.NotEqual(t, first.cfg.ChainParams.Name,
 		second.cfg.ChainParams.Name)
+}
+
+// TestManagerCreateRecoveryValidation verifies excessive lookahead is rejected
+// before persistence and a corrected request can create the same Wallet name.
+func TestManagerCreateRecoveryValidation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the existing real SQL fixture and valid creation input,
+	// changing only the lookahead to exceed the supported recovery maximum.
+	manager := testSQLiteManager(t)
+	base := sqliteCreateParams(t)
+	window := uint32(MaxRecoveryWindow + 1)
+	params := base
+	params.RecoveryWindow = &window
+
+	// Act: Submit the excessive recovery request through public creation.
+	w, err := manager.Create(params)
+
+	// Assert: Rejection publishes no handle and consumes no durable identity;
+	// corrected input must still create the same name on the same Manager.
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrWalletParams)
+	_, err = manager.Create(base)
+	require.NoError(t, err)
 }
 
 // TestManagerChainRollbackOrder fences both published recipients before one
