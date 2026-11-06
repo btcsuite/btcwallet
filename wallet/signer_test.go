@@ -2912,13 +2912,13 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidSignParam)
 	})
 
-	// This subtest ensures that if the underlying `Sign` method of the
-	// spend details returns an error, the raw signature computation
-	// correctly propagates that error.
+	// This subtest ensures that if the spend details cannot build the
+	// signature hash, the raw signature computation correctly propagates
+	// that error.
 	t.Run("Sign Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		leafPriv, _ := expectStoreSignerPrivKey(
+		expectStoreSignerPrivKey(
 			t, mocks, w.id, path.KeyScope, path.DerivationPath,
 		)
 
@@ -2933,12 +2933,10 @@ func TestComputeRawSigFail(t *testing.T) {
 		mockDetails := &mockSpendDetails{}
 		params.Details = mockDetails
 
-		// The signer derives its own leaf key; match on the value it
-		// resolves rather than object identity.
-		mockDetails.On("Sign", params, mock.MatchedBy(
-			func(pk *btcec.PrivateKey) bool {
-				return pk.Key.Equals(&leafPriv.Key)
-			})).Return((RawSignature)(nil), errSignMock)
+		// The spend details see only the request, never the key.
+		mockDetails.On("inputSigHash", params).Return(
+			(*inputSigHash)(nil), errSignMock,
+		)
 		_, err := w.ComputeRawSig(t.Context(), params)
 		require.ErrorContains(t, err, "sign error")
 		mockDetails.AssertExpectations(t)
