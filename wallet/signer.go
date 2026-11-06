@@ -378,14 +378,61 @@ const (
 
 // SpendDetails is a sealed interface that provides the version-specific
 // details required to generate a raw signature.
+//
+// SpendDetails only describes what an input signature commits to. The wallet
+// computes the signature hash from it, and the key that signs that hash stays
+// with the wallet's key vault.
 type SpendDetails interface {
 	// isSpendDetails is a marker method to ensure that only the types
 	// defined in this package can implement this interface.
 	isSpendDetails()
 
-	// Sign performs the version-specific signing operation.
+	// Sign signs with a caller-owned key without deriving a wallet key.
+	//
+	// Deprecated: Use Signer.ComputeRawSig for wallet-managed keys.
 	Sign(params *RawSigParams, privKey *btcec.PrivateKey) (
 		RawSignature, error)
+
+	// inputSigHash returns the digest one input signature signs, and how
+	// the signature is made and serialized. It needs no private key.
+	inputSigHash(params *RawSigParams) (*inputSigHash, error)
+}
+
+// inputSigHash is the signing request for one transaction input: the digest,
+// the signature algorithm, any BIP-341 output key tweak, and the sighash byte
+// the serialized signature carries.
+type inputSigHash struct {
+	// digest is the signature hash of the input.
+	digest [32]byte
+
+	// schnorr selects BIP-340 signing; otherwise the input is signed with
+	// ECDSA.
+	schnorr bool
+
+	// taprootKeyPath reports a Taproot key-path spend. Its key is the
+	// BIP-341 output key for taprootScriptRoot, not the derived key itself.
+	taprootKeyPath bool
+
+	// taprootScriptRoot is the script tree root of a Taproot key-path
+	// spend. Empty commits to no scripts, as BIP-86 does.
+	taprootScriptRoot []byte
+
+	// hashType is appended to the signature when appendHashType is set.
+	hashType txscript.SigHashType
+
+	// appendHashType reports whether the serialized signature ends in its
+	// sighash byte.
+	appendHashType bool
+}
+
+// serialize returns the raw signature for sig, with the sighash byte when the
+// input format carries one.
+func (h *inputSigHash) serialize(sig []byte) RawSignature {
+	if h.appendHashType {
+		return append(sig, byte(h.hashType))
+	}
+
+	return sig
 }
 
 // LegacySpendDetails provides the details for signing a legacy P2PKH input.
@@ -394,9 +441,19 @@ type LegacySpendDetails struct {
 	RedeemScript []byte
 }
 
-// Sign performs the version-specific signing operation for a legacy input.
+// Sign signs a legacy input with a caller-owned key.
+//
+// Deprecated: Use Signer.ComputeRawSig for wallet-managed keys.
 func (l LegacySpendDetails) Sign(params *RawSigParams,
 	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	return signSpendDetails(l, params, privKey)
+}
+
+// inputSigHash returns the legacy signature hash. The signature carries its
+// sighash byte.
+func (l LegacySpendDetails) inputSigHash(
+	params *RawSigParams) (*inputSigHash, error) {
 
 	// For P2SH, the redeem script must be provided. For P2PKH, the pkscript
 	// of the output is used.
@@ -412,15 +469,20 @@ func (l LegacySpendDetails) Sign(params *RawSigParams,
 		script = params.Output.PkScript
 	}
 
-	rawSig, err := txscript.RawTxInSignature(
-		params.Tx, params.InputIndex, script,
-		params.HashType, privKey,
+	hash, err := txscript.CalcSignatureHash(
+		script, params.HashType, params.Tx, params.InputIndex,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create raw signature: %w", err)
 	}
 
-	return rawSig, nil
+	sigHash := &inputSigHash{
+		hashType:       params.HashType,
+		appendHashType: true,
+	}
+	copy(sigHash.digest[:], hash)
+
+	return sigHash, nil
 }
 
 // isSpendDetails implements the sealed interface.
@@ -433,9 +495,19 @@ type SegwitV0SpendDetails struct {
 	WitnessScript []byte
 }
 
-// Sign performs the version-specific signing operation for a SegWit v0 input.
+// Sign signs a SegWit v0 input with a caller-owned key.
+//
+// Deprecated: Use Signer.ComputeRawSig for wallet-managed keys.
 func (s SegwitV0SpendDetails) Sign(params *RawSigParams,
 	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	return signSpendDetails(s, params, privKey)
+}
+
+// inputSigHash returns the BIP-143 signature hash. The raw signature does not
+// carry its sighash byte.
+func (s SegwitV0SpendDetails) inputSigHash(
+	params *RawSigParams) (*inputSigHash, error) {
 
 	// Segwit commits to the previous output value, even when the caller
 	// supplies a witness script. Reject its absence before dereferencing it.
@@ -443,23 +515,18 @@ func (s SegwitV0SpendDetails) Sign(params *RawSigParams,
 		return nil, fmt.Errorf("%w: missing segwit output", ErrNilArguments)
 	}
 
-	sig, err := txscript.RawTxInWitnessSignature(
-		params.Tx, params.SigHashes, params.InputIndex,
-		params.Output.Value, s.WitnessScript,
-		params.HashType, privKey,
+	hash, err := txscript.CalcWitnessSigHash(
+		s.WitnessScript, params.SigHashes, params.HashType, params.Tx,
+		params.InputIndex, params.Output.Value,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create witness sig: %w", err)
 	}
 
-	// Validate the signature by parsing it. This serves as a sanity check
-	// to ensure the generated signature is valid.
-	_, err = ecdsa.ParseDERSignature(sig[:len(sig)-1])
-	if err != nil {
-		return nil, fmt.Errorf("generated invalid witness sig: %w", err)
-	}
+	sigHash := &inputSigHash{hashType: params.HashType}
+	copy(sigHash.digest[:], hash)
 
-	return sig[:len(sig)-1], nil
+	return sigHash, nil
 }
 
 // isSpendDetails implements the sealed interface.
@@ -479,9 +546,19 @@ type TaprootSpendDetails struct {
 	WitnessScript []byte
 }
 
-// Sign performs the version-specific signing operation for a Taproot input.
+// Sign signs a Taproot input with a caller-owned key.
+//
+// Deprecated: Use Signer.ComputeRawSig for wallet-managed keys.
 func (t TaprootSpendDetails) Sign(params *RawSigParams,
 	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	return signSpendDetails(t, params, privKey)
+}
+
+// inputSigHash returns the BIP-341 signature hash of the key or script path.
+// The signature carries its sighash byte unless the type is SigHashDefault.
+func (t TaprootSpendDetails) inputSigHash(
+	params *RawSigParams) (*inputSigHash, error) {
 
 	// Both supported Taproot paths commit to the previous output. Keep
 	// unknown-path rejection with the existing dispatch below.
@@ -491,49 +568,56 @@ func (t TaprootSpendDetails) Sign(params *RawSigParams,
 		return nil, fmt.Errorf("%w: missing taproot output", ErrNilArguments)
 	}
 
+	sigHash := &inputSigHash{
+		schnorr:        true,
+		hashType:       params.HashType,
+		appendHashType: params.HashType != txscript.SigHashDefault,
+	}
+
 	var (
-		rawSig []byte
-		err    error
+		hash []byte
+		err  error
 	)
+
 	switch t.SpendPath {
 	case KeyPathSpend:
-		rawSig, err = txscript.RawTxInTaprootSignature(
-			params.Tx, params.SigHashes,
-			params.InputIndex, params.Output.Value,
-			params.Output.PkScript, t.Tweak,
-			params.HashType, privKey,
+		hash, err = txscript.CalcTaprootSignatureHash(
+			params.SigHashes, params.HashType, params.Tx,
+			params.InputIndex, txscript.NewCannedPrevOutputFetcher(
+				params.Output.PkScript, params.Output.Value,
+			),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("taproot sig error: %w", err)
 		}
+
+		sigHash.taprootKeyPath = true
+		sigHash.taprootScriptRoot = t.Tweak
+
 	case ScriptPathSpend:
 		leaf := txscript.TapLeaf{
 			LeafVersion: txscript.BaseLeafVersion,
 			Script:      t.WitnessScript,
 		}
 
-		rawSig, err = txscript.RawTxInTapscriptSignature(
-			params.Tx, params.SigHashes,
-			params.InputIndex, params.Output.Value,
-			params.Output.PkScript, leaf,
-			params.HashType, privKey,
+		hash, err = txscript.CalcTapscriptSignaturehash(
+			params.SigHashes, params.HashType, params.Tx,
+			params.InputIndex, txscript.NewCannedPrevOutputFetcher(
+				params.Output.PkScript, params.Output.Value,
+			), leaf,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("tapscript sig error: %w", err)
 		}
+
 	default:
 		return nil, fmt.Errorf("%w: %v", ErrUnknownSignMethod,
 			t.SpendPath)
 	}
 
-	// Validate the signature by parsing it. This serves as a sanity check
-	// to ensure the generated signature is valid.
-	_, err = schnorr.ParseSignature(rawSig[:schnorr.SignatureSize])
-	if err != nil {
-		return nil, fmt.Errorf("generated invalid taproot sig: %w", err)
-	}
+	copy(sigHash.digest[:], hash)
 
-	return rawSig, nil
+	return sigHash, nil
 }
 
 // isSpendDetails implements the sealed interface.
@@ -544,6 +628,39 @@ func (t TaprootSpendDetails) isSpendDetails() {}
 var _ SpendDetails = (*LegacySpendDetails)(nil)
 var _ SpendDetails = (*SegwitV0SpendDetails)(nil)
 var _ SpendDetails = (*TaprootSpendDetails)(nil)
+
+// signSpendDetails signs an input with a key already held by the caller. A
+// Taproot key-path spend signs with the BIP-341 output key, which is cleared
+// before return.
+func signSpendDetails(details SpendDetails, params *RawSigParams,
+	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	sigHash, err := details.inputSigHash(params)
+	if err != nil {
+		return nil, err
+	}
+
+	key := privKey
+	if sigHash.taprootKeyPath {
+		key = txscript.TweakTaprootPrivKey(
+			*privKey, sigHash.taprootScriptRoot,
+		)
+		defer key.Zero()
+	}
+
+	if !sigHash.schnorr {
+		sig := ecdsa.Sign(key, sigHash.digest[:])
+
+		return sigHash.serialize(sig.Serialize()), nil
+	}
+
+	sig, err := schnorr.Sign(key, sigHash.digest[:])
+	if err != nil {
+		return nil, fmt.Errorf("taproot sig error: %w", err)
+	}
+
+	return sigHash.serialize(sig.Serialize()), nil
+}
 
 // derivePubKeyReq retains account selection until accepted derivation ends.
 type derivePubKeyReq struct {
@@ -1551,7 +1668,7 @@ func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
 
 	// With the private key retrieved and tweaked, we can now delegate the
 	// actual signing to the version-specific details object.
-	rawSig, err := params.Details.Sign(params, privKey)
+	rawSig, err := signSpendDetails(params.Details, params, privKey)
 	if err != nil {
 		return nil, fmt.Errorf("cannot sign transaction: %w", err)
 	}

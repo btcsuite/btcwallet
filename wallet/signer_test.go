@@ -46,9 +46,6 @@ var (
 
 	// errPrivKeyMock is a mock error for private key retrieval.
 	errPrivKeyMock = errors.New("privkey error")
-
-	// errSignMock is a mock error for signing operations.
-	errSignMock = errors.New("sign error")
 )
 
 // expectStorePubKey wires the store-routed public-key lookup for a derived
@@ -2746,38 +2743,6 @@ func TestComputeRawSigFail(t *testing.T) {
 
 		_, err = w.ComputeRawSig(t.Context(), params)
 		require.ErrorIs(t, err, ErrInvalidSignParam)
-	})
-
-	// This subtest ensures that if the underlying `Sign` method of the
-	// spend details returns an error, the raw signature computation
-	// correctly propagates that error.
-	t.Run("Sign Fail", func(t *testing.T) {
-		t.Parallel()
-		w, mocks := createUnlockedWalletWithMocks(t)
-		leafPriv, _ := expectStoreSignerPrivKey(
-			t, mocks, w.id, path.KeyScope, path.DerivationPath,
-		)
-
-		params := &RawSigParams{
-			Tx:        tx,
-			Output:    prevOut,
-			SigHashes: sigHashes,
-			HashType:  txscript.SigHashAll,
-			Path:      path,
-			Details:   LegacySpendDetails{},
-		}
-		mockDetails := &mockSpendDetails{}
-		params.Details = mockDetails
-
-		// The signer derives its own leaf key; match on the value it
-		// resolves rather than object identity.
-		mockDetails.On("Sign", params, mock.MatchedBy(
-			func(pk *btcec.PrivateKey) bool {
-				return pk.Key.Equals(&leafPriv.Key)
-			})).Return((RawSignature)(nil), errSignMock)
-		_, err := w.ComputeRawSig(t.Context(), params)
-		require.ErrorContains(t, err, "sign error")
-		mockDetails.AssertExpectations(t)
 	})
 
 	// This subtest verifies that an error is returned when an unsupported
