@@ -257,7 +257,7 @@ func (w *Wallet) buildAccountDeriveFn(
 	return func(ctx context.Context, scope db.KeyScope, accountNumber uint32,
 		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
 
-		plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
+		plaintext, err := w.unsafeVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt master HD priv: %w", err)
 		}

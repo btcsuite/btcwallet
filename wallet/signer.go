@@ -657,7 +657,7 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 //
 // The private key is resolved entirely through the durable store: the
 // account-level extended private key is fetched by the path's BIP44 account
-// number, decrypted through keyVault, and the branch and index derived
+// number, decrypted through unsafeVault, and the branch and index derived
 // locally. This single path covers both SQL-backed and kvdb-backed wallets
 // because the kvdb store adapter exports the legacy address manager's
 // encrypted account material through the same account-secret contract.
@@ -1022,8 +1022,8 @@ func canUseAddressInfoDerivation(addressInfo AddressInfo) bool {
 
 // privKeyForAddressInfo derives the private key described by store-backed
 // address metadata. It resolves the owning account's encrypted extended
-// private key through the store, decrypts it through keyVault, and derives the
-// leaf key at the address's branch and index.
+// private key through the store, decrypts it through unsafeVault, and derives
+// the leaf key at the address's branch and index.
 func (w *Wallet) privKeyForAddressInfo(ctx context.Context,
 	addressInfo AddressInfo) (
 	*btcec.PrivateKey, error) {
@@ -1081,7 +1081,7 @@ func (w *Wallet) resolveImportedAddrPrivKey(ctx context.Context,
 		return nil, ErrNoAssocPrivateKey
 	}
 
-	plaintext, err := w.keyVault.Decrypt(
+	plaintext, err := w.unsafeVault.Decrypt(
 		waddrmgr.CKTPrivate, secret.EncryptedPrivKey,
 	)
 	if err != nil {
@@ -1146,7 +1146,7 @@ func (w *Wallet) scriptForAddressInfo(ctx context.Context,
 		scriptKey = waddrmgr.CKTScript
 	}
 
-	plaintext, err := w.keyVault.Decrypt(scriptKey, secret.EncryptedScript)
+	plaintext, err := w.unsafeVault.Decrypt(scriptKey, secret.EncryptedScript)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt script: %w", err)
 	}
@@ -1230,17 +1230,17 @@ func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
 	}
 
 	return deriveStoredAccountChildKey(
-		w.keyVault, secret.EncryptedPrivateKey, path,
+		w.unsafeVault, secret.EncryptedPrivateKey, path,
 	)
 }
 
 // deriveStoredAccountChildKey decrypts an account's encrypted private key with
-// the wallet's keyVault and walks the branch and index derivation to produce
+// the wallet's unsafeVault and walks the branch and index derivation to produce
 // the leaf private key. The decrypted byte slice and intermediate HD keys are
 // zeroed before the call returns. Note that hdkeychain/base58 parsing allocates
 // a transient immutable string copy of the decrypted bytes that cannot be
 // wiped and is left to the garbage collector.
-func deriveStoredAccountChildKey(vault keyvault.Vault,
+func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
 	encryptedAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
@@ -1597,7 +1597,7 @@ func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 // It is the context-free compatibility wrapper over privKeyForAddress used by
 // callers on the legacy Signer interface. It performs no walletdb transaction
 // of its own; the private key is resolved entirely through the store and
-// keyVault.
+// unsafeVault.
 //
 // DANGER: This method exports sensitive key material.
 func (w *Wallet) PrivKeyForAddress(a address.Address) (

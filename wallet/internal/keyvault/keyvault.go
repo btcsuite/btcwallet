@@ -24,8 +24,8 @@ var ErrVaultLocked = errors.New("vault is locked")
 // vault was already unlocked.
 var ErrVaultUnlocked = errors.New("vault is already unlocked")
 
-// Vault manages the lock lifecycle and cryptographic operations for wallet key
-// material.
+// Vault manages the lock lifecycle of wallet key material and the operations
+// that keep plaintext secrets inside the vault.
 type Vault interface {
 	// Unlock unlocks the vault with the provided passphrase.
 	//
@@ -46,10 +46,6 @@ type Vault interface {
 	// type.
 	Encrypt(keyType waddrmgr.CryptoKeyType, plaintext []byte) ([]byte, error)
 
-	// Decrypt decrypts ciphertext key material with the selected crypto key
-	// type.
-	Decrypt(keyType waddrmgr.CryptoKeyType, ciphertext []byte) ([]byte, error)
-
 	// ChangePassphrase re-wraps the persisted wallet secrets according to
 	// params.
 	//
@@ -66,6 +62,20 @@ type Vault interface {
 	// parameters before re-wrapping under the new one.
 	ChangePassphrase(ctx context.Context,
 		params ChangePassphraseParams) error
+}
+
+// UnsafeVault is a Vault that also decrypts any stored ciphertext and returns
+// the plaintext to the caller.
+//
+// Decrypt hands secret material, including private keys, to code outside the
+// vault, so the vault cannot clear it or make Lock wait for its use. ADR 0010
+// replaces each caller with a typed vault operation. Do not add new callers.
+type UnsafeVault interface {
+	Vault
+
+	// Decrypt decrypts ciphertext key material with the selected crypto key
+	// type. The caller owns the plaintext and must clear it.
+	Decrypt(keyType waddrmgr.CryptoKeyType, ciphertext []byte) ([]byte, error)
 }
 
 // ErrPublicPassphraseUnsupported reports that a backend was asked to rotate a

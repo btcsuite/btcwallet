@@ -337,8 +337,16 @@ type Wallet struct {
 	// querying the wallet's transaction history and unspent outputs.
 	txStore wtxmgr.TxStore
 
-	// keyVault provides encryption and decryption for wallet key material.
+	// keyVault serves the vault operations that keep plaintext secrets
+	// inside the vault, plus the lock lifecycle.
 	keyVault keyvault.Vault
+
+	// unsafeVault is the same vault as keyVault, seen through its raw
+	// Decrypt. Only callers that still take plaintext secrets out of the
+	// vault use it, so each of them is visible at its call site.
+	//
+	// TODO(gus): remove this field once no Wallet code calls Decrypt.
+	unsafeVault keyvault.UnsafeVault
 
 	// store provides access to database operations used by wallet managers.
 	//
