@@ -208,6 +208,10 @@ type Config struct {
 	// the discovery of unused gaps is given up.
 	RecoveryWindow uint32
 
+	// RescanOnStart requests a birthday rewind before background workers
+	// start, preserving metadata while normal synchronization replays history.
+	RescanOnStart bool
+
 	// WalletSyncRetryInterval is the interval at which the wallet should
 	// retry syncing to the chain if it encounters an error.
 	WalletSyncRetryInterval time.Duration
