@@ -5277,3 +5277,78 @@ func TestApplyTxBatchAcceptedReplacement(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyTxBatchExcludesNoChainSync keeps key-only accounts out of automatic
+// credits when a mixed transaction is observed through the batch API.
+func TestApplyTxBatchExcludesNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Materialize ordinary and excluded account addresses in the
+	// real SQL harness, with both scripts appearing in one observed tx.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "batch-key-only-output")
+	outputs := make([]*wire.TxOut, 0, 2)
+	candidates := make(map[uint32][]address.Address)
+
+	for i, account := range []struct {
+		name     string
+		excluded bool
+	}{
+		{
+			name: "ordinary",
+		},
+		{
+			name:     "excluded",
+			excluded: true,
+		},
+	} {
+		_, err := store.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:    walletID,
+				Scope:       db.KeyScopeBIP0084,
+				Name:        account.name,
+				NoChainSync: account.excluded,
+			}, SpendableDeriveFn(),
+		)
+		require.NoError(t, err)
+
+		addr := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, account.name, false,
+		)
+		outputs = append(outputs, wire.NewTxOut(5000, addr.ScriptPubKey))
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			addr.ScriptPubKey, &chaincfg.RegressionNetParams,
+		)
+		require.NoError(t, err)
+
+		candidates[uint32(i)] = addrs
+	}
+
+	tx := newRegularTx([]wire.OutPoint{randomOutPoint()}, outputs)
+
+	// Act: Admit chain-observed credit candidates through the transactional
+	// batch API, letting it apply account synchronization policy atomically.
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID:         walletID,
+				Tx:               tx,
+				Received:         time.Unix(1710009990, 0),
+				Status:           db.TxStatusPublished,
+				CreditCandidates: candidates,
+			},
+		},
+	})
+
+	// Assert: Only the ordinary output is credited even though the observed
+	// transaction also pays an address in the key-only account.
+	require.NoError(t, err)
+	detail, err := store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Len(t, detail.OwnedOutputs, 1)
+	require.Zero(t, detail.OwnedOutputs[0].Index)
+}

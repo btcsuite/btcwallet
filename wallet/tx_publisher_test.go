@@ -1207,61 +1207,56 @@ func TestPublishTx(t *testing.T) {
 	}
 }
 
-// TestBroadcastSuccess tests the Broadcast method for a successful broadcast.
+// TestBroadcastSuccess publishes ordinary change while keeping an excluded
+// key-only output out of automatic credits and receiving watches.
 func TestBroadcastSuccess(t *testing.T) {
 	t.Parallel()
 
-	label := testTxLabel
+	// Arrange: Reuse the started Wallet and owned-address helpers for the
+	// PoC's mixed-output publication. Ownership still resolves both scripts;
+	// recorded credits and receiving watches must contain ordinary change only.
 	w, m := createStartedWalletWithMocks(t)
+	addr := mustNewStandalonePubKeyAddr(t)
+	keyOnly := mustNewStandalonePubKeyAddr(t)
+	script := mustPayToAddrScript(addr)
+	keyScript := mustPayToAddrScript(keyOnly)
+	tx := subscriptionTx(script, 92)
+	tx.AddTxOut(wire.NewTxOut(1000, keyScript))
 
-	// Arrange: An owned output makes publication tracking observable.
-	ownedPrivKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-	ownedAddr, err := address.NewAddressPubKey(
-		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
-	)
-	require.NoError(t, err)
-	pkScript, err := txscript.PayToAddrScript(ownedAddr)
-	require.NoError(t, err)
-
-	tx := &wire.MsgTx{
-		TxIn:  []*wire.TxIn{{}},
-		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
-	}
-
-	// Mock checkMempool to succeed.
-	m.chain.On("TestMempoolAccept",
-		mock.Anything, mock.Anything,
-	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil).Once()
-
+	m.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+		Return(nil, chain.ErrUnimplemented).Once()
 	m.store.On("ResolveOwnedAddresses", mock.Anything,
-		matchResolveOwnedAddressesQuery(w.id, pkScript),
-	).Return(ownedAddrsResult(pkScript), nil).Once()
+		matchResolveOwnedAddressesQuery(w.id, script, keyScript),
+	).Return(map[string]*db.AddressInfo{
+		string(script): {},
+		string(keyScript): {
+			NoChainSync: true,
+		},
+	}, nil).Once()
 	m.store.On("CreateTx", mock.Anything,
-		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
-			0: ownedAddr,
-		}),
+		matchCreateTxParams(
+			w.id, tx, testTxLabel,
+			map[uint32]address.Address{0: addr},
+		),
 	).Return(nil).Once()
-	// Read the immutable bytes retained by the original Store API.
+	// Preserve the parent's immutable-byte read after the mixed-output write.
 	m.store.On("GetTx", mock.Anything, db.GetTxQuery{
 		WalletID: w.id,
 		Txid:     tx.TxHash(),
 	}).Return(&db.TxInfo{
 		SerializedTx: serializeTx(t, tx),
 		Status:       db.TxStatusPublished,
-		Label:        label,
+		Label:        testTxLabel,
 	}, nil).Once()
+	m.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
+	m.chain.On("SendRawTransaction", tx, false).Return(nil, nil).Once()
 
-	// Mock publishTx to succeed.
-	m.chain.On("NotifyReceived", mock.Anything).Return(nil).Once()
-	m.chain.On("SendRawTransaction",
-		mock.Anything, mock.Anything,
-	).Return(nil, nil).Once()
+	// Act: Publish through the public Wallet entry point with both owned
+	// scripts present, using their stored receiving policy during admission.
+	err := w.Broadcast(t.Context(), tx, testTxLabel)
 
-	// Act: Publish after recording returns the expected immutable bytes.
-	err = w.Broadcast(t.Context(), tx, label)
-
-	// Assert: Recording permits publication; fixture cleanup verifies calls.
+	// Assert: The send succeeds with only eligible credits and watch data;
+	// existing fixture cleanup verifies all exact mock expectations once.
 	require.NoError(t, err)
 }
 

@@ -17,6 +17,8 @@ SELECT
     da.address_id AS derived_address_id,
     da.account_id,
     acc.account_number,
+    -- Admit automatic credits from stored policy without another lookup.
+    acc.no_chain_sync,
     ks.purpose,
     ks.coin_type,
     a.script_type_id,
@@ -64,6 +66,8 @@ SELECT
     da.address_id AS derived_address_id,
     da.account_id,
     acc.account_number,
+    -- Admit automatic credits from stored policy without another lookup.
+    acc.no_chain_sync,
     ks.purpose,
     ks.coin_type,
     a.script_type_id,

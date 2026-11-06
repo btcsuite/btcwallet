@@ -703,8 +703,8 @@ type RenameAccountParams struct {
 // derivation information.
 type AddressInfo struct {
 	// NoChainSync carries the owning account's stored policy in account
-	// address listings, allowing receiving admission without another lookup.
-	// Other address results do not populate this field.
+	// address listings and batched ownership results, allowing receiving and
+	// publication admission without another lookup. Other results omit it.
 	NoChainSync bool
 
 	// ID is the database unique identifier for the address.
@@ -1189,6 +1189,10 @@ type CreateTxParams struct {
 
 	// CreditCandidates maps output indexes to addresses extracted from the
 	// output script that may make the output wallet-owned.
+	//
+	// Scans and live notifications use candidates for automatic credits.
+	// SQL excludes NoChainSync accounts here. Explicit Credits retain their
+	// authoritative ownership semantics and bypass this automatic filter.
 	//
 	// Unlike Credits, candidates are not trusted ownership assertions. Batch
 	// writers resolve them inside the same write transaction that records the
