@@ -168,7 +168,8 @@ type Controller interface {
 
 // start starts the background processes owned by a Wallet. Manager is its sole
 // caller and invokes it at most once for each Wallet instance.
-func (w *Wallet) start(startCtx context.Context) error {
+func (w *Wallet) start(startCtx context.Context,
+	prepare func(context.Context, chainProcessor) error) error {
 	// 1. Attempt to transition from Stopped to Starting.
 	err := w.state.toStarting()
 	if err != nil {
@@ -186,7 +187,7 @@ func (w *Wallet) start(startCtx context.Context) error {
 	// We use startCtx here because these operations must complete
 	// synchronously before the wallet is considered "started". If
 	// startCtx is canceled, the startup sequence aborts.
-	err = w.performRuntimeSetup(startCtx)
+	err = w.performRuntimeSetup(startCtx, prepare)
 	if err != nil {
 		// Cleanup resources.
 		w.cancel()
@@ -252,7 +253,16 @@ func (w *Wallet) runSyncLoop() {
 			return
 		}
 
-		log.Errorf("Chain sync loop exited with error: %v", err)
+		// Owner policy decides whether retry may borrow Store.
+		if w.chainSyncer.reportFailure(w.lifetimeCtx, err) {
+			return
+		}
+
+		if errors.Is(err, ErrStateChanged) {
+			log.Debugf("Chain sync restarting after state change: %v", err)
+		} else {
+			log.Errorf("Chain sync loop exited with error: %v", err)
+		}
 
 		var shouldContinue bool
 
@@ -301,7 +311,14 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 				return 0, false
 			}
 
-			if err != nil {
+			// Retry observations use the active worker's owner policy.
+			if w.chainSyncer.reportFailure(w.lifetimeCtx, err) {
+				return 0, false
+			}
+
+			if errors.Is(err, ErrStateChanged) {
+				log.Debugf("Chain state changed during retry: %v", err)
+			} else if err != nil {
 				// Retain the scheduled retry after an observation fails, just
 				// as a failed sync attempt returns here instead of stopping.
 				log.Errorf("Chain event processing failed during retry: %v",
@@ -311,9 +328,7 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 		case <-retry:
 			// Increase backoff for the next attempt, capping it.
 			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
+			backoff = min(backoff, maxBackoff)
 
 			return backoff, true
 
@@ -329,7 +344,8 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 // before the wallet's main loops can start. This includes sanity checking the
 // birthday block, fail-fast verifying that the wallet's accounts can be read
 // from the store, and cleaning up expired locks.
-func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
+func (w *Wallet) performRuntimeSetup(startCtx context.Context,
+	prepare func(context.Context, chainProcessor) error) error {
 	// Perform the birthday sanity check synchronously to ensure we are
 	// connected and our status is valid before starting the main loop.
 	//
@@ -359,7 +375,9 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 		return fmt.Errorf("delete expired leases: %w", err)
 	}
 
-	return nil
+	// The backend supplies only its applicable readiness work, keeping legacy
+	// initialization asynchronous while SQL watches precede publication.
+	return prepare(startCtx, w.sync)
 }
 
 // stop performs the Wallet's complete terminal teardown synchronously. The

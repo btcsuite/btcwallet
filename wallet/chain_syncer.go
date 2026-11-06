@@ -15,6 +15,12 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// errChainWatchRegistration identifies native watch loss for backend policy.
+var errChainWatchRegistration = errors.New("chain watch registration failed")
+
+// errUnminedObservation identifies loss that scanning cannot recover.
+var errUnminedObservation = errors.New("unmined observation failed")
+
 // chainRouter supplies live subscriptions and prepared events while its caller
 // owns the reader lifetime and each Wallet owns transaction persistence.
 type chainRouter interface {
@@ -39,7 +45,17 @@ type chainRouter interface {
 
 	// notifyBlocks enables the backend's existing block/control notifications.
 	notifyBlocks(ctx context.Context) error
+
+	// requestRollback offers a retry hint without waiting on its own worker.
+	requestRollback(ctx context.Context, event chainRecoveryRequest)
+
+	// reportFailure obtains owner policy before the caller can be joined.
+	reportFailure(ctx context.Context, err error) bool
 }
+
+// chainRecoveryRequest preserves the first abandoned block's identity so a
+// delayed private hint cannot rewind a replacement branch recovered meanwhile.
+type chainRecoveryRequest chain.BlockDisconnected
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
 // Manager supplies its lifetime to the blocking reader instead of giving this
@@ -53,15 +69,16 @@ type chainSyncer struct {
 
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
+
+	// requestChan is the required inbox of the sole lifecycle owner.
+	requestChan chan<- any
 }
 
 // chainSyncer implements the behavior shared by Manager and its Wallets.
 var _ chainRouter = (*chainSyncer)(nil)
 
-// watchRegistry indexes observed addresses/outpoints directly to Wallet ID
-// sets, so shared interests need no per-Wallet scan or second reverse index.
-// Interests remain additive for its Manager's lifetime: deleting on first
-// spend loses replacement/reorg spends, and an address can receive again.
+// watchRegistry indexes addresses/outpoints to Wallet IDs. Interests stay
+// additive so replacement spends and repeated payments remain routable.
 type watchRegistry struct {
 	// mu guards the mutable sets; no caller holds it during I/O or delivery.
 	mu sync.Mutex
@@ -75,15 +92,47 @@ type watchRegistry struct {
 
 // newChainSyncer retains the caller-owned source without starting any work.
 func newChainSyncer(source chain.Interface,
-	params *chaincfg.Params) *chainSyncer {
+	params *chaincfg.Params, requests chan<- any) *chainSyncer {
 
 	return &chainSyncer{
-		source: source,
-		params: params,
+		source:      source,
+		params:      params,
+		requestChan: requests,
 		watches: &watchRegistry{
 			addresses: make(map[string]map[uint32]struct{}),
 			outpoints: make(map[wire.OutPoint]map[uint32]struct{}),
 		},
+	}
+}
+
+// requestRollback waits only for acceptance, never for its own writer barrier.
+func (s *chainSyncer) requestRollback(ctx context.Context,
+	event chainRecoveryRequest) {
+
+	select {
+	case s.requestChan <- recoveryReq{event: event}:
+	case <-ctx.Done():
+	}
+}
+
+// reportFailure returns classification before cleanup can join this caller.
+func (s *chainSyncer) reportFailure(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+
+	req := chainFailureReq{err: err, resp: make(chan bool, 1)}
+	select {
+	case s.requestChan <- req:
+	case <-ctx.Done():
+		return true
+	}
+
+	select {
+	case terminal := <-req.resp:
+		return terminal
+	case <-ctx.Done():
+		return true
 	}
 }
 
@@ -123,14 +172,14 @@ func (s *chainSyncer) watchAddresses(ctx context.Context, id uint32,
 
 	err := s.source.WatchAddrsFromTip(ctx, addrs)
 	if err != nil {
-		return fmt.Errorf("watch chain addresses: %w", err)
+		return fmt.Errorf("watch addresses: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
 }
 
-// watchOutpoints preserves input-only routing before NotifySpent can emit.
-// Native subscription errors remain on the existing processor retry path.
+// watchOutpoints records input ownership before native activation can emit.
 func (s *chainSyncer) watchOutpoints(ctx context.Context, id uint32,
 	points []*wire.OutPoint) error {
 
@@ -145,7 +194,8 @@ func (s *chainSyncer) watchOutpoints(ctx context.Context, id uint32,
 
 	err = s.source.NotifySpent(points)
 	if err != nil {
-		return fmt.Errorf("watch chain outpoints: %w", err)
+		return fmt.Errorf("watch outpoints: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
@@ -162,7 +212,8 @@ func (s *chainSyncer) notifyReceived(_ context.Context, id uint32,
 	// native API has no cancellation; Wallet's request join owns its drain.
 	err := s.source.NotifyReceived(addrs)
 	if err != nil {
-		return fmt.Errorf("notify received addresses: %w", err)
+		return fmt.Errorf("notify received: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil
@@ -178,7 +229,8 @@ func (s *chainSyncer) notifyBlocks(ctx context.Context) error {
 
 	err = s.source.NotifyBlocks()
 	if err != nil {
-		return fmt.Errorf("notify chain blocks: %w", err)
+		return fmt.Errorf("notify blocks: %w: %w",
+			errChainWatchRegistration, err)
 	}
 
 	return nil

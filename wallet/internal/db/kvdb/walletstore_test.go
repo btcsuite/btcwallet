@@ -154,6 +154,7 @@ func TestGetEncryptedHDSeed(t *testing.T) {
 func TestListSyncedBlocksReadsTip(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Persist one tip while leaving the preceding height absent.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -171,6 +172,7 @@ func TestListSyncedBlocksReadsTip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Act: Read the recorded height through the shared Store contract.
 	store := NewStore(dbConn, nil, mgr)
 	blocks, err := store.ListSyncedBlocks(
 		t.Context(), db.ListSyncedBlocksQuery{
@@ -178,10 +180,17 @@ func TestListSyncedBlocksReadsTip(t *testing.T) {
 			EndHeight:   7,
 		},
 	)
+	// Assert: Preserve metadata and normalize absent legacy history.
 	require.NoError(t, err)
 	require.Len(t, blocks, 1)
 	require.Equal(t, wantHash, blocks[0].Hash)
 	require.Equal(t, uint32(7), blocks[0].Height)
+
+	_, err = store.ListSyncedBlocks(t.Context(), db.ListSyncedBlocksQuery{
+		StartHeight: 6,
+		EndHeight:   7,
+	})
+	require.ErrorIs(t, err, db.ErrBlockNotFound)
 }
 
 // TestListSyncedBlocksRejectsFullUint32Range verifies kvdb rejects a

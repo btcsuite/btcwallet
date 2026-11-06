@@ -48,7 +48,7 @@ relationship metadata, but do not rewrite its historical decision body.
   ADR 0004's import trigger and target scope.
 - [ADR 0006: Wallet Transaction Manager SQL
   Schema](./0006-wtxmgr-sql-schema.md) defines the relational `wtxmgr` schema;
-  amended by ADR 0015 for SQL block identity and canonical-frontier semantics.
+  amended by ADR 0015 for SQL shared block identity and rollback ownership.
 - [ADR 0007: XChaCha20-Poly1305 Encryption](./0007-xchacha20-poly1305-encryption.md) - Replaces XSalsa20-Poly1305 with XChaCha20-Poly1305 for encrypting private key material.
 - [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md) - Defines a modular integration test framework for chain and database backend permutations.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
@@ -68,6 +68,8 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0016: Wallet Transaction
   Subscriptions](./0016-wallet-transaction-subscriptions.md) defines
   best-effort Wallet notifications with bounded subscriber queues.
-- [ADR 0017: Manager Chain Routing](./0017-manager-chain-routing.md) proposes
-  moving live matching to Manager while retaining Wallet-owned processing and
-  historical recovery; partially amends ADR 0015.
+- [ADR 0017: Manager Chain Routing](./0017-manager-chain-routing.md) assigns
+  borrowed-source consumption, matching and shared rollback to Manager's
+  central runtime loop, with
+  watch-ready SQL publication and Wallet-scoped checkpoints/catch-up; amends
+  ADR 0015.

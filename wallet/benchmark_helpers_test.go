@@ -324,7 +324,9 @@ func setupBenchmarkWallet(tb testing.TB,
 		w.cfg.Chain = cfg.chainSource
 	}
 
-	w.chainSyncer = newChainSyncer(w.cfg.Chain, w.cfg.ChainParams)
+	w.chainSyncer = newChainSyncer(
+		w.cfg.Chain, w.cfg.ChainParams, make(chan any, 1),
+	)
 	w.chainEventChan = make(chan chainEvent, 1)
 
 	if w.sync == nil {
@@ -1380,9 +1382,9 @@ func RunKVDBBenchmark(b *testing.B,
 			// its existing fixture owns cleanup and worker shutdown.
 			path := nodeBenchmarkKVDBPath(b, workload)
 			manager := testKVDBManagerAt(b, path)
-			manager.RLock()
+			// Start has published this fixture's only Wallet; membership
+			// stays fixed until benchmark cleanup calls Stop.
 			w := manager.wallets[""]
-			manager.RUnlock()
 			require.NoError(b, w.Unlock(b.Context(), UnlockRequest{
 				Passphrase: []byte("private"),
 				Timeout:    -1,

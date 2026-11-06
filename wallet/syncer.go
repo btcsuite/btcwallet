@@ -235,6 +235,9 @@ type prepareRollbackReq struct {
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
+	// prepareLiveWatches establishes operational SQL notification readiness.
+	prepareLiveWatches(ctx context.Context) error
+
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
@@ -369,21 +372,9 @@ func (s *syncer) syncState() syncState {
 // enabling block notifications. It returns an error if any of these setup
 // steps fail.
 func (s *syncer) initChainSync(ctx context.Context) error {
-	var err error
-
-	// Inform the backend about our birthday for optimization. For backends
-	// like Neutrino (SPV), this provides a starting point for the internal
-	// synchronization of block headers and compact filters. Without this
-	// hint, the backend might attempt to sync from genesis or its latest
-	// checkpoint, leading to unnecessary network I/O and delayed wallet
-	// readiness.
-	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
-		birthday, err := s.walletBirthday(ctx)
-		if err != nil {
-			return err
-		}
-
-		cc.SetStartTime(birthday)
+	err := s.setChainStartTime(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Wait for the backend to be synced to the network. We require the
@@ -402,23 +393,25 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 		return fmt.Errorf("unable to check for rollback: %w", err)
 	}
 
-	// A retry may follow a committed scan whose registration failed.
-	// Register stored addresses and outpoints even if the tip is current.
-	//
-	// TODO(yy): Avoid rereading and registering the full set on each retry
-	// while preserving registration that failed after a committed scan.
+	return s.prepareLiveWatches(ctx)
+}
+
+// prepareLiveWatches installs persisted subscriptions before SQL publication
+// and on recovery retries. It does not wait for backend currency or catch-up.
+func (s *syncer) prepareLiveWatches(ctx context.Context) error {
+	err := s.setChainStartTime(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Retry registrations that failed after a committed scan, even at tip.
 	err = s.refreshLiveWatches(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Explicitly request connected/disconnected block notifications. Only
-	// the bitcoind and neutrino wrappers enable block notifications as a
-	// side effect of NotifyReceived; btcd's NotifyReceived (the embedded
-	// rpcclient method) registers only address notifications, so without
-	// this call a btcd-backed wallet would stop receiving live block
-	// connect/disconnect events. The call is idempotent on the wrappers
-	// that already enabled notifications, so it is safe for all backends.
+	// Btcd address watches do not enable block notifications. Keep the
+	// explicit idempotent subscription on every supported backend.
 	err = s.chainSyncer.notifyBlocks(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start block "+
@@ -428,14 +421,24 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	return nil
 }
 
-// walletBirthday returns the wallet birthday from the active backend. SQL
-// wallets have no legacy address manager, so their birthday is sourced from
-// the runtime store.
-func (s *syncer) walletBirthday(ctx context.Context) (time.Time, error) {
-	if s.addrStore != nil {
-		return s.addrStore.Birthday(), nil
+// setChainStartTime preserves Neutrino's birthday hint both before its
+// initial backend wait and before synchronous SQL subscription installation.
+func (s *syncer) setChainStartTime(ctx context.Context) error {
+	// Neutrino uses this hint to avoid fetching filters before the birthday.
+	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
+		birthday, err := s.walletBirthday(ctx)
+		if err != nil {
+			return err
+		}
+
+		cc.SetStartTime(birthday)
 	}
 
+	return nil
+}
+
+// walletBirthday reads durable birthday metadata through the Store boundary.
+func (s *syncer) walletBirthday(ctx context.Context) (time.Time, error) {
 	info, err := s.store.GetWallet(ctx, s.cfg.Name)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("load wallet birthday: %w", err)
@@ -482,15 +485,8 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 // It checks if the wallet's synced tip is still on the main chain, and if not,
 // rewinds the wallet state to the common ancestor.
 func (s *syncer) checkRollback(ctx context.Context) error {
-	// batchSize is the number of blocks to fetch from the chain backend in
-	// a single batch when checking for a rollback. A value of 10 is chosen
-	// as a conservative default that covers the vast majority of reorg
-	// scenarios (typically 1-3 blocks) while keeping individual batch
-	// requests lightweight.
-	const batchSize = 10
-
-	// Read the synced tip through syncedTo so a Store-backed backend uses
-	// the Store's tip rather than the legacy addrStore tip.
+	// Keep traversal tied to the committed Wallet tip; individual batches
+	// retain their existing Store reads and Manager-owned rewind boundary.
 	syncedTo, err := s.syncedTo(ctx)
 	if err != nil {
 		return err
@@ -498,82 +494,93 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 
 	syncedHeight := syncedTo.Height
 
-	var (
-		localHashes  []*chainhash.Hash
-		remoteHashes []chainhash.Hash
-		header       *wire.BlockHeader
-	)
+	// A saved non-genesis tip must also search genesis for an ancestor.
+	for syncedTo.Height > 0 && syncedHeight >= 0 {
+		var done bool
 
-	for syncedHeight > 0 {
-		// Calculate the range for this batch. We scan backwards:
-		// [startHeight, endHeight] where endHeight is syncedHeight.
-		endHeight := syncedHeight
-		startHeight := max(0, endHeight-batchSize+1)
-
-		// Fetch Local Batch (from wallet's database).
-		localHashes, err = s.syncedBlockHashes(
-			ctx, startHeight, endHeight,
+		syncedHeight, done, err = s.checkRollbackBatch(
+			ctx, syncedTo, syncedHeight,
 		)
-		if err != nil {
-			return s.resolveMissingHistoricalBlock(err, syncedTo)
+		if done {
+			return err
 		}
+	}
 
-		// Fetch Remote Batch - Fetch corresponding hashes from the
-		// chain backend.
-		remoteHashes, err = s.cfg.Chain.GetBlockHashes(
-			int64(startHeight), int64(endHeight),
-		)
-		if err != nil {
-			return fmt.Errorf("remote get block hashes: %w", err)
-		}
-
-		// Compare Batches. Iterate backwards to find the last matching
-		// block (the fork point).
-		matchIndex := s.findForkPoint(localHashes, remoteHashes)
-
-		// Case A: Tip matches. No rollback needed (if we are at the
-		// tip). If syncedHeight == syncedTo.Height and matchIndex is
-		// the last element, then we are fully synced on the main
-		// chain.
-		if syncedHeight == syncedTo.Height &&
-			matchIndex == len(localHashes)-1 {
-
-			return nil
-		}
-
-		// Case B: Mismatch found within this batch. A fork point has
-		// been detected. This indicates a blockchain reorganization
-		// where the wallet's local chain history diverges from the
-		// chain backend's view within the current batch of blocks.
-		if matchIndex != -1 {
-			//nolint:gosec // matchIndex < batchSize (10).
-			forkHeight := startHeight + int32(matchIndex)
-			forkHash := localHashes[matchIndex]
-
-			log.Infof("Rollback detected! Rewinding to height %d "+
-				"(%v)", forkHeight, forkHash)
-
-			// Fetch the block header outside the DB transaction to
-			// avoid holding the lock during an RPC call.
-			header, err = s.cfg.Chain.GetBlockHeader(forkHash)
-			if err != nil {
-				return fmt.Errorf("get fork header: %w", err)
-			}
-
-			// Perform the rollback.
-			return s.rewindToBlock(ctx, waddrmgr.BlockStamp{
-				Height:    forkHeight,
-				Hash:      *forkHash,
-				Timestamp: header.Timestamp,
-			})
-		}
-
-		// Case C: No match in this batch. The fork point is deeper.
-		// Move syncedHeight back and continue loop.
-		syncedHeight = startHeight - 1
+	if syncedTo.Height > 0 {
+		return fmt.Errorf("no recorded common ancestor: %w",
+			db.ErrBlockNotFound)
 	}
 
 	return nil
+}
+
+// checkRollbackBatch compares one recorded range within the remote tip;
+// a common ancestor requests Manager recovery before the next worker retry.
+func (s *syncer) checkRollbackBatch(ctx context.Context,
+	syncedTo waddrmgr.BlockStamp, endHeight int32) (int32, bool, error) {
+
+	// Bound backward RPC batches while searching for a recorded ancestor.
+	const batchSize = 10
+
+	startHeight := max(0, endHeight-batchSize+1)
+
+	localHashes, startHeight, err := s.syncedBlockHashes(
+		ctx, startHeight, endHeight,
+	)
+	if err != nil {
+		return 0, true, s.resolveMissingHistoricalBlock(err, syncedTo)
+	}
+
+	// A shorter current branch cannot serve hashes above its own tip.
+	// Preserve local-read order; a higher batch retries from that tip.
+	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return 0, true, fmt.Errorf("get rollback chain tip: %w", err)
+	}
+
+	if startHeight > bestHeight {
+		return bestHeight, false, nil
+	}
+
+	remoteHashes, err := s.cfg.Chain.GetBlockHashes(
+		int64(startHeight), int64(min(endHeight, bestHeight)),
+	)
+	if err != nil {
+		return 0, true, fmt.Errorf("remote get block hashes: %w", err)
+	}
+
+	matchIndex := s.findForkPoint(localHashes, remoteHashes)
+	// Only a match at the saved tip avoids rewind; a shorter current branch
+	// cannot confirm that tip.
+	if endHeight == syncedTo.Height && bestHeight >= syncedTo.Height &&
+		matchIndex == len(localHashes)-1 {
+
+		return 0, true, nil
+	}
+
+	// The common ancestor lies deeper, so continue below this entire batch.
+	if matchIndex == -1 {
+		return startHeight - 1, false, nil
+	}
+
+	// Resolve the matching ancestor before entering persistence or the
+	// Manager barrier, so backend I/O never holds a storage transaction.
+	//nolint:gosec // matchIndex < batchSize (10).
+	forkHeight := startHeight + int32(matchIndex)
+	forkHash := localHashes[matchIndex]
+	log.Infof("Rollback detected! Rewinding to height %d (%v)",
+		forkHeight, forkHash)
+
+	header, err := s.cfg.Chain.GetBlockHeader(forkHash)
+	if err != nil {
+		return 0, true, fmt.Errorf("get fork header: %w", err)
+	}
+
+	return 0, true, s.rewindToBlock(ctx, waddrmgr.BlockStamp{
+		Height:    forkHeight,
+		Hash:      *forkHash,
+		Timestamp: header.Timestamp,
+	})
 }
 
 // resolveMissingHistoricalBlock accepts a missing historical block when the
@@ -582,12 +589,7 @@ func (s *syncer) resolveMissingHistoricalBlock(listErr error,
 	syncedTo waddrmgr.BlockStamp) error {
 
 	if !errors.Is(listErr, db.ErrBlockNotFound) {
-		var managerErr waddrmgr.ManagerError
-		if !errors.As(listErr, &managerErr) ||
-			managerErr.ErrorCode != waddrmgr.ErrBlockNotFound {
-
-			return listErr
-		}
+		return listErr
 	}
 
 	remoteHash, err := s.cfg.Chain.GetBlockHash(int64(syncedTo.Height))
@@ -614,17 +616,31 @@ func (s *syncer) rewindToBlock(ctx context.Context,
 		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
 	}
 
-	// Roll transaction state back and rewind the wallet sync tip to the same
-	// fork point in one atomic store call so a failure cannot leave the sync
-	// tip rewound while transaction state still references the abandoned
-	// chain. RollbackToBlock derives the new sync tip from the stored
-	// fork-point block, so the caller only supplies the rollback boundary.
-	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	// The owner serializes a proven fork against this Wallet and any siblings.
+	blocks, err := s.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		StartHeight: rollbackHeight,
+		EndHeight:   rollbackHeight,
+	})
 	if err != nil {
-		return fmt.Errorf("rollback to block: %w", err)
+		return fmt.Errorf("read recovery boundary: %w", err)
 	}
 
-	return nil
+	if len(blocks) != 0 {
+		boundary, err := db.BlockStampFromBlock(&blocks[0])
+		if err != nil {
+			return err
+		}
+
+		s.chainSyncer.requestRollback(ctx, chainRecoveryRequest{
+			Block: wtxmgr.Block{
+				Height: boundary.Height,
+				Hash:   blocks[0].Hash,
+			},
+			Time: blocks[0].Timestamp,
+		})
+	}
+
+	return ErrStateChanged
 }
 
 // rewindWallet rewinds this wallet's sync and transaction state for a manual
@@ -685,18 +701,21 @@ func (s *syncer) resolveRewindBlock(
 }
 
 // syncedBlockHashes returns the wallet's synced block hashes for the inclusive
-// height range.
+// height range and its actual start. Retry only the end row when
+// pre-birthday history is absent, keeping remote comparison aligned with it.
 func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
-	endHeight int32) ([]*chainhash.Hash, error) {
+	endHeight int32) ([]*chainhash.Hash, int32, error) {
 
 	start, err := db.Int64ToUint32(int64(startHeight))
 	if err != nil {
-		return nil, fmt.Errorf("start height %d: %w", startHeight, err)
+		return nil, startHeight, fmt.Errorf("start height %d: %w",
+			startHeight, err)
 	}
 
 	end, err := db.Int64ToUint32(int64(endHeight))
 	if err != nil {
-		return nil, fmt.Errorf("end height %d: %w", endHeight, err)
+		return nil, startHeight, fmt.Errorf("end height %d: %w", endHeight,
+			err)
 	}
 
 	blocks, err := s.store.ListSyncedBlocks(
@@ -705,8 +724,16 @@ func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 			EndHeight:   end,
 		},
 	)
+	if startHeight < endHeight &&
+		errors.Is(err, db.ErrBlockNotFound) {
+
+		// One singleton retry preserves the stored endpoint without
+		// requiring missing pre-birthday rows; it cannot recurse again.
+		return s.syncedBlockHashes(ctx, endHeight, endHeight)
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("list synced blocks: %w", err)
+		return nil, startHeight, fmt.Errorf("list synced blocks: %w", err)
 	}
 
 	hashes := make([]*chainhash.Hash, len(blocks))
@@ -714,7 +741,7 @@ func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 		hashes[i] = &blocks[i].Hash
 	}
 
-	return hashes, nil
+	return hashes, startHeight, nil
 }
 
 // syncedTo returns the wallet's current synced-to block from the Store.
@@ -913,10 +940,9 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 		return err
 	}
 
-	// A filtered notification may remain queued after advanceChainSync has
-	// already scanned past it. Only the exact next block may move the tip
-	// forward; the sync loop handles gaps and rollback handles rewinds.
-	if blockMeta.Height != current.Height+1 {
+	// Only the exact next block may advance the checkpoint. Catch-up handles
+	// gaps, while later representations may supplement committed payloads.
+	if blockMeta.Height > current.Height+1 {
 		return nil
 	}
 
@@ -925,7 +951,46 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 		return err
 	}
 
-	return s.applyStoreTxBatch(ctx, matches, block, block)
+	if blockMeta.Height == current.Height+1 {
+		return s.applyStoreTxBatch(ctx, matches, block, block)
+	}
+
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Supplemental payloads may add effects only on the committed branch.
+	onBranch, err := s.blockMatchesCheckpoint(ctx, *block, current)
+	if err != nil || !onBranch {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// blockMatchesCheckpoint validates a supplemental payload against the saved
+// tip or older shared history. Missing history contributes no new effects.
+func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
+	current waddrmgr.BlockStamp) (bool, error) {
+
+	committedHash := current.Hash
+	if int64(block.Height) < int64(current.Height) {
+		blocks, err := s.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+			StartHeight: block.Height,
+			EndHeight:   block.Height,
+		})
+		if errors.Is(err, db.ErrBlockNotFound) {
+			return false, nil
+		}
+
+		if err != nil || len(blocks) == 0 {
+			return false, err
+		}
+
+		committedHash = blocks[0].Hash
+	}
+
+	return block.Hash == committedHash, nil
 }
 
 // applyStoreTxBatch writes transaction matches through the store batch API.
@@ -1942,6 +2007,15 @@ func (s *syncer) processChainEvent(ctx context.Context,
 	event chainEvent) error {
 
 	switch n := event.notification.(type) {
+	case chain.ClientConnected:
+		// A matching SQL reconnect keeps this worker in place. Only a
+		// current backend can prove a fork for the Manager's shared rewind.
+		if s.cfg.Chain.IsCurrent() {
+			return s.checkRollback(ctx)
+		}
+
+		return nil
+
 	case prepareRollbackReq:
 		// Acknowledge only from the worker so historical and live writes
 		// are both quiescent until Manager releases this operation.
@@ -1956,7 +2030,7 @@ func (s *syncer) processChainEvent(ctx context.Context,
 		}
 
 	case chain.RelevantTx:
-		return s.putTxNotifications(ctx, event.matches, n.Block)
+		return s.processRelevantTxEvent(ctx, n, event.matches)
 
 	case chain.FilteredBlockConnected:
 		return s.putBlockNotifications(ctx, event.matches, n.Block)
@@ -1966,6 +2040,31 @@ func (s *syncer) processChainEvent(ctx context.Context,
 
 		return nil
 	}
+}
+
+// processRelevantTxEvent retains determinate Store rejections for retry while
+// unexpected unmined failures revoke SQL readiness through the existing owner.
+func (s *syncer) processRelevantTxEvent(ctx context.Context,
+	event chain.RelevantTx, matches TxEntries) error {
+
+	err := s.putTxNotifications(ctx, matches, event.Block)
+	// Raw coinbase observations lack block metadata, and input arbitration
+	// can reject an external replacement. Reopening cannot change either
+	// definite Store decision; keep their maintained retry/catch-up path.
+	if errors.Is(err, db.ErrInvalidParam) ||
+		errors.Is(err, db.ErrTxInputConflict) ||
+		errors.Is(err, db.ErrTxInputInvalidParent) {
+
+		return err
+	}
+
+	if err != nil && event.Block == nil && ctx.Err() == nil {
+		// Scanning cannot recreate a lost mempool observation; preserve its
+		// cause and let the owning backend decide whether retry is safe.
+		return fmt.Errorf("%w: %w", errUnminedObservation, err)
+	}
+
+	return err
 }
 
 // handleScanReq processes a user-initiated rescan request.

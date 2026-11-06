@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Status:** Proposed
-- **Date:** 2026-10-26
+- **Status:** Accepted
+- **Date:** 2026-11-03
 
 ## Relationships
 
@@ -35,7 +35,7 @@ without live-event Store reads or another recovery cache.
 
 ### Constraints
 
-- Preserve asynchronous Wallet initialization, retry, and backend ordering.
+- Preserve asynchronous historical catch-up, retry, and backend ordering.
 - Install routing ownership before a successful native subscription can emit.
 - A watched address or outpoint can belong to several Wallets.
 - Preserve source order and bounded, lossless admission for each live target.
@@ -47,17 +47,43 @@ without live-event Store reads or another recovery cache.
 ## 3. Decision
 
 Manager owns a private chainSyncer through a private behavior interface: one
-backend reader, a synchronized additive watch registry, and matching of live
-transactions to Wallet IDs. Manager owns the reader's lifetime context,
-cancellation and join. Wallet owns its independent lifetime and chain processor:
-its existing worker applies relevant events and performs catch-up and explicit
-recovery. No new public API is needed.
+borrowed notification reader, an additive watch registry and live transaction
+matching. One Manager runtime loop owns membership, publication, rollback
+ordering and Store lifetime. Start, Stop, Create and String send typed requests
+through one inbox; source events, recovery hints, failures and I/O results use
+that same inbox. Wallets retain their existing processors and independent
+lifetimes. Public method signatures do not change.
+
+```mermaid
+flowchart LR
+    %% Only the owner changes Manager state; I/O returns a typed result.
+    Calls["Start / Stop / Create / String"] --> Inbox["requestChan"]
+    Source["Borrowed client"] --> Reader["Notification reader"]
+    Reader --> Inbox
+    Wallets["Wallet workers"] -->|recovery or failure| Inbox
+    Inbox --> Loop["Manager mainLoop"]
+    Loop -->|selectable delivery| Wallets
+    Loop -->|one operation in flight| IO["Startup / Create / rollback I/O"]
+    IO -->|result request| Inbox
+```
+
+The loop selects mailbox delivery alongside incoming requests, so a full Wallet
+mailbox cannot prevent shutdown or failure reporting. At most one temporary I/O
+task performs startup, creation or rollback with fixed configuration, backend
+and recipient inputs. It never changes Manager state. Its typed result returns
+publication and cleanup decisions to the owner; the existing WaitGroup joins
+it before Store closure. There is no standing I/O worker or generic job queue.
 
 A Wallet registration identifies its Wallet ID and addresses or outpoints.
 Manager records the association before calling the existing backend method,
 without holding routing locks during I/O. Success means that native method
-succeeded. Failure remains with the existing caller or processor retry; an
-already recorded association never suppresses a retry. The registry indexes
+succeeded. Native helpers return classified errors to their callers. The
+existing SQL backend selects synchronous preparation and terminal handling for
+lost required watches; the KVDB backend keeps deferred preparation and local
+retry. Workers and post-commit callers report through the owner inbox before
+retrying or returning their native error. A fresh Manager reconstructs persisted obligations;
+an already recorded association never suppresses native registration. The
+registry indexes
 each address or outpoint to its set of Wallet owners, allowing direct event
 lookups and shared interests without scanning each Wallet. Its short mutex
 protects the mutable sets; parsing, native I/O and delivery happen outside it.
@@ -78,9 +104,13 @@ transactions. Header-only block notifications retain their wakeup meaning:
 catch-up scans recovery-window addresses before advancing the checkpoint.
 Control events other than disconnects use ordinary Wallet handlers.
 
-Manager snapshots membership before routing and sends in source order.
-Create joins subsequent snapshots after publication. Ordinary delivery does
-not promise processing completion or startup readiness.
+Manager enrolls its reader before startup watches. Each event waits for an
+owner receipt before intake continues, bounding native admission to one pending
+event. Startup/Create I/O installs watches, then its result lets the owner
+publish the complete recipient set before matching that event. Native queues
+retain later events. Create waits for unfinished delivery before registration,
+so it cannot wait on an intake reader still holding a preceding receipt.
+Ordinary delivery remains asynchronous with respect to Wallet persistence.
 
 For every backend, Manager owns live disconnects. It settles earlier Wallet
 writes, rewinds the database once, and then releases processing. Wallet
@@ -89,16 +119,34 @@ fetched before rollback are discarded and refetched; accepted targeted scans
 continue their ranges. Successful rollback resumes dispatch directly.
 
 Manager's reader lifetime is separate from each Wallet's synchronization and
-recovery state. Start and Create do not promise completed watch installation
-or aligned tips. No-gap registration covers future admitted events after a
-successful subscription; it does not promise startup mempool backfill.
+recovery state. SQL Start and Create establish native watch readiness before
+returning; each Wallet continues from its own committed checkpoint in the
+background. No startup mempool backfill or aligned-tip guarantee is added.
+Additional payload for a matching committed block uses Store idempotency
+without advancing the checkpoint a second time.
 
-Ordinary processing and registration failures retain Wallet retry behavior.
-Loss of the required notification stream terminates the reader and stops
-Manager. Any rollback error, including an ambiguous commit, stops all Wallets
-before chain writes resume. No automatic retry or readback is attempted.
-Shutdown drains Wallet work before closing Store and joins the source reader.
-The borrowed backend client remains caller-owned.
+Historical fork detection offers a hint through the same owner inbox and
+returns to retry. The owner retains one coalesced hint while another operation
+is active; workers recheck committed state on retry. The runtime rollback barrier checks that a hint still names
+the stored abandoned block before mutating history. Manual and targeted scans
+remain scoped to their Wallet; a current sibling need not wait for their
+completion to become ready.
+
+Lost SQL registrations, unexpected unmined failures and ambiguous processing
+writes stop Manager. Definite input arbitration, mined/block errors and reads
+retain catch-up/retry. Required source loss and rollback persistence failure
+are terminal for every backend. The existing backend adapters select policy;
+shared workers do not inspect backend kinds or legacy address-manager presence.
+
+Stop is an ordinary inbox request. The owner rejects new mutations, settles
+accepted startup/Create work and cancels its loop-local worker context to
+release intake, delivery and rollback preparation when applicable. Accepted
+durable rollback writes finish. Wallets, source intake and I/O join before
+Store closes. Only then does lifetimeCtx signal aggregate completion. The
+selected Stop caller receives cleanup errors; later callers join without
+replaying them. A worker's failure report acknowledges policy without waiting
+for cleanup that joins that same worker. Manager never starts/stops the borrowed
+client or waits for its notification channel to close.
 
 ## 4. Rationale
 
@@ -123,7 +171,8 @@ This retains repeated parsing and per-Wallet relevance work on the live path.
 
 ### Caller-fed fanout with Wallet filtering (#1434)
 
-[PR #1434](https://github.com/btcsuite/btcwallet/pull/1434) accepts ordered events
+[PR #1434](https://github.com/btcsuite/btcwallet/pull/1434) accepts ordered
+events
 from a caller and forwards them to Wallet workers, which select relevant
 transactions. The caller must own source consumption and delivery, and each
 Wallet repeats relevance/filtering work. Manager-owned consumption and recorded
@@ -161,27 +210,32 @@ scheduling policy. Bounded backpressure is sufficient for the current contract.
   decision; this design defines no GC threshold or background worker.
 - A dead required source stops every Wallet served by that Manager.
 - Live disconnects use the event height and terminal Manager error policy
-  for every backend, including the single KVDB Wallet. Initialization and
-  historical fork detection retain their existing Wallet recovery policy.
-  KVDB block-identity reconciliation remains a separate storage concern.
+  for every backend, including the single KVDB Wallet. Historical fork
+  detection uses that same Manager barrier and each backend's actual Store
+  rewind. KVDB block-identity reconciliation remains a storage concern.
 
 ## 7. Implementation Overview
 
-Every Manager supplies one private chainSyncer to its Wallets.
-Wallet watch producers delegate to it; their existing processors consume
+Every Manager starts one runtime loop after construction and supplies one
+private chainSyncer to its Wallets. The loop owns the Wallet map and backend
+without Manager mutexes; only it writes the existing atomic Start guard and
+enrolls/joins source intake and the single accepted I/O operation. Wallet watch producers delegate to
+the chainSyncer; their existing processors consume
 prepared events. Btcd and bitcoind keep their current address/outpoint/block
 subscriptions. Neutrino keeps birthday initialization, historical address
 registration, and no-op spent subscription. Kvdb delegates its native address
 registration through the same owner and retains its one-Wallet storage limit.
 
 Unit coverage checks registration order, shared recipients, unknown-prevout
-input-address spends, queued-parent spends, progress, ordered admission,
+input-address spends, queued-parent spends, progress, ordered delivery,
 membership changes and joined shutdown.
-Native integration coverage funds two Wallets and confirms a payment from one
-to the other, then checks their respective transaction and coin views on full
-nodes and Neutrino. Existing confirmed-watch replay covers persisted SPV
-interests. No schema, generated output, backend adapter, or Store implementation
-changes are needed.
+Native integration coverage checks two-Wallet unmined delivery on full nodes
+and confirmed ownership on full nodes and Neutrino. Reopen checks recover a
+missed fork and restore watches before historical readiness on SQL and the
+isolated single KVDB Wallet. Existing confirmed-watch replay covers persisted
+SPV interests. The existing KVDB Store adapter normalizes missing block-hash
+errors to the shared Store identity. SQL schema, queries and generated output
+remain unchanged.
 
 ## 8. References
 

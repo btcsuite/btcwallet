@@ -819,6 +819,8 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// interaction within it.
 	err := w.chainSyncer.notifyReceived(w.lifetimeCtx, w.id, ourAddrs)
 	if err != nil {
+		// Report at the committed caller boundary, outside native RPC helpers.
+		w.chainSyncer.reportFailure(w.lifetimeCtx, err)
 		return err
 	}
 

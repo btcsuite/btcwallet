@@ -934,6 +934,8 @@ func (w *Wallet) deliverStoreAddresses(ctx context.Context,
 	//nolint:contextcheck // Only the Wallet lifetime may cancel registration.
 	err := w.chainSyncer.watchAddresses(w.lifetimeCtx, w.id, addrs)
 	if err != nil {
+		//nolint:contextcheck // Committed watches outlive caller cancellation.
+		w.chainSyncer.reportFailure(w.lifetimeCtx, err)
 		return nil, err
 	}
 
@@ -1088,6 +1090,8 @@ func (w *Wallet) newKVDBAddress(ctx context.Context, selector AccountSelector,
 		ctx, w.id, []address.Address{info.Addr},
 	)
 	if err != nil {
+		//nolint:contextcheck // Committed watches outlive caller cancellation.
+		w.chainSyncer.reportFailure(w.lifetimeCtx, err)
 		return AddressInfo{}, err
 	}
 

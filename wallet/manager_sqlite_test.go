@@ -119,9 +119,22 @@ func TestChangeWatchFailureSQLiteKeepsChange(t *testing.T) {
 	// Act: Register the kept change and fail the backend registration.
 	err = w.watchAuthoredChange(t.Context(), 0, changeAccount, change)
 
-	// Assert: The failure is returned and the committed child remains.
+	// Assert: Lost SQL registration ends its owner, while a fresh Manager
+	// restores the committed child before exposing an operational Wallet.
 	require.ErrorIs(t, err, errChainMock)
-	stored, err := w.store.GetAddress(t.Context(), db.GetAddressQuery{
+	require.Eventually(t, func() bool {
+		return m.lifetimeCtx.Err() != nil
+	}, time.Second, time.Millisecond)
+	require.NoError(t, m.Stop())
+	cfg := m.config
+	cfg.ChainSource = createTestChain(t)
+	reopened, err := NewManager(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Stop() })
+	wallets, err := reopened.Start(t.Context())
+	require.NoError(t, err)
+	require.Len(t, wallets, 1)
+	stored, err := wallets[0].store.GetAddress(t.Context(), db.GetAddressQuery{
 		WalletID: w.id, ScriptPubKey: script,
 	})
 	require.NoError(t, err)
@@ -331,6 +344,7 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	}).
 		Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(7)).Return(nil).Once()
+	expectEmptyLiveWatches(store, 7)
 
 	// Act: Create through Manager, including its mandatory runtime startup,
 	// with a birthday row that cannot supply the committed identity.
