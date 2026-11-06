@@ -20,6 +20,16 @@ var ErrEmptyPassphrase = errors.New("empty vault passphrase")
 // was attempted while the vault was locked.
 var ErrVaultLocked = errors.New("vault is locked")
 
+// ErrScriptNotFound reports that the wallet stores no encrypted script for the
+// selected script pubkey: the script pubkey is unknown, it has no secret row,
+// or the row holds no script.
+var ErrScriptNotFound = errors.New("no encrypted script")
+
+// ErrNotImplemented reports that a vault does not serve an operation. Only the
+// legacy kvdb vault returns it, for operations that its callers still run
+// through UnsafeVault during the kvdb migration.
+var ErrNotImplemented = errors.New("vault operation not implemented")
+
 // ErrVaultUnlocked reports that an unlock operation was attempted while the
 // vault was already unlocked.
 var ErrVaultUnlocked = errors.New("vault is already unlocked")
@@ -45,6 +55,23 @@ type Vault interface {
 	// Encrypt encrypts plaintext key material with the selected crypto key
 	// type.
 	Encrypt(keyType waddrmgr.CryptoKeyType, plaintext []byte) ([]byte, error)
+
+	// DecryptScript returns the plaintext script stored for the output with
+	// the given script pubkey. The vault does not interpret the script: it
+	// is the bytes that the import encrypted, such as a redeem script, a
+	// witness script, or an encoded Tapscript.
+	//
+	// The result is a copy exception of ADR 0010: a new copy that the
+	// caller owns. It does not alias vault or Store memory, and Lock does
+	// not clear it.
+	//
+	// The Store lookup comes before the lock check. Thus an output without a
+	// stored script returns ErrScriptNotFound even while the vault is
+	// locked. Otherwise a locked vault returns ErrVaultLocked.
+	//
+	// The legacy kvdb vault returns ErrNotImplemented. Its callers use the
+	// UnsafeVault Decrypt path until kvdb support is removed.
+	DecryptScript(ctx context.Context, scriptPubKey []byte) ([]byte, error)
 
 	// ChangePassphrase re-wraps the persisted wallet secrets according to
 	// params.

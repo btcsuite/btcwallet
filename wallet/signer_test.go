@@ -1768,9 +1768,8 @@ func TestScriptForOutputScriptClasses(t *testing.T) {
 			require.NoError(t, err)
 
 			// The store persists the TLV-encoded Tapscript as the
-			// encrypted script; the identity vault returns it
-			// unchanged on decrypt, and ScriptForOutput decodes it
-			// back to the leaf script.
+			// encrypted script; the vault decrypts it, and
+			// ScriptForOutput decodes it back to the leaf script.
 			encoded, err := waddrmgr.EncodeTaprootScript(tapscript)
 			require.NoError(t, err)
 
@@ -1947,14 +1946,12 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 }
 
 // assertScriptForOutput drives ScriptForOutput for a script-based output whose
-// encrypted script decrypts (via the identity vault) to encScript, and returns
-// the resolved OutputScriptInfo.Script. It programs the store address lookup as
-// a script address and the address-secret lookup as script-only.
-//
-// Every stored script body reads back through the vault's single script
-// operation, so there is no per-address crypto class for the test to select.
+// stored script decrypts to storedScript, and returns the resolved
+// OutputScriptInfo.Script. It programs the store address lookup as a script
+// address and the vault script operation as the stored script.
 func assertScriptForOutput(t *testing.T, w *Wallet, mocks *mockWalletDeps,
-	addr address.Address, addrType db.AddressType, encScript []byte) []byte {
+	addr address.Address, addrType db.AddressType,
+	storedScript []byte) []byte {
 
 	t.Helper()
 
@@ -1969,17 +1966,9 @@ func assertScriptForOutput(t *testing.T, w *Wallet, mocks *mockWalletDeps,
 		HasScript:    true,
 	})
 
-	// The address secret carries only the encrypted script.
-	mocks.store.On("GetAddressSecret", mock.Anything,
-		db.GetAddressSecretQuery{
-			WalletID:     w.id,
-			ScriptPubKey: pkScript,
-		}).Return(&db.AddressSecret{
-		EncryptedScript: encScript,
-	}, nil).Once()
-
-	mocks.vault.On("Decrypt", mock.Anything, encScript).Return(
-		identityDecrypt, nil,
+	// The vault returns its own copy of the decrypted stored script.
+	mocks.vault.On("DecryptScript", mock.Anything, pkScript).Return(
+		bytes.Clone(storedScript), nil,
 	).Once()
 
 	info, err := w.ScriptForOutput(
