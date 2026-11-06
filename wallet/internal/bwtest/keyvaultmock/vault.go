@@ -97,4 +97,4 @@ func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
 }
 
 // A compile-time check that the mock satisfies the interface it stands in for.
-var _ keyvault.Vault = (*Vault)(nil)
+var _ keyvault.UnsafeVault = (*Vault)(nil)
