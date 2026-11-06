@@ -994,19 +994,21 @@ const (
 	TxStatusPublished
 
 	// TxStatusReplaced indicates a transaction that was invalidated by a
-	// competing transaction spending the same inputs via RBF.
+	// competing transaction spending the same inputs via RBF. A confirming
+	// block may restore this regular row and its spend edges to published.
 	TxStatusReplaced
 
 	// TxStatusFailed indicates a transaction that was invalidated by a
-	// competing transaction spending the same inputs (double-spend).
+	// competing transaction spending the same inputs (double-spend) or an
+	// invalid ancestor. A confirming block may restore this regular row.
 	TxStatusFailed
 
 	// TxStatusOrphaned indicates a coinbase transaction that was reorged out of
 	// the best chain.
 	//
 	// This state is reserved for coinbase transactions. Non-coinbase rows must
-	// use a different terminal state such as TxStatusFailed or
-	// TxStatusReplaced.
+	// use TxStatusFailed or TxStatusReplaced for invalid unmined history;
+	// only a confirming observation may restore those rows.
 	TxStatusOrphaned
 )
 

@@ -164,6 +164,8 @@ func (w *Wallet) checkMempoolAcceptance(_ context.Context,
 // A backend that cannot answer the mempool acceptance check does not stop the
 // publish: the tx is sent without a verdict, so a nil return reports that it
 // was handed to the network, not that the network kept it.
+// Neutrino refuses conflicting replacements before sending because it cannot
+// provide acceptance evidence to displace the original input claims.
 //
 // Preflight rejection records nothing new. After recording, publication-policy
 // failures and unknown outcomes retain history and input claims; recognized
@@ -173,6 +175,9 @@ func (w *Wallet) checkMempoolAcceptance(_ context.Context,
 // DeleteUnconfirmedTx removes a retained unconfirmed branch. A changed witness
 // returns ErrTxWitnessMismatch before sending an unconfirmed retry.
 // TxStatusPublished tracks publication/rebroadcast, not successful delivery.
+//
+// Publications and their recording are serialized per Wallet, preserving
+// replacement order when callers broadcast concurrently.
 func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
 
@@ -205,6 +210,11 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 // handleBroadcast records and publishes within the accepted outer request.
 // The admitted caller waits for this result before reusing its inputs.
 func (w *Wallet) handleBroadcast(r broadcastReq) {
+	// Keep each send and its graph update together so a delayed reply cannot
+	// reconcile an older acceptance after a later competing publication.
+	w.broadcastMu.Lock()
+	defer w.broadcastMu.Unlock()
+
 	// We'll start by checking if the tx is acceptable to the mempool.
 	err := w.checkMempool(r.ctx, r.tx)
 	if errors.Is(err, errAlreadyBroadcasted) {
@@ -219,11 +229,16 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		return
 	}
 
-	// First, we'll attempt to add the tx to our wallet's DB. This will
-	// allow us to track the tx's confirmation status, and also
-	// re-broadcast it upon startup.
-	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
-	if err != nil {
+	// Record before publication so confirmation tracking and rebroadcast
+	// can proceed even when sending fails. recorded gates success
+	// notifications for wallet-relevant transactions.
+	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label, false)
+	// Preserve the original graph until the backend accepts a competing send.
+	// Failed atomic admission still supplies the addresses needed for watches.
+	replacement := errors.Is(err, db.ErrTxInputConflict)
+	// Neutrino queues nil-result sends for rebroadcast without proving
+	// acceptance, so refuse its competing send before handing it that work.
+	if err != nil && (!replacement || w.cfg.Chain.BackEnd() == "neutrino") {
 		r.respErrChan <- err
 
 		return
@@ -233,6 +248,25 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// the row. Publication-policy errors must never abandon a tracked spend.
 	err = w.publishTx(r.tx, ourAddrs)
 	if err == nil {
+		if replacement {
+			// Caller cancellation cannot undo the node's acceptance.
+			// Bound persistence while Stop still joins this handler.
+			ctx, cancel := context.WithTimeout(
+				context.WithoutCancel(r.ctx), time.Minute,
+			)
+			defer cancel()
+
+			_, recorded, err = w.addTxToWallet(
+				ctx, r.tx, r.label, true,
+			)
+			if err != nil {
+				r.respErrChan <- fmt.Errorf("record accepted "+
+					"replacement: %w", err)
+
+				return
+			}
+		}
+
 		// Only recorded Wallet transactions have a detail to announce.
 		// Best-effort notification cannot undo a successful publication.
 		if recorded {
@@ -244,11 +278,22 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		return
 	}
 
-	txid := r.tx.TxHash()
-	if recorded && shouldRemoveTx(err) {
+	// Keep cleanup and retained-claim reporting coupled to the send outcome.
+	r.respErrChan <- w.handlePublicationFailure(
+		r.ctx, r.tx, recorded, err,
+	)
+}
+
+// handlePublicationFailure removes only branches rejected as invalid. It keeps
+// retained claims and both causal errors when cleanup cannot release them.
+func (w *Wallet) handlePublicationFailure(ctx context.Context, tx *wire.MsgTx,
+	recorded bool, publishErr error) error {
+
+	txid := tx.TxHash()
+	if recorded && shouldRemoveTx(publishErr) {
 		// A recognized malformed/script rejection keeps the existing
 		// cleanup behavior; policy and uncertain outcomes never enter it.
-		cleanupErr := w.deleteUnminedTx(r.ctx, r.tx)
+		cleanupErr := w.deleteUnminedTx(ctx, tx)
 		// Absence means cleanup is complete; other failures retain the
 		// claims signal and remain inspectable beside the send error.
 		if errors.Is(cleanupErr, db.ErrTxNotFound) {
@@ -256,18 +301,18 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 		}
 
 		recorded = cleanupErr != nil
-		err = errors.Join(err, cleanupErr)
+		publishErr = errors.Join(publishErr, cleanupErr)
 	}
 
 	// Expose retained claims without hiding the publication/cleanup causes.
 	if recorded {
-		err = fmt.Errorf("%w: tx %v remains recorded: %w",
-			ErrTxRetained, txid, err)
+		publishErr = fmt.Errorf("%w: tx %v remains recorded: %w",
+			ErrTxRetained, txid, publishErr)
 	}
 
-	log.Warnf("%v: broadcast failed: %v", txid, err)
+	log.Warnf("%v: broadcast failed: %v", txid, publishErr)
 
-	r.respErrChan <- err
+	return publishErr
 }
 
 var (
@@ -404,12 +449,12 @@ type ownedAddrInfo struct {
 // the necessary database writes, ensuring that the exclusive database lock is
 // held for the shortest possible time.
 //
-// It returns the wallet-owned output addresses and a recorded flag reporting
-// whether a tx row was actually written to the store. The flag is required
-// because a debit-only sweep records a row yet returns zero addresses, so
-// callers cannot infer recording from the address slice alone.
+// It returns the wallet-owned output addresses and whether wallet-relevant
+// recording succeeded, including duplicate reconciliation. A debit-only
+// sweep is recorded despite returning zero owned addresses. accepted selects
+// batch recording after a successful send; input conflicts retain watch data.
 func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
-	label string) ([]address.Address, bool, error) {
+	label string, accepted bool) ([]address.Address, bool, error) {
 
 	// Stage 1: Extract potential addresses from all transaction outputs.
 	// This is a CPU-intensive operation that is performed entirely in
@@ -442,7 +487,7 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 		// The tx spends a wallet output but credits none, so record it
 		// with an empty credit set. It is now tracked, so recorded is
 		// true even though no addresses are returned.
-		err = w.recordTxAndCredits(ctx, tx, label, nil)
+		err = w.recordTxAndCredits(ctx, tx, label, nil, accepted)
 		if err != nil {
 			return nil, false, err
 		}
@@ -482,18 +527,23 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 	// Stage 4: Atomically execute the write plan. This is the only stage
 	// that takes an exclusive database lock, and it is designed to be as
 	// fast as possible, containing no business logic.
-	err = w.recordTxAndCredits(ctx, tx, label, creditsToWrite)
+	err = w.recordTxAndCredits(
+		ctx, tx, label, creditsToWrite, accepted,
+	)
 	if err != nil {
-		return nil, false, err
+		// The caller uses this watch plan only when the atomic write
+		// reports an input conflict; other errors still stop publication.
+		return ourAddrs, false, err
 	}
 
 	return ourAddrs, true, nil
 }
 
 // recordTxAndCredits performs a single atomic database transaction to execute a
-// pre-computed "write plan" for a transaction.
+// pre-computed "write plan" for a transaction. accepted selects the observation
+// batch only after a competing send succeeds.
 func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
-	label string, creditsToWrite []creditInfo) error {
+	label string, creditsToWrite []creditInfo, accepted bool) error {
 
 	// The Store contract records exactly one credit per output index
 	// (CreateTxParams.Credits is keyed by index, so "duplicate credited
@@ -517,14 +567,26 @@ func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
 		}
 	}
 
-	err := w.store.CreateTx(ctx, db.CreateTxParams{
+	params := db.CreateTxParams{
 		WalletID: w.id,
 		Tx:       tx,
 		Received: time.Now(),
 		Status:   db.TxStatusPublished,
 		Label:    label,
 		Credits:  credits,
-	})
+	}
+	// Only a successful send authorizes an accepted observation. Ordinary
+	// pre-send recording must keep the existing branch's input claims.
+	var err error
+	if accepted {
+		err = w.store.ApplyTxBatch(ctx, db.TxBatchParams{
+			WalletID:     w.id,
+			Transactions: []db.CreateTxParams{params},
+		})
+	} else {
+		err = w.store.CreateTx(ctx, params)
+	}
+
 	if err != nil && !errors.Is(err, db.ErrTxAlreadyExists) {
 		return err
 	}

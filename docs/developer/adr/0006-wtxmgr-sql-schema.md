@@ -62,7 +62,7 @@ Two designs were considered for tracking transaction validity:
 
 *   **Derived status from other columns (alternative):**
     *   At coarse granularity (pending vs active vs invalid), some states are partly derivable: `orphaned` = `is_coinbase AND block_height IS NULL`; direct `replaced` victims can be identified from `tx_replacements.replaced_tx_id`. Direct `failed` victims are not derivable from replacement edges alone because upstream invalidation intentionally records no replacement edge.
-    *   However, a full replacement requires preserving the distinct invalid states (`replaced`, `failed`, `orphaned`), which have different operational semantics: RBF (`replaced`) allows re-spending the same inputs with a new tx; `orphaned` coinbase can recover on reconfirmation; `failed` (double-spend) is permanent. Collapsing these into a single boolean loses information needed for recovery logic and user-facing audit.
+    *   The distinct invalid states (`replaced`, `failed`, `orphaned`) have different recovery rules. Orphaned coinbase can recover on reconfirmation; regular `replaced` or `failed` rows require a real confirming block. A boolean loses this recovery and audit information.
     *   A boolean decomposition (e.g., `is_broadcast` + `is_invalid`) also introduces problems: `is_broadcast` does not equal `published` — a tx can be valid/published because it was received from the network, not broadcast by this wallet; boolean pairs create ambiguous combinations (e.g., `is_broadcast=false, is_invalid=true`) requiring additional constraints.
     *   A fully-derived alternative that preserves the same information would require at least three columns (`is_broadcast`/source marker, `invalidation_reason` enum, optional `invalidated_by_tx_id`) — strictly more schema surface than a single `tx_status` column.
     *   Cascading invalidation adds further complexity: downstream txs whose parent became invalid were never directly "replaced." Without a pre-computed status, every balance/coin-selection query would need a recursive CTE walking up the ancestor chain — O(depth) per tx on the hot path.
@@ -89,7 +89,8 @@ Recommended operational defaults:
         *   If you enforce the coinbase invariant at the database level, a simple `DELETE FROM blocks ...` will fail unless the coinbase row's `tx_status` is updated to `orphaned` as part of the same statement.
         *   Recommended: use a trigger to rewrite coinbase `tx_status` during the `block_height -> NULL` update (see 3.5).
     *   **Reconfirmation:** If an orphaned coinbase transaction re-enters the best chain, restoring it requires setting `block_height` and `tx_status = 1` (`published`) atomically.
-*   **RBF:** Handled by updating the `utxos.spent_by_tx_id` pointer to the new transaction and marking the old transaction as `replaced`.
+*   **RBF:** After the backend accepts an unmined replacement, SQL updates `utxos.spent_by_tx_id` and marks the displaced transaction `replaced` atomically. A rejected publication leaves the original claim intact.
+*   **Confirmation:** A real block may restore a regular `replaced` or `failed` row to `published` and reconcile its spend edges atomically. Unmined echoes cannot restore these rows; descendants need their own confirmation.
 
 ### 2.4 Implementation Notes
 
