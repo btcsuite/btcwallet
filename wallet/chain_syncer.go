@@ -12,8 +12,22 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// rollbackReq asks the existing Manager reader to reconcile a retained fork
+// through its writer barrier, rather than rewinding from a Wallet worker.
+type rollbackReq struct {
+	// walletName identifies the active Wallet whose Store reported a conflict.
+	walletName string
+
+	// block is the fetched canonical candidate, rechecked after writers pause.
+	block db.Block
+
+	// result is buffered so cancellation cannot strand the Manager's reply.
+	result chan error
+}
 
 // chainRouter supplies live subscriptions and prepared events while its caller
 // owns the reader lifetime and each Wallet owns transaction persistence.
@@ -21,6 +35,9 @@ type chainRouter interface {
 	// run reads the borrowed stream until cancellation or source failure.
 	run(ctx context.Context,
 		dispatch func(context.Context, any) error) error
+
+	// rollbackRequests admits recovery work to the existing reader owner.
+	rollbackRequests() chan<- rollbackReq
 
 	// routeChainEvent prepares matches for the current membership snapshot.
 	routeChainEvent(n any, wallets []*Wallet) map[uint32]chainEvent
@@ -53,6 +70,10 @@ type chainSyncer struct {
 
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
+
+	// rollbacks bounds recovery admission without creating another reader.
+	// Cancellation releases senders; it stays open until all workers join.
+	rollbacks chan rollbackReq
 }
 
 // chainSyncer implements the behavior shared by Manager and its Wallets.
@@ -78,13 +99,19 @@ func newChainSyncer(source chain.Interface,
 	params *chaincfg.Params) *chainSyncer {
 
 	return &chainSyncer{
-		source: source,
-		params: params,
+		source:    source,
+		params:    params,
+		rollbacks: make(chan rollbackReq, 1),
 		watches: &watchRegistry{
 			addresses: make(map[string]map[uint32]struct{}),
 			outpoints: make(map[wire.OutPoint]map[uint32]struct{}),
 		},
 	}
+}
+
+// rollbackRequests exposes only admission; the existing reader owns dispatch.
+func (s *chainSyncer) rollbackRequests() chan<- rollbackReq {
+	return s.rollbacks
 }
 
 // recordAddresses associates recipients before backend activation can emit
@@ -373,6 +400,14 @@ func (s *chainSyncer) run(ctx context.Context,
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+
+		case req := <-s.rollbacks:
+			// Recovery uses the same reader and Manager rollback ownership
+			// as disconnects, including its terminal write-error cleanup.
+			err := dispatch(ctx, req)
+			if err != nil {
+				return err
+			}
 
 		case n, ok := <-notifications:
 			if !ok {
