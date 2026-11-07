@@ -488,6 +488,14 @@ func (m *Manager) chainRecipients() []*Wallet {
 // and reader cancellation both release delivery during terminal shutdown.
 // Shared storage disconnects settle rollback before the next source event.
 func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
+	// A recovery request owns a buffered reply. Pre-mutation read failures
+	// stay with its worker; rollback write failures already drain Manager.
+	if req, ok := n.(rollbackReq); ok {
+		req.result <- m.handleRollbackRequest(ctx, req)
+
+		return nil
+	}
+
 	// A disconnect changes the history that Wallet workers are writing.
 	// Settle their earlier writes and rewind Store once before the next
 	// source event; independent Wallet delivery cannot order that rewind.
@@ -570,7 +578,31 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 		return fmt.Errorf("disconnect block: %w", err)
 	}
 
-	err = ctx.Err()
+	return m.rollbackChain(ctx, *block, nil)
+}
+
+// handleRollbackRequest retains admission while a recovery request settles,
+// including requests queued before Create publication or terminal cleanup.
+func (m *Manager) handleRollbackRequest(ctx context.Context,
+	req rollbackReq) error {
+
+	m.Lock()
+	defer m.Unlock()
+
+	err := m.checkCreate()
+	if err != nil {
+		return err
+	}
+
+	return m.rollbackChain(ctx, req.block, &req)
+}
+
+// rollbackChain shares the existing writer barrier and fatal cleanup between
+// source disconnects and recovery requests. Its caller holds Manager admission.
+func (m *Manager) rollbackChain(ctx context.Context, block db.Block,
+	request *rollbackReq) error {
+
+	err := ctx.Err()
 	if err != nil {
 		return err
 	}
@@ -587,9 +619,22 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 
+	// A delayed recovery request may have become stale while other writers
+	// settled. Recheck only after their fetched state is held at the barrier.
+	if request != nil {
+		retained, err := m.retainedRollbackBlock(ctx, *request)
+		if err != nil {
+			close(rollbackDone)
+
+			return err
+		}
+
+		block = *retained
+	}
+
 	// Accepted persistence settles even if its caller or Stop cancels.
 	// The Manager lock keeps Store open until this one rollback completes.
-	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
+	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), block)
 	if err != nil {
 		err = fmt.Errorf("rollback chain: %w", err)
 		if m.lifetimeCtx.Err() == nil {
@@ -612,6 +657,45 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	close(rollbackDone)
 
 	return nil
+}
+
+// retainedRollbackBlock proves a retained hash is still orphaned after all
+// writers pause. ErrStateChanged means the request needs a refetch.
+func (m *Manager) retainedRollbackBlock(ctx context.Context,
+	req rollbackReq) (*db.Block, error) {
+
+	wallet := m.wallets[req.walletName]
+	if wallet == nil {
+		return nil, fmt.Errorf("recovery wallet %q: %w", req.walletName,
+			db.ErrWalletNotFound)
+	}
+
+	blocks, err := wallet.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		StartHeight: req.block.Height,
+		EndHeight:   req.block.Height,
+	})
+	if errors.Is(err, db.ErrBlockNotFound) {
+		return nil, ErrStateChanged
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("read retained block: %w", err)
+	}
+
+	if len(blocks) == 0 || blocks[0].Hash == req.block.Hash {
+		return nil, ErrStateChanged
+	}
+
+	hash, err := m.config.ChainSource.GetBlockHash(int64(req.block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("get recovery block hash: %w", err)
+	}
+
+	if !req.block.Hash.IsEqual(hash) {
+		return nil, ErrStateChanged
+	}
+
+	return &blocks[0], nil
 }
 
 // String returns a summary of the active wallets managed by the Manager.

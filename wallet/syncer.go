@@ -627,6 +627,39 @@ func (s *syncer) rewindToBlock(ctx context.Context,
 	return nil
 }
 
+// requestRollback lets the existing Manager reader own shared reconciliation.
+// Servicing the mailbox releases source backpressure and acknowledges this
+// worker's own preparation, so Manager can pause every writer before mutation.
+func (s *syncer) requestRollback(ctx context.Context, block db.Block) error {
+	req := rollbackReq{
+		walletName: s.cfg.Name,
+		block:      block,
+		result:     make(chan error, 1),
+	}
+	requests := s.chainSyncer.rollbackRequests()
+
+	for {
+		select {
+		case requests <- req:
+			// Disable admission once Manager owns the request; waiting
+			// still services its barrier and earlier observations.
+			requests = nil
+
+		case err := <-req.result:
+			return err
+
+		case event := <-s.chainEventChan:
+			err := s.processChainEventBeforeSync(ctx, event)
+			if err != nil {
+				return err
+			}
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // rewindWallet rewinds this wallet's sync and transaction state for a manual
 // rescan without requiring a DB-wide block rollback.
 func (s *syncer) rewindWallet(ctx context.Context,
@@ -998,14 +1031,15 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 
 	// Retained observations must not checkpoint an unfetched next block:
 	// live matches can omit recovery addresses until historical scanning.
-	// An empty mailbox returns a zero event and needs no deferred handler.
-	if pending.notification != nil {
-		defer func() {
+	// Recovery flushes earlier observations before the Manager barrier, so
+	// consult the pending value again rather than replaying it after rollback.
+	defer func() {
+		if pending.notification != nil {
 			resultErr = errors.Join(
 				resultErr, s.processChainEventBeforeSync(ctx, pending),
 			)
-		}()
-	}
+		}
+	}()
 
 	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
@@ -1025,6 +1059,20 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	// loop makes forward progress regardless of whether a given backend
 	// also mirrors the tip into the legacy addrStore.
 	err = s.store.ApplyScanBatch(ctx, params)
+	if errors.Is(err, db.ErrBlockMismatch) {
+		// The refused transaction left no scan writes. Settle its earlier
+		// observation before Manager pauses every writer and removes forks.
+		// The existing event handler treats an empty mailbox's zero as a no-op.
+		err = errors.Join(
+			err, s.processChainEventBeforeSync(ctx, pending),
+		)
+		pending = chainEvent{}
+
+		err = errors.Join(
+			err, s.reconcileScanBlocks(ctx, params.SyncedBlocks),
+		)
+	}
+
 	if err != nil {
 		return fmt.Errorf("apply sync scan batch: %w", err)
 	}
@@ -1039,6 +1087,61 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	// finish registration before catch-up reports this batch complete.
 	if refreshWatches {
 		return s.refreshLiveWatches(ctx)
+	}
+
+	return nil
+}
+
+// reconcileScanBlocks locates an orphan retained above an interrupted rewind.
+// A current source hash authorizes Manager reconciliation; same-hash metadata
+// errors and stale fetched branches keep the original strict Store refusal.
+func (s *syncer) reconcileScanBlocks(ctx context.Context,
+	blocks []db.Block) error {
+
+	for _, block := range blocks {
+		retained, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				StartHeight: block.Height,
+				EndHeight:   block.Height,
+			},
+		)
+		if errors.Is(err, db.ErrBlockNotFound) {
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("read recovery block: %w", err)
+		}
+
+		for _, stored := range retained {
+			if stored.Hash == block.Hash {
+				// SQL identity compares seconds. A timestamp conflict
+				// with the same hash is not evidence of an orphan.
+				if stored.Timestamp.Unix() != block.Timestamp.Unix() {
+					return nil
+				}
+
+				continue
+			}
+
+			hash, err := s.cfg.Chain.GetBlockHash(int64(block.Height))
+			if err != nil {
+				return fmt.Errorf("get recovery block hash: %w", err)
+			}
+
+			if !block.Hash.IsEqual(hash) {
+				return nil
+			}
+
+			err = s.requestRollback(ctx, block)
+			if err != nil {
+				return err
+			}
+
+			// The failed batch and its recovery horizons must be fetched
+			// again after all writers have joined the existing barrier.
+			return ErrStateChanged
+		}
 	}
 
 	return nil

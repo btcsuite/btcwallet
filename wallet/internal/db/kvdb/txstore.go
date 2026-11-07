@@ -1382,9 +1382,31 @@ func (s *Store) RewindWallet(_ context.Context,
 
 		preRewindTip = s.addrStore.SyncedTo()
 
-		err := s.addrStore.SetSyncedTo(addrmgrNs, &block)
+		// Birthday checkpoints can have no stored predecessor. Reuse the
+		// sparse rollback snapshot and clear the marker only within this
+		// update, restoring its original block and verified state below.
+		target := &rollbackTarget{}
+
+		err := s.computeRollbackBirthdayBlockTarget(
+			addrmgrNs, rollbackHeight, target,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = s.deleteRollbackBirthdayBlock(tx, target)
+		if err != nil {
+			return err
+		}
+
+		err = s.addrStore.SetSyncedTo(addrmgrNs, &block)
 		if err != nil {
 			return fmt.Errorf("set synced to: %w", err)
+		}
+
+		err = s.restoreCurrentBirthdayBlock(tx, target)
+		if err != nil {
+			return err
 		}
 
 		return s.txStore.Rollback(txmgrNs, rollbackHeight)
