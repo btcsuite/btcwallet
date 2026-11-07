@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/chain/port"
+	"github.com/btcsuite/btcwallet/wallet"
 )
 
 var (
@@ -58,15 +60,34 @@ func init() {
 
 // TestBtcWallet runs the btcwallet integration test suite.
 func TestBtcWallet(t *testing.T) {
-	if len(allTestCases) == 0 {
+	// Keep SQL's authored-change watch contract separate from the shared
+	// funding cases; copy before appending/shuffling so repeats stay isolated.
+	cases := slices.Clone(allTestCases)
+	if *dbBackend == string(wallet.DBBackendSQLite) ||
+		*dbBackend == string(wallet.DBBackendPostgres) {
+
+		cases = append(
+			cases,
+			&testCase{
+				Name:     "psbtmanager sql watch failure",
+				TestFunc: testFundPsbtSQLWatchFailure,
+			},
+			&testCase{
+				Name:     "psbtmanager sql watch change",
+				TestFunc: testFundPsbtSQLWatchChange,
+			},
+		)
+	}
+
+	if len(cases) == 0 {
 		t.Skip("no integration test cases registered")
 	}
 
-	maybeShuffleTestCases()
+	maybeShuffleTestCases(cases)
 
 	harness := bwtest.SetupHarness(t, *chainBackend, *dbBackend)
 
-	for _, tc := range allTestCases {
+	for _, tc := range cases {
 		if tc == nil {
 			continue
 		}
@@ -89,17 +110,17 @@ func TestBtcWallet(t *testing.T) {
 	}
 }
 
-// maybeShuffleTestCases shuffles the test cases if the flag `shuffleseed` is
-// set and not 0.
-func maybeShuffleTestCases() {
+// maybeShuffleTestCases shuffles the supplied cases if `shuffleseed` is set,
+// leaving the canonical registrations available to later runs.
+func maybeShuffleTestCases(cases []*testCase) {
 	// Exit if set to 0.
 	if *shuffleSeedFlag == 0 {
 		return
 	}
 
 	r := rand.New(rand.NewSource(int64(*shuffleSeedFlag)))
-	r.Shuffle(len(allTestCases), func(i, j int) {
-		allTestCases[i], allTestCases[j] = allTestCases[j], allTestCases[i]
+	r.Shuffle(len(cases), func(i, j int) {
+		cases[i], cases[j] = cases[j], cases[i]
 	})
 }
 

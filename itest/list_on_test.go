@@ -586,6 +586,22 @@ var allTestCases = []*testCase{
 		TestFunc: testFundPsbtCommitChange,
 	},
 	{
+		Name:     "psbtmanager funding leases",
+		TestFunc: testFundPsbtFundingLeases,
+	},
+	{
+		Name:     "psbtmanager watchonly",
+		TestFunc: testFundPsbtWatchOnly,
+	},
+	{
+		Name:     "psbtmanager reject intent",
+		TestFunc: testFundPsbtRejectIntent,
+	},
+	{
+		Name:     "psbtmanager reject inputs",
+		TestFunc: testFundPsbtRejectInputs,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
