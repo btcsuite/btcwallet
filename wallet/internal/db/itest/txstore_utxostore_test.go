@@ -3905,10 +3905,10 @@ func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
 		walletInfo.SyncedTo.Timestamp.Unix())
 }
 
-// TestApplyTxBatchRejectsStaleDuplicateTx verifies that a duplicate batch
-// observation is not skipped when the existing row is terminal history. A blind
-// ErrTxAlreadyExists skip would leave the failed row in place while reporting a
-// successful batch application.
+// TestApplyTxBatchRejectsStaleDuplicateTx keeps Pending requests strict when
+// the stored row has failed. Only Published network echoes may be ignored
+// against terminal history inside the batch transaction; a Pending request
+// must not report a successful creation without recording its requested state.
 func TestApplyTxBatchRejectsStaleDuplicateTx(t *testing.T) {
 	t.Parallel()
 
@@ -5102,4 +5102,178 @@ func TestApplyTxBatchDuplicate(t *testing.T) {
 			t, walletUtxoExists(t, store, walletID, creditOutPoint),
 		)
 	})
+}
+
+// TestApplyTxBatchAcceptedReplacement keeps Pending claims, queued terminal
+// echoes and confirmation of either competing hash consistent.
+func TestApplyTxBatchAcceptedReplacement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		confirmOriginal bool
+		childStatus     db.TxStatus
+	}{
+		{
+			name:        "replacement confirms",
+			childStatus: db.TxStatusFailed,
+		},
+		{
+			name:            "original confirms",
+			confirmOriginal: true,
+			childStatus:     db.TxStatusPublished,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Record an owned credit, its spender and descendant
+			// so rejection and either confirmed winner use the same graph.
+			ctx := t.Context()
+			store := NewTestStore(t)
+			id := newWallet(t, store, "accepted-replacement")
+			createDerivedAccount(
+				t, store, id, db.KeyScopeBIP0084, "default",
+			)
+			addr := newDerivedAddress(
+				t, store, id, db.KeyScopeBIP0084, "default", false,
+			)
+			parent := newRegularTx(
+				[]wire.OutPoint{randomOutPoint()},
+				[]*wire.TxOut{wire.NewTxOut(10000, addr.ScriptPubKey)},
+			)
+			parentParams := db.CreateTxParams{
+				WalletID: id,
+				Tx:       parent,
+				Received: time.Unix(1710001500, 0),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			}
+			require.NoError(t, store.CreateTx(ctx, parentParams))
+
+			outpoint := wire.OutPoint{Hash: parent.TxHash()}
+			original := parent.Copy()
+			original.TxIn[0].PreviousOutPoint = outpoint
+			original.TxOut[0].Value = 8000
+			originalParams := parentParams
+			originalParams.Tx = original
+			require.NoError(t, store.CreateTx(ctx, originalParams))
+
+			child := original.Copy()
+			child.TxIn[0].PreviousOutPoint.Hash = original.TxHash()
+			child.TxOut[0].Value = 6000
+			childParams := originalParams
+			childParams.Tx = child
+			require.NoError(t, store.CreateTx(ctx, childParams))
+
+			// Queue the published observation before replacement; the batch
+			// must reconcile the terminal history it finds when delivered.
+			observation := originalParams
+			tip := NewBlockFixture(259)
+
+			replacement := original.Copy()
+			replacement.TxOut[0].Value = 7000
+			batch := db.TxBatchParams{
+				WalletID:     id,
+				Transactions: []db.CreateTxParams{originalParams},
+			}
+			batch.Transactions[0].Tx = replacement
+			batch.Transactions[0].Status = db.TxStatusPending
+
+			// Act: An unaccepted competing batch must not rewrite claims.
+			err := store.ApplyTxBatch(ctx, batch)
+
+			// Assert: Pending refusal leaves the original history/claim.
+			require.ErrorIs(t, err, db.ErrTxInputConflict)
+			query := db.GetTxQuery{WalletID: id, Txid: original.TxHash()}
+			old, err := store.GetTx(ctx, query)
+			require.NoError(t, err)
+			require.Equal(t, db.TxStatusPublished, old.Status)
+			require.Len(t, childSpendingTxIDs(t, store, id, parent.TxHash()), 1)
+
+			// Act: Acceptance permits atomic replacement without a block.
+			batch.Transactions[0].Status = db.TxStatusPublished
+			err = store.ApplyTxBatch(ctx, batch)
+
+			require.NoError(t, err)
+
+			// Act: Deliver the older echo after replacement has committed.
+			err = store.ApplyTxBatch(ctx, db.TxBatchParams{
+				WalletID:     id,
+				Transactions: []db.CreateTxParams{observation},
+				SyncedTo:     &tip,
+			})
+
+			// Assert: The echo preserves replacement history and permits sync
+			// progress; only the accepted replacement's credit is spendable.
+			require.NoError(t, err)
+			old, err = store.GetTx(ctx, query)
+			require.NoError(t, err)
+			require.Equal(t, db.TxStatusReplaced, old.Status)
+			creditQuery := db.GetUtxoQuery{WalletID: id}
+			creditQuery.OutPoint.Hash = original.TxHash()
+			_, err = store.GetUtxo(ctx, creditQuery)
+			require.ErrorIs(t, err, db.ErrUtxoNotFound)
+
+			creditQuery.OutPoint.Hash = replacement.TxHash()
+			_, err = store.GetUtxo(ctx, creditQuery)
+			require.NoError(t, err)
+			info, err := store.GetWallet(ctx, "accepted-replacement")
+			require.NoError(t, err)
+			require.NotNil(t, info.SyncedTo)
+			require.Equal(t, tip.Hash, info.SyncedTo.Hash)
+
+			// Act: Block truth may confirm either hash and the original's
+			// displaced descendant, restoring its actual credits and claims.
+			winner, loser := batch.Transactions[0], original
+
+			creditHash := replacement.TxHash()
+			if tc.confirmOriginal {
+				winner, loser = originalParams, replacement
+				creditHash = child.TxHash()
+			}
+
+			block := CreateBlockFixture(t, store.Queries(), 260)
+			winner.Block = &block
+
+			confirmations := []db.CreateTxParams{winner}
+			if tc.confirmOriginal {
+				childParams.Block = &block
+				confirmations = append(confirmations, childParams)
+			}
+
+			err = store.ApplyTxBatch(ctx, db.TxBatchParams{
+				WalletID: id, Transactions: confirmations,
+			})
+
+			// Assert: The block fixes the winner, descendant state and change;
+			// even another accepted unmined observation cannot override it.
+			require.NoError(t, err)
+
+			query.Txid = winner.Tx.TxHash()
+			mined, err := store.GetTx(ctx, query)
+			require.NoError(t, err)
+			require.Equal(t, db.TxStatusPublished, mined.Status)
+			require.NotNil(t, mined.Block)
+
+			query.Txid = child.TxHash()
+			storedChild, err := store.GetTx(ctx, query)
+			require.NoError(t, err)
+			require.Equal(t, tc.childStatus, storedChild.Status)
+			require.Equal(t, tc.confirmOriginal, storedChild.Block != nil)
+
+			creditQuery.OutPoint.Hash = creditHash
+			_, err = store.GetUtxo(ctx, creditQuery)
+			require.NoError(t, err)
+
+			creditQuery.OutPoint.Hash = loser.TxHash()
+			_, err = store.GetUtxo(ctx, creditQuery)
+			require.ErrorIs(t, err, db.ErrUtxoNotFound)
+
+			batch.Transactions[0].Tx.TxOut[0].Value = 6000
+			err = store.ApplyTxBatch(ctx, batch)
+			require.ErrorIs(t, err, db.ErrTxInputConflict)
+		})
+	}
 }

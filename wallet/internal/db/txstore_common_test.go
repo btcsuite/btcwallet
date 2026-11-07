@@ -1586,7 +1586,7 @@ func TestHandleTxConflicts(t *testing.T) {
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{2, 3}).
 		Return(nil).Once()
 
-	err = handleTxConflicts(t.Context(), req, 9, ops)
+	err = handleTxConflicts(t.Context(), req, 9, false, ops)
 	require.NoError(t, err)
 }
 
@@ -1647,7 +1647,7 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{3}).Return(nil).
 		Once()
 
-	err = handleTxConflicts(t.Context(), req, 9, ops)
+	err = handleTxConflicts(t.Context(), req, 9, false, ops)
 	require.NoError(t, err)
 }
 
@@ -1684,7 +1684,7 @@ func TestHandleTxConflictsNoDescendants(t *testing.T) {
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1},
 		int64(9)).Return(nil).Once()
 
-	err = handleTxConflicts(t.Context(), req, 9, ops)
+	err = handleTxConflicts(t.Context(), req, 9, false, ops)
 	require.NoError(t, err)
 }
 
@@ -1734,7 +1734,7 @@ func TestHandleTxConflictsMarkFailedError(t *testing.T) {
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{2}).Return(
 		errConflictMarkFailed).Once()
 
-	err = handleTxConflicts(t.Context(), req, 9, ops)
+	err = handleTxConflicts(t.Context(), req, 9, false, ops)
 	require.ErrorIs(t, err, errConflictMarkFailed)
 	require.ErrorContains(t, err, "mark conflict descendants failed")
 }
@@ -2168,7 +2168,7 @@ func TestHandleTxConflictsEdgeError(t *testing.T) {
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1},
 		int64(9)).Return(errCreateTxTest).Once()
 
-	err = handleTxConflicts(context.Background(), req, 9, ops)
+	err = handleTxConflicts(context.Background(), req, 9, false, ops)
 	require.ErrorIs(t, err, errCreateTxTest)
 	require.ErrorContains(t, err, "record conflict replacement edges")
 }
@@ -2198,7 +2198,7 @@ func TestHandleTxConflictsListError(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		nil, errCreateTxTest).Once()
 
-	err = handleTxConflicts(context.Background(), req, 9, ops)
+	err = handleTxConflicts(context.Background(), req, 9, false, ops)
 	require.ErrorIs(t, err, errCreateTxTest)
 	require.ErrorContains(t, err, "list create tx conflict candidates")
 }
@@ -2233,7 +2233,7 @@ func TestHandleTxConflictsMarkReplacedError(t *testing.T) {
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(
 		errCreateTxTest).Once()
 
-	err = handleTxConflicts(context.Background(), req, 9, ops)
+	err = handleTxConflicts(context.Background(), req, 9, false, ops)
 	require.ErrorIs(t, err, errCreateTxTest)
 	require.ErrorContains(t, err, "mark direct conflicts replaced")
 }
