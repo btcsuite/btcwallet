@@ -233,6 +233,18 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerRejectAccountCreation,
 	},
 	{
+		Name:     "account manager reject derived account identity",
+		TestFunc: testAccountManagerRejectDerivedAccountIdentity,
+	},
+	{
+		Name:     "account manager reject exact account creation",
+		TestFunc: testAccountManagerRejectExactAccountCreation,
+	},
+	{
+		Name:     "account manager reject excluded account identity",
+		TestFunc: testAccountManagerRejectExcludedAccountIdentity,
+	},
+	{
 		Name:     "account manager enforce account creation lifecycle",
 		TestFunc: testAccountManagerEnforceAccountCreationLifecycle,
 	},
@@ -295,6 +307,10 @@ var allTestCases = []*testCase{
 	{
 		Name:     "account manager reject invalid import key",
 		TestFunc: testAccountManagerRejectInvalidImportKey,
+	},
+	{
+		Name:     "account manager reject declared account import",
+		TestFunc: testAccountManagerRejectDeclaredAccountImport,
 	},
 	{
 		Name:     "account manager enforce account import lifecycle",
