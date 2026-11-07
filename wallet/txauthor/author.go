@@ -7,8 +7,10 @@ package txauthor
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -17,7 +19,27 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
 )
 
+var (
+	// ErrChangeScriptInfoMismatch is returned by InputSelection.Complete
+	// when the change script does not match the ChangeScriptInfo the
+	// selection was sized and judged for.
+	ErrChangeScriptInfoMismatch = errors.New(
+		"change script does not match the selected change script info",
+	)
+
+	// errChangeScriptSizeOutOfRange is returned when a change script size
+	// is negative or exceeds txscript.MaxScriptSize, so no change script
+	// could have it.
+	errChangeScriptSizeOutOfRange = errors.New(
+		"change script size is out of range",
+	)
+)
+
 // SumOutputValues sums up the list of TxOuts and returns an Amount.
+//
+// Deprecated: this sum is unchecked. It panics on a nil element, admits a
+// negative or over-maximum value, and wraps silently on overflow. Use
+// CheckOutputsAmount, which validates the set and returns the same total.
 func SumOutputValues(outputs []*wire.TxOut) (totalOutput btcutil.Amount) {
 	for _, txOut := range outputs {
 		totalOutput += btcutil.Amount(txOut.Value)
@@ -71,6 +93,34 @@ type ChangeSource struct {
 	ScriptSize int
 }
 
+// ChangeScriptInfo describes the change scripts an InputSelection may pay by
+// the two properties authoring depends on: the script size, which the fee
+// assumes, and whether the script is a witness program, which the dust rule
+// discounts. It lets a caller decide whether change is kept before committing
+// a script.
+//
+// Judging dust by this info assumes a spendable change script that carries no
+// data, as every wallet-derived change script is. Size and witness status
+// cannot represent script-specific policy exceptions, such as an unspendable
+// script or a data carrier, so the info must only describe such standard
+// scripts.
+type ChangeScriptInfo struct {
+	// ScriptSize is the size in bytes of the change scriptPubKey.
+	ScriptSize uint
+
+	// IsWitnessProgram reports whether the change scriptPubKey is a witness
+	// program.
+	IsWitnessProgram bool
+}
+
+// NewChangeScriptInfo returns the ChangeScriptInfo of changeScript.
+func NewChangeScriptInfo(changeScript []byte) ChangeScriptInfo {
+	return ChangeScriptInfo{
+		ScriptSize:       uint(len(changeScript)),
+		IsWitnessProgram: txscript.IsWitnessProgram(changeScript),
+	}
+}
+
 // NewUnsignedTransaction creates an unsigned transaction paying to one or more
 // non-change outputs.  An appropriate transaction fee is included based on the
 // transaction size.
@@ -79,94 +129,345 @@ type ChangeSource struct {
 // increasing targets amounts.
 //
 // If any remaining output value can be returned to the wallet via a change
-// output without violating mempool dust rules, a P2WPKH change output is
-// appended to the transaction outputs.  Since the change output may not be
-// necessary, fetchChange is called zero or one times to generate this script.
-// This function must return a P2WPKH script or smaller, otherwise fee estimation
-// will be incorrect.
+// output without violating mempool dust rules, a change output paying the
+// script from changeSource.NewScript is appended to the transaction outputs.
+// NewScript is called exactly once, after input selection succeeds, even when
+// the change is then dropped as zero or dust. The fee is sized for a change
+// script of changeSource.ScriptSize bytes, so NewScript must not return a
+// larger script, otherwise fee estimation will be incorrect.
 //
 // If successful, the transaction, total input value spent, and all previous
 // output scripts are returned.  If the input source was unable to provide
 // enough input value to pay for every output any any necessary fees, an
 // InputSourceError is returned.
 //
+// Every amount this function forms is checked. The change script size is
+// range-checked, the output set is validated, and the fee rate is rejected at
+// or below zero before the first fetchInputs call, so a malformed request never
+// reaches a callback. The per-iteration fee and
+// change arithmetic depends on the inputs that were selected, so it necessarily
+// follows input selection, but it still completes before changeSource.NewScript
+// is called.
+//
+// It is SelectInputs followed by completion, with the change script drawn from
+// changeSource in between. A ChangeSource does not describe whether its scripts
+// are witness programs, so the relay policy judges the drawn script, including
+// scripts no wallet would derive: an unspendable script is dropped as dust and
+// a data carrier is kept. Callers that must not commit a script for dropped
+// change use SelectInputs, InputSelection.NeedsChangeScript, and Complete
+// instead.
+//
 // BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
 func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
 
-	targetAmount := SumOutputValues(outputs)
-	estimatedSize := txsizes.EstimateVirtualSize(
-		0, 0, 1, 0, outputs, changeSource.ScriptSize,
-	)
-	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize)
+	if changeSource.ScriptSize < 0 {
+		return nil, fmt.Errorf("%w: %d bytes", errChangeScriptSizeOutOfRange,
+			changeSource.ScriptSize)
+	}
 
+	// This path judges dust on the drawn script, so the info carries only
+	// the size the fee is estimated for.
+	changeInfo := ChangeScriptInfo{ScriptSize: uint(changeSource.ScriptSize)}
+
+	selection, err := SelectInputs(
+		outputs, feeRatePerKb, fetchInputs, changeInfo,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	changeScript, err := changeSource.NewScript()
+	if err != nil {
+		return nil, err
+	}
+
+	change := wire.NewTxOut(int64(selection.changeAmount), changeScript)
+	if selection.changeAmount == 0 ||
+		txrules.IsDustOutput(change, txrules.DefaultRelayFeePerKb) {
+
+		change = nil
+	}
+
+	return selection.build(change), nil
+}
+
+// InputSelection is a funded input set for a set of outputs, together with the
+// value left over for change once the fee is paid. It is produced by
+// SelectInputs before any change script exists: NeedsChangeScript reports
+// whether change survives for the selected ChangeScriptInfo, so a caller
+// commits a change script only when one is needed and then finishes the
+// transaction with Complete.
+type InputSelection struct {
+	// outputs are the non-change outputs the inputs fund.
+	outputs []*wire.TxOut
+
+	// inputs are the selected transaction inputs.
+	inputs []*wire.TxIn
+
+	// prevScripts are the previous output scripts the inputs redeem.
+	prevScripts [][]byte
+
+	// prevInputValues are the previous output values the inputs redeem.
+	prevInputValues []btcutil.Amount
+
+	// totalInput is the sum of prevInputValues.
+	totalInput btcutil.Amount
+
+	// changeAmount is the value left for change after paying for every
+	// output and a fee that assumes a change output is present.
+	changeAmount btcutil.Amount
+
+	// changeInfo describes the change script the fee was sized for and the
+	// dust rule judges change by.
+	changeInfo ChangeScriptInfo
+}
+
+// SelectInputs chooses inputs that pay for outputs and a fee at feeRatePerKb,
+// sizing the fee as though a change output described by changeInfo is present.
+// Transaction inputs are chosen from repeated calls to fetchInputs with
+// increasing target amounts.
+//
+// A change script size above txscript.MaxScriptSize is rejected, the output set
+// is validated, and the fee rate is rejected at or below zero before the first
+// fetchInputs call, so a malformed request never reaches the callback. If the
+// input source was unable to provide enough input value to pay
+// for every output and any necessary fees, an InputSourceError is returned.
+//
+// BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
+func SelectInputs(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
+	fetchInputs InputSource, changeInfo ChangeScriptInfo) (*InputSelection,
+	error) {
+
+	if changeInfo.ScriptSize > txscript.MaxScriptSize {
+		return nil, fmt.Errorf("%w: %d bytes, maximum %d",
+			errChangeScriptSizeOutOfRange, changeInfo.ScriptSize,
+			txscript.MaxScriptSize)
+	}
+
+	changeScriptSize := int(changeInfo.ScriptSize)
+
+	targetAmount, err := CheckOutputsAmount(outputs)
+	if err != nil {
+		return nil, err
+	}
+
+	estimatedSize := txsizes.EstimateVirtualSize(
+		0, 0, 1, 0, outputs, changeScriptSize,
+	)
+
+	targetFee, err := CheckedFeeForSerializeSize(
+		feeRatePerKb, estimatedSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// The three checked add and subtract calls below cannot currently fail.
+	// CheckOutputsAmount bounds the target and CheckedFeeForSerializeSize bounds
+	// the fee, so their sum stays far inside an int64; each subtraction is
+	// guarded by the comparison immediately above it. They are checked
+	// anyway, so that a later change to either bound cannot reintroduce a
+	// silent wrap, but a reader should not go looking for the input that
+	// trips them.
 	for {
-		inputAmount, inputs, inputValues, scripts, err := fetchInputs(targetAmount + targetFee)
+		inputAmount, inputs, inputValues, scripts, err := fetchFunding(
+			fetchInputs, targetAmount, targetFee,
+		)
 		if err != nil {
 			return nil, err
-		}
-		if inputAmount < targetAmount+targetFee {
-			return nil, insufficientFundsError{}
 		}
 
 		// We count the types of inputs, which we'll use to estimate
 		// the vsize of the transaction.
-		var nested, p2wpkh, p2tr, p2pkh int
-		for _, pkScript := range scripts {
-			switch {
-			// If this is a p2sh output, we assume this is a
-			// nested P2WKH.
-			case txscript.IsPayToScriptHash(pkScript):
-				nested++
-			case txscript.IsPayToWitnessPubKeyHash(pkScript):
-				p2wpkh++
-			case txscript.IsPayToTaproot(pkScript):
-				p2tr++
-			default:
-				p2pkh++
-			}
-		}
+		p2pkh, p2tr, p2wpkh, nested := countInputTypes(scripts)
 
 		maxSignedSize := txsizes.EstimateVirtualSize(
-			p2pkh, p2tr, p2wpkh, nested, outputs, changeSource.ScriptSize,
+			p2pkh, p2tr, p2wpkh, nested, outputs, changeScriptSize,
 		)
-		maxRequiredFee := txrules.FeeForSerializeSize(feeRatePerKb, maxSignedSize)
-		remainingAmount := inputAmount - targetAmount
+
+		maxRequiredFee, err := CheckedFeeForSerializeSize(
+			feeRatePerKb, maxSignedSize,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		remainingAmount, err := subAmounts(inputAmount, targetAmount)
+		if err != nil {
+			return nil, err
+		}
+
 		if remainingAmount < maxRequiredFee {
 			targetFee = maxRequiredFee
 			continue
 		}
 
-		unsignedTransaction := &wire.MsgTx{
-			Version:  wire.TxVersion,
-			TxIn:     inputs,
-			TxOut:    outputs,
-			LockTime: 0,
-		}
-
-		changeIndex := -1
-		changeAmount := inputAmount - targetAmount - maxRequiredFee
-		changeScript, err := changeSource.NewScript()
+		// Reuse the sufficiency remainder rather than re-deriving the
+		// change from the input total a second time.
+		changeAmount, err := subAmounts(remainingAmount, maxRequiredFee)
 		if err != nil {
 			return nil, err
 		}
-		change := wire.NewTxOut(int64(changeAmount), changeScript)
-		if changeAmount != 0 && !txrules.IsDustOutput(change,
-			txrules.DefaultRelayFeePerKb) {
 
-			l := len(outputs)
-			unsignedTransaction.TxOut = append(outputs[:l:l], change)
-			changeIndex = l
-		}
-
-		return &AuthoredTx{
-			Tx:              unsignedTransaction,
-			PrevScripts:     scripts,
-			PrevInputValues: inputValues,
-			TotalInput:      inputAmount,
-			ChangeIndex:     changeIndex,
+		return &InputSelection{
+			outputs:         outputs,
+			inputs:          inputs,
+			prevScripts:     scripts,
+			prevInputValues: inputValues,
+			totalInput:      inputAmount,
+			changeAmount:    changeAmount,
+			changeInfo:      changeInfo,
 		}, nil
 	}
+}
+
+// fetchFunding asks fetchInputs for inputs covering targetAmount plus
+// targetFee and returns an insufficient funds error if it supplies less.
+func fetchFunding(fetchInputs InputSource, targetAmount,
+	targetFee btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+	[]btcutil.Amount, [][]byte, error) {
+
+	// Form the target the inputs must cover once, and hold on to it so the
+	// sufficiency comparison below tests the very same value the input
+	// source was asked for.
+	targetTotal, err := addAmounts(targetAmount, targetFee)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	inputAmount, inputs, inputValues, scripts, err := fetchInputs(
+		targetTotal,
+	)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	if inputAmount < targetTotal {
+		return 0, nil, nil, nil, insufficientFundsError{}
+	}
+
+	return inputAmount, inputs, inputValues, scripts, nil
+}
+
+// NeedsChangeScript reports whether Complete needs a change script, because the
+// transaction keeps a change output: the leftover value is non-zero and not
+// dust under the default relay fee for a change script the selection's
+// ChangeScriptInfo describes. Otherwise the leftover value is added to the fee
+// and Complete ignores the script, so the caller need not obtain one.
+func (s *InputSelection) NeedsChangeScript() bool {
+	return s.changeAmount != 0 && !isDustChange(
+		s.changeAmount, s.changeInfo, txrules.DefaultRelayFeePerKb,
+	)
+}
+
+// Complete builds the unsigned transaction from the selection. When the
+// selection keeps change, the leftover value pays changeScript, which must
+// match the selected ChangeScriptInfo, otherwise ErrChangeScriptInfoMismatch is
+// returned since the fee and dust decisions would not hold for it. Without
+// kept change the result reports no change index and changeScript is ignored,
+// so it may be nil.
+func (s *InputSelection) Complete(changeScript []byte) (*AuthoredTx, error) {
+	if !s.NeedsChangeScript() {
+		return s.build(nil), nil
+	}
+
+	if NewChangeScriptInfo(changeScript) != s.changeInfo {
+		return nil, ErrChangeScriptInfoMismatch
+	}
+
+	return s.build(wire.NewTxOut(int64(s.changeAmount), changeScript)), nil
+}
+
+// build assembles the unsigned transaction, appending change unless it is nil.
+// The change output is optional rather than its script, since a legacy
+// ChangeSource may hand out an empty script that still pays kept change.
+func (s *InputSelection) build(change *wire.TxOut) *AuthoredTx {
+	unsignedTransaction := &wire.MsgTx{
+		Version:  wire.TxVersion,
+		TxIn:     s.inputs,
+		TxOut:    s.outputs,
+		LockTime: 0,
+	}
+
+	changeIndex := -1
+
+	if change != nil {
+		// Copy the outputs so the caller's slice is never grown in
+		// place.
+		txOuts := make([]*wire.TxOut, 0, len(s.outputs)+1)
+		txOuts = append(txOuts, s.outputs...)
+		txOuts = append(txOuts, change)
+
+		unsignedTransaction.TxOut = txOuts
+		changeIndex = len(s.outputs)
+	}
+
+	return &AuthoredTx{
+		Tx:              unsignedTransaction,
+		PrevScripts:     s.prevScripts,
+		PrevInputValues: s.prevInputValues,
+		TotalInput:      s.totalInput,
+		ChangeIndex:     changeIndex,
+	}
+}
+
+// isDustChange reports whether a change output of amount is dust at
+// relayFeePerKb for a change script described by info. It is btcd's
+// mempool.IsDust stated over the script's ChangeScriptInfo instead of its
+// bytes: the cost of spending an output is its serialized size plus a typical
+// redeeming input, whose 107-byte signature script is discounted by the
+// witness scale factor when the output is a witness program, and the output is
+// dust when its value is less than three times that cost at the relay fee.
+// Change scripts are spendable and never carry data, so the unspendable and
+// data carrier cases IsDust handles cannot arise.
+func isDustChange(amount btcutil.Amount, info ChangeScriptInfo,
+	relayFeePerKb btcutil.Amount) bool {
+
+	// typicalInputSize is the outpoint, sequence and script length prefix of
+	// a redeeming input, typicalSigScriptSize is its signature script, and
+	// dustSpendMultiple is how many times the spending cost an output must
+	// be worth not to be dust.
+	const (
+		typicalInputSize     = 41
+		typicalSigScriptSize = 107
+		dustSpendMultiple    = 3
+	)
+
+	output := wire.TxOut{PkScript: make([]byte, info.ScriptSize)}
+	outputSize := output.SerializeSize()
+
+	spendSize := outputSize + typicalInputSize + typicalSigScriptSize
+	if info.IsWitnessProgram {
+		spendSize = outputSize + typicalInputSize +
+			typicalSigScriptSize/blockchain.WitnessScaleFactor
+	}
+
+	return int64(amount)*1000/(dustSpendMultiple*int64(spendSize)) <
+		int64(relayFeePerKb)
+}
+
+// countInputTypes classifies the previous output scripts an input set redeems.
+// The counts drive the virtual size estimate, since each script type costs a
+// different amount of witness and signature data to spend. The results are
+// named because they are four values of the same type: transposing any two at
+// the call site would compile and surface only as a slightly wrong fee.
+func countInputTypes(scripts [][]byte) (p2pkh, p2tr, p2wpkh, nested int) {
+	for _, pkScript := range scripts {
+		switch {
+		// If this is a p2sh output, we assume this is a nested P2WKH.
+		case txscript.IsPayToScriptHash(pkScript):
+			nested++
+		case txscript.IsPayToWitnessPubKeyHash(pkScript):
+			p2wpkh++
+		case txscript.IsPayToTaproot(pkScript):
+			p2tr++
+		default:
+			p2pkh++
+		}
+	}
+
+	return p2pkh, p2tr, p2wpkh, nested
 }
 
 // RandomizeOutputPosition randomizes the position of a transaction's output by

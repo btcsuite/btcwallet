@@ -2,11 +2,20 @@ btcwallet
 vendor
 .idea
 coverage.txt
+coverage-itest-postgres.txt
+coverage-itest-sqlite.txt
 *.swp
 .vscode
 .DS_Store
 .aider*
+/.worktrees/
 coverage.out
 *.prof
 *.test
 *cpu.out
+
+# Integration test logs.
+itest/test-logs/
+
+# Backwards compatibility for older log dir.
+itest/.minerlogs/

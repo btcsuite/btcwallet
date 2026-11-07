@@ -1,5 +1,20 @@
 # ADR 0002: Controller-Syncer-State Architecture
 
+## Status
+
+- **Status:** Superseded
+- **Date:** 2025-12-25
+
+## Relationships
+
+- **Amends:** None.
+- **Supersedes:** None.
+- **Amended by:** None.
+- **Superseded by:**
+  [ADR 0015](0015-sql-shared-chain-ownership.md), which replaces this
+  lifecycle model for all maintained Managers and this synchronization model
+  for SQL Managers.
+
 ## 1. Context
 
 The legacy `btcwallet` architecture tightly coupled lifecycle management, synchronization logic, and state tracking within a single `Wallet` struct. This monolithic design led to several issues:
@@ -45,7 +60,3 @@ Instead of a single status enum, we track three separate dimensions:
 ### Cons
 *   **Complexity:** Increases the number of distinct types and files.
 *   **Indirection:** Calls to sync functionality now go through a channel-based request mechanism rather than direct method calls.
-
-## 4. Status
-
-Accepted and Implemented.

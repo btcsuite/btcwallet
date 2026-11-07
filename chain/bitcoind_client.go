@@ -367,6 +367,23 @@ func (c *BitcoindClient) NotifyReceived(addrs []address.Address) error {
 	return nil
 }
 
+// WatchAddrsFromTip adds addresses to bitcoind's existing in-memory
+// notification filter and starts block notifications without invoking either
+// historical rescan entry point. Reusing the filter maps also makes repeated
+// registrations idempotent.
+func (c *BitcoindClient) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	c.updateWatchedFilters(addrs)
+
+	return c.NotifyBlocks()
+}
+
 // NotifySpent allows the chain backend to notify the caller whenever a
 // transaction spends any of the given outpoints.
 func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
@@ -921,7 +938,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		}
 
 		currentBlock.Height--
-		currentBlock.Hash = currentHeader.PrevBlock
+		// Keep the identity of the header just loaded, not its parent.
+		currentBlock.Hash = *prevBlock
 		currentBlock.Timestamp = currentHeader.Timestamp
 
 		// Store the correct block in our list in order to notify it

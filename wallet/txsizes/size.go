@@ -198,10 +198,25 @@ func EstimateSerializeSize(inputCount int, txOuts []*wire.TxOut, addChangeOutput
 // EstimateVirtualSize returns a worst case virtual size estimate for a
 // signed transaction that spends the given number of P2PKH, P2TR, P2WPKH and
 // (nested) P2SH-P2WPKH outputs, and contains each transaction output
-// from txOuts. The estimate is incremented for an additional P2PKH
-// change output if addChangeOutput is true.
+// from txOuts. The estimate is incremented for an additional change output
+// if changeScriptSize is greater than zero.
+//
+// The virtual size is the transaction weight defined by BIP 141, rounded up
+// to whole units:
+//
+//	weight = base size * (witness scale factor - 1) + total size
+//	vsize  = ceil(weight / witness scale factor)
+//
+// Since the total size is the base size plus the witness data, this is the
+// same as charging a full unit for every byte serialized outside the witness
+// and a quarter of a unit for every byte serialized inside it. The estimate
+// is accumulated in those two parts: baseSize counts the non-witness bytes,
+// which are already whole virtual bytes, and witnessWeight counts the witness
+// bytes in weight units, which are scaled down at the end.
 func EstimateVirtualSize(numP2PKHIns, numP2TRIns, numP2WPKHIns, numNestedP2WPKHIns int,
 	txOuts []*wire.TxOut, changeScriptSize int) int {
+
+	inputCount := numP2PKHIns + numP2TRIns + numP2WPKHIns + numNestedP2WPKHIns
 	outputCount := len(txOuts)
 
 	changeOutputSize := 0
@@ -212,13 +227,18 @@ func EstimateVirtualSize(numP2PKHIns, numP2TRIns, numP2WPKHIns, numNestedP2WPKHI
 		outputCount++
 	}
 
-	// Version 4 bytes + LockTime 4 bytes + Serialized var int size for the
-	// number of transaction inputs and outputs + size of redeem scripts +
-	// the size out the serialized outputs and change.
+	// The base size is everything serialized outside the witness: the
+	// 4-byte version and the 4-byte locktime, the compact int encoding the
+	// number of inputs and the one encoding the number of outputs, the
+	// inputs with their worst case redeem scripts, and the outputs from
+	// txOuts along with the change output.
+	//
+	// Note that the change output must be part of the output count, since
+	// including it may widen that compact int, e.g. from one byte to three
+	// bytes when it is the 253rd output.
 	baseSize := 8 +
-		wire.VarIntSerializeSize(
-			uint64(numP2PKHIns+numP2TRIns+numP2WPKHIns+numNestedP2WPKHIns)) +
-		wire.VarIntSerializeSize(uint64(len(txOuts))) +
+		wire.VarIntSerializeSize(uint64(inputCount)) +
+		wire.VarIntSerializeSize(uint64(outputCount)) +
 		numP2PKHIns*RedeemP2PKHInputSize +
 		numP2WPKHIns*RedeemP2WPKHInputSize +
 		numP2TRIns*RedeemP2TRInputSize +
@@ -226,21 +246,28 @@ func EstimateVirtualSize(numP2PKHIns, numP2TRIns, numP2WPKHIns, numNestedP2WPKHI
 		SumOutputSerializeSizes(txOuts) +
 		changeOutputSize
 
-	// If this transaction has any witness inputs, we must count the
-	// witness data.
+	// A transaction is only serialized in the BIP 144 format if at least
+	// one of its inputs is spent with a witness. That format inserts a
+	// marker and a flag byte after the version, which cost 1 weight unit
+	// each, and appends one witness stack per input after the outputs.
+	//
+	// Every input owns a stack, including the legacy P2PKH inputs that
+	// have no witness data: their stack is serialized as a compact int
+	// encoding zero items, which is a single byte. The stacks of the
+	// witness inputs already include their own item counts, as documented
+	// on the Redeem*InputWitnessWeight constants.
 	witnessWeight := 0
 	if numP2WPKHIns+numNestedP2WPKHIns+numP2TRIns > 0 {
-		// Additional 2 weight units for segwit marker + flag.
 		witnessWeight = 2 +
-			wire.VarIntSerializeSize(
-				uint64(numP2WPKHIns+numNestedP2WPKHIns+numP2TRIns)) +
+			numP2PKHIns +
 			numP2WPKHIns*RedeemP2WPKHInputWitnessWeight +
 			numP2TRIns*RedeemP2TRInputWitnessWeight +
 			numNestedP2WPKHIns*RedeemP2WPKHInputWitnessWeight
 	}
 
-	// We add 3 to the witness weight to make sure the result is
-	// always rounded up.
+	// The base size is already counted in virtual bytes, so only the
+	// witness weight is scaled down. We add 3 to it to make sure the
+	// result is always rounded up.
 	return baseSize + (witnessWeight+3)/blockchain.WitnessScaleFactor
 }
 

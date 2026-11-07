@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -56,6 +57,8 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 
+					// Arrange a real legacy wallet and recorded history; the
+					// shared mock supplies only the required chain lookups.
 					w := testWalletWatchingOnly(t)
 					t.Cleanup(func() {
 						w.StopDeprecated()
@@ -63,11 +66,28 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 						require.NoError(t, w.db.Close())
 					})
 					w.SetChainSynced(synced)
-					w.chainClient = &mockChainClient{
-						getBlockHeader: &wire.BlockHeader{
-							Timestamp: time.Unix(1, 0),
-						},
+					// Arrange the shared mock for history lookup and the final
+					// delayed disconnect; only a matching initial tip also
+					// requires an earlier predecessor header.
+					client := &bwmock.Chain{}
+					t.Cleanup(func() { client.AssertExpectations(t) })
+					client.On("Stop").Return().Once()
+					client.On("GetBestBlock").Return(
+						&chainhash.Hash{}, int32(0), nil,
+					).Once()
+
+					headerCalls := 1
+					if tip.name == "matching" {
+						headerCalls++
 					}
+
+					client.On("GetBlockHeader", chainParams.GenesisHash).
+						Return(&wire.BlockHeader{
+							Timestamp: time.Unix(1, 0),
+						}, nil).Times(headerCalls)
+
+					w.chainClient = client
+					defer w.StopDeprecated()
 
 					old := &wtxmgr.BlockMeta{
 						Block: wtxmgr.Block{
@@ -94,12 +114,16 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 						})
 					require.NoError(t, err)
 
+					// Act by delivering the disconnect through the legacy
+					// transaction boundary, including the duplicate delivery.
 					err = walletdb.Update(w.db,
 						func(tx walletdb.ReadWriteTx) error {
 							return w.disconnectBlock(tx, *old)
 						})
 					require.NoError(t, err)
 
+					// Assert the exact retained tip before checking public
+					// transaction results and replacement-block survival.
 					require.Equal(
 						t, tip.wantHeight, w.addrStore.SyncedTo().Height,
 					)
@@ -112,6 +136,8 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 					require.NoError(t, err)
 
 					// A replayed disconnect must not remove the replacement.
+					// Act by delivering the disconnect through the legacy
+					// transaction boundary, including the duplicate delivery.
 					err = walletdb.Update(w.db,
 						func(tx walletdb.ReadWriteTx) error {
 							return w.disconnectBlock(tx, *old)
@@ -129,6 +155,8 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 					notifications := w.NtfnServer.TransactionNotifications()
 					t.Cleanup(notifications.Done)
 
+					// Act by delivering the disconnect through the legacy
+					// transaction boundary, including the duplicate delivery.
 					err = walletdb.Update(w.db,
 						func(tx walletdb.ReadWriteTx) error {
 							return w.disconnectBlock(tx, *old)
@@ -164,30 +192,12 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 
 var errReorgBackend = errors.New("reorg backend unavailable")
 
-// reorgChainClient supplies canonical block hashes, including lookup failures.
+// reorgChainClient keeps canonical fixture data beside the shared mock.
+// Its chain methods are the existing testify implementation.
 type reorgChainClient struct {
-	*mockChainClient
+	*bwmock.Chain
 
 	blockHashes map[int64]chainhash.Hash
-	bestErr     error
-}
-
-func (c *reorgChainClient) GetBestBlock() (*chainhash.Hash, int32, error) {
-	if c.bestErr != nil {
-		return nil, 0, c.bestErr
-	}
-
-	return c.mockChainClient.GetBestBlock()
-}
-
-func (c *reorgChainClient) GetBlockHash(height int64) (*chainhash.Hash, error) {
-	hash, ok := c.blockHashes[height]
-	if !ok {
-		return nil, fmt.Errorf("block hash at height %d: %w",
-			height, errReorgBackend)
-	}
-
-	return &hash, nil
 }
 
 type mixedHistoryCase struct {
@@ -224,6 +234,8 @@ func TestDisconnectMixedHistory(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 
+					// Arrange a real legacy wallet and recorded history; the
+					// shared mock supplies only the required chain lookups.
 					w := testWalletWatchingOnly(t)
 					t.Cleanup(func() {
 						w.StopDeprecated()
@@ -231,20 +243,17 @@ func TestDisconnectMixedHistory(t *testing.T) {
 						require.NoError(t, w.db.Close())
 					})
 
+					// Arrange canonical responses on the shared mock; fixture
+					// maps describe the same history as the upstream test.
 					client := &reorgChainClient{
-						mockChainClient: &mockChainClient{
-							getBestBlockHeight: test.tip,
-							getBlockHeader: &wire.BlockHeader{
-								Timestamp: time.Unix(1, 0),
-							},
-						},
+						Chain:       &bwmock.Chain{},
 						blockHashes: map[int64]chainhash.Hash{1: {9}},
 					}
-					if test.bestErr {
-						client.bestErr = errReorgBackend
-					}
+					t.Cleanup(func() { client.AssertExpectations(t) })
+					client.On("Stop").Return().Once()
 
 					w.chainClient = client
+					defer w.StopDeprecated()
 
 					old := reorgBlock(1)
 					replacement := old
@@ -253,7 +262,7 @@ func TestDisconnectMixedHistory(t *testing.T) {
 						t, stored, test, client,
 					)
 
-					delete(client.blockHashes, test.missing)
+					client.expectHistory(test, heights)
 
 					wantErr := test.bestErr || test.missing != 0
 					if wantErr {
@@ -274,10 +283,14 @@ func TestDisconnectMixedHistory(t *testing.T) {
 							return w.connectBlock(tx, old)
 						}))
 
+					// Act on the mixed history in one database update; a
+					// lookup failure must abort every recorded effect.
 					err := walletdb.Update(w.db,
 						func(tx walletdb.ReadWriteTx) error {
 							return w.disconnectBlock(tx, old)
 						})
+					// Assert rollback or atomic failure using persisted
+					// history, balances, and the address-manager tip.
 					if wantErr {
 						require.ErrorIs(t, err, errReorgBackend)
 						require.Equal(t, old.Hash, w.addrStore.SyncedTo().Hash)
@@ -298,6 +311,45 @@ func TestDisconnectMixedHistory(t *testing.T) {
 					}
 				})
 		}
+	}
+}
+
+// expectHistory declares exactly the lookups reachable before the tip or
+// first backend failure, so missing or excess queries fail the shared mock.
+func (c *reorgChainClient) expectHistory(test mixedHistoryCase,
+	heights []int32) {
+
+	c.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&wire.BlockHeader{
+			Timestamp: time.Unix(1, 0),
+		}, nil).Once()
+
+	var bestErr error
+	if test.bestErr {
+		bestErr = errReorgBackend
+	}
+
+	c.On("GetBestBlock").Return(
+		&chainhash.Hash{}, test.tip, bestErr,
+	).Once()
+
+	// Lookup stops at the backend tip or first reported
+	// failure, so later records must never be requested.
+	for _, height := range heights {
+		if test.bestErr || height > test.tip {
+			break
+		}
+
+		if int64(height) == test.missing {
+			c.On("GetBlockHash", int64(height)).
+				Return(nil, errReorgBackend).Once()
+
+			break
+		}
+
+		hash := c.blockHashes[int64(height)]
+		c.On("GetBlockHash", int64(height)).
+			Return(&hash, nil).Once()
 	}
 }
 

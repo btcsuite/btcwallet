@@ -1,0 +1,1051 @@
+// Copyright (c) 2025 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package wallet
+
+import (
+	"bytes"
+	"testing"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/stretchr/testify/require"
+)
+
+// testParentTx returns a transaction to be spent, the outpoint naming its only
+// output, and that output.
+func testParentTx(t *testing.T) (*wire.MsgTx, wire.OutPoint, *wire.TxOut) {
+	t.Helper()
+
+	out := &wire.TxOut{
+		Value:    100000,
+		PkScript: bytes.Repeat([]byte{0x51}, 22),
+	}
+
+	parent := &wire.MsgTx{
+		Version: 2,
+		TxIn: []*wire.TxIn{{
+			PreviousOutPoint: wire.OutPoint{Index: 7},
+		}},
+		TxOut: []*wire.TxOut{out},
+	}
+
+	return parent, wire.OutPoint{Hash: parent.TxHash(), Index: 0}, out
+}
+
+// testValidKey and testOtherValidKey return deterministic keys that parse, so
+// derivation fixtures carry usable material.
+func testValidKey() *btcec.PublicKey {
+	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{1}, 32))
+
+	return priv.PubKey()
+}
+
+func testOtherValidKey() *btcec.PublicKey {
+	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{2}, 32))
+
+	return priv.PubKey()
+}
+
+// testDerSig returns a deterministic DER-encoded ECDSA signature over a fixed
+// digest, with a SIGHASH_ALL byte appended.
+//
+// The psbt package validates signature material when it parses a packet, so a
+// fixture carrying filler bytes would be refused as malformed rather than
+// exercising whatever the test is actually about.
+func testDerSig() []byte {
+	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{3}, 32))
+	sig := ecdsa.Sign(priv, bytes.Repeat([]byte{9}, 32))
+
+	return append(sig.Serialize(), byte(txscript.SigHashAll))
+}
+
+// testSchnorrSig returns a deterministic 64-byte BIP340 Schnorr signature over
+// a fixed digest, for the same reason as testDerSig.
+func testSchnorrSig() []byte {
+	priv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{3}, 32))
+	sig, _ := schnorr.Sign(priv, bytes.Repeat([]byte{9}, 32))
+
+	return sig.Serialize()
+}
+
+// testPacket returns a packet that passes validatePacket, so that a test can
+// make one thing wrong with it and know that is the only thing wrong.
+func testPacket(t *testing.T) *psbt.Packet {
+	t.Helper()
+
+	parent, outPoint, prevOut := testParentTx(t)
+
+	return &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			Version: 2,
+			TxIn: []*wire.TxIn{{
+				PreviousOutPoint: outPoint,
+				Sequence:         wire.MaxTxInSequenceNum - 2,
+			}},
+			TxOut: []*wire.TxOut{{
+				Value:    40000,
+				PkScript: bytes.Repeat([]byte{0x52}, 22),
+			}, {
+				Value:    50000,
+				PkScript: bytes.Repeat([]byte{0x53}, 22),
+			}},
+		},
+		Inputs: []psbt.PInput{{
+			NonWitnessUtxo: parent,
+			WitnessUtxo:    prevOut,
+			SighashType:    txscript.SigHashAll,
+		}},
+		Outputs: make([]psbt.POutput, 2),
+	}
+}
+
+// TestValidatePacketAccepts verifies that a well formed packet is admitted, so
+// that the rejection tests below are known to be rejecting the one thing they
+// each make wrong.
+func TestValidatePacketAccepts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a packet with nothing wrong with it.
+	packet := testPacket(t)
+
+	err := validatePacket(packet)
+
+	require.NoError(t, err)
+}
+
+// TestValidatePacketNilPacket verifies that a missing packet is reported
+// rather than dereferenced.
+func TestValidatePacketNilPacket(t *testing.T) {
+	t.Parallel()
+
+	require.ErrorIs(t, validatePacket(nil), ErrPacketNil)
+}
+
+// TestValidatePacketNilUnsignedTx verifies that a packet with no transaction
+// in it is reported rather than dereferenced.
+func TestValidatePacketNilUnsignedTx(t *testing.T) {
+	t.Parallel()
+
+	packet := &psbt.Packet{}
+
+	require.ErrorIs(t, validatePacket(packet), ErrPacketNil)
+}
+
+// TestValidatePacketRecordCountMismatch verifies that a packet whose record
+// lists are a different length than its transaction is refused. The rule
+// itself belongs to the psbt package; this checks that its verdict is
+// surfaced under the wallet's own error.
+func TestValidatePacketRecordCountMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: two outputs but only one output record.
+	packet := testPacket(t)
+	packet.Outputs = make([]psbt.POutput, 1)
+
+	err := validatePacket(packet)
+
+	require.ErrorIs(t, err, ErrPacketMalformed)
+}
+
+// TestValidatePacketNilTxIn verifies that a nil transaction input is refused.
+//
+// A caller assembles a Packet as a plain struct, so it can hold one. Both
+// SanityCheck and the wallet's own loops read through these entries, so this
+// has to be caught before either runs.
+func TestValidatePacketNilTxIn(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.UnsignedTx.TxIn[0] = nil
+
+	err := validatePacket(packet)
+
+	// Assert: refused, rather than panicking.
+	require.ErrorIs(t, err, ErrPacketMalformed)
+}
+
+// TestValidatePacketNilTxOut verifies that a nil transaction output is
+// refused rather than dereferenced by a later stage.
+func TestValidatePacketNilTxOut(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.UnsignedTx.TxOut[1] = nil
+
+	err := validatePacket(packet)
+
+	require.ErrorIs(t, err, ErrPacketMalformed)
+}
+
+// TestValidatePacketNilParentEntries verifies that a nil entry inside the
+// caller's parent transaction is refused. Hashing and copying the parent both
+// read through its own inputs and outputs.
+func TestValidatePacketNilParentEntries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		parent *wire.MsgTx
+	}{{
+		name: "a nil parent input",
+		parent: &wire.MsgTx{
+			Version: 2,
+			TxIn:    []*wire.TxIn{nil},
+			TxOut: []*wire.TxOut{{
+				Value: 1, PkScript: []byte{0x51},
+			}},
+		},
+	}, {
+		name: "a nil parent output",
+		parent: &wire.MsgTx{
+			Version: 2,
+			TxIn:    []*wire.TxIn{{}},
+			TxOut:   []*wire.TxOut{nil},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].NonWitnessUtxo = tc.parent
+			packet.Inputs[0].WitnessUtxo = nil
+
+			err := validatePacket(packet)
+
+			// Assert: refused, rather than panicking.
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
+}
+
+// TestValidatePacketNilInputRecords verifies that a nil entry in any of an
+// input's pointer-bearing record lists is refused.
+func TestValidatePacketNilInputRecords(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input psbt.PInput
+	}{{
+		name:  "a nil partial signature",
+		input: psbt.PInput{PartialSigs: []*psbt.PartialSig{nil}},
+	}, {
+		name: "a nil taproot script spend signature",
+		input: psbt.PInput{
+			TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{
+				nil,
+			},
+		},
+	}, {
+		name: "a nil taproot leaf script",
+		input: psbt.PInput{
+			TaprootLeafScript: []*psbt.TaprootTapLeafScript{nil},
+		},
+	}, {
+		name: "a nil bip32 derivation",
+		input: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{nil},
+		},
+	}, {
+		name: "a nil taproot derivation",
+		input: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{
+				nil,
+			},
+		},
+	}, {
+		name:  "a nil unknown field",
+		input: psbt.PInput{Unknowns: []*psbt.Unknown{nil}},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0] = tc.input
+
+			err := validatePacket(packet)
+
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
+}
+
+// TestValidatePacketNilOutputRecords verifies that a nil entry in any of an
+// output's pointer-bearing record lists is refused.
+func TestValidatePacketNilOutputRecords(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output psbt.POutput
+	}{{
+		name: "a nil bip32 derivation",
+		output: psbt.POutput{
+			Bip32Derivation: []*psbt.Bip32Derivation{nil},
+		},
+	}, {
+		name: "a nil taproot derivation",
+		output: psbt.POutput{
+			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{
+				nil,
+			},
+		},
+	}, {
+		name:   "a nil unknown field",
+		output: psbt.POutput{Unknowns: []*psbt.Unknown{nil}},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Outputs[0] = tc.output
+
+			err := validatePacket(packet)
+
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
+}
+
+// TestValidatePacketDerivationKeys verifies that derivation records carrying
+// a key the psbt package could not parse are refused.
+//
+// A record is only metadata until something reads it, and what reads it parses
+// the key. Admitting one that cannot parse would let funding hand back a
+// packet the caller could not serialize.
+func TestValidatePacketDerivationKeys(t *testing.T) {
+	t.Parallel()
+
+	valid := testValidKey()
+
+	tests := []struct {
+		name    string
+		input   psbt.PInput
+		wantErr bool
+	}{{
+		name: "a usable compressed key",
+		input: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{{
+				PubKey: valid.SerializeCompressed(),
+			}},
+		},
+	}, {
+		name: "a usable x-only key",
+		input: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
+				XOnlyPubKey: schnorr.SerializePubKey(valid),
+			}},
+		},
+	}, {
+		name: "a one byte key",
+		input: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{{
+				PubKey: []byte{0x02},
+			}},
+		},
+		wantErr: true,
+	}, {
+		name: "a truncated x-only key",
+		input: psbt.PInput{
+			TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
+				XOnlyPubKey: bytes.Repeat([]byte{0x02}, 31),
+			}},
+		},
+		wantErr: true,
+	}, {
+		name: "one key named twice",
+		input: psbt.PInput{
+			Bip32Derivation: []*psbt.Bip32Derivation{{
+				PubKey: valid.SerializeCompressed(),
+			}, {
+				PubKey: valid.SerializeCompressed(),
+			}},
+		},
+		wantErr: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			input := tc.input
+			input.NonWitnessUtxo = packet.Inputs[0].NonWitnessUtxo
+			input.WitnessUtxo = packet.Inputs[0].WitnessUtxo
+			packet.Inputs[0] = input
+
+			err := validatePacket(packet)
+
+			if !tc.wantErr {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
+}
+
+// TestValidatePacketAcceptsMultipleDerivations verifies that an input naming
+// several keys is admitted. Multisig and coordinator packets carry one record
+// per cosigner, and funding preserves them rather than refusing them.
+func TestValidatePacketAcceptsMultipleDerivations(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey: testValidKey().SerializeCompressed(),
+	}, {
+		PubKey: testOtherValidKey().SerializeCompressed(),
+	}}
+
+	require.NoError(t, validatePacket(packet))
+}
+
+// TestValidatePacketEncoding verifies that a packet the psbt package itself
+// would refuse is refused here.
+//
+// These are records whose contents that package validates when it parses a
+// packet, and which the wallet therefore does not check field by field. A
+// packet admitted with one of them would be one the wallet could hand back
+// and the caller could not serialize.
+func TestValidatePacketEncoding(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input psbt.PInput
+	}{{
+		name: "a control block of the wrong length",
+		input: psbt.PInput{
+			TaprootLeafScript: []*psbt.TaprootTapLeafScript{{
+				ControlBlock: []byte{0x01},
+				Script:       []byte{0x51},
+				LeafVersion:  txscript.BaseLeafVersion,
+			}},
+		},
+	}, {
+		name: "an internal key that is not a key",
+		input: psbt.PInput{
+			TaprootInternalKey: []byte{0x02},
+		},
+	}, {
+		// Empty is not a signature, so this is refused as malformed
+		// rather than reaching funding's question about signatures.
+		name: "an empty key spend signature",
+		input: psbt.PInput{
+			TaprootKeySpendSig: []byte{},
+		},
+	}, {
+		name: "a partial signature that is not a signature",
+		input: psbt.PInput{
+			PartialSigs: []*psbt.PartialSig{{
+				PubKey:    testValidKey().SerializeCompressed(),
+				Signature: []byte{0x30, 0x01},
+			}},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			input := tc.input
+			input.NonWitnessUtxo = packet.Inputs[0].NonWitnessUtxo
+			input.WitnessUtxo = packet.Inputs[0].WitnessUtxo
+			packet.Inputs[0] = input
+
+			require.ErrorIs(
+				t, validatePacket(packet), ErrPacketMalformed,
+			)
+		})
+	}
+}
+
+// TestValidatePacketMerkleRoot verifies that a taproot merkle root which is
+// not a hash is refused.
+//
+// The psbt package stores this record without inspecting it, so it is the one
+// field parsing a packet back does not judge, and the only reason the wallet
+// still checks a record's contents itself.
+func TestValidatePacketMerkleRoot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		root    []byte
+		wantErr bool
+	}{{
+		name: "absent",
+	}, {
+		name: "a hash",
+		root: bytes.Repeat([]byte{0x07}, chainhash.HashSize),
+	}, {
+		// Present but empty is a root of the wrong size, not an
+		// absent one, which is the nil-versus-empty distinction the
+		// signature fields turn on as well.
+		name:    "empty but present",
+		root:    []byte{},
+		wantErr: true,
+	}, {
+		name:    "one byte",
+		root:    []byte{0x07},
+		wantErr: true,
+	}, {
+		name:    "one byte too long",
+		root:    bytes.Repeat([]byte{0x07}, chainhash.HashSize+1),
+		wantErr: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].TaprootMerkleRoot = tc.root
+
+			err := validatePacket(packet)
+
+			if !tc.wantErr {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
+}
+
+// TestValidatePacketEncodingAcceptsRichMetadata verifies that a packet
+// carrying real material in every field funding preserves is still admitted,
+// so the encoding check is not refusing what it should be letting through.
+func TestValidatePacketEncodingAcceptsRichMetadata(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.Inputs[0].WitnessScript = []byte{0x51, 0x52}
+	packet.Inputs[0].RedeemScript = []byte{0x53}
+	packet.Inputs[0].TaprootInternalKey = schnorr.SerializePubKey(
+		testValidKey(),
+	)
+	packet.Inputs[0].TaprootMerkleRoot = bytes.Repeat([]byte{0x07}, 32)
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               testValidKey().SerializeCompressed(),
+		MasterKeyFingerprint: 7,
+		Bip32Path:            []uint32{84, 0, 0, 0, 1},
+	}}
+	packet.Outputs[0].WitnessScript = []byte{0x55}
+	packet.Outputs[1].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey: testOtherValidKey().SerializeCompressed(),
+	}}
+
+	require.NoError(t, validatePacket(packet))
+}
+
+// TestValidatePacketSignedTransaction verifies that a transaction carrying its
+// unlocking script inline is refused. A PSBT holds those in its per-input
+// records, so a packet with one inline is not the unsigned template it claims
+// to be.
+func TestValidatePacketSignedTransaction(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.UnsignedTx.TxIn[0].SignatureScript = []byte{0x51}
+
+	err := validatePacket(packet)
+
+	require.ErrorIs(t, err, ErrPacketMalformed)
+}
+
+// TestValidatePacketParentTxMismatch verifies that a parent transaction that
+// is not the one the input names is refused. Every later stage reads the spent
+// output from these records, so a caller must not be able to substitute one.
+func TestValidatePacketParentTxMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a parent that hashes to something other than the outpoint.
+	packet := testPacket(t)
+	packet.Inputs[0].NonWitnessUtxo = &wire.MsgTx{
+		Version: 2,
+		TxIn:    []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{
+			Value: 1, PkScript: []byte{0x51},
+		}},
+	}
+
+	err := validatePacket(packet)
+
+	require.ErrorIs(t, err, ErrConflictingUtxo)
+}
+
+// TestValidatePacketParentIndexOutOfRange verifies that an input spending an
+// output its own parent transaction does not have is refused rather than
+// indexing past the parent's outputs.
+func TestValidatePacketParentIndexOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the parent has one output; name its second.
+	parent, outPoint, _ := testParentTx(t)
+	outPoint.Index = 1
+
+	packet := testPacket(t)
+	packet.UnsignedTx.TxIn[0].PreviousOutPoint = outPoint
+	packet.Inputs[0].NonWitnessUtxo = parent
+	packet.Inputs[0].WitnessUtxo = nil
+
+	err := validatePacket(packet)
+
+	require.ErrorIs(t, err, ErrConflictingUtxo)
+}
+
+// TestValidatePacketUtxoViewsDisagree verifies that a packet carrying both
+// views of the spent output is refused when they are not the same output,
+// since nothing could tell which one the caller meant.
+func TestValidatePacketUtxoViewsDisagree(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a witness UTXO that is not the parent's output.
+	packet := testPacket(t)
+	packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+		Value:    99999,
+		PkScript: bytes.Repeat([]byte{0x51}, 22),
+	}
+
+	err := validatePacket(packet)
+
+	require.ErrorIs(t, err, ErrConflictingUtxo)
+}
+
+// TestValidateInputSighash verifies which sighash types an input may ask for.
+//
+// The base type is the low five bits and ANYONECANPAY is the only modifier
+// defined on top of it, so the admissible set is small and fully enumerable.
+func TestValidateInputSighash(t *testing.T) {
+	t.Parallel()
+
+	const (
+		unknownModifier = txscript.SigHashType(0x40)
+		unknownBase     = txscript.SigHashType(0x05)
+	)
+
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+		wantErr error
+	}{{
+		// Indistinguishable from an unset field, so it is admitted
+		// for every input type.
+		name:    "the default type",
+		sigHash: txscript.SigHashDefault,
+	}, {
+		name:    "sighash all",
+		sigHash: txscript.SigHashAll,
+	}, {
+		name:    "sighash none",
+		sigHash: txscript.SigHashNone,
+	}, {
+		// Well formed here. Whether funding can honour it is
+		// funding's own question.
+		name:    "sighash single",
+		sigHash: txscript.SigHashSingle,
+	}, {
+		name:    "sighash all with anyonecanpay",
+		sigHash: txscript.SigHashAll | txscript.SigHashAnyOneCanPay,
+	}, {
+		name:    "sighash none with anyonecanpay",
+		sigHash: txscript.SigHashNone | txscript.SigHashAnyOneCanPay,
+	}, {
+		name:    "sighash single with anyonecanpay",
+		sigHash: txscript.SigHashSingle | txscript.SigHashAnyOneCanPay,
+	}, {
+		// The default type is the absence of a type, so there is
+		// nothing for a modifier to modify. Taproot spells the
+		// ANYONECANPAY variant as 0x81, never 0x80.
+		name:    "anyonecanpay on its own",
+		sigHash: txscript.SigHashAnyOneCanPay,
+		wantErr: ErrUnsafeSighash,
+	}, {
+		name:    "an unknown modifier flag",
+		sigHash: txscript.SigHashAll | unknownModifier,
+		wantErr: ErrUnsafeSighash,
+	}, {
+		name:    "an unknown base type",
+		sigHash: unknownBase,
+		wantErr: ErrUnsafeSighash,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].SighashType = tc.sigHash
+
+			err := validatePacket(packet)
+
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestValidatePacketLeavesPacketUnchanged verifies that validation is
+// side-effect free.
+//
+// It runs before the wallet commits to anything, and callers rely on being
+// handed back exactly what they passed in when it refuses, so it must not
+// touch the packet even on the paths that accept one.
+func TestValidatePacketLeavesPacketUnchanged(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a packet carrying something in every field validation looks
+	// at, plus a signature so the funding gate has something to reject.
+	// The two derivation records are in descending key order, which is the
+	// order serializing would sort them out of.
+	hi, lo := testKeyPairDescending()
+
+	packet := testPacket(t)
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+		PubKey:    hi,
+		Signature: testDerSig(),
+	}}
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               hi,
+		MasterKeyFingerprint: 0x11223344,
+		Bip32Path:            []uint32{84, 0, 0, 0, 1},
+	}, {
+		PubKey:               lo,
+		MasterKeyFingerprint: 0x11223344,
+		Bip32Path:            []uint32{84, 0, 0, 0, 2},
+	}}
+	packet.Outputs[0].WitnessScript = []byte{0x51, 0x52}
+
+	// A deep copy, not an encoding: serializing would sort these lists as
+	// a side effect and hide any reordering.
+	before := clonePacket(packet)
+
+	// Act: run both the structural core and the funding gate, which
+	// rejects this packet for its signature.
+	require.NoError(t, validatePacket(packet))
+	require.ErrorIs(t, validateFundPacket(packet), ErrPacketSigned)
+
+	// Assert: neither call altered the caller's packet.
+	require.Equal(t, before, packet)
+}
+
+// testKeyPairDescending returns two serialized keys, higher first, so a list
+// built from them is in the order serializing would sort it out of.
+func testKeyPairDescending() ([]byte, []byte) {
+	first := testValidKey().SerializeCompressed()
+	second := testOtherValidKey().SerializeCompressed()
+
+	if bytes.Compare(first, second) < 0 {
+		return second, first
+	}
+
+	return first, second
+}
+
+// TestValidatePacketLeavesFinalisedRecordsUnjudged pins where the encoding
+// check stops.
+//
+// An input holding a final script signature or witness has all of its other
+// records left out of the encoding, so reading the packet back judges none of
+// them: a derivation key that could never parse goes unexamined. That is the
+// format's position rather than a gap, since those records are no longer part
+// of a finalized input, and it is safe here because funding refuses such a
+// packet for being signed at all.
+func TestValidatePacketLeavesFinalisedRecordsUnjudged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		finalSig   []byte
+		finalWitns []byte
+	}{{
+		name:     "behind a final script signature",
+		finalSig: []byte{0x51},
+	}, {
+		name:       "behind a final witness",
+		finalWitns: []byte{0x01, 0x01, 0x51},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].Bip32Derivation =
+				[]*psbt.Bip32Derivation{{PubKey: []byte{0x02}}}
+			packet.Inputs[0].FinalScriptSig = tc.finalSig
+			packet.Inputs[0].FinalScriptWitness = tc.finalWitns
+
+			// The structural core has nothing to say about a record
+			// the encoding does not carry.
+			require.NoError(t, validatePacket(packet))
+
+			// Funding refuses the packet regardless, because it is
+			// finalized.
+			require.ErrorIs(
+				t, validateFundPacket(packet), ErrPacketSigned,
+			)
+		})
+	}
+}
+
+// TestValidatePacketNilGlobalUnknown verifies that a nil entry in the global
+// unclassified-field list is refused rather than dereferenced.
+//
+// Serializing the packet reads through that list, so a nil there would be a
+// panic if either the pointer sweep or the unclassified-field rejection ran
+// after the encoding check. The sweep answers first, and a nil entry is
+// malformed rather than merely unclassified.
+func TestValidatePacketNilGlobalUnknown(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.Unknowns = []*psbt.Unknown{nil}
+
+	require.ErrorIs(t, validatePacket(packet), ErrPacketMalformed)
+}
+
+// TestValidatePacketRejectsUnusableXPub verifies that a global extended key
+// the psbt package cannot decode is refused.
+//
+// This is a rejection the wallet did not make before reading packets back: an
+// xpub must decode, and its path must carry one element per level of its own
+// depth. A packet failing either could not be serialized and reparsed by any
+// conforming implementation.
+func TestValidatePacketRejectsUnusableXPub(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+	packet.XPubs = []psbt.XPub{{
+		ExtendedKey:          bytes.Repeat([]byte{0x04}, 78),
+		MasterKeyFingerprint: 7,
+		Bip32Path:            []uint32{84, 0, 0},
+	}}
+
+	require.ErrorIs(t, validatePacket(packet), ErrPacketMalformed)
+}
+
+// TestValidateFundPacketAcceptsUnsigned verifies that an ordinary unsigned
+// packet passes the funding gate.
+func TestValidateFundPacketAcceptsUnsigned(t *testing.T) {
+	t.Parallel()
+
+	packet := testPacket(t)
+
+	err := validateFundPacket(packet)
+
+	require.NoError(t, err)
+}
+
+// TestValidateFundPacketRejectsSignatures verifies that funding refuses a
+// packet that already carries signature material, in any of the forms a PSBT
+// can hold it.
+//
+// Funding rewrites the very transaction those signatures commit to, so one
+// present here is either already void or about to be. Saying so is more use to
+// the caller than silently invalidating it.
+func TestValidateFundPacketRejectsSignatures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input psbt.PInput
+	}{{
+		name: "an ecdsa partial signature",
+		input: psbt.PInput{
+			PartialSigs: []*psbt.PartialSig{{
+				PubKey:    bytes.Repeat([]byte{0x02}, 33),
+				Signature: testDerSig(),
+			}},
+		},
+	}, {
+		name: "a taproot key spend signature",
+		input: psbt.PInput{
+			TaprootKeySpendSig: testSchnorrSig(),
+		},
+	}, {
+		name: "a taproot script spend signature",
+		input: psbt.PInput{
+			TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
+				XOnlyPubKey: bytes.Repeat([]byte{0x02}, 32),
+				LeafHash:    bytes.Repeat([]byte{0x03}, 32),
+				Signature:   testSchnorrSig(),
+			}},
+		},
+	}, {
+		name: "a finalized script signature",
+		input: psbt.PInput{
+			FinalScriptSig: []byte{0x51},
+		},
+	}, {
+		name: "a finalized witness",
+		input: psbt.PInput{
+			FinalScriptWitness: []byte{0x01, 0x01, 0x51},
+		},
+	}, {
+		// Present but empty still marks the input finalized, which is
+		// what the psbt package's own check asks.
+		name: "an empty but present script signature",
+		input: psbt.PInput{
+			FinalScriptSig: []byte{},
+		},
+	}, {
+		name: "an empty but present witness",
+		input: psbt.PInput{
+			FinalScriptWitness: []byte{},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: keep the input's UTXO records, so the only
+			// thing wrong with the packet is the signature.
+			packet := testPacket(t)
+			input := tc.input
+			input.NonWitnessUtxo = packet.Inputs[0].NonWitnessUtxo
+			input.WitnessUtxo = packet.Inputs[0].WitnessUtxo
+			packet.Inputs[0] = input
+
+			err := validateFundPacket(packet)
+
+			require.ErrorIs(t, err, ErrPacketSigned)
+		})
+	}
+}
+
+// TestValidateFundPacketRejectsSighashSingle verifies that funding refuses
+// SIGHASH_SINGLE, with or without ANYONECANPAY.
+//
+// It commits an input to the output at its own index, and funding appends a
+// change output and re-sorts, so it cannot keep outputs where the caller put
+// them.
+func TestValidateFundPacketRejectsSighashSingle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+	}{{
+		name:    "on its own",
+		sigHash: txscript.SigHashSingle,
+	}, {
+		name:    "with anyonecanpay",
+		sigHash: txscript.SigHashSingle | txscript.SigHashAnyOneCanPay,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].SighashType = tc.sigHash
+
+			err := validateFundPacket(packet)
+
+			require.ErrorIs(t, err, ErrUnsafeSighash)
+		})
+	}
+}
+
+// TestValidatePacketAcceptsUnknowns verifies that the structural check does
+// not refuse unclassified fields, so signing can carry them through.
+func TestValidatePacketAcceptsUnknowns(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an unclassified field at every level a packet has one.
+	packet := testPacket(t)
+	unknown := []*psbt.Unknown{{Key: []byte{0xfc}, Value: []byte{0x01}}}
+	packet.Unknowns = unknown
+	packet.Inputs[0].Unknowns = unknown
+	packet.Outputs[0].Unknowns = unknown
+
+	// Act: run the structural check.
+	err := validatePacket(packet)
+
+	// Assert: the fields do not fail it.
+	require.NoError(t, err)
+}
+
+// TestValidateFundPacketRejectsUnknowns verifies that funding refuses an
+// unclassified field wherever it sits.
+func TestValidateFundPacketRejectsUnknowns(t *testing.T) {
+	t.Parallel()
+
+	unknown := []*psbt.Unknown{{Key: []byte{0xfc}, Value: []byte{0x01}}}
+
+	// Each key is a type the psbt package knows at that level, so reading
+	// the packet back would parse the field as that type and fail.
+	knownKey := func(k byte) []*psbt.Unknown {
+		return []*psbt.Unknown{{Key: []byte{k}, Value: []byte{0x01}}}
+	}
+
+	tests := []struct {
+		name   string
+		global []*psbt.Unknown
+		input  []*psbt.Unknown
+		output []*psbt.Unknown
+	}{{
+		name:   "global field",
+		global: unknown,
+	}, {
+		name:  "input field",
+		input: unknown,
+	}, {
+		name:   "output field",
+		output: unknown,
+	}, {
+		name:   "global field keyed as an xpub",
+		global: knownKey(0x01),
+	}, {
+		name:  "input field keyed as a non-witness utxo",
+		input: knownKey(0x00),
+	}, {
+		name:   "output field keyed as a derivation",
+		output: knownKey(0x02),
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: add the field at the level under test only.
+			packet := testPacket(t)
+			packet.Unknowns = tc.global
+			packet.Inputs[0].Unknowns = tc.input
+			packet.Outputs[0].Unknowns = tc.output
+
+			// Act: run the funding gate.
+			err := validateFundPacket(packet)
+
+			// Assert: the field is refused.
+			require.ErrorIs(t, err, ErrUnclassifiedField)
+		})
+	}
+}

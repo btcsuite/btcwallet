@@ -7,18 +7,22 @@ package wallet
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
+	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -153,6 +157,14 @@ var (
 	// flow (skipping inputs that don't belong to this wallet) and should
 	// not be exposed to the caller.
 	errComputeRawSig = errors.New("cannot compute raw signature")
+
+	// errTxOutputIndexOutOfRange is returned when a transaction output is
+	// missing the referenced index.
+	errTxOutputIndexOutOfRange = errors.New("tx output index out of range")
+
+	// errUtxoParentMismatch is returned when a UTXO does not match its
+	// parent transaction output.
+	errUtxoParentMismatch = errors.New("utxo parent output mismatch")
 )
 
 const (
@@ -160,6 +172,17 @@ const (
 	// full path follows the structure:
 	// m / purpose' / coin_type' / account' / branch / index.
 	BIP32PathLength = 5
+
+	// fundLeaseDuration bounds how long a successful FundPsbt attempt owns
+	// its selected inputs. It is long enough for a caller to sign and
+	// publish, and short enough that an abandoned attempt frees its inputs
+	// through ordinary lease expiry without any cleanup worker.
+	fundLeaseDuration = 10 * time.Minute
+
+	// fundCleanupTimeout bounds the releases a FundPsbt attempt makes
+	// after an ambiguous reservation. Stop joins the attempt, so the
+	// bound also limits how long cleanup can delay shutdown.
+	fundCleanupTimeout = time.Minute
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -197,6 +220,61 @@ type FundIntent struct {
 	Label string
 }
 
+// FundResult is the outcome of a successful FundPsbt attempt.
+type FundResult struct {
+	// Packet is the funded PSBT, ready for signing.
+	Packet *psbt.Packet
+
+	// ChangeIndex is the index of the change output in
+	// `Packet.UnsignedTx.TxOut`, or -1 if no change output was added.
+	ChangeIndex int32
+
+	// LeaseID is the lock ID the wallet generated for this attempt. Every
+	// input of Packet is leased under it until the lease expires or the
+	// caller releases it through ReleaseOutput with this ID. The wallet
+	// draws a fresh random ID for every attempt, so no two attempts share
+	// a lease owner.
+	LeaseID wtxmgr.LockID
+}
+
+// FundReservationError reports a FundPsbt attempt whose input reservation
+// commit was ambiguous: the leases may or may not exist. FundPsbt returns no
+// packet in that case. Before returning, it attempts to release every input
+// under LeaseID, leaving any input another attempt has since leased with that
+// owner. It matches ErrIndeterminateCommit through errors.Is; use errors.As to
+// read its fields.
+//
+// If a release failed, the error also wraps that failure, and a release whose
+// own commit was ambiguous is reported as ErrIndeterminateCommit rather than
+// as success. Leases of this attempt may then remain; the caller may retry
+// ReleaseOutput with LeaseID for each input, or let them expire on their own.
+// Releasing an input another attempt has since leased returns
+// ErrOutputUnlockNotAllowed, which means the lease is not this attempt's and
+// can be ignored.
+type FundReservationError struct {
+	// LeaseID is the lock ID the attempt reserved under.
+	LeaseID wtxmgr.LockID
+
+	// Inputs lists the outpoints the attempt tried to reserve, in the order
+	// they appear in the funded transaction.
+	Inputs []wire.OutPoint
+
+	// cause is the ambiguous reservation failure, which wraps
+	// ErrIndeterminateCommit, joined with any release failures.
+	cause error
+}
+
+// Error returns the ambiguous reservation failure's message, followed by any
+// release failures.
+func (e *FundReservationError) Error() string {
+	return e.cause.Error()
+}
+
+// Unwrap returns the ambiguous reservation failure and any release failures.
+func (e *FundReservationError) Unwrap() error {
+	return e.cause
+}
+
 // SignPsbtParams encapsulates the arguments for signing a PSBT.
 type SignPsbtParams struct {
 	// Packet is the PSBT to be signed.
@@ -222,7 +300,7 @@ type SignPsbtResult struct {
 	// successfully signed.
 	SignedInputs []uint32
 
-	// Packet is the modified PSBT packet. This is the same pointer as
+	// Packet is the signed PSBT packet. This is the same pointer as
 	// passed in the params, returned for convenience.
 	Packet *psbt.Packet
 }
@@ -261,34 +339,52 @@ type SignPsbtResult struct {
 //	    },
 //	    FeeRate: btcunit.NewSatPerKVByte(250),
 //	}
-//	fundedPacket, changeIndex, err := psbtManager.FundPsbt(
-//		ctx, fundIntent,
-//	)
+//	result, err := psbtManager.FundPsbt(ctx, fundIntent)
+//	if err != nil {
+//		// The wallet already tried to release an ambiguous
+//		// reservation. Release is idempotent, so retrying covers
+//		// any release that failed.
+//		var resErr *wallet.FundReservationError
+//		if errors.As(err, &resErr) {
+//			for _, op := range resErr.Inputs {
+//				_ = utxoManager.ReleaseOutput(ctx, resErr.LeaseID, op)
+//			}
+//		}
+//
+//		return err
+//	}
+//	fundedPacket := result.Packet
 //
 // The `fundedPacket` now contains the necessary inputs (fully decorated)
-// and a change output. The `changeIndex` indicates the index of the
+// and a change output. The `result.ChangeIndex` indicates the index of the
 // change output in the `fundedPacket.UnsignedTx.TxOut` slice, or -1 if
-// no change output was added.
+// no change output was added. Every input of `fundedPacket` is leased
+// under the wallet-generated `result.LeaseID`; release them early with
+// ReleaseOutput if the transaction is abandoned.
+//
+// FundPsbt does not modify `barePacket`. It returns a funded packet of its
+// own, so every step below works on `fundedPacket`; `barePacket` still
+// describes the unfunded template it did before the call.
 //
 // 3. Sign the PSBT:
 // The wallet signs all inputs it has the keys for.
 //
-//	signParams := &wallet.SignPsbtParams{Packet: barePacket}
+//	signParams := &wallet.SignPsbtParams{Packet: fundedPacket}
 //	result, err := psbtManager.SignPsbt(ctx, signParams)
 //
 // 4. Finalize the PSBT:
 // The final scriptSig and/or witness for each input is constructed.
 //
-//	err = psbtManager.FinalizePsbt(ctx, barePacket)
+//	err = psbtManager.FinalizePsbt(ctx, fundedPacket)
 //
 // 5. Extract and Broadcast:
 // The final, network-ready transaction is extracted and broadcast.
 //
-//	finalTx, err := psbt.Extract(barePacket)
+//	finalTx, err := psbt.Extract(fundedPacket)
 //	err = broadcaster.Broadcast(ctx, finalTx, "payment")
 //
 // For more detailed examples, including multi-party collaborative workflows,
-// see the documentation in the `wallet/docs/psbt_workflows.md` file.
+// see the documentation in the `docs/developer/psbt_workflows.md` file.
 type PsbtManager interface {
 	// DecorateInputs enriches a PSBT's inputs with UTXO and derivation
 	// information known to the wallet.
@@ -301,6 +397,14 @@ type PsbtManager interface {
 	// If `skipUnknown` is true, the wallet will skip inputs it does not
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
+	//
+	// Owned Taproot inputs receive the Wallet's internal key. A conflicting
+	// caller internal key, or one on a non-Taproot input, returns
+	// ErrConflictingInputMetadata.
+	//
+	// When the origin is unknown, no new derivation records are added.
+	// Caller origins for the spending key are retained without authenticating
+	// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
 	DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		skipUnknown bool) (*psbt.Packet, error)
 
@@ -311,11 +415,11 @@ type PsbtManager interface {
 	// perform automatic coin selection (if no inputs are present) or to
 	// validate and fund a specific set of manual inputs.
 	//
-	// The returned PSBT is a fully funded transaction template, ready for
-	// signing. The change output index is also returned (-1 if no change
-	// was added).
-	FundPsbt(ctx context.Context, intent *FundIntent) (*psbt.Packet,
-		int32, error)
+	// The returned FundResult carries a fully funded transaction
+	// template, ready for signing, the change output index (-1 if no
+	// change was added), and the wallet-generated lease ID that every
+	// input is reserved under.
+	FundPsbt(ctx context.Context, intent *FundIntent) (*FundResult, error)
 
 	// SignPsbt adds partial signatures to the PSBT for all inputs
 	// controlled by the wallet.
@@ -359,6 +463,57 @@ type PsbtManager interface {
 		*psbt.Packet, error)
 }
 
+// decorateInputsReq borrows the packet until accepted enrichment completes.
+type decorateInputsReq struct {
+	reqCtx
+
+	packet      *psbt.Packet
+	skipUnknown bool
+	respChan    chan psbtPacketResp
+}
+
+// psbtPacketResp returns the operation result after in-place input updates.
+type psbtPacketResp struct {
+	packet *psbt.Packet
+	err    error
+}
+
+// fundPsbtReq borrows funding data through authoring and packet population.
+type fundPsbtReq struct {
+	reqCtx
+
+	intent   *FundIntent
+	respChan chan fundPsbtResp
+}
+
+// fundPsbtResp delivers funding results only after packet mutation ends.
+type fundPsbtResp struct {
+	result *FundResult
+	err    error
+}
+
+// signPsbtReq borrows signing metadata until signing and callbacks complete.
+type signPsbtReq struct {
+	reqCtx
+
+	params   *SignPsbtParams
+	respChan chan signPsbtResp
+}
+
+// signPsbtResp returns signed indices with the original packet.
+type signPsbtResp struct {
+	result *SignPsbtResult
+	err    error
+}
+
+// finalizePsbtReq keeps final witness assembly joined through completion.
+type finalizePsbtReq struct {
+	reqCtx
+
+	packet      *psbt.Packet
+	respErrChan chan error
+}
+
 // DecorateInputs enriches a PSBT's inputs with UTXO and derivation information.
 //
 // It iterates through all inputs in the PSBT and:
@@ -366,8 +521,16 @@ type PsbtManager interface {
 //     references a UTXO owned by the wallet.
 //  2. Enriches: If owned, calls `decorateInput` to add the full previous
 //     transaction (`NonWitnessUtxo`) or output (`WitnessUtxo`), along with
-//     BIP32 derivation paths (`Bip32Derivation` or `TaprootBip32Derivation`)
+//     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
+//
+// Owned Taproot inputs receive the Wallet's internal key. A conflicting
+// caller internal key, or one on a non-Taproot input, returns
+// ErrConflictingInputMetadata.
+//
+// When the origin is unknown, no new derivation records are added.
+// Caller origins for the spending key are retained without authenticating
+// unknown paths; a wrong key or family returns ErrConflictingInputMetadata.
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
@@ -375,6 +538,53 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	if err != nil {
 		return nil, err
 	}
+
+	// Reject unreadable caller records before admission: originless
+	// decoration reads derivation entries without further pointer checks.
+	err = validatePacketShape(packet)
+	if err != nil {
+		return nil, err
+	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := decorateInputsReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		packet:      packet,
+		skipUnknown: skipUnknown,
+		respChan:    make(chan psbtPacketResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.packet, result.err
+}
+
+// handleDecorateInputs delivers the result of an accepted component request.
+func (w *Wallet) handleDecorateInputs(r decorateInputsReq) {
+	// Reuse decoration shared with funding without a second admission.
+	_, err := w.decorateInputs(r.ctx, r.packet, r.skipUnknown)
+	if err != nil {
+		r.respChan <- psbtPacketResp{err: err}
+
+		return
+	}
+
+	r.respChan <- psbtPacketResp{packet: r.packet}
+}
+
+// decorateInputs completes its accepted operation with the caller's packet,
+// in place. It returns how the wallet spends each input, by position, with
+// SpendTypeUnknown for an input it skipped.
+func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
+	skipUnknown bool) ([]waddrmgr.SpendType, error) {
+
+	spends := make([]waddrmgr.SpendType, len(packet.UnsignedTx.TxIn))
 
 	// We'll iterate through all the inputs of the PSBT and decorate them
 	// if they are owned by the wallet. The `skipUnknown` parameter
@@ -386,7 +596,7 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		// the UTXO. The `fetchAndValidateUtxo` function will return an
 		// `ErrNotMine` error if the UTXO is not found or not owned by
 		// the wallet.
-		tx, utxo, err := w.fetchAndValidateUtxo(txIn)
+		tx, utxo, err := w.fetchAndValidateUtxo(ctx, txIn)
 		if err != nil {
 			// If the error is `ErrNotMine` and `skipUnknown` is
 			// true, we'll simply continue to the next input, as we
@@ -403,112 +613,159 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		// If we own the UTXO, we'll proceed to decorate the
 		// corresponding PSBT input with detailed information from the
 		// wallet.
-		err = w.decorateInput(ctx, &packet.Inputs[i], tx, utxo)
+		spends[i], err = w.decorateInput(
+			ctx, &packet.Inputs[i], tx, utxo,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("error decorating input %d: %w",
 				i, err)
 		}
 	}
 
-	return packet, nil
+	return spends, nil
 }
 
 // decorateInput is a helper function that decorates a single PSBT input with
-// UTXO information from the wallet.
+// UTXO information from the wallet, and returns how the wallet spends it.
 //
 // NOTE: The `pInput` parameter is modified in-place by this function.
 func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
-	tx *wire.MsgTx, utxo *wire.TxOut) error {
+	tx *wire.MsgTx, utxo *wire.TxOut) (waddrmgr.SpendType, error) {
 
-	// We'll start by extracting the address from the UTXO's pkScript.
-	// This will be used to look up the managed address from the
-	// database.
-	addr := extractAddrFromPKScript(utxo.PkScript, w.cfg.ChainParams)
-	if addr == nil {
-		return fmt.Errorf("%w: from pkscript %x",
-			ErrUnableToExtractAddress, utxo.PkScript)
-	}
-
-	// We'll then use the address to look up the managed address from the
-	// database. This will give us access to the derivation information.
-	managedAddr, err := w.AddressInfo(ctx, addr)
+	// Reuse the same wallet lookup and script-construction path as the signer,
+	// so PSBT decoration and spending metadata stay in sync.
+	scriptInfo, err := w.scriptForOutput(ctx, *utxo)
 	if err != nil {
-		return fmt.Errorf("unable to get address info for %s: %w",
-			addr.String(), err)
+		return waddrmgr.SpendTypeUnknown, err
 	}
 
-	// We'll ensure that the managed address is a public key address, as
-	// we can only decorate inputs for which we have the private key.
-	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
-			managedAddr.Address())
-	}
+	taproot := txscript.IsPayToTaproot(utxo.PkScript)
 
 	// With the managed address, we can now get the derivation information
 	// for the address.
-	derivation, err := derivationForManagedAddress(pubKeyAddr)
+	derivation, err := derivationForAddressInfo(scriptInfo.AddressInfo)
+	// A known public key can describe a coin without a root origin, while
+	// a present but unusable origin must still fail.
+	if errors.Is(err, ErrDerivationPathNotFound) &&
+		scriptInfo.Derivation == nil && scriptInfo.PubKey != nil {
+
+		err = checkOriginlessInputDerivations(
+			pInput, scriptInfo.PubKey, taproot,
+		)
+	}
+
 	if err != nil {
-		return err
+		return waddrmgr.SpendTypeUnknown, err
+	}
+
+	// Script and public-key facts determine the internal key independently
+	// of the root origin; native inputs cannot carry an internal key.
+	var internalKey []byte
+	if taproot {
+		internalKey = scriptInfo.PubKey.SerializeCompressed()[1:]
+	}
+
+	// Both public entrypoints share this check before replacing metadata,
+	// so funding restoration can only receive absent or agreeing keys.
+	if pInput.TaprootInternalKey != nil {
+		err := checkWalletInternalKey(internalKey, pInput.TaprootInternalKey)
+		if err != nil {
+			return waddrmgr.SpendTypeUnknown, err
+		}
 	}
 
 	// With all the information gathered, we'll now populate the PSBT
 	// input based on its address type by calling the existing, non-
 	// deprecated helper functions.
-	switch {
-	// For SegWit v1 (Taproot) inputs, we'll use the SegWit v1 helper.
-	case txscript.IsPayToTaproot(utxo.PkScript):
+	// Taproot carries its known internal key even without a root origin.
+	if taproot {
+		pInput.TaprootInternalKey = internalKey
 		addInputInfoSegWitV1(pInput, utxo, derivation)
-
-	// For SegWit v0 inputs, we'll use the SegWit v0 helper.
-	default:
-		// We'll need to build the redeem script for the input.
-		_, redeemScript, err := buildScriptsForManagedAddress(
-			pubKeyAddr, utxo.PkScript, w.cfg.ChainParams,
+	} else {
+		// With the redeem script, we can now populate the PSBT input.
+		addInputInfoSegWitV0Common(
+			pInput, tx, utxo, derivation,
+			scriptInfo.AddrType.SpendType() ==
+				waddrmgr.SpendTypeNestedWitnessKey,
+			scriptInfo.RedeemScript,
 		)
-		if err != nil {
-			return err
+	}
+
+	return scriptInfo.AddrType.SpendType(), nil
+}
+
+// checkOriginlessInputDerivations checks the key and spent-script family the
+// Wallet knows without claiming knowledge of a caller's root origin. Taproot
+// inputs here are key-path spends, so their derivations cannot name leaves.
+func checkOriginlessInputDerivations(input *psbt.PInput,
+	pubKey *btcec.PublicKey, taproot bool) error {
+
+	// Check every caller record before preserving it: the missing origin
+	// does not make another public key applicable to this single-key input.
+	for _, derivation := range input.Bip32Derivation {
+		if taproot || !bytes.Equal(
+			derivation.PubKey, pubKey.SerializeCompressed(),
+		) {
+
+			return ErrConflictingInputMetadata
 		}
+	}
 
-		// With the redeem script, we can now populate the PSBT
-		// input.
-		addInputInfoSegWitV0(
-			pInput, tx, utxo, derivation, managedAddr, redeemScript,
-		)
+	for _, derivation := range input.TaprootBip32Derivation {
+		if !taproot || len(derivation.LeafHashes) > 0 || !bytes.Equal(
+			derivation.XOnlyPubKey, schnorr.SerializePubKey(pubKey),
+		) {
+
+			return ErrConflictingInputMetadata
+		}
 	}
 
 	return nil
 }
 
-// fetchAndValidateUtxo fetches the transaction details for a given input,
-// validates that the wallet owns the UTXO, and ensures it is not locked.
+// fetchAndValidateUtxo fetches the wallet-owned UTXO and transaction details
+// for a given input, and ensures the UTXO is not locked.
 //
 // This function serves as a crucial pre-check before decorating a PSBT input.
 // It performs three key validation steps:
-//  1. Transaction Lookup: It first attempts to fetch the full transaction
-//     details from the wallet's transaction store using the input's previous
-//     outpoint. If the transaction is not found, it returns an `ErrNotMine`
-//     error.
-//  2. Ownership Verification: If the transaction is found, it verifies that the
-//     specific output index is a credit to the wallet. This ensures that the
-//     wallet actually owns the UTXO. If this check fails, it also returns
-//     `ErrNotMine`.
-//  3. Lock Status Check: After confirming ownership, it checks if the UTXO has
-//     been locked. If the UTXO is locked, it returns an `ErrUtxoLocked`
-//     error.
+//  1. UTXO Lookup: It first attempts to fetch the wallet-owned UTXO using the
+//     input's previous outpoint. If the UTXO is not found, it returns an
+//     `ErrNotMine` error.
+//  2. Lock Status Check: After confirming ownership, it checks if the UTXO has
+//     been locked. If the UTXO is locked, it returns an `ErrUtxoLocked` error.
+//  3. Transaction Lookup: It fetches the full parent transaction details needed
+//     for SegWit v0 PSBT non-witness UTXO data.
 //
 // Only if all these checks pass, the function returns the full parent
 // transaction (`*wire.MsgTx`) and the specific unspent transaction output
 // (`*wire.TxOut`).
-func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
+func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 	*wire.MsgTx, *wire.TxOut, error) {
 
-	// First, we'll attempt to fetch the transaction details from our
-	// transaction store.
-	txDetail, err := w.fetchTxDetails(&txIn.PreviousOutPoint.Hash)
-	if errors.Is(err, ErrTxNotFound) {
-		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
-			txIn.PreviousOutPoint)
+	outPoint := txIn.PreviousOutPoint
+
+	utxoInfo, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint,
+	})
+	if errors.Is(err, db.ErrUtxoNotFound) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine, outPoint)
+	}
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch utxo: %w", err)
+	}
+
+	if utxoInfo.IsLocked {
+		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked, outPoint)
+	}
+
+	txDetail, err := w.store.GetTxDetail(ctx, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     outPoint.Hash,
+	})
+	if errors.Is(err, db.ErrTxNotFound) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine, outPoint)
 	}
 
 	if err != nil {
@@ -516,85 +773,337 @@ func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
 			err)
 	}
 
-	// With the transaction details retrieved, we'll make an additional
-	// check to ensure we actually have control of this output.
-	cred := findCredit(txDetail, txIn.PreviousOutPoint.Index)
-	if cred == nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
-			txIn.PreviousOutPoint)
-	}
-
-	// Now that we've confirmed we know about the UTXO, we'll check if it
-	// is locked.
-	if cred.Locked {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked,
-			txIn.PreviousOutPoint)
-	}
-
 	// Now that we've confirmed we know about the UTXO, we'll proceed to
 	// gather the rest of the information required to decorate the PSBT
 	// input.
-	tx := &txDetail.MsgTx
-	utxo := tx.TxOut[txIn.PreviousOutPoint.Index]
+	tx, err := txFromDetail(*txDetail)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	utxo, err := validatePsbtParentOutput(outPoint, utxoInfo, tx)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return tx, utxo, nil
 }
 
-// findCredit determines whether a transaction's details contain a credit for a
-// specific output index.
-func findCredit(txDetail *wtxmgr.TxDetails,
-	outputIndex uint32) *wtxmgr.CreditRecord {
-
-	for i := range txDetail.Credits {
-		if txDetail.Credits[i].Index == outputIndex {
-			return &txDetail.Credits[i]
-		}
+// txFromDetail returns the decoded transaction for one store tx-detail record.
+func txFromDetail(detail db.TxDetailInfo) (*wire.MsgTx, error) {
+	if detail.MsgTx != nil {
+		return detail.MsgTx, nil
 	}
 
-	return nil
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(detail.SerializedTx))
+	if err != nil {
+		return nil, fmt.Errorf("deserialize tx %v: %w", detail.Hash, err)
+	}
+
+	return &msgTx, nil
+}
+
+// validatePsbtParentOutput returns the parent transaction output for the
+// store-backed UTXO, ensuring the tx index and value match.
+//
+// The parent transaction output is canonical for PSBT decoration: it carries
+// the full on-chain script the input must be spent against (e.g. the complete
+// bare-multisig script), which can legitimately differ from the address script
+// recorded in the UTXO row. For a wallet-owned bare-multisig/member credit the
+// store keys the row against the matched member address, so comparing
+// utxoInfo.PkScript against the parent output script would wrongly reject the
+// input. Ownership is therefore established upstream by the store UTXO lookup
+// in fetchAndValidateUtxo (the wallet owns the output because the store
+// returned it), not by script equality here. Only the value is cross-checked
+// against the on-chain output.
+func validatePsbtParentOutput(outPoint wire.OutPoint,
+	utxoInfo *db.UtxoInfo, tx *wire.MsgTx) (*wire.TxOut, error) {
+
+	if uint64(outPoint.Index) >= uint64(len(tx.TxOut)) {
+		return nil, fmt.Errorf("%w: tx %v output index %d",
+			errTxOutputIndexOutOfRange, outPoint.Hash, outPoint.Index)
+	}
+
+	utxo := tx.TxOut[outPoint.Index]
+	if utxo.Value != int64(utxoInfo.Amount) {
+		return nil, fmt.Errorf("%w: %v", errUtxoParentMismatch,
+			outPoint)
+	}
+
+	return utxo, nil
 }
 
 // FundPsbt performs coin selection and funds the PSBT.
 //
 // It executes the funding logic by:
 //  1. Validation: Checking the `FundIntent` for consistency.
-//  2. Creation: Converting the intent into a `TxIntent` and delegating to the
-//     `CreateTransaction` method (which handles the underlying coin selection
-//     and change calculation algorithms).
+//  2. Creation: Converting the intent into a `TxIntent` and authoring it
+//     through the shared `authorTxIntent` boundary, which selects inputs,
+//     completes the transaction, and allocates one change address only when
+//     positive, non-dust change is kept.
 //  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
 //     change output to the PSBT structure and sort it according to BIP 69.
+//  4. Registration: On SQL wallets, registering change kept by the funded
+//     packet from the live tip. A registration failure returns no packet while
+//     the committed change address stays in the wallet, and acquires no lease.
+//     Kvdb change and change for NoChainSync accounts are not registered.
+//  5. Reservation: Atomically leasing the packet's complete input set under a
+//     fresh random lease ID generated for this attempt. Either every input is
+//     leased or none is, and no packet is returned unless the attempt owns a
+//     lease on every input.
+//
+// The wallet owns lease ID generation so that two attempts can never share a
+// lease owner: the Store renews an active lease held under the same ID, so a
+// reused ID would let two attempts both reserve the same input.
+//
+// On success the caller owns unexpired leases for every input of the returned
+// packet under `FundResult.LeaseID`. They expire on their own after a fixed
+// wallet-defined duration, and the caller may release them earlier through
+// ReleaseOutput with that ID. If the reservation commit is ambiguous, FundPsbt
+// attempts to release every input under that ID before it returns, even if the
+// caller has canceled, and then returns no result and a *FundReservationError,
+// which matches ErrIndeterminateCommit, carries the lease ID and inputs, and
+// wraps any release failure. Every other failure acquires no lease.
+//
+// A change address is committed only once input selection keeps a positive,
+// non-dust change output. Funding that fails before that point, and packets
+// without change, leave the change branch untouched. A failure after the
+// commit, in completion, registration, decoration, or reservation, returns no
+// result and leaves the committed address unused; it is not released. An
+// ambiguous change allocation precedes any lease, so it returns an error
+// matching ErrIndeterminateCommit that is not a *FundReservationError, and no
+// result, without retrying.
+//
+// A caller-selected input that is already leased is refused with
+// ErrUtxoNotEligible when it is checked during authoring. If another attempt
+// leases it after that check, input decoration or the reservation refuses it
+// with ErrOutputAlreadyLocked instead. Callers should treat both as an
+// unavailable input.
+//
+// FundPsbt deliberately invokes the neutral authoring boundary instead of the
+// public CreateTransaction wrapper. Their construction flow is identical
+// today, but keeping the wrappers independent keeps each wrapper's change
+// registration next to its own lease, cleanup, and publication obligations.
+// Accepted funding finishes before return, including packet updates and any
+// supplied coin selector, even if the caller cancels after admission.
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
-	*psbt.Packet, int32, error) {
+	*FundResult, error) {
 
-	err := w.state.validateSynced()
+	// Judge the packet before anything is consulted on its behalf. The
+	// check reads the intent and nothing else, so a caller handed a
+	// malformed packet back learns that without the wallet having asked
+	// the syncer where it is.
+	err := w.validateFundIntent(intent)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	// Validate the funding intent before proceeding.
-	err = w.validateFundIntent(intent)
+	err = w.state.validateSynced()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := fundPsbtReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		intent:   intent,
+		respChan: make(chan fundPsbtResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	resp := <-r.respChan
+
+	return resp.result, resp.err
+}
+
+// handleFundPsbt completes its accepted operation with the caller's packet.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
+	// Everything from here on works on a clone. The caller's packet is
+	// never the thing being rewritten, so however this ends, and however
+	// far it got, the caller gets its own packet back exactly as it was.
+	packet := clonePacket(r.intent.Packet)
 
 	// Create a TxIntent from the FundIntent.
-	txIntent := w.createTxIntent(intent)
+	txIntent := w.createTxIntent(packet, r.intent)
 
-	// Create the transaction.
-	authoredTx, err := w.CreateTransaction(ctx, txIntent)
+	err := normalizeAndValidateTxIntent(txIntent)
 	if err != nil {
-		return nil, 0, err
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	// Author the transaction through the shared authoring boundary.
+	authoredTx, changeAccount, change, err := w.authorTxIntent(
+		r.ctx, txIntent,
+	)
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
 	}
 
 	// Populate the PSBT packet with the new transaction details.
 	packet, changeIndex, err := w.populatePsbtPacket(
-		ctx, intent.Packet, authoredTx,
+		r.ctx, packet, authoredTx,
 	)
-	if err != nil {
-		return nil, 0, err
+
+	// Another attempt can lease an input after authoring accepted it but
+	// before decoration reads it. Report that as the same unavailable
+	// input the reservation would refuse, keeping DecorateInputs' own
+	// error unchanged.
+	if errors.Is(err, ErrUtxoLocked) {
+		err = fmt.Errorf("%w: %s", ErrOutputAlreadyLocked, err.Error())
 	}
 
-	return packet, changeIndex, nil
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	// Register kept change before the caller can observe the packet. A
+	// negative sorted index means authoring dropped the change output.
+	err = w.watchAuthoredChange(
+		r.ctx, int(changeIndex), changeAccount, change,
+	)
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	// Draw this attempt's own lease owner only once it is about to
+	// reserve, so an attempt that fails earlier never mints an ID.
+	leaseID := newFundLeaseID()
+
+	outPoints := make([]wire.OutPoint, 0, len(packet.UnsignedTx.TxIn))
+	for _, txIn := range packet.UnsignedTx.TxIn {
+		outPoints = append(outPoints, txIn.PreviousOutPoint)
+	}
+
+	// Reserve the complete input set last, so selection, authoring, and
+	// chain calls stay outside the reservation transaction, an invalid
+	// packet or failed registration never acquires a lease, and the
+	// returned leases run a full duration from return.
+	err = w.reserveFundingInputs(r.ctx, leaseID, outPoints)
+
+	// An ambiguous commit may have leased the inputs, and no packet is
+	// returned that would let the caller use them, so release them here.
+	// The error still carries the lease ID and inputs for any release
+	// that did not succeed.
+	if errors.Is(err, ErrIndeterminateCommit) {
+		cleanupErr := w.releaseFundingInputs(r.ctx, leaseID, outPoints)
+
+		err = &FundReservationError{
+			LeaseID: leaseID,
+			Inputs:  outPoints,
+			cause:   errors.Join(err, cleanupErr),
+		}
+	}
+
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	r.respChan <- fundPsbtResp{result: &FundResult{
+		Packet:      packet,
+		ChangeIndex: changeIndex,
+		LeaseID:     leaseID,
+	}}
+}
+
+// newFundLeaseID draws a fresh, uniformly random lease ID for one funding
+// attempt. A 256-bit random ID makes a collision with any other attempt's, or
+// with a caller-chosen ReleaseOutput/LeaseOutput ID, negligible. The ID comes
+// from crypto/rand because it is the capability that releases the leases, so
+// it must not be predictable.
+func newFundLeaseID() wtxmgr.LockID {
+	var id wtxmgr.LockID
+
+	// crypto/rand.Read never returns an error; it aborts the program if
+	// the system source fails.
+	_, _ = rand.Read(id[:])
+
+	return id
+}
+
+// reserveFundingInputs atomically leases the funded packet's complete input
+// set under the attempt's lease ID for the fixed funding duration.
+//
+// Coin selection skips leased outputs, but concurrent attempts can both see an
+// input as free before either reserves it. The all-or-nothing Store write is
+// the point where such a race is decided: the loser acquires no part of its
+// set and gets no packet.
+func (w *Wallet) reserveFundingInputs(ctx context.Context,
+	leaseID wtxmgr.LockID, outPoints []wire.OutPoint) error {
+
+	_, err := w.store.LeaseOutputs(ctx, db.LeaseOutputsParams{
+		WalletID:  w.id,
+		ID:        db.LockID(leaseID),
+		OutPoints: outPoints,
+		Duration:  fundLeaseDuration,
+	})
+	if err != nil {
+		// On an ambiguous commit the leases may or may not exist, so
+		// the result claims neither and is not retried or read back.
+		return fmt.Errorf("reserve funding inputs: %w",
+			translateLeaseErr(err))
+	}
+
+	return nil
+}
+
+// releaseFundingInputs releases the inputs of an ambiguous reservation under
+// the attempt's lease ID before FundPsbt returns without a packet.
+//
+// Every outpoint is attempted even after an earlier release fails, and the
+// failures are joined. The Store release is ownership-checked, so an input
+// another attempt has since leased keeps that owner and is not a failure, and
+// an input that is no longer a wallet UTXO has no lease left to release. A
+// release whose own commit is ambiguous reports ErrIndeterminateCommit rather
+// than success. Nothing is retried or read back.
+//
+// The releases run under a bounded context detached from the caller's
+// cancellation: a caller that gave up still must not leave the inputs out of
+// coin selection until the leases expire. The handler is joined by Stop, so
+// cleanup finishes before the Store closes.
+func (w *Wallet) releaseFundingInputs(ctx context.Context,
+	leaseID wtxmgr.LockID, outPoints []wire.OutPoint) error {
+
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), fundCleanupTimeout,
+	)
+	defer cancel()
+
+	errs := make([]error, 0, len(outPoints))
+	for _, outPoint := range outPoints {
+		err := w.store.ReleaseOutput(ctx, db.ReleaseOutputParams{
+			WalletID: w.id,
+			ID:       leaseID,
+			OutPoint: outPoint,
+		})
+		if err == nil || errors.Is(err, db.ErrOutputUnlockNotAllowed) ||
+			errors.Is(err, db.ErrUtxoNotFound) {
+
+			continue
+		}
+
+		errs = append(errs, fmt.Errorf("release funding input %v: %w",
+			outPoint, translateLeaseErr(err)))
+	}
+
+	return errors.Join(errs...)
 }
 
 // populatePsbtPacket updates the PSBT packet with the new transaction details,
@@ -604,53 +1113,89 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	authoredTx *txauthor.AuthoredTx) (*psbt.Packet, int32, error) {
 
-	// The authored transaction contains the selected inputs and the change
-	// output (if any). We'll update the PSBT packet with this new
-	// unsigned transaction.
-	packet.UnsignedTx = authoredTx.Tx
+	// Take the caller's own records off the packet before the authored
+	// transaction replaces the transaction they were attached to. Inputs
+	// are keyed by outpoint and outputs by the position they were handed
+	// to authoring at, since neither survives as a position in the result.
+	callerTx := packet.UnsignedTx
+	callerInputs := indexCallerInputs(packet)
+	callerOutputs := packet.Outputs
 
-	// We'll also re-initialize the input and output slices to match the
-	// dimensions of the new transaction. This is crucial because the
-	// `authoredTx` may have a different output order than the original PSBT
-	// (e.g., due to change output randomization in txauthor.AuthoredTx),
-	// which would otherwise cause a misalignment between the wire outputs
-	// and the PSBT's output metadata. By resetting, we ensure consistency.
-	packet.Inputs = make([]psbt.PInput, len(authoredTx.Tx.TxIn))
-	packet.Outputs = make([]psbt.POutput, len(authoredTx.Tx.TxOut))
+	tx := authoredTx.Tx
+
+	// The caller's transaction-level choices are the caller's. Authoring
+	// resets the version and locktime to its own defaults and rebuilds
+	// every input with a default sequence number, which would silently
+	// undo a locktime the caller set, or its opt-in to replacement.
+	tx.Version = callerTx.Version
+	tx.LockTime = callerTx.LockTime
+
+	packet.UnsignedTx = tx
+	packet.Inputs = make([]psbt.PInput, len(tx.TxIn))
+
+	for i, txIn := range tx.TxIn {
+		caller, ok := callerInputs[txIn.PreviousOutPoint]
+		if !ok {
+			// An input the wallet selected itself, which keeps
+			// authoring's own sequence number.
+			continue
+		}
+
+		txIn.Sequence = caller.sequence
+
+		// Check caller facts in shared decoration before restoration.
+		// UTXO and known-origin metadata are still overwritten and
+		// reconciled against the original indexed records below.
+		packet.Inputs[i] = caller.pInput
+	}
+
+	// Authoring leaves the caller's outputs in their own order and swaps
+	// its own change output into a random position among them. Mirroring
+	// that one exchange onto the records keeps each caller's metadata with
+	// the output it describes.
+	outputs, err := changeSwappedOutputs(
+		callerOutputs, authoredTx.ChangeIndex,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	packet.Outputs = outputs
 
 	// With the new inputs in place, we'll decorate them with UTXO and
 	// derivation information from the wallet. We set `skipUnknown` to
 	// false because all inputs in the `authoredTx` must be known to the
 	// wallet.
-	_, err := w.DecorateInputs(ctx, packet, false)
+	spends, err := w.decorateInputs(ctx, packet, false)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Decoration states what the wallet knows about each input. Now put
+	// the caller's own input records back on top of it, which is also
+	// where a caller that contradicted the wallet about its own coin is
+	// refused.
+	err = restoreInputMetadata(packet, callerInputs, spends)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	// If a change output was created, we need to add its derivation
 	// information to the corresponding PSBT output.
-	var changeOutput *wire.TxOut
 	if authoredTx.ChangeIndex >= 0 {
 		err := w.addChangeOutputInfo(ctx, packet, authoredTx)
 		if err != nil {
 			return nil, 0, err
 		}
-
-		changeOutput = authoredTx.Tx.TxOut[authoredTx.ChangeIndex]
 	}
 
 	// The PSBT specification recommends that inputs and outputs are
-	// sorted. This is done for privacy and standardization. We'll sort
-	// the packet in place.
-	err = psbt.InPlaceSort(packet)
-	if err != nil {
-		return nil, 0, fmt.Errorf("cannot sort psbt: %w", err)
-	}
-
-	// After sorting, the original change index from `authoredTx` is no
-	// longer valid. We need to find the new index of the change output in
-	// the sorted list.
-	changeIndex, err := findChangeIndex(changeOutput, packet)
+	// sorted, for privacy and standardization. Sorting moves the change
+	// output, so its new index is read back off the output itself rather
+	// than searched for by value.
+	changeIndex, err := sortPacketAndFindChange(
+		packet, authoredTx.ChangeIndex,
+	)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -662,38 +1207,24 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 // for a change output to a PSBT packet.
 func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 	authoredTx *txauthor.AuthoredTx) error {
-
-	// TODO(yy): The calls to `w.ScriptForOutput` and `w.AddressInfo` both
-	// involve database lookups. This could be optimized to a single
-	// database call to fetch all necessary address information. However,
-	// for now, this approach favors readability over micro-optimization,
-	// as this path is not performance-critical.
-	//
 	// First, we'll get the script information for the change output.
-	changeScriptInfo, err := w.ScriptForOutput(
+	changeScriptInfo, err := w.scriptForOutput(
 		ctx, *authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
 	)
 	if err != nil {
 		return err
 	}
 
-	// Then, we'll get the managed address for the change output.
-	changeAddr, err := w.AddressInfo(ctx, changeScriptInfo.Addr.Address())
-	if err != nil {
-		return err
-	}
-
 	// We'll ensure that the change address is a public key address.
-	managedPubKeyAddr, ok := changeAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
+	if changeScriptInfo.PubKey == nil {
 		return ErrChangeAddressNotManagedPubKey
 	}
 
 	// With the managed address, we can now create the PSBT output
 	// information.
-	changeOutputInfo, err := createOutputInfo(
+	changeOutputInfo, err := createOutputInfoFromAddressInfo(
 		authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
-		managedPubKeyAddr,
+		changeScriptInfo.AddressInfo,
 	)
 	if err != nil {
 		return err
@@ -729,6 +1260,14 @@ func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 		)
 	}
 
+	// The structural gate. Everything it rejects would otherwise be
+	// discovered somewhere further in, after the wallet had already acted
+	// on the packet.
+	err := validateFundPacket(intent.Packet)
+	if err != nil {
+		return err
+	}
+
 	// If the PSBT has no inputs (automatic coin selection mode), it must
 	// have at least one output.
 	if len(intent.Packet.UnsignedTx.TxIn) == 0 &&
@@ -744,32 +1283,6 @@ func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 	}
 
 	return nil
-}
-
-// findChangeIndex finds the new index of the change output after the PSBT has
-// been sorted.
-func findChangeIndex(changeOutput *wire.TxOut,
-	packet *psbt.Packet) (int32, error) {
-
-	if changeOutput == nil {
-		return -1, nil
-	}
-
-	for i, txOut := range packet.UnsignedTx.TxOut {
-		if i > math.MaxInt32 {
-			return 0, ErrChangeIndexOutOfRange
-		}
-
-		if psbt.TxOutsEqual(changeOutput, txOut) {
-			// The above check ensures that the conversion to int32
-			// is safe.
-			//
-			//nolint:gosec
-			return int32(i), nil
-		}
-	}
-
-	return -1, nil
 }
 
 // createTxIntent creates a TxIntent from a FundIntent. This helper function
@@ -790,10 +1303,15 @@ func findChangeIndex(changeOutput *wire.TxOut,
 //     to `TxIntent.ChangeSource`. Any default change source determination
 //     (e.g., when `FundIntent.ChangeSource` is `nil`) is delegated to the
 //     underlying `TxCreator`'s `determineChangeSource` method.
-func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
+func (w *Wallet) createTxIntent(packet *psbt.Packet,
+	intent *FundIntent) *TxIntent {
+
 	// First, we'll copy the outputs from the PSBT packet to the TxIntent.
-	outputs := make([]wire.TxOut, len(intent.Packet.UnsignedTx.TxOut))
-	for i, txOut := range intent.Packet.UnsignedTx.TxOut {
+	// Copying a TxOut by value shares its script, so this reads the
+	// wallet's own clone: the funded packet must not end up holding the
+	// caller's script memory.
+	outputs := make([]wire.TxOut, len(packet.UnsignedTx.TxOut))
+	for i, txOut := range packet.UnsignedTx.TxOut {
 		outputs[i] = *txOut
 	}
 
@@ -806,7 +1324,7 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 
 	// Now, we'll determine the input source based on whether the PSBT
 	// packet already contains inputs.
-	if len(intent.Packet.UnsignedTx.TxIn) == 0 {
+	if len(packet.UnsignedTx.TxIn) == 0 {
 		// If the packet has no inputs, we'll use the policy-based input
 		// source from the intent. This will trigger automatic coin
 		// selection by the wallet. The caller is responsible for
@@ -818,9 +1336,9 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 		// source. This bypasses coin selection and tells the wallet to
 		// use the exact inputs provided in the PSBT.
 		utxos := make(
-			[]wire.OutPoint, len(intent.Packet.UnsignedTx.TxIn),
+			[]wire.OutPoint, len(packet.UnsignedTx.TxIn),
 		)
-		for i, txIn := range intent.Packet.UnsignedTx.TxIn {
+		for i, txIn := range packet.UnsignedTx.TxIn {
 			utxos[i] = txIn.PreviousOutPoint
 		}
 
@@ -848,6 +1366,16 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 //  4. Signing: dispatching to `signTaprootPsbtInput` or `signBip32PsbtInput` to
 //     generate the raw ECDSA or Schnorr signature using the underlying
 //     `Signer`.
+//
+// The packet is validated, and every existing signature record must verify
+// against its input or the call fails with ErrInvalidSignatureRecord. Records
+// are checked against the prevout data the packet itself carries. Valid
+// records are kept; one for the wallet's key means that input is not signed
+// again. The packet is then signed as a copy: the caller's packet is updated
+// only if the call succeeds.
+//
+// Accepted signing finishes before return, including partial signatures and
+// supplied input tweakers, even if the caller cancels after admission.
 func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	*SignPsbtResult, error) {
 
@@ -860,7 +1388,38 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 		return nil, ErrNilArguments
 	}
 
-	packet := params.Packet
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := signPsbtReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		params:   params,
+		respChan: make(chan signPsbtResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.result, result.err
+}
+
+// handleSignPsbt completes its accepted operation with the caller's packet.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleSignPsbt(r signPsbtReq) {
+	// Validate before cloning: cloning panics on the nil transaction
+	// entries that validation refuses.
+	err := validatePacket(r.params.Packet)
+	if err != nil {
+		r.respChan <- signPsbtResp{err: err}
+
+		return
+	}
+
+	// Sign a clone, copied back to the caller only on success.
+	packet := clonePacket(r.params.Packet)
 
 	// signedInputs will track the indices of all inputs that we
 	// successfully sign during this operation. This is useful for callers
@@ -875,7 +1434,11 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// or incomplete PSBT that cannot be signed.
 	err = psbt.InputsReadyToSign(packet)
 	if err != nil {
-		return nil, fmt.Errorf("psbt inputs not ready: %w", err)
+		r.respChan <- signPsbtResp{
+			err: fmt.Errorf("psbt inputs not ready: %w", err),
+		}
+
+		return
 	}
 
 	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
@@ -886,12 +1449,25 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// signatures for each input.
 	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
 	if err != nil {
-		return nil, fmt.Errorf("error creating prevOutFetcher: %w", err)
+		r.respChan <- signPsbtResp{
+			err: fmt.Errorf("error creating prevOutFetcher: %w", err),
+		}
+
+		return
 	}
 
 	sigHashes := txscript.NewTxSigHashes(
 		packet.UnsignedTx, prevOutFetcher,
 	)
+
+	// Existing records are kept and can stop an input being signed, so
+	// they must verify first.
+	err = authorizeSignRecords(packet, sigHashes, prevOutFetcher)
+	if err != nil {
+		r.respChan <- signPsbtResp{err: err}
+
+		return
+	}
 
 	// Iterate through each input in the PSBT. For each input, we attempt
 	// to sign it if the wallet can provide the necessary key material and
@@ -900,10 +1476,12 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// signing process accordingly.
 	for i := range packet.Inputs {
 		signed, err := w.signPsbtInput(
-			ctx, packet, i, sigHashes, params.InputTweakers,
+			r.ctx, packet, i, sigHashes, r.params.InputTweakers,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("input %d: %w", i, err)
+			r.respChan <- signPsbtResp{err: fmt.Errorf("input %d: %w", i, err)}
+
+			return
 		}
 
 		if signed {
@@ -919,13 +1497,17 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 		}
 	}
 
+	*r.params.Packet = *packet
+
 	// Finally, return the result, which includes the list of inputs that
-	// were successfully signed and the modified (partially) signed PSBT
-	// packet.
-	return &SignPsbtResult{
-		SignedInputs: signedInputs,
-		Packet:       packet,
-	}, nil
+	// were successfully signed and the caller's now (partially) signed
+	// PSBT packet.
+	r.respChan <- signPsbtResp{
+		result: &SignPsbtResult{
+			SignedInputs: signedInputs,
+			Packet:       r.params.Packet,
+		},
+	}
 }
 
 // signPsbtInput attempts to sign a single input of the PSBT. It returns true
@@ -1044,9 +1626,16 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	bip32Path := BIP32Path{
 		KeyScope: scope,
 		DerivationPath: waddrmgr.DerivationPath{
-			Account: account,
-			Branch:  branch,
-			Index:   index,
+			// InternalAccount is the wallet's database account
+			// number that both the legacy DeriveFromKeyPath and
+			// the SQL account-secret lookup key on. Leaving it
+			// unset always resolves account 0, so a PSBT for a
+			// non-zero account would otherwise sign with the wrong
+			// key or fail to find one.
+			InternalAccount: account,
+			Account:         account,
+			Branch:          branch,
+			Index:           index,
 		},
 	}
 
@@ -1060,22 +1649,12 @@ func addressTypeFromPurpose(purpose uint32) (waddrmgr.AddressType, error) {
 	// determine supported key scopes configured in the database, allowing
 	// for custom purposes (e.g., LND's 1017 purpose key) to be seamlessly
 	// supported without code changes here.
-	switch purpose {
-	case waddrmgr.KeyScopeBIP0044.Purpose:
-		return waddrmgr.PubKeyHash, nil
-
-	case waddrmgr.KeyScopeBIP0049Plus.Purpose:
-		return waddrmgr.NestedWitnessPubKey, nil
-
-	case waddrmgr.KeyScopeBIP0084.Purpose:
-		return waddrmgr.WitnessPubKey, nil
-
-	case waddrmgr.KeyScopeBIP0086.Purpose:
-		return waddrmgr.TaprootPubKey, nil
-
-	default:
+	addrType, err := waddrmgr.AddressTypeForPurpose(purpose)
+	if err != nil {
 		return 0, fmt.Errorf("%w: %d", ErrUnknownBip32Purpose, purpose)
 	}
+
+	return addrType, nil
 }
 
 // shouldSkipInput determines whether the input at the given index should be
@@ -1126,16 +1705,12 @@ func shouldSkipSigningError(err error, idx int) bool {
 	}
 
 	// In a collaborative PSBT workflow, the transaction may contain inputs
-	// that belong to other parties. Even if a derivation path is present
-	// and valid (e.g. BIP-84), it might correspond to a different signer's
-	// key (same path, different seed).
-	//
-	// If we encounter `errComputeRawSig`, it means we failed to produce a
-	// signature. This usually happens because we don't have the private
-	// key for the derived address (it's someone else's input). In this
-	// case, we skip the input and log a debug message, allowing us to
-	// proceed and sign the inputs that we DO own.
-	if errors.Is(err, errComputeRawSig) {
+	// that belong to other parties. Skip only explicit ownership failures;
+	// operational Store, vault, tweaking and signing errors must reach the
+	// caller.
+	missingSigningKey := errors.Is(err, ErrAccountNotInStore) ||
+		errors.Is(err, ErrWatchOnlyAccount)
+	if errors.Is(err, errComputeRawSig) && missingSigningKey {
 		log.Debugf("Skipping input %d: %v", idx, err)
 		return true
 	}
@@ -1398,40 +1973,15 @@ func createTaprootSpendDetails(pInput *psbt.PInput,
 // Returns `ErrUnknownAddressType` if the address type is not supported.
 // Returns `errAlreadySigned` if a valid signature for the derived key already
 // exists.
+//
+// NOTE: Taproot key-path spends must be routed through the taproot-specific
+// signing path before reaching this helper. Grouping `TaprootPubKey` with other
+// unsupported families here used to hide that misrouting.
 func createBip32SpendDetails(pInput *psbt.PInput, utxo *wire.TxOut,
 	addrType waddrmgr.AddressType,
 	derivation *psbt.Bip32Derivation) (SpendDetails, error) {
 
-	// Determine the script to use for signing (subScript).
-	var subScript []byte
-	switch {
-	case len(pInput.RedeemScript) > 0:
-		subScript = pInput.RedeemScript
-
-	case len(pInput.WitnessScript) > 0:
-		subScript = pInput.WitnessScript
-
-	default:
-		subScript = utxo.PkScript
-	}
-
-	var details SpendDetails
-	switch addrType {
-	case waddrmgr.WitnessPubKey, waddrmgr.NestedWitnessPubKey:
-		details = SegwitV0SpendDetails{WitnessScript: subScript}
-
-	case waddrmgr.PubKeyHash:
-		details = LegacySpendDetails{RedeemScript: subScript}
-
-	case waddrmgr.Script, waddrmgr.RawPubKey,
-		waddrmgr.WitnessScript, waddrmgr.TaprootPubKey,
-		waddrmgr.TaprootScript:
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-			addrType)
-	default:
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-			addrType)
-	}
+	subScript := bip32SubScript(pInput, utxo)
 
 	// Check if we have already signed this input.
 	for _, sig := range pInput.PartialSigs {
@@ -1440,7 +1990,41 @@ func createBip32SpendDetails(pInput *psbt.PInput, utxo *wire.TxOut,
 		}
 	}
 
-	return details, nil
+	signingMethod, err := addrType.SigningMethod()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
+			addrType)
+	}
+
+	switch signingMethod {
+	case waddrmgr.SigningMethodWitnessV0:
+		return SegwitV0SpendDetails{WitnessScript: subScript}, nil
+
+	case waddrmgr.SigningMethodLegacy:
+		return LegacySpendDetails{RedeemScript: subScript}, nil
+
+	case waddrmgr.SigningMethodTaprootKeySpend:
+		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
+			addrType)
+	}
+
+	return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
+		addrType)
+}
+
+// bip32SubScript returns the subscript that should be used for bip32-based
+// signing decisions.
+func bip32SubScript(pInput *psbt.PInput, utxo *wire.TxOut) []byte {
+	switch {
+	case len(pInput.RedeemScript) > 0:
+		return pInput.RedeemScript
+
+	case len(pInput.WitnessScript) > 0:
+		return pInput.WitnessScript
+
+	default:
+		return utxo.PkScript
+	}
 }
 
 // signTaprootPsbtInput attempts to sign a single Taproot input of a PSBT.
@@ -1497,7 +2081,7 @@ func (w *Wallet) signTaprootPsbtInput(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// Compute the raw signature.
-	sig, err := w.ComputeRawSig(ctx, params)
+	sig, err := w.computeRawSig(ctx, params)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errComputeRawSig, err)
 	}
@@ -1570,7 +2154,7 @@ func (w *Wallet) signBip32PsbtInput(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// Compute the raw signature.
-	sig, err := w.ComputeRawSig(ctx, params)
+	sig, err := w.computeRawSig(ctx, params)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errComputeRawSig, err)
 	}
@@ -1597,21 +2181,44 @@ func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 		return err
 	}
 
-	// Check that the PSBT is structurally ready to be signed/finalized.
-	err = psbt.InputsReadyToSign(packet)
-	if err != nil {
-		return fmt.Errorf("psbt inputs not ready: %w", err)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := finalizePsbtReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		packet:      packet,
+		respErrChan: make(chan error, 1),
 	}
 
-	tx := packet.UnsignedTx
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleFinalizePsbt completes its accepted operation with the caller's packet.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleFinalizePsbt(r finalizePsbtReq) {
+	// Check that the PSBT is structurally ready to be signed/finalized.
+	err := psbt.InputsReadyToSign(r.packet)
+	if err != nil {
+		r.respErrChan <- fmt.Errorf("psbt inputs not ready: %w", err)
+
+		return
+	}
+
+	tx := r.packet.UnsignedTx
 
 	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
 	// previous transaction outputs needed for sighash generation. This is
 	// required for generating valid signatures, as the value and script of
 	// the UTXO being spent are part of the signed digest.
-	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
+	prevOutFetcher, err := PsbtPrevOutputFetcher(r.packet)
 	if err != nil {
-		return fmt.Errorf("error creating prevOutFetcher: %w", err)
+		r.respErrChan <- fmt.Errorf("error creating prevOutFetcher: %w", err)
+
+		return
 	}
 
 	// Compute the transaction's sighashes. This is an optimization to
@@ -1623,22 +2230,26 @@ func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 	// Iterate through each input in the PSBT. For each input, we will
 	// check if we can sign and finalize it (i.e., if we own the UTXO and
 	// have the private key).
-	for i := range packet.Inputs {
-		err := w.finalizeInput(ctx, packet, i, sigHashes)
+	for i := range r.packet.Inputs {
+		err := w.finalizeInput(r.ctx, r.packet, i, sigHashes)
 		if err != nil {
-			return err
+			r.respErrChan <- err
+
+			return
 		}
 	}
 
 	// Finally, attempt to finalize the entire PSBT. This will check if all
 	// inputs have final scripts (either added by us above or constructed
 	// from PartialSigs by the psbt library) and strip the partial data.
-	err = psbt.MaybeFinalizeAll(packet)
+	err = psbt.MaybeFinalizeAll(r.packet)
 	if err != nil {
-		return fmt.Errorf("error finalizing PSBT: %w", err)
+		r.respErrChan <- fmt.Errorf("error finalizing PSBT: %w", err)
+
+		return
 	}
 
-	return nil
+	r.respErrChan <- nil
 }
 
 // finalizeInput attempts to finalize a single input of the PSBT.
@@ -1678,7 +2289,7 @@ func (w *Wallet) finalizeInput(ctx context.Context, packet *psbt.Packet,
 		HashType:   pInput.SighashType,
 	}
 
-	unlockingScript, err := w.ComputeUnlockingScript(ctx, params)
+	unlockingScript, err := w.computeUnlockingScript(ctx, params)
 	if err != nil {
 		// If we can't generate the script (e.g. we don't own the key,
 		// or it's a type we don't support yet, or the account is
@@ -2209,12 +2820,11 @@ func mergeOutputScripts(dest, src *psbt.POutput) error {
 	return nil
 }
 
-// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a
-// SegWit v0 PSBT input (p2wkh, np2wkh) from the given wallet
-// information.
-func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
-	derivationInfo *psbt.Bip32Derivation, addr waddrmgr.ManagedAddress,
-	witnessProgram []byte) {
+// addInputInfoSegWitV0Common adds common SegWit v0 fields. A nil derivation
+// retains caller origin records without inventing Wallet origin metadata.
+func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
+	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
+	isNestedWitness bool, redeemScript []byte) {
 
 	// As a fix for CVE-2020-14199 we have to always include the full
 	// non-witness UTXO in the PSBT for segwit v0.
@@ -2228,21 +2838,37 @@ func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
 	}
 	in.SighashType = txscript.SigHashAll
 
-	// Include the derivation path for each input.
-	in.Bip32Derivation = []*psbt.Bip32Derivation{
-		derivationInfo,
+	// Known Wallet origins replace caller records in both families so
+	// reconciliation cannot mistake a seeded opposite-family claim for fact.
+	if derivationInfo != nil {
+		in.Bip32Derivation = []*psbt.Bip32Derivation{derivationInfo}
+		in.TaprootBip32Derivation = nil
 	}
 
 	// For nested P2WKH we need to add the redeem script to the input,
 	// otherwise an offline wallet won't be able to sign for it. For normal
 	// P2WKH this will be nil.
-	if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
-		in.RedeemScript = witnessProgram
+	if isNestedWitness {
+		in.RedeemScript = redeemScript
 	}
 }
 
+// addInputInfoSegWitV0FromAddressInfo adds the UTXO and BIP32 derivation info
+// for a SegWit v0 PSBT input (p2wkh, np2wkh) from wallet-owned address
+// metadata.
+func addInputInfoSegWitV0FromAddressInfo(in *psbt.PInput, prevTx *wire.MsgTx,
+	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
+	addr AddressInfo, redeemScript []byte) {
+
+	addInputInfoSegWitV0Common(
+		in, prevTx, utxo, derivationInfo,
+		addr.AddrType.SpendType() == waddrmgr.SpendTypeNestedWitnessKey,
+		redeemScript,
+	)
+}
+
 // addInputInfoSegWitV1 adds the UTXO and BIP32 derivation info for a SegWit v1
-// PSBT input (p2tr) from the given wallet information.
+// PSBT input (p2tr). A nil derivation retains the caller's origin, if supplied.
 func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	derivationInfo *psbt.Bip32Derivation) {
 
@@ -2253,13 +2879,15 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}
 	in.SighashType = txscript.SigHashDefault
 
-	// Include the derivation path for each input in addition to the
-	// taproot specific info we have below.
-	in.Bip32Derivation = []*psbt.Bip32Derivation{
-		derivationInfo,
+	// An unknown root must not become a zero fingerprint or an empty path.
+	if derivationInfo == nil {
+		return
 	}
 
-	// Include the derivation path for each input.
+	// Taproot inputs carry only the taproot-specific derivation. Emitting a
+	// parallel Bip32Derivation would make the input ambiguous for the
+	// wallet's own signer (see validateDerivation), so it is omitted here.
+	in.Bip32Derivation = nil
 	in.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
 		XOnlyPubKey:          derivationInfo.PubKey[1:],
 		MasterKeyFingerprint: derivationInfo.MasterKeyFingerprint,
@@ -2267,30 +2895,51 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}}
 }
 
-// createOutputInfo creates the BIP32 derivation info for an output from our
-// internal wallet.
-func createOutputInfo(txOut *wire.TxOut,
-	addr waddrmgr.ManagedPubKeyAddress) (*psbt.POutput, error) {
+// createOutputInfoFromAddressInfo creates change-output metadata, retaining
+// known script facts when an HD child's root origin is unavailable.
+func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
+	addr AddressInfo) (*psbt.POutput, error) {
 
-	// We don't know the derivation path for imported keys. Those shouldn't
-	// be selected as change outputs in the first place, but just to make
-	// sure we don't run into an issue, we return early for imported keys.
-	keyScope, derivationPath, isKnown := addr.DerivationInfo()
-	if !isKnown {
+	// Raw imported keys cannot supply account change. Numberless XPub
+	// children are HD addresses, however, and still have a known public key.
+	if addr.PubKey == nil || (addr.Imported && addr.Derivation == nil) {
 		return nil, fmt.Errorf("error adding output info to PSBT: %w",
 			ErrImportedAddrNoDerivation)
 	}
 
+	// Keep the child's script facts without inventing its root fingerprint
+	// or account path. Existing script construction supplies nested redeem
+	// information independently of that optional origin.
+	if addr.Derivation == nil {
+		_, redeemScript, _, err := buildScriptsForAddressInfo(
+			addr, txOut.PkScript, nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		out := new(psbt.POutput)
+		out.RedeemScript = redeemScript
+
+		// Taproot's internal key is known even when its root origin is not.
+		if txscript.IsPayToTaproot(txOut.PkScript) {
+			out.TaprootInternalKey = addr.PubKey.SerializeCompressed()[1:]
+		}
+
+		return out, nil
+	}
+
 	// Include the derivation path for this output.
 	derivation := &psbt.Bip32Derivation{
-		PubKey:               addr.PubKey().SerializeCompressed(),
-		MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
+		PubKey:               addr.PubKey.SerializeCompressed(),
+		MasterKeyFingerprint: addr.Derivation.MasterKeyFingerprint,
 		Bip32Path: []uint32{
-			keyScope.Purpose + hdkeychain.HardenedKeyStart,
-			keyScope.Coin + hdkeychain.HardenedKeyStart,
-			derivationPath.Account,
-			derivationPath.Branch,
-			derivationPath.Index,
+			addr.Derivation.KeyScope.Purpose + hdkeychain.HardenedKeyStart,
+			addr.Derivation.KeyScope.Coin + hdkeychain.HardenedKeyStart,
+			addr.Derivation.Account +
+				hdkeychain.HardenedKeyStart,
+			addr.Derivation.Branch,
+			addr.Derivation.Index,
 		},
 	}
 	out := &psbt.POutput{

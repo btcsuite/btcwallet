@@ -63,6 +63,11 @@ type TxStore interface {
 	// outputs and deletes those which have already expired.
 	DeleteExpiredLockedOutputs(ns walletdb.ReadWriteBucket) error
 
+	// DeleteMaturedLockedOutputs deletes confirmation-controlled locks whose
+	// spend has reached its requested depth at the given chain height.
+	DeleteMaturedLockedOutputs(ns walletdb.ReadWriteBucket,
+		chainHeight int32) error
+
 	// InsertTx records a transaction as belonging to a wallet's transaction
 	// history. If block is nil, the transaction is considered unspent, and
 	// the transaction's index must be unset.
@@ -100,9 +105,11 @@ type TxStore interface {
 	// LockOutput locks an output to the given ID, preventing it from being
 	// available for coin selection. The absolute time of the lock's
 	// expiration is returned. The expiration of the lock can be extended by
-	// successive invocations of this call.
+	// successive invocations of this call. A confirmation-controlled lock
+	// stores that time but releases only at spend maturity or by its owner.
 	LockOutput(ns walletdb.ReadWriteBucket, id LockID, op wire.OutPoint,
-		duration time.Duration) (time.Time, error)
+		duration time.Duration, optFuncs ...LockOutputOption) (time.Time,
+		error)
 
 	// OutputsToWatch returns a list of outputs to monitor during the
 	// wallet's startup. The returned items are similar to UnspentOutputs,
@@ -117,6 +124,11 @@ type TxStore interface {
 	PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
 		label string) error
 
+	// DeleteTxLabel removes any label recorded for the transaction, which
+	// is how this store records a transaction that has none. A transaction
+	// that already has no label is not an error.
+	DeleteTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash) error
+
 	// RangeTransactions runs the function f on all transaction details
 	// between blocks on the best chain over the height range [begin,end].
 	// The special height -1 may be used to also include unmined
@@ -125,6 +137,23 @@ type TxStore interface {
 	// processed first.
 	RangeTransactions(ns walletdb.ReadBucket, begin, end int32,
 		f func([]TxDetails) (bool, error)) error
+
+	// BlockHash returns the mined identity at height, or nil when no
+	// transaction-store block exists independently of manager history.
+	BlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, error)
+
+	// PartitionBlockHistory snapshots the affected mined range in order,
+	// omitting canonical records before the first orphan.
+	PartitionBlockHistory(ns walletdb.ReadBucket, height int32,
+		isCanonical func(Block) (bool, error)) (
+		[]TxDetails, []TxDetails, error)
+
+	// RollbackBlockHistory atomically preserves canonical records and valid
+	// pending descendants from snapshots made in this write transaction.
+	// The returned original snapshots let callers compare final spentness
+	// for their own notifications; replay does not publish callbacks.
+	RollbackBlockHistory(ns walletdb.ReadWriteBucket,
+		canonical, orphaned []TxDetails) ([]TxDetails, error)
 
 	// Rollback removes all blocks at height onwards, moving any transactions
 	// within each block to the unconfirmed pool.
@@ -151,6 +180,14 @@ type TxStore interface {
 	// UnspentOutputs returns all unspent received transaction outputs.
 	// The order is undefined.
 	UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error)
+
+	// UnspentOutputsIncludingLocked returns all unspent received
+	// transaction outputs, including outputs currently held by an
+	// active output lease. Callers reporting a wallet balance to
+	// external consumers use this so the balance reflects the
+	// wallet's total UTXO value independent of leasing state.
+	UnspentOutputsIncludingLocked(
+		ns walletdb.ReadBucket) ([]Credit, error)
 
 	// FetchTxLabel reads a transaction label from the tx labels bucket. If
 	// a label with 0 length was written, we return an error, since this is
