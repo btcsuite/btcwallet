@@ -56,8 +56,8 @@ type unlockedState struct {
 	hdRootKey *hdkeychain.ExtendedKey
 }
 
-// Ensure WalletVault implements Vault.
-var _ Vault = (*WalletVault)(nil)
+// Ensure WalletVault implements UnsafeVault.
+var _ UnsafeVault = (*WalletVault)(nil)
 
 // NewWalletVault creates a key-vault bridge scoped to one wallet row.
 func NewWalletVault(store db.Store, walletID uint32,

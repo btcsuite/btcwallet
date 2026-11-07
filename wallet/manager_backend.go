@@ -44,7 +44,7 @@ type walletData struct {
 	store             db.Store
 	addressStore      waddrmgr.AddrStore
 	transactionStore  wtxmgr.TxStore
-	vault             keyvault.Vault
+	vault             keyvault.UnsafeVault
 	masterFingerprint uint32
 	isWatchOnly       bool
 }

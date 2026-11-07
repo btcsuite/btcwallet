@@ -292,6 +292,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		store:       mockStore,
 		txStore:     mockTxStore,
 		keyVault:    mockVault,
+		unsafeVault: mockVault,
 		sync:        mockSyncer,
 		state:       newWalletState(mockSyncer),
 		lifetimeCtx: ctx,
