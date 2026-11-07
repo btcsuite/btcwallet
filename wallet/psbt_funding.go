@@ -60,9 +60,9 @@ func indexCallerInputs(packet *psbt.Packet) map[wire.OutPoint]callerInput {
 // two disagree.
 //
 // Every field is either the wallet's to state or the caller's to keep. The
-// wallet states what is being spent and which key spends it, since it looks
-// those up rather than accepting them, so a caller that says otherwise is
-// refused, as is a record the wallet's spend of the coin does not use.
+// wallet states the verified output and any known key origin, refusing caller
+// contradictions and records its spend does not use. Imported Taproot scripts
+// retain caller spending records for authorization by their signer.
 // Everything else is carried across untouched. spends is how the wallet spends
 // each input, by position.
 func restoreInputMetadata(packet *psbt.Packet,
@@ -244,11 +244,10 @@ func checkCallerInputAgrees(decorated, caller *psbt.PInput, idx int) error {
 // checkCallerDerivations refuses any derivation record the caller names other
 // than the wallet's own.
 //
-// Funding only spends coins the wallet derived, and decoration states the one
-// key that spends each of them, with no leaf hashes: the wallet's taproot
-// coins are key-path only. A record for another key, or for that key with
-// leaves, describes a spend this coin does not have. The wallet's signer also
-// refuses an input carrying more than one record of a kind.
+// For derived inputs, decoration states the spending key; a derived Taproot
+// coin uses the key path and no leaf hashes. Imported Taproot scripts instead
+// retain caller records without selecting or authorizing their spending leaf.
+// The wallet's signer refuses an input with more than one record of a kind.
 func checkCallerDerivations(decorated, caller *psbt.PInput, idx int) error {
 	for _, c := range caller.Bip32Derivation {
 		if !slices.ContainsFunc(decorated.Bip32Derivation,

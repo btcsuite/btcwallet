@@ -490,6 +490,58 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerSignAfterReload,
 	},
 	{
+		Name:     "psbtmanager sign owned inputs",
+		TestFunc: testSignPsbtOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager sign already signed",
+		TestFunc: testSignPsbtAlreadySigned,
+	},
+	{
+		Name:     "psbtmanager sign partial ownership",
+		TestFunc: testSignPsbtPartialOwnership,
+	},
+	{
+		Name:     "psbtmanager sign multisig partial",
+		TestFunc: testSignPsbtMultisigPartial,
+	},
+	{
+		Name:     "psbtmanager sign tapscript",
+		TestFunc: testSignPsbtTapscript,
+	},
+	{
+		Name:     "psbtmanager sign reject packet",
+		TestFunc: testSignPsbtRejectPacket,
+	},
+	{
+		Name:     "psbtmanager finalize owned inputs",
+		TestFunc: testFinalizePsbtOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager finalize signed inputs",
+		TestFunc: testFinalizePsbtSignedInputs,
+	},
+	{
+		Name:     "psbtmanager finalize external signatures",
+		TestFunc: testFinalizePsbtExternalSignatures,
+	},
+	{
+		Name:     "psbtmanager finalize finalized packet",
+		TestFunc: testFinalizePsbtFinalizedPacket,
+	},
+	{
+		Name:     "psbtmanager finalize reject incomplete",
+		TestFunc: testFinalizePsbtRejectIncomplete,
+	},
+	{
+		Name:     "psbtmanager signing reject locked",
+		TestFunc: testPsbtSigningRejectLocked,
+	},
+	{
+		Name:     "psbtmanager signing reject watchonly",
+		TestFunc: testPsbtSigningRejectWatchOnly,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
