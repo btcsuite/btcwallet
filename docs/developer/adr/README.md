@@ -52,7 +52,9 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0007: XChaCha20-Poly1305 Encryption](./0007-xchacha20-poly1305-encryption.md) - Replaces XSalsa20-Poly1305 with XChaCha20-Poly1305 for encrypting private key material.
 - [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md) - Defines a modular integration test framework for chain and database backend permutations.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
-- [ADR 0010: Keyvault Encryption Layer](./0010-keyvault-encryption-layer.md) - Defines an in-memory keyvault boundary for lock state, key lifecycle, and encryption orchestration between domain logic and SQL persistence.
+- [ADR 0010: Keyvault Encryption Layer](./0010-keyvault-encryption-layer.md) -
+  Defines a keyvault for each wallet. The keyvault owns lock state, secret
+  lifetime, encryption, and every private-key use.
 - [ADR 0011: No `used` Column on the Addresses Table](./0011-no-addresses-used-column.md) - Records the decision that the SQL backend derives address used-ness from the utxos table (monotonic by ADR 0006's soft-delete schema) rather than persisting a separate column. The kvdb backend continues to use waddrmgr's legacy sticky-bit because wtxmgr deletes credit records on reorg.
 - [ADR 0012: Wallet Root Mode and Account Custody](./0012-wallet-level-watch-only-uniformity.md)
   preserves immutable root mode while permitting imported XPub accounts
