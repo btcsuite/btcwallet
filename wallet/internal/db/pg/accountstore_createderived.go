@@ -42,6 +42,37 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	return info, nil
 }
 
+// CreateInitialDerivedAccounts writes a constructor's account set in one
+// transaction. Call before publishing the Wallet; a later refusal rolls back
+// every account, secret and cursor while preserving normal identity admission.
+func (s *Store) CreateInitialDerivedAccounts(ctx context.Context,
+	walletID uint32, accounts []db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) error {
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		for _, account := range accounts {
+			account.WalletID = walletID
+
+			info, err := db.CreateDerivedAccountWithOps(
+				ctx, account, createDerivedAccountOps{q: qtx},
+				deriveFn,
+			)
+			if err != nil {
+				return err
+			}
+
+			// Keep cross-scope ownership checks in the same write as
+			// every row, including those inserted earlier in this batch.
+			err = checkAccountIdentity(ctx, qtx, walletID, info)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
 // createDerivedAccountOps adapts PostgreSQL sqlc queries to the shared
 // CreateDerivedAccount workflow.
 type createDerivedAccountOps struct {
