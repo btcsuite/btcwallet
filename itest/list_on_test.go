@@ -15,6 +15,12 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
+	// Compare public state with an independently tracking Core wallet.
+	{
+		Name:     "bitcoind compatibility check",
+		TestFunc: testBitcoindCompatibilityCheck,
+	},
+
 	// External raw outputs retain custody and public reports after reopen.
 	{
 		Name:     "address manager raw import tracking",

@@ -2,6 +2,8 @@ package bwtest
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/chain"
@@ -136,8 +139,13 @@ func (b *BitcoindBackend) Name() string {
 	return backendBitcoind
 }
 
-// Start launches the backend daemon.
+// Start launches the backend daemon without Core wallet resources.
 func (b *BitcoindBackend) Start() error {
+	return b.start(true)
+}
+
+// start reuses the daemon lifecycle with optional Core wallet disabling.
+func (b *BitcoindBackend) start(disableWallet bool) error {
 	// Startup sequence overview:
 	//  1. Validate harness wiring (miner address + process limits).
 	//  2. Build daemon arguments (regtest, rpc, zmq, resource limits).
@@ -156,6 +164,13 @@ func (b *BitcoindBackend) Start() error {
 	// RLIMIT_NOFILE.
 	_ = raiseNoFileLimit()
 
+	// Core parses booleans numerically; the literal "true" would enable the
+	// wallet instead. Keep that encoding at the command-line boundary.
+	walletFlag := map[bool]int{
+		false: 0,
+		true:  1,
+	}[disableWallet]
+
 	args := []string{
 		// Core regtest + connectivity setup.
 		"-datadir=" + b.logDir,
@@ -170,7 +185,7 @@ func (b *BitcoindBackend) Start() error {
 
 		// Enable wallet-required indexing and RPC auth.
 		"-txindex",
-		"-disablewallet",
+		fmt.Sprintf("-disablewallet=%d", walletFlag),
 		"-rpcauth=" + bitcoindRPCAuthorization,
 		fmt.Sprintf("-rpcport=%d", b.rpcPort),
 		fmt.Sprintf("-port=%d", b.p2pPort),
@@ -232,16 +247,7 @@ func (b *BitcoindBackend) Start() error {
 	//
 	// This readiness check also verifies that bitcoind has synced to the
 	// pre-mined harness chain height.
-	host := fmt.Sprintf("127.0.0.1:%d", b.rpcPort)
-	clientCfg := &rpcclient.ConnConfig{
-		Host:                 host,
-		User:                 bitcoindRPCUser,
-		Pass:                 bitcoindRPCPass,
-		DisableAutoReconnect: false,
-		DisableConnectOnNew:  true,
-		DisableTLS:           true,
-		HTTPPostMode:         true,
-	}
+	clientCfg := b.rpcConfig()
 
 	err = wait.NoError(func() error {
 		// Construct a short-lived RPC client for readiness probing.
@@ -281,6 +287,106 @@ func (b *BitcoindBackend) Start() error {
 	}
 
 	return nil
+}
+
+// rpcConfig keeps readiness and wallet RPC clients on the same transport/auth.
+func (b *BitcoindBackend) rpcConfig() *rpcclient.ConnConfig {
+	return &rpcclient.ConnConfig{
+		Host:                fmt.Sprintf("127.0.0.1:%d", b.rpcPort),
+		User:                bitcoindRPCUser,
+		Pass:                bitcoindRPCPass,
+		DisableConnectOnNew: true,
+		DisableTLS:          true,
+		HTTPPostMode:        true,
+	}
+}
+
+// NewBitcoindWallet starts a watch-only Core wallet on the shared chain.
+// Cleanup joins its independent client and daemon even after setup failures.
+func (h *HarnessTest) NewBitcoindWallet() *rpcclient.Client {
+	h.Helper()
+
+	// Register ownership before starting so partial setup cannot leak a daemon.
+	logDir := createUniqueLogSubDir(h.T, h.logDir, "core-wallet")
+	backend := NewBitcoindBackend(h.T, logDir)
+	h.Cleanup(func() {
+		require.NoError(h, backend.Stop(), "stop Core wallet oracle")
+	})
+	require.NoError(h, backend.ConnectMiner(h.miner.P2PAddress()))
+	require.NoError(h, backend.start(false), "start Core wallet oracle")
+
+	// One loaded wallet lets Core route wallet RPCs on this isolated endpoint.
+	client, err := rpcclient.New(backend.rpcConfig(), nil)
+	require.NoError(h, err, "create Core wallet RPC client")
+	h.Cleanup(func() {
+		client.Shutdown()
+		client.WaitForShutdown()
+	})
+
+	_, err = client.CreateWallet(
+		"compatibility", rpcclient.WithCreateWalletDisablePrivateKeys(),
+		rpcclient.WithCreateWalletBlank(),
+	)
+	require.NoError(h, err, "create Core watch-only wallet")
+
+	return client
+}
+
+// ImportBitcoindWalletScripts watches public fixture scripts in Core. The
+// synchronous rescan discovers funding even when it predates the oracle.
+func (h *HarnessTest) ImportBitcoindWalletScripts(client *rpcclient.Client,
+	scripts ...[]byte) {
+
+	h.Helper()
+
+	// Core checksums the descriptors without wallet keys or Store data.
+	for _, script := range scripts {
+		descriptor, err := client.GetDescriptorInfo(
+			"raw(" + hex.EncodeToString(script) + ")",
+		)
+		require.NoError(h, err, "describe Core watched script")
+		request, err := json.Marshal([]map[string]any{{
+			"desc":      descriptor.Descriptor,
+			"timestamp": 0,
+		}})
+		require.NoError(h, err)
+		response, err := client.RawRequest(
+			"importdescriptors", []json.RawMessage{request},
+		)
+		require.NoError(h, err, "import Core watched script")
+
+		// Core can reject one descriptor while the outer RPC still succeeds.
+		var results []struct {
+			Success bool              `json:"success"`
+			Error   *btcjson.RPCError `json:"error"`
+		}
+		require.NoError(h, json.Unmarshal(response, &results))
+		require.Len(h, results, 1)
+		require.True(h, results[0].Success, "Core import: %v", results[0].Error)
+	}
+}
+
+// AssertBitcoindWalletSynced waits for Core's independently processed chain to
+// reach the miner's exact tip. It never retries the btcwallet observation.
+func (h *HarnessTest) AssertBitcoindWalletSynced(client *rpcclient.Client) {
+	h.Helper()
+
+	wantHash, _ := h.GetBestBlock()
+	err := wait.NoError(func() error {
+		// listsinceblock synchronizes Core's wallet before returning its tip.
+		history, err := client.ListSinceBlockMinConfWatchOnly(nil, 1, true)
+		if err != nil {
+			return fmt.Errorf("read Core wallet tip: %w", err)
+		}
+
+		if history.LastBlock != wantHash.String() {
+			return fmt.Errorf("%w: Core wallet=%s miner=%v",
+				ErrMinerNotSynced, history.LastBlock, wantHash)
+		}
+
+		return nil
+	}, defaultTestTimeout)
+	require.NoError(h, err, "Core wallet sync timeout")
 }
 
 // Stop shuts down the backend daemon.

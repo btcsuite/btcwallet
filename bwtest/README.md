@@ -163,3 +163,13 @@ call `WaitForMinerTip` with that branch's known winning hash and height before
 `AssertWalletSynced`. This prevents the Wallet boundary from succeeding while
 the harness miner still reports the losing tip. Wallet-owned reads after the
 synchronization boundary are asserted directly without retries.
+
+## Bitcoin Core Wallet Oracle
+
+`NewBitcoindWallet` creates an independent watch-only Core wallet connected to
+this harness's shared miner, regardless of the wallet's selected chain backend.
+The harness owns the daemon and joins its RPC client during test cleanup.
+`ImportBitcoindWalletScripts` imports public fixture scripts and rescans their
+history. `AssertBitcoindWalletSynced` waits for Core's processed tip to match the
+miner's exact hash; it does not retry observations from the wallet under test.
+Oracle logs remain in a `core-wallet` subdirectory of the run's log directory.
