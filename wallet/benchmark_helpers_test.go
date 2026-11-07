@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -1241,11 +1242,41 @@ func createNodeBenchmarkWallet(tb testing.TB, manager *Manager,
 	return w
 }
 
-// seedNodeBenchmarkKVDB uses native scoped bulk derivation and Store history
-// writes. The borrowed DB remains Manager-owned; shared batch order gives SQL
-// and kvdb identical ordinary scripts and internal key-family indexes.
+// seedNodeBenchmarkKVDB applies read history after reusable native metadata
+// allocation; real-chain startup preparation needs only the unsynced inventory.
 func seedNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
 	dbConn walletdb.DB, workload bwtest.NodeBenchmarkWorkload) {
+
+	tb.Helper()
+
+	scripts := allocateNodeBenchmarkKVDB(tb, w, dbConn, workload)
+
+	phaseStarted := time.Now()
+
+	// Legacy sync metadata needs each confirmed predecessor tip. The shared
+	// builder leaves force-close records unconfirmed without adding credits;
+	// later confirmed sweep credits preserve the observed resolved endpoint.
+	batch := workload.Batch(w.id, scripts)
+	for _, transaction := range batch.Transactions {
+		require.NoError(tb, w.store.ApplyTxBatch(
+			tb.Context(), db.TxBatchParams{
+				WalletID:     w.id,
+				Transactions: []db.CreateTxParams{transaction},
+				SyncedTo:     transaction.Block,
+			},
+		))
+	}
+
+	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+
+	// Both runtimes reuse this snapshot, so check its committed totals once.
+	bwtest.AssertNodeBenchmarkWallet(tb, w.store, w.id, workload)
+}
+
+// allocateNodeBenchmarkKVDB derives the established inventory without
+// applying history, so a real-chain fixture can save an unsynced baseline.
+func allocateNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
+	dbConn walletdb.DB, workload bwtest.NodeBenchmarkWorkload) [][]byte {
 
 	tb.Helper()
 
@@ -1320,26 +1351,197 @@ func seedNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
 	}
 
 	tb.Logf("fixture allocation: %s", time.Since(phaseStarted))
-	phaseStarted = time.Now()
 
-	// Legacy sync metadata needs each confirmed predecessor tip. The shared
-	// builder leaves force-close records unconfirmed without adding credits;
-	// later confirmed sweep credits preserve the observed resolved endpoint.
-	batch := workload.Batch(w.id, scripts)
-	for _, transaction := range batch.Transactions {
-		require.NoError(tb, w.store.ApplyTxBatch(
-			tb.Context(), db.TxBatchParams{
-				WalletID:     w.id,
-				Transactions: []db.CreateTxParams{transaction},
-				SyncedTo:     transaction.Block,
-			},
-		))
+	return scripts
+}
+
+// prepareSyncBenchmarkKVDB reuses native metadata allocation, stopping at the
+// shared base tip. Both native runtimes restore this same closed baseline.
+func prepareSyncBenchmarkKVDB(tb testing.TB,
+	scenario bwtest.SyncBenchmarkCase) (string, string) {
+
+	tb.Helper()
+
+	ctx, cancel := context.WithTimeout(tb.Context(), 20*time.Minute)
+	defer cancel()
+
+	workload := scenario.Workload
+	base, target := bwtest.PrepareSyncBenchmarkBase(ctx, tb, scenario)
+	fixture := filepath.Join(
+		os.Getenv("BTCWALLET_BENCH_FIXTURE_DIR"),
+		"kvdb", scenario.ID+".db",
+	)
+
+	_, err := os.Stat(fixture)
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(tb, err)
+		return fixture, target
 	}
 
-	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+	// Prepare through a real source, never the read fixture's chain mock.
+	started := time.Now()
+	dir, node, rpc, stopNode := bwtest.RestoreSyncBenchmarkNode(ctx, tb, base)
+	source, stopSource := bwtest.NewSyncBenchmarkClient(ctx, tb, node)
+	path := testKVDBPath(tb)
+	manager, err := NewManager(ctx, ManagerConfig{
+		Backend: DBBackendKVDB, DataSource: path,
+		ChainParams: chaincfg.RegressionNetParams, ChainSource: source,
+		SyncMethod:              SyncMethodFullBlocks,
+		WalletSyncRetryInterval: 10 * time.Millisecond,
+		KVDBPubPassphrase:       []byte(InsecurePubPassphrase),
+	})
+	require.NoError(tb, err)
+	tb.Cleanup(func() { require.NoError(tb, manager.Stop()) })
 
-	// Both runtimes reuse this snapshot, so check its committed totals once.
-	bwtest.AssertNodeBenchmarkWallet(tb, w.store, w.id, workload)
+	_, err = manager.Start(ctx)
+	require.NoError(tb, err)
+
+	params := CreateWalletParams{
+		Name:              "list-unspent-benchmark",
+		Mode:              ModeImportSeed,
+		Seed:              workload.Seed,
+		Birthday:          workload.Birthday,
+		PubPassphrase:     []byte(InsecurePubPassphrase),
+		PrivatePassphrase: []byte("private"),
+	}
+	w := createNodeBenchmarkWallet(tb, manager, params)
+	backend, ok := manager.backend.(*kvdbManagerBackend)
+	require.True(tb, ok)
+	scripts := allocateNodeBenchmarkKVDB(tb, w, backend.db, workload)
+
+	// Only the first native preparation signs the existing graph. Subsequent
+	// backends allocate their own metadata and share that already saved chain.
+	var history []*wire.MsgTx
+
+	_, err = os.Stat(target)
+
+	prepareTarget := errors.Is(err, os.ErrNotExist)
+	if prepareTarget {
+		// Every startup case uses the one-deposit small-node Wallet.
+		// Zero-history controls still publish a target after shutdown.
+		if len(scenario.HistoryBlocks) != 0 {
+			hash, err := rpc.GetBlockHash(1)
+			require.NoError(tb, err)
+			block, err := rpc.GetBlock(hash)
+			require.NoError(tb, err)
+
+			funding := []*wire.MsgTx{block.Transactions[0]}
+
+			history, err = bwtest.BuildSyncBenchmarkHistory(
+				ctx, workload, scripts, funding,
+				func(ctx context.Context, tx *wire.MsgTx,
+					index int, output *wire.TxOut,
+					hashes *txscript.TxSigHashes) (wire.TxWitness, error) {
+
+					return signSyncBenchmarkInput(
+						ctx, w, tx, index, output, hashes,
+					)
+				},
+			)
+			require.NoError(tb, err)
+		}
+	} else {
+		require.NoError(tb, err)
+	}
+
+	// Exact-base observation fixes the durable scan origin before shutdown;
+	// no mining can race this save or consume the history being measured.
+	hash, height, err := source.GetBestBlock()
+	require.NoError(tb, err)
+
+	for {
+		info, err := w.Info(ctx)
+		require.NoError(tb, err)
+
+		if info.Synced && info.SyncedTo.Height == height &&
+			info.SyncedTo.Hash.IsEqual(hash) {
+
+			break
+		}
+
+		require.NoError(tb, ctx.Err())
+		runtime.Gosched()
+	}
+
+	require.NoError(tb, manager.Stop())
+	stopSource()
+
+	// A missing target needs publication even when its Wallet graph is empty;
+	// reuse the stat result instead of treating nil history as a cache hit.
+	if prepareTarget {
+		bwtest.SaveSyncBenchmarkTarget(
+			ctx, tb, dir, target, rpc, stopNode, scenario, history,
+		)
+	} else {
+		stopNode()
+	}
+
+	data, err := os.ReadFile(filepath.Clean(path))
+	require.NoError(tb, err)
+	require.NoError(tb, os.MkdirAll(filepath.Dir(fixture), 0o700))
+
+	pending := fixture + ".partial"
+	defer func() { _ = os.Remove(pending) }()
+
+	require.NoError(tb, os.WriteFile(pending, data, 0o600))
+	require.NoError(tb, os.Rename(pending, fixture))
+	tb.Logf("fixture preparation: %s; base=%d:%s",
+		time.Since(started), height, hash)
+
+	return fixture, target
+}
+
+// signSyncBenchmarkInput adapts the public Wallet signer to the graph builder.
+// Witness-v0 and taproot require different native sighash modes.
+func signSyncBenchmarkInput(ctx context.Context, w *Wallet,
+	tx *wire.MsgTx, index int, output *wire.TxOut,
+	hashes *txscript.TxSigHashes) (wire.TxWitness, error) {
+
+	hashType := txscript.SigHashAll
+	if txscript.IsPayToTaproot(output.PkScript) {
+		hashType = txscript.SigHashDefault
+	}
+
+	unlock, err := w.ComputeUnlockingScript(ctx,
+		&UnlockingScriptParams{
+			Tx: tx, InputIndex: index, Output: output,
+			SigHashes: hashes, HashType: hashType,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sign startup wallet input: %w", err)
+	}
+
+	return unlock.Witness, nil
+}
+
+// syncBenchmarkKVDBPath gives each sample a private file without rebuilding
+// keys or history, using the same closed-copy mechanism as the read suite.
+func syncBenchmarkKVDBPath(tb testing.TB, fixture string) string {
+	tb.Helper()
+
+	started := time.Now()
+	path := testKVDBPath(tb)
+	data, err := os.ReadFile(filepath.Clean(fixture))
+	require.NoError(tb, err)
+	require.NoError(tb, os.WriteFile(path, data, 0o600))
+	tb.Logf("fixture restoration: %s", time.Since(started))
+
+	return path
+}
+
+// openSyncBenchmarkLegacy loads the durable Wallet inside legacy timing.
+// Physical walletdb.Open remains outside, matching NewManager's boundary.
+func openSyncBenchmarkLegacy(tb testing.TB, dbConn walletdb.DB) *Wallet {
+	tb.Helper()
+
+	w, err := OpenWithRetry(
+		dbConn, []byte(InsecurePubPassphrase), nil,
+		&chaincfg.RegressionNetParams, 0, 10*time.Millisecond,
+	)
+	require.NoError(tb, err)
+
+	return w
 }
 
 // RunKVDBBenchmark reopens each shared snapshot through its native runtime and

@@ -1,14 +1,24 @@
 package chain
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os/exec"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -49,6 +59,146 @@ func TestBitcoindEventsZMQ(t *testing.T) {
 //nolint:paralleltest
 func TestBitcoindEventsRPC(t *testing.T) {
 	runBitcoindEventsTests(t, true)
+
+	// Observe the real wire bound once: both event modes share this sender,
+	// and forwarding to Core preserves its block data and RPC error behavior.
+	t.Run("GetBlocksBounded", func(t *testing.T) {
+		// Arrange a connected Core fixture and an observer that forwards every
+		// request. Guard its counters because HTTP handlers run independently.
+		miner := setupMiner(t)
+		backend := setupBitcoind(t, miner, true)
+		hashes, err := backend.GetBlockHashes(1, 3)
+		require.NoError(t, err)
+
+		forwarder := httputil.NewSingleHostReverseProxy(&url.URL{
+			Scheme: "http",
+			Host:   backend.chainConn.cfg.Host,
+		})
+		wireMu := &sync.Mutex{}
+
+		var batches []int
+
+		server := httptest.NewServer(http.HandlerFunc(func(
+			w http.ResponseWriter, request *http.Request) {
+
+			// Inspect the envelope and restore the exact body for Core.
+			// Parse failures surface through HTTP so assertions stay in
+			// the owning test goroutine.
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			var calls []json.RawMessage
+
+			err = json.Unmarshal(body, &calls)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			wireMu.Lock()
+
+			batches = append(batches, len(calls))
+
+			wireMu.Unlock()
+
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			forwarder.ServeHTTP(w, request)
+		}))
+		t.Cleanup(server.Close)
+
+		batch, err := rpcclient.NewBatch(&rpcclient.ConnConfig{
+			Host:         strings.TrimPrefix(server.URL, "http://"),
+			User:         backend.chainConn.cfg.User,
+			Pass:         backend.chainConn.cfg.Pass,
+			HTTPPostMode: true,
+			DisableTLS:   true,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			batch.Shutdown()
+			batch.WaitForShutdown()
+		})
+
+		client := &BitcoindClient{
+			batchClient: batch,
+		}
+
+		// Repeat already-mined hashes to cross full and partial batches,
+		// preserving the requested order without mining another large chain.
+		requested := make([]chainhash.Hash, 2*maxGetBlocksRPCBatchSize+1)
+		for i := range requested {
+			requested[i] = hashes[i%len(hashes)]
+		}
+
+		t.Run("blocks preserve order", func(t *testing.T) {
+			// Arrange a fresh wire census for this complete logical request.
+			wireMu.Lock()
+
+			batches = nil
+
+			wireMu.Unlock()
+
+			// Act through the public method, including every transport batch.
+			blocks, err := client.GetBlocks(requested)
+
+			// Assert complete ordered results and the observable per-request
+			// bound. The old one-POST sender fails without a timing dependency.
+			require.NoError(t, err)
+			require.Len(t, blocks, len(requested))
+
+			for i, block := range blocks {
+				require.Equal(t, requested[i], block.BlockHash())
+			}
+
+			wireMu.Lock()
+
+			sizes := append([]int(nil), batches...)
+
+			wireMu.Unlock()
+			require.Greater(t, len(sizes), 1)
+
+			for _, size := range sizes {
+				require.LessOrEqual(t, size, maxGetBlocksRPCBatchSize)
+			}
+		})
+
+		t.Run("blocks reject a late missing hash", func(t *testing.T) {
+			// Arrange a missing block after successful batches, with a separate
+			// census so the earlier success cannot satisfy this wire assertion.
+			missing := append([]chainhash.Hash(nil), requested...)
+			missing[len(missing)-1] = chainhash.Hash{}
+
+			wireMu.Lock()
+
+			batches = nil
+
+			wireMu.Unlock()
+
+			// Act once with the late RPC error in the same logical request.
+			blocks, err := client.GetBlocks(missing)
+
+			// Assert Core's typed error survives with no partial result;
+			// failed calls must also obey the observable wire bound.
+			var rpcError *btcjson.RPCError
+			require.ErrorAs(t, err, &rpcError)
+			require.Equal(t, btcjson.ErrRPCBlockNotFound, rpcError.Code)
+			require.Nil(t, blocks)
+
+			wireMu.Lock()
+
+			sizes := append([]int(nil), batches...)
+
+			wireMu.Unlock()
+			require.Greater(t, len(sizes), 1)
+
+			for _, size := range sizes {
+				require.LessOrEqual(t, size, maxGetBlocksRPCBatchSize)
+			}
+		})
+	})
 }
 
 // runBitcoindEventsTests runs the suite of bitcoind event tests with the
