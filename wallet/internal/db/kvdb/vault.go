@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/signing"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -19,6 +21,20 @@ type LegacyWalletVault struct {
 
 // Compile-time assertion that LegacyWalletVault satisfies keyvault.Vault.
 var _ keyvault.Vault = (*LegacyWalletVault)(nil)
+
+// DerivePubKey reports that LegacyWalletVault does not yet expose key operations.
+func (v *LegacyWalletVault) DerivePubKey(context.Context,
+	signing.KeyLocator) (*btcec.PublicKey, error) {
+
+	return nil, keyvault.ErrVaultKeyOpsUnimplemented
+}
+
+// Sign reports that LegacyWalletVault does not yet expose key operations.
+func (v *LegacyWalletVault) Sign(context.Context,
+	signing.Request) (signing.Signature, error) {
+
+	return nil, keyvault.ErrVaultKeyOpsUnimplemented
+}
 
 // NewLegacyWalletVault creates a Vault backed by a legacy walletdb address
 // manager.
