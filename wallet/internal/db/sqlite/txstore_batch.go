@@ -194,11 +194,13 @@ func ownedCreditCandidate(ctx context.Context, qtx *sqlc.Queries,
 	return nil, nil //nolint:nilnil // A nil address means no candidate matched.
 }
 
-// creditScriptOwned reports whether walletID has an address row for script.
+// creditScriptOwned reports whether script is eligible for automatic credits.
+// Raw imports remain eligible; key-only accounts retain ownership without
+// admitting outputs merely because another output made the tx relevant.
 func creditScriptOwned(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
 	script []byte) (bool, error) {
 
-	_, err := qtx.GetAddressByScriptPubKey(
+	row, err := qtx.GetAddressByScriptPubKey(
 		ctx, sqlc.GetAddressByScriptPubKeyParams{
 			ScriptPubKey: script,
 			WalletID:     int64(walletID),
@@ -212,7 +214,7 @@ func creditScriptOwned(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
 		return false, err
 	}
 
-	return true, nil
+	return !row.NoChainSync.Bool, nil
 }
 
 // promoteBatchDuplicate promotes a pending unmined duplicate to published when

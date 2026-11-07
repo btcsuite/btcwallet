@@ -2477,14 +2477,17 @@ func matchStoreScanSyncedBlocks(params db.ScanBatchParams, wantSynced bool,
 }
 
 // matchStoreScanTx reports whether the batched scan transaction carries the
-// fixture's wallet, hash, receive time, credit, status, and confirming block.
+// fixture's wallet, hash, time, candidate, status, and confirming block.
 func matchStoreScanTx(txParams db.CreateTxParams, walletID uint32,
 	fixture storeScanBatchFixture) bool {
 
-	creditAddr, ok := txParams.Credits[0]
-	if !ok || creditAddr == nil || txParams.Tx == nil ||
-		txParams.Block == nil {
-
+	// Scans defer credit admission to the Store, just like live observations.
+	// Check lengths first so the next case can safely index the candidate.
+	candidates := txParams.CreditCandidates[0]
+	switch {
+	case len(txParams.Credits) != 0, len(candidates) != 1:
+		return false
+	case candidates[0] == nil, txParams.Tx == nil, txParams.Block == nil:
 		return false
 	}
 
@@ -2496,7 +2499,7 @@ func matchStoreScanTx(txParams db.CreateTxParams, walletID uint32,
 		txParams.Tx.TxHash() == fixture.tx.TxHash() &&
 		txParams.Received.Equal(fixture.received) &&
 		txParams.Status == db.TxStatusPublished &&
-		creditAddr.EncodeAddress() == fixture.addr.EncodeAddress()
+		candidates[0].EncodeAddress() == fixture.addr.EncodeAddress()
 }
 
 // matchStoreScanBatch matches the store scan batch produced by scan routing.
@@ -2537,7 +2540,8 @@ func matchStoreScanBlock(block *db.Block,
 func TestPutSyncBatchStore(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a store-backed syncer and one scan result.
+	// Arrange: Give the Store one matched output and a discovered horizon
+	// so it resolves automatic credits after persisting that horizon.
 	const walletID uint32 = 11
 
 	store := &walletmock.Store{}
@@ -2567,12 +2571,14 @@ func TestPutSyncBatchStore(t *testing.T) {
 	store.On("ListOutputsToWatch", mock.Anything, walletID).
 		Return([]db.UtxoInfo(nil), nil).Once()
 
-	// Act: Apply a normal sync scan batch.
+	// Act: Submit the normal sync batch with unresolved address candidates;
+	// the Store owns receiving admission within its atomic write.
 	err := s.putSyncBatch(
 		t.Context(), scanState, []scanResult{fixture.result},
 	)
 
-	// Assert: The store saw transactions, horizons, and synced blocks.
+	// Assert: The candidates and horizon reach the Store together with
+	// processed blocks, keeping scan and live admission aligned.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
@@ -2582,7 +2588,8 @@ func TestPutSyncBatchStore(t *testing.T) {
 func TestPutTargetedBatchStore(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a store-backed syncer and one targeted scan result.
+	// Arrange: Reuse the matched output and discovered horizon fixture;
+	// targeted recovery must resolve credits without advancing the tip.
 	const walletID uint32 = 12
 
 	store := &walletmock.Store{}
@@ -2612,12 +2619,14 @@ func TestPutTargetedBatchStore(t *testing.T) {
 	store.On("ListOutputsToWatch", mock.Anything, walletID).
 		Return([]db.UtxoInfo(nil), nil).Once()
 
-	// Act: Apply a targeted scan batch.
+	// Act: Submit targeted recovery through the existing batch boundary
+	// without converting matched addresses into explicit credits.
 	err := s.putTargetedBatch(
 		t.Context(), scanState, []scanResult{fixture.result},
 	)
 
-	// Assert: The store saw transactions and horizons, but no synced blocks.
+	// Assert: The Store receives candidates and horizons but no synced
+	// blocks, preserving live-tip ownership and receiving policy.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
