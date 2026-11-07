@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -69,8 +70,11 @@ type Signer interface {
 
 	// ECDH performs a scalar multiplication (ECDH-like operation) between
 	// a key from the wallet and a remote public key. The output returned
-	// will be the raw 32-byte shared secret (the X-coordinate of the
-	// result point).
+	// is the SHA-256 of the resulting shared point serialized in its
+	// 33-byte compressed form. This is libsecp256k1's default ECDH output
+	// and the shared secret lnd's keychain.ECDHRing and BOLT 8 expect. It
+	// is not the hash of the X coordinate alone: the compressed form also
+	// commits to the point's Y parity.
 	//
 	// A nil remote key returns ErrNilArguments, and one that is not a curve
 	// point returns ErrInvalidSignParam; neither derives a wallet key.
@@ -680,7 +684,8 @@ func (w *Wallet) derivePathPrivKey(ctx context.Context, path BIP32Path) (
 
 // ECDH performs a scalar multiplication (ECDH-like operation) between a key
 // from the wallet and a remote public key. The output returned will be the
-// sha256 of the resulting shared point serialized in compressed format.
+// sha256 of the resulting shared point serialized in compressed format. The
+// wallet's private key and the shared point never leave the wallet.
 func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
@@ -699,9 +704,9 @@ func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	}
 
 	// A key that is not a curve point multiplies to the point at infinity,
-	// whose X coordinate is zero. That is a valid-looking 32-byte secret both
-	// sides could agree on without either holding a private key, so it has to
-	// be an error rather than a result.
+	// whose coordinates are zero. Hashing it yields a fixed, valid-looking
+	// 32-byte secret both sides could agree on without either holding a
+	// private key, so it has to be an error rather than a result.
 	if !pub.IsOnCurve() {
 		return [32]byte{}, fmt.Errorf(
 			"%w: remote public key is not a curve point",
@@ -745,13 +750,28 @@ func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 	}
 	defer privKey.Zero()
 
-	// Perform the scalar multiplication and hash the result.
-	secret := btcec.GenerateSharedSecret(privKey, pub)
+	// Perform the scalar multiplication and hash all 33 bytes of the
+	// compressed result. The leading byte carries the Y parity, so this
+	// differs from hashing the X coordinate alone.
+	point := compressedSharedPoint(privKey, pub)
+	defer zero.Bytes(point)
 
-	var sharedSecret [32]byte
-	copy(sharedSecret[:], secret)
+	return sha256.Sum256(point), nil
+}
 
-	return sharedSecret, nil
+// compressedSharedPoint multiplies pub by privKey and returns the 33-byte
+// compressed encoding of the product. The caller must supply an on-curve
+// pub and a nonzero privKey, so the product is never the point at infinity,
+// and must zero the returned point once it has derived its result.
+func compressedSharedPoint(privKey *btcec.PrivateKey,
+	pub *btcec.PublicKey) []byte {
+
+	var remote, shared btcec.JacobianPoint
+	pub.AsJacobian(&remote)
+	btcec.ScalarMultNonConst(&privKey.Key, &remote, &shared)
+	shared.ToAffine()
+
+	return btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed()
 }
 
 // validateSignDigestIntent validates the parameters of a SignDigestIntent.

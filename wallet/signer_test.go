@@ -31,6 +31,7 @@ import (
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -471,26 +472,39 @@ func TestECDHSuccess(t *testing.T) {
 	}
 
 	// The ECDH key is resolved through the store account secret; take the
-	// leaf private key the signer will derive so we can compute the
-	// expected shared secret independently.
-	privKey, _ := expectStoreSignerPrivKey(
+	// leaf public key the signer will derive so the remote side can compute
+	// the expected shared secret independently.
+	_, walletPubKey := expectStoreSignerPrivKey(
 		t, mocks, w.id, path.KeyScope, path.DerivationPath,
 	)
 
-	// Compute the expected shared secret before ECDH runs, since ECDH
-	// zeroes the private key it derived internally (a separate copy from
-	// this one).
-	expectedSecret := btcec.GenerateSharedSecret(privKey, remotePubKey)
-
-	var expectedSecretArray [32]byte
-	copy(expectedSecretArray[:], expectedSecret)
+	expectedSecret, _ := expectedECDHSecret(t, remoteKey, walletPubKey)
 
 	// Act: Perform the ECDH operation.
 	sharedSecret, err := w.ECDH(t.Context(), path, remotePubKey)
 
 	// Assert: Check that the correct shared secret is returned.
 	require.NoError(t, err)
-	require.Equal(t, expectedSecretArray, sharedSecret)
+	require.Equal(t, expectedSecret, sharedSecret)
+}
+
+// expectedECDHSecret independently computes the ECDH result from the remote
+// side: sha256 of the compressed encoding of remoteKey*walletPub. Agreement
+// with the wallet's own walletKey*remotePub proves both the multiplication and
+// the encoding. It also returns the compressed point's parity prefix.
+func expectedECDHSecret(t *testing.T, remoteKey *btcec.PrivateKey,
+	walletPub *btcec.PublicKey) ([32]byte, byte) {
+
+	t.Helper()
+
+	var walletPoint, shared btcec.JacobianPoint
+	walletPub.AsJacobian(&walletPoint)
+	btcec.ScalarMultNonConst(&remoteKey.Key, &walletPoint, &shared)
+	shared.ToAffine()
+
+	compressed := btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed()
+
+	return sha256.Sum256(compressed), compressed[0]
 }
 
 // TestECDHFails tests the failure case where the key derivation fails during
@@ -3331,7 +3345,7 @@ func TestECDHRejectsNilRemoteKey(t *testing.T) {
 
 // TestECDHRejectsOffCurveRemoteKey verifies that a remote key which is not a
 // curve point is refused rather than multiplied to the point at infinity,
-// whose X coordinate would be returned as an all-zero shared secret.
+// whose hash would be returned as a fixed shared secret.
 func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
 	t.Parallel()
 
@@ -3349,11 +3363,153 @@ func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
 
 	// Assert: The key is refused before the account secret is read, which the
 	// strict mock enforces by failing on an unexpected call. Reaching the
-	// multiplication instead yields a nil error and 32 zero bytes: the X
-	// coordinate of the point at infinity, which both sides could agree on
-	// while holding no key at all.
+	// multiplication instead yields a nil error and the hash of the point at
+	// infinity, which both sides could agree on while holding no key at all.
 	require.ErrorIs(t, err, ErrInvalidSignParam)
 	require.Equal(t, [32]byte{}, secret)
+}
+
+// TestCompressedSharedPointBOLT8Vectors pins the shared-point primitive behind
+// ECDH to the BOLT 8 Appendix A transport vectors. Their ss values are
+// sha256(compressed(k*P)), libsecp256k1's default ECDH output and the function
+// lnd implements as keychain.ECDHRing, so matching them proves ECDH's format
+// independently of btcec's own helpers. The vectors include both Y parities,
+// and for each the hash of the X coordinate alone is checked to differ, so the
+// parity byte is shown to be part of the hashed input.
+func TestCompressedSharedPointBOLT8Vectors(t *testing.T) {
+	t.Parallel()
+
+	vectors := []struct {
+		name       string
+		privKey    string
+		remotePub  string
+		wantPrefix byte
+		wantSecret string
+	}{
+		{
+			name: "act one es",
+			privKey: "1212121212121212121212121212121212121212121212" +
+				"121212121212121212",
+			remotePub: "028d7500dd4c12685d1f568b4c2b5048e8534b873319f3" +
+				"a8daa612b469132ec7f7",
+			wantPrefix: secp256k1.PubKeyFormatCompressedEven,
+			wantSecret: "1e2fb3c8fe8fb9f262f649f64d26ecf0f2c0a805a767cf" +
+				"02dc2d77a6ef1fdcc3",
+		},
+		{
+			name: "act two ee",
+			privKey: "1212121212121212121212121212121212121212121212" +
+				"121212121212121212",
+			remotePub: "02466d7fcae563e5cb09a0d1870bb580344804617879a1" +
+				"4949cf22285f1bae3f27",
+			wantPrefix: secp256k1.PubKeyFormatCompressedOdd,
+			wantSecret: "c06363d6cc549bcb7913dbb9ac1c33fc1158680c89e972" +
+				"000ecd06b36c472e47",
+		},
+		{
+			name: "act three se",
+			privKey: "1111111111111111111111111111111111111111111111" +
+				"111111111111111111",
+			remotePub: "02466d7fcae563e5cb09a0d1870bb580344804617879a1" +
+				"4949cf22285f1bae3f27",
+			wantPrefix: secp256k1.PubKeyFormatCompressedEven,
+			wantSecret: "b36b6d195982c5be874d6d542dc268234379e1ae4ff170" +
+				"9402135b7de5cf0766",
+		},
+	}
+
+	for _, vector := range vectors {
+		t.Run(vector.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Decode the vector's local key and remote point.
+			privBytes, err := hex.DecodeString(vector.privKey)
+			require.NoError(t, err)
+
+			privKey, _ := btcec.PrivKeyFromBytes(privBytes)
+
+			pubBytes, err := hex.DecodeString(vector.remotePub)
+			require.NoError(t, err)
+
+			remotePub, err := btcec.ParsePubKey(pubBytes)
+			require.NoError(t, err)
+
+			wantSecret, err := hex.DecodeString(vector.wantSecret)
+			require.NoError(t, err)
+
+			// Act: Compute the compressed shared point.
+			point := compressedSharedPoint(privKey, remotePub)
+
+			// Assert: The point has the expected parity, its hash is the
+			// vector's ss, and hashing X alone gives something else.
+			require.Equal(t, vector.wantPrefix, point[0])
+
+			secret := sha256.Sum256(point)
+			require.Equal(t, wantSecret, secret[:])
+
+			xSecret := sha256.Sum256(point[1:])
+			require.NotEqual(t, wantSecret, xSecret[:])
+		})
+	}
+}
+
+// TestECDHSharedPointParity verifies that ECDH hashes the full compressed
+// shared point for both Y parities, so its result is neither the raw X
+// coordinate btcec.GenerateSharedSecret returns nor the hash of that X.
+func TestECDHSharedPointParity(t *testing.T) {
+	t.Parallel()
+
+	// The peer scalars are fixed so that, against the fixture wallet key, the
+	// shared points cover both Y parities. wantPrefix pins that coverage.
+	tests := []struct {
+		name       string
+		peerByte   byte
+		wantPrefix byte
+	}{
+		{
+			name:       "odd shared point",
+			peerByte:   0x01,
+			wantPrefix: secp256k1.PubKeyFormatCompressedOdd,
+		},
+		{
+			name:       "even shared point",
+			peerByte:   0x02,
+			wantPrefix: secp256k1.PubKeyFormatCompressedEven,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: An unlocked wallet serving its fixture key, and a
+			// deterministic peer key.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+			privKey, walletPub := expectStoreSignerPrivKey(
+				t, mocks, w.id, path.KeyScope, path.DerivationPath,
+			)
+
+			peerKey, _ := btcec.PrivKeyFromBytes(
+				bytes.Repeat([]byte{test.peerByte}, 32),
+			)
+
+			wantSecret, prefix := expectedECDHSecret(t, peerKey, walletPub)
+			require.Equal(t, test.wantPrefix, prefix)
+
+			rawX := btcec.GenerateSharedSecret(privKey, peerKey.PubKey())
+
+			// Act: Compute the shared secret.
+			secret, err := w.ECDH(t.Context(), path, peerKey.PubKey())
+
+			// Assert: The secret hashes the compressed point, not X alone.
+			require.NoError(t, err)
+			require.Equal(t, wantSecret, secret)
+			require.NotEqual(t, rawX, secret[:])
+			require.NotEqual(t, sha256.Sum256(rawX), secret)
+		})
+	}
 }
 
 // TestSignerRejectsNilArguments verifies that every Signer method taking a
