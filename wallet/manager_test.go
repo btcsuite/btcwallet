@@ -368,7 +368,7 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 
 		deps.chain.On("IsCurrent").Return(true).Once()
 		deps.store.On("GetWallet", mock.Anything, testWalletName).
-			Return(&db.WalletInfo{SyncedTo: &tip}, nil).Once()
+			Return(&db.WalletInfo{SyncedTo: &tip}, nil).Twice()
 		deps.store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{StartHeight: 0, EndHeight: 2}).
 			Return([]db.Block{tip}, nil).Once()
@@ -388,12 +388,15 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		m.started.Store(true)
 		m.wallets[w.cfg.Name] = w
 
-		// Act: Queue a filtered event before the disconnect, then let the
-		// same worker enter retry. No second initialization is permitted by
-		// the strict mocks; it must drain this mailbox in its existing wait.
+		// Act: Queue an at-tip event so its write is admitted before the
+		// disconnect; future history stays deferred. The same worker must
+		// drain this mailbox in retry without a second initialization.
 		require.NoError(t, m.dispatchChainEvent(t.Context(),
 			chain.FilteredBlockConnected{
-				Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 3}},
+				Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{
+					Height: int32(tip.Height),
+					Hash:   tip.Hash,
+				}},
 			}))
 		w.wg.Go(w.runSyncLoop)
 		synctest.Wait()
@@ -3576,13 +3579,13 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	require.Nil(t, w)
 }
 
-// TestManagerRollbackKvdbAheadOfTip reproduces mined notifications arriving
-// before the sync stamp and requires immediate, readable replacement history.
+// TestManagerRollbackKvdbAheadOfTip detaches already-recorded mined history
+// above the sync stamp and requires immediate, readable replacement history.
 func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	t.Parallel()
 
-	// Arrange real stores while syncing, with an owned credit persisted by a
-	// mined notification that does not advance the earlier complete sync tip.
+	// Arrange real stores with mined history above an earlier complete sync
+	// tip, so rollback must handle that history without waiting for a rescan.
 	source := bwmock.NewGenesisChain(t, true)
 	source.On("TestMempoolAccept", mock.Anything, float64(0)).
 		Return(nil, chain.ErrTxAlreadyInMempool).Maybe()
@@ -3638,17 +3641,18 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 		Maybe()
 	source.On("GetBlockHash", int64(1)).Return(&stamp.Hash, nil).Once()
 	source.On("GetBlockHash", int64(2)).Return(&replacement.Hash, nil).Once()
-	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
-		notification: chain.RelevantTx{
-			TxRecord: oldTx,
-			Block:    &old,
-		},
-		matches: liveMatches(oldTx),
-	}))
-
+	// Seed persisted history directly: live observations above the tip are
+	// deferred until their ordered block batch.
 	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		err := s.txStore.InsertTx(ns, oldTx, &old)
+		if err != nil {
+			return err
+		}
+
 		return s.txStore.AddCredit(
-			tx.ReadWriteBucket(wtxmgrNamespaceKey), oldTx, &old, 0, false,
+			ns, oldTx, &old, 0, false,
 		)
 	})
 	require.NoError(t, err)
