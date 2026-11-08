@@ -13,6 +13,8 @@ import (
 
 // TestBitcoindMapRPCErr checks cluster-limit reasons share the existing chain
 // limit category while legacy and unknown reasons retain their classifications.
+//
+//nolint:err113 // Fixtures reproduce raw backend rejection strings.
 func TestBitcoindMapRPCErr(t *testing.T) {
 	t.Parallel()
 
@@ -69,6 +71,8 @@ func TestBitcoindMapRPCErr(t *testing.T) {
 
 // TestBtcdMapRPCErr checks input diagnostics take precedence over their
 // nested policy causes while output and unknown errors retain their identity.
+//
+//nolint:err113 // Fixtures reproduce raw backend rejection strings.
 func TestBtcdMapRPCErr(t *testing.T) {
 	t.Parallel()
 
