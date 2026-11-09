@@ -15,45 +15,37 @@ type testCase struct {
 
 // allTestCases is the full set of integration test cases.
 var allTestCases = []*testCase{
-	// External raw outputs retain custody and public reports after reopen.
 	{
 		Name:     "address manager raw import tracking",
 		TestFunc: testAddressManagerRawImportTracking,
 	},
 
-	// Raw imports must retain committed keys and retry live registration.
 	{
 		Name:     "address manager raw import public key",
 		TestFunc: testAddressManagerRawImportPublicKey,
 	},
 
-	// Equivalent script repeats must preserve secrets and receive payments.
 	{
 		Name:     "address manager raw import taproot script",
 		TestFunc: testAddressManagerRawImportTaprootScript,
 	},
 
-	// Key-only allocation must retain ownership without receiving activity.
 	{
 		Name:     "address manager allocate key",
 		TestFunc: testAddressManagerAllocateKey,
 	},
-	// Unused custom-scope children must stay consumed across callers/reload.
 	{
 		Name:     "address manager allocate key concurrent",
 		TestFunc: testAddressManagerAllocateKeyConcurrent,
 	},
-	// Batch delivery must expose complete, durable public address results.
 	{
 		Name:     "address manager allocate batch",
 		TestFunc: testAddressManagerAllocateBatch,
 	},
-	// Invalid counts and excluded accounts must expose no partial mutation.
 	{
 		Name:     "address manager reject sql batch",
 		TestFunc: testAddressManagerRejectSQLBatch,
 	},
-	// Kvdb rejects batches without consuming its count-one allocation cursor.
 	{
 		Name:     "address manager reject kvdb batch",
 		TestFunc: testAddressManagerRejectKVDBBatch,
@@ -98,13 +90,10 @@ var allTestCases = []*testCase{
 		Name:     "address manager new address fingerprint",
 		TestFunc: testAddressManagerNewAddressFingerprint,
 	},
-	// Confirmed transactions must update both Wallets sharing one Manager.
 	{
 		Name:     "manager multi wallet transactions",
 		TestFunc: testManagerMultiWalletTransactions,
 	},
-	// Fresh-client cases prove persisted and recovered watch delivery without
-	// relying on filters retained by an earlier Wallet runtime.
 	{
 		Name:     "manager neutrino watch replay",
 		TestFunc: testManagerNeutrinoWatchReplay,
@@ -197,17 +186,14 @@ var allTestCases = []*testCase{
 		Name:     "account manager create account",
 		TestFunc: testAccountManagerCreateAccount,
 	},
-	// Custom scopes must persist their schema together with the account.
 	{
 		Name:     "account manager create custom scope account",
 		TestFunc: testAccountManagerCreateCustomScopeAccount,
 	},
-	// Imported receiving accounts retain both declared branch paths.
 	{
 		Name:     "account manager derive path bound address",
 		TestFunc: testAccountManagerDerivePathBoundAddress,
 	},
-	// Custom imported key allocation resumes its declared path after reopen.
 	{
 		Name:     "account manager allocate path bound key",
 		TestFunc: testAccountManagerAllocatePathBoundKey,
@@ -260,13 +246,10 @@ var allTestCases = []*testCase{
 		Name:     "account manager enforce account rename lifecycle",
 		TestFunc: testAccountManagerEnforceAccountRenameLifecycle,
 	},
-	// Account admission must refuse shared scripts before deriving children.
 	{
 		Name:     "account manager reject account identity",
 		TestFunc: testAccountManagerRejectAccountIdentity,
 	},
-	// Mixed custody must survive the same public wallet lifecycle on every
-	// backend, including the existing kvdb import mechanism.
 	{
 		Name:     "account manager mix account custody",
 		TestFunc: testAccountManagerMixAccountCustody,
@@ -280,7 +263,6 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerImportAccountZeroFingerprint,
 	},
 	{
-		// Exercise effective branch schema durability on every backend.
 		Name:     "account manager preserve imported schema",
 		TestFunc: testAccountManagerPreserveImportedSchema,
 	},
@@ -356,13 +338,10 @@ var allTestCases = []*testCase{
 		Name:     "controller rescan bounds",
 		TestFunc: testControllerRescanBounds,
 	},
-	// All public chain views must agree through rollback and durable reload.
 	{
 		Name:     "wallet sync rollback",
 		TestFunc: testWalletSyncRollback,
 	},
-	// Keep the public Signer request in the integration matrix so callers
-	// cannot accidentally depend on wallet-internal database types.
 	{
 		Name:     "signer derive pubkey paths",
 		TestFunc: testSignerDerivePubKeyPaths,
@@ -403,8 +382,6 @@ var allTestCases = []*testCase{
 		Name:     "signer derive imported xpub",
 		TestFunc: testSignerDeriveImportedXPub,
 	},
-	// Keep raw extraction in separate UnsafeSigner cases so safe signing
-	// scenarios never need private-key results as fixtures or assertions.
 	{
 		Name:     "unsafe signer derive privkey",
 		TestFunc: testUnsafeSignerDerivePrivKey,
@@ -429,7 +406,6 @@ var allTestCases = []*testCase{
 		Name:     "unsafe signer reject watchonly",
 		TestFunc: testUnsafeSignerRejectWatchOnly,
 	},
-	// Run the same digest-signing contract on every selected backend.
 	{
 		Name:     "signer sign digest ecdsa",
 		TestFunc: testSignerSignDigestECDSA,
@@ -446,7 +422,6 @@ var allTestCases = []*testCase{
 		Name:     "signer reject digest intent",
 		TestFunc: testSignerRejectDigestIntent,
 	},
-	// Keep output ownership and script verification identical across stores.
 	{
 		Name:     "signer compute unlocking script",
 		TestFunc: testSignerComputeUnlockingScript,
@@ -455,7 +430,6 @@ var allTestCases = []*testCase{
 		Name:     "signer reject unlocking script",
 		TestFunc: testSignerRejectUnlockingScript,
 	},
-	// Raw formats share the backend matrix while retaining caller assembly.
 	{
 		Name:     "signer compute raw sig legacy",
 		TestFunc: testSignerComputeRawSigLegacy,
@@ -476,7 +450,6 @@ var allTestCases = []*testCase{
 		Name:     "signer reject raw sig",
 		TestFunc: testSignerRejectRawSig,
 	},
-	// Exercise key availability and durable identity through real Wallets.
 	{
 		Name:     "signer reject locked",
 		TestFunc: testSignerRejectLocked,
@@ -649,12 +622,10 @@ var allTestCases = []*testCase{
 		Name:     "txreader durable reopen",
 		TestFunc: testTxReaderDurableReopen,
 	},
-	// Local publication provides observations without an incoming mempool feed.
 	{
 		Name:     "transaction subscription publication",
 		TestFunc: testTransactionSubscriptionPublication,
 	},
-	// External observations reach subscribers through committed syncer work.
 	{
 		Name:     "transaction subscription observation",
 		TestFunc: testTransactionSubscriptionObservation,
