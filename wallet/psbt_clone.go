@@ -13,9 +13,9 @@ import (
 )
 
 // clonePacket returns a deep copy of a packet that shares no memory with the
-// original. Every operation that transforms a packet works on a clone, so that
-// a caller's own packet is never left half rewritten by an operation that
-// failed part of the way through.
+// original. Operations requiring an independent working packet use it to keep
+// their changes separate from caller-owned data. DecorateInputs instead
+// deliberately enriches its caller's packet in place.
 //
 // A nil packet clones to nil, so that validation, not this function, decides
 // what to do about it.
@@ -217,9 +217,12 @@ func cloneTaprootBip32Derivations(
 			continue
 		}
 
-		leafHashes := make([][]byte, len(d.LeafHashes))
-		for j, hash := range d.LeafHashes {
-			leafHashes[j] = bytes.Clone(hash)
+		var leafHashes [][]byte
+		if d.LeafHashes != nil {
+			leafHashes = make([][]byte, len(d.LeafHashes))
+			for j, hash := range d.LeafHashes {
+				leafHashes[j] = bytes.Clone(hash)
+			}
 		}
 
 		clone[i] = &psbt.TaprootBip32Derivation{

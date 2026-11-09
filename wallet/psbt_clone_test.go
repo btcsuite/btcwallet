@@ -162,3 +162,37 @@ func TestClonePacketPreservesAbsentFields(t *testing.T) {
 	packet.Outputs[0].Bip32Derivation = []*psbt.Bip32Derivation{}
 	require.Equal(t, packet, clonePacket(packet))
 }
+
+// TestClonePacketPreservesTaprootLeafHashes protects structural equality for
+// key-only origins with absent or empty leaf lists. Both input and output
+// derivations use the same contract.
+func TestClonePacketPreservesTaprootLeafHashes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		leafHashes [][]byte
+	}{
+		{name: "absent"},
+		{name: "empty", leafHashes: [][]byte{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet := testPacket(t)
+			packet.Inputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{{
+					LeafHashes: tc.leafHashes,
+				}}
+			packet.Outputs[0].TaprootBip32Derivation =
+				[]*psbt.TaprootBip32Derivation{{
+					LeafHashes: tc.leafHashes,
+				}}
+
+			clone := clonePacket(packet)
+
+			require.Equal(t, packet, clone)
+		})
+	}
+}

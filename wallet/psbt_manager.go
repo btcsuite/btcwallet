@@ -469,6 +469,7 @@ type PsbtManager interface {
 	//
 	// This method is essential for collaborative workflows (e.g. Multisig,
 	// CoinJoin) where no single party holds all necessary keys.
+	// The returned packet owns its data independently of the source packets.
 	CombinePsbt(ctx context.Context, psbts ...*psbt.Packet) (
 		*psbt.Packet, error)
 }
@@ -2574,7 +2575,9 @@ func (w *Wallet) CombinePsbt(_ context.Context, psbts ...*psbt.Packet) (
 			err)
 	}
 
-	return combined, nil
+	// Merge helpers may borrow nested records from the contributions. Publish
+	// an independent packet so later caller edits cannot change a source.
+	return clonePacket(combined), nil
 }
 
 // validatePsbtMerge checks that a set of PSBT packets are compatible for
@@ -2683,6 +2686,11 @@ func mergePsbtInputs(dest, src *psbt.PInput) error {
 	dest.TaprootBip32Derivation = deduplicateTaprootBip32Derivations(
 		dest.TaprootBip32Derivation, src.TaprootBip32Derivation,
 	)
+
+	err = mergeInputTaprootInternalKey(dest, src)
+	if err != nil {
+		return err
+	}
 
 	err = mergeTaprootKeySpendSig(dest, src)
 	if err != nil {
@@ -2971,6 +2979,24 @@ func mergeNonWitnessUtxo(dest, src *psbt.PInput) error {
 
 	if dest.NonWitnessUtxo == nil {
 		dest.NonWitnessUtxo = src.NonWitnessUtxo
+	}
+
+	return nil
+}
+
+// mergeInputTaprootInternalKey retains a Taproot input's internal key and
+// rejects disagreeing contributions using the existing field conflict contract.
+func mergeInputTaprootInternalKey(dest, src *psbt.PInput) error {
+	if len(dest.TaprootInternalKey) > 0 &&
+		len(src.TaprootInternalKey) > 0 &&
+		!bytes.Equal(dest.TaprootInternalKey, src.TaprootInternalKey) {
+
+		return fmt.Errorf("%w: taproot internal key mismatch",
+			ErrPsbtMergeConflict)
+	}
+
+	if len(dest.TaprootInternalKey) == 0 {
+		dest.TaprootInternalKey = src.TaprootInternalKey
 	}
 
 	return nil
