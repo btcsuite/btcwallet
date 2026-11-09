@@ -2239,7 +2239,8 @@ func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
 }
 
 // TestProcessFilteredBlockUsesStore verifies that filtered block notifications
-// are routed through the store as one transaction batch with a sync-tip update.
+// atomically advance the tip, then retain later payloads at or below that tip
+// with confirming metadata and without another checkpoint.
 func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	t.Parallel()
 
@@ -2278,7 +2279,9 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		Time: blockTime,
 	}
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 100}}, nil,
+	).Once()
 	store.On("ApplyTxBatch", mock.Anything,
 		matchBlockTxBatch(walletID, tx, addr, received, block),
 	).Return(nil).Once()
@@ -2298,13 +2301,77 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	// mailbox path, preserving its atomic transaction/checkpoint boundary.
 	err = s.waitForEvent(t.Context())
 
-	// Assert: The block transaction and sync tip were written together.
+	// Assert: The first representation writes effects and checkpoint together.
+	require.NoError(t, err)
+
+	// Arrange: Copy the transaction with a new value and return the committed
+	// tip so this second representation must retain effects without progress.
+	lateTx := tx.Copy()
+	lateTx.TxOut[0].Value++
+	late, err := wtxmgr.NewTxRecordFromMsgTx(lateTx, received)
+	require.NoError(t, err)
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 101, Hash: block.Hash}}, nil,
+	).Once()
+	store.On("ApplyTxBatch", mock.Anything,
+		matchConfirmedTxBatchNoSyncTip(
+			walletID, lateTx, addr, received, block,
+		),
+	).Return(nil).Once()
+
+	// Act: Deliver the second representation through the same mailbox after
+	// its block has become the committed tip.
+	mailbox <- chainEvent{
+		notification: chain.FilteredBlockConnected{Block: block},
+		matches:      liveMatches(late),
+	}
+
+	err = s.waitForEvent(t.Context())
+
+	// Assert: Its distinct transaction commits without another checkpoint.
+	require.NoError(t, err)
+
+	// Arrange: A third distinct transaction arrives after catch-up reaches
+	// 102, so only recorded history can identify its confirming block at 101.
+	historicalTx := lateTx.Copy()
+	historicalTx.TxOut[0].Value++
+	historical, err := wtxmgr.NewTxRecordFromMsgTx(historicalTx, received)
+	require.NoError(t, err)
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 102}}, nil,
+	).Once()
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 101,
+		EndHeight:   101,
+	}).Return([]db.Block{
+		{
+			Height: 101,
+			Hash:   block.Hash,
+		},
+	}, nil).Once()
+	store.On("ApplyTxBatch", mock.Anything,
+		matchConfirmedTxBatchNoSyncTip(
+			walletID, historicalTx, addr, received, block,
+		),
+	).Return(nil).Once()
+
+	// Act: Deliver the older representation after the mocked catch-up; the
+	// worker must resolve its identity from recorded history instead of tip102.
+	mailbox <- chainEvent{
+		notification: chain.FilteredBlockConnected{Block: block},
+		matches:      liveMatches(historical),
+	}
+
+	err = s.waitForEvent(t.Context())
+
+	// Assert: The older confirmed payload also leaves progress untouched;
+	// every exact read and transaction-only batch must have been consumed.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
 
-// TestProcessFilteredBlockOrder verifies that stale, duplicate, and
-// skipped-height notifications are left for the normal sync loop to reconcile.
+// TestProcessFilteredBlockOrder verifies that stale empty metadata, gaps and
+// same-height wrong-branch payloads cannot change the committed checkpoint.
 func TestProcessFilteredBlockOrder(t *testing.T) {
 	t.Parallel()
 
@@ -2312,6 +2379,7 @@ func TestProcessFilteredBlockOrder(t *testing.T) {
 		name         string
 		current      int32
 		notification int32
+		matches      TxEntries
 	}{
 		{
 			name:         "stale",
@@ -2319,9 +2387,12 @@ func TestProcessFilteredBlockOrder(t *testing.T) {
 			notification: 101,
 		},
 		{
-			name:         "duplicate",
+			name:         "wrong branch",
 			current:      102,
 			notification: 102,
+			matches: liveMatches(&wtxmgr.TxRecord{
+				MsgTx: *wire.NewMsgTx(1),
+			}),
 		},
 		{
 			name:         "gap",
@@ -2334,14 +2405,15 @@ func TestProcessFilteredBlockOrder(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Load the current tip while allowing no checkpoint write
-			// for stale, duplicate or skipped progress metadata.
+			// Arrange: Permit only the tip read; a nonempty same-height
+			// payload has a different hash, while stale/gap rows carry no tx.
 			store := &walletmock.Store{}
-			expectSyncedTip(store, waddrmgr.BlockStamp{
-				Height: test.current,
-			})
-
 			s := newTestSyncer(Config{}, nil, nil, nil, store, 0)
+			store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+				&db.WalletInfo{SyncedTo: &db.Block{
+					Height: uint32(test.current),
+				}}, nil,
+			).Once()
 
 			// Act: Apply the prepared block through the normal processor.
 			err := s.processChainEvent(
@@ -2349,16 +2421,99 @@ func TestProcessFilteredBlockOrder(t *testing.T) {
 					notification: chain.FilteredBlockConnected{
 						Block: &wtxmgr.BlockMeta{
 							Block: wtxmgr.Block{
+								Hash:   chainhash.Hash{1},
 								Height: test.notification,
 							},
 						},
 					},
+					matches: test.matches,
 				},
 			)
 
 			// Assert: Reconciliation stays with catch-up rather than forcing a
 			// checkpoint; the strict Store mock permits only the tip read.
 			require.NoError(t, err)
+			store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestProcessFilteredBlockHistoryIdentity verifies that older payloads cannot
+// add effects without a matching recorded hash, preserving read failures while
+// treating either backend's missing history as unavailable authorization.
+func TestProcessFilteredBlockHistoryIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		blocks     []db.Block
+		historyErr error
+		wantErr    error
+	}{
+		{
+			name: "wrong branch",
+			blocks: []db.Block{
+				{
+					Height: 101,
+					Hash:   chainhash.Hash{2},
+				},
+			},
+		},
+		{
+			name:       "SQL missing history",
+			historyErr: db.ErrBlockNotFound,
+		},
+		{
+			name: "legacy missing history",
+			historyErr: fmt.Errorf("missing recorded hash: %w",
+				waddrmgr.ManagerError{
+					ErrorCode: waddrmgr.ErrBlockNotFound,
+				}),
+		},
+		{
+			name:       "read failure",
+			historyErr: errDBMock,
+			wantErr:    errDBMock,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Require the current tip and the older height's hash
+			// read, with no batch expectation to permit unauthorised effects.
+			store := &walletmock.Store{}
+			s := newTestSyncer(Config{}, nil, nil, nil, store, 0)
+			store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+				&db.WalletInfo{SyncedTo: &db.Block{Height: 102}}, nil,
+			).Once()
+			store.On("ListSyncedBlocks", mock.Anything,
+				db.ListSyncedBlocksQuery{
+					StartHeight: 101,
+					EndHeight:   101,
+				},
+			).Return(test.blocks, test.historyErr).Once()
+
+			// Act: Process a nonempty older payload on the usual event path;
+			// the supplied block identity must be checked before any batch.
+			err := s.processChainEvent(t.Context(), chainEvent{
+				notification: chain.FilteredBlockConnected{
+					Block: &wtxmgr.BlockMeta{
+						Block: wtxmgr.Block{
+							Hash:   chainhash.Hash{1},
+							Height: 101,
+						},
+					},
+				},
+				matches: liveMatches(&wtxmgr.TxRecord{
+					MsgTx: *wire.NewMsgTx(1),
+				}),
+			})
+
+			// Assert: Only unexpected read errors propagate; wrong or missing
+			// identities leave both transaction effects and progress untouched.
+			require.ErrorIs(t, err, test.wantErr)
 			store.AssertExpectations(t)
 		})
 	}
