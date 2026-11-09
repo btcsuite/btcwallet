@@ -926,10 +926,9 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 		return err
 	}
 
-	// A filtered notification may remain queued after advanceChainSync has
-	// already scanned past it. Only the exact next block may move the tip
-	// forward; the sync loop handles gaps and rollback handles rewinds.
-	if blockMeta.Height != current.Height+1 {
+	// Only the exact next block may advance the checkpoint. Catch-up handles
+	// gaps, while later representations may supplement committed payloads.
+	if blockMeta.Height > current.Height+1 {
 		return nil
 	}
 
@@ -938,7 +937,64 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 		return err
 	}
 
-	return s.applyStoreTxBatch(ctx, matches, block, block)
+	if blockMeta.Height == current.Height+1 {
+		return s.applyStoreTxBatch(ctx, matches, block, block)
+	}
+
+	// Empty supplemental payloads cannot add effects, so they need no
+	// historical lookup after the checkpoint has already passed them.
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Supplemental payloads may add effects only on the committed branch.
+	onBranch, err := s.blockMatchesCheckpoint(ctx, *block, current)
+	if err != nil || !onBranch {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// blockMatchesCheckpoint validates a supplemental payload against the saved
+// tip or older shared history. Missing history contributes no new effects.
+func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
+	current waddrmgr.BlockStamp) (bool, error) {
+
+	committedHash := current.Hash
+	// The tip hash identifies only its own height; older payloads must match
+	// the recorded hash at their height before adding confirmed effects.
+	if int64(block.Height) < int64(current.Height) {
+		blocks, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				StartHeight: block.Height,
+				EndHeight:   block.Height,
+			},
+		)
+		// Missing history cannot authorize effects, whether the Store uses
+		// the SQL sentinel or wraps the legacy address manager's error.
+		var managerErr waddrmgr.ManagerError
+		if errors.Is(err, db.ErrBlockNotFound) ||
+			errors.As(err, &managerErr) &&
+				managerErr.ErrorCode == waddrmgr.ErrBlockNotFound {
+
+			return false, nil
+		}
+
+		if err != nil {
+			return false, fmt.Errorf("list committed block %d: %w",
+				block.Height, err)
+		}
+
+		// An empty successful read likewise supplies no committed identity.
+		if len(blocks) == 0 {
+			return false, nil
+		}
+
+		committedHash = blocks[0].Hash
+	}
+
+	return block.Hash == committedHash, nil
 }
 
 // applyStoreTxBatch writes transaction matches through the store batch API.
