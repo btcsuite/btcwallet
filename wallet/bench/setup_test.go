@@ -1,23 +1,164 @@
 package bench
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
+
+// prepareSQLSyncBenchmarkWallet saves native metadata at the common real base.
+// Publish the closed target first so a cache hit needs no graph replay.
+func prepareSQLSyncBenchmarkWallet(tb testing.TB,
+	scenario bwtest.SyncBenchmarkCase) (*sqlBenchmarkFixture, string, string) {
+
+	tb.Helper()
+
+	ctx, cancel := context.WithTimeout(tb.Context(), 20*time.Minute)
+	defer cancel()
+
+	workload := scenario.Workload
+	base, target := bwtest.PrepareSyncBenchmarkBase(ctx, tb, scenario)
+	native := newSQLBenchmarkFixture(tb)
+	config := native.config
+	config.SyncMethod = wallet.SyncMethodFullBlocks
+	config.WalletSyncRetryInterval = 10 * time.Millisecond
+	native.config = config
+	fixture := filepath.Join(
+		os.Getenv("BTCWALLET_BENCH_FIXTURE_DIR"),
+		string(config.Backend), scenario.ID+".db",
+	)
+
+	_, err := os.Stat(fixture)
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(tb, err)
+		return native, fixture, target
+	}
+
+	// Real preparation allocates the existing inventory while the only
+	// available chain is the base, leaving history for measured discovery.
+	started := time.Now()
+	dir, node, rpc, stopNode := bwtest.RestoreSyncBenchmarkNode(ctx, tb, base)
+	source, stopSource := bwtest.NewSyncBenchmarkClient(ctx, tb, node)
+	config.ChainSource = source
+	manager, err := wallet.NewManager(ctx, config)
+	require.NoError(tb, err)
+	tb.Cleanup(func() { require.NoError(tb, manager.Stop()) })
+
+	_, err = manager.Start(ctx)
+	require.NoError(tb, err)
+	w, scripts := allocateSQLBenchmarkWallet(tb, manager, workload)
+
+	var history []*wire.MsgTx
+
+	_, err = os.Stat(target)
+
+	prepareTarget := errors.Is(err, os.ErrNotExist)
+	if prepareTarget {
+		// Every startup case uses the one-deposit small-node Wallet.
+		// Zero-history controls still publish a target after shutdown.
+		if len(scenario.HistoryBlocks) != 0 {
+			hash, err := rpc.GetBlockHash(1)
+			require.NoError(tb, err)
+			block, err := rpc.GetBlock(hash)
+			require.NoError(tb, err)
+
+			funding := []*wire.MsgTx{block.Transactions[0]}
+
+			history, err = bwtest.BuildSyncBenchmarkHistory(
+				ctx, workload, scripts, funding,
+				func(ctx context.Context, tx *wire.MsgTx,
+					index int, output *wire.TxOut,
+					hashes *txscript.TxSigHashes) (wire.TxWitness, error) {
+
+					return signSQLSyncBenchmarkInput(
+						ctx, w, tx, index, output, hashes,
+					)
+				},
+			)
+			require.NoError(tb, err)
+		}
+	} else {
+		require.NoError(tb, err)
+	}
+
+	// Observe the base through the public contract before draining every SQL
+	// connection. The subsequent target mining cannot update this baseline.
+	hash, height, err := source.GetBestBlock()
+	require.NoError(tb, err)
+
+	for {
+		info, err := w.Info(ctx)
+		require.NoError(tb, err)
+
+		if info.Synced && info.SyncedTo.Height == height &&
+			info.SyncedTo.Hash.IsEqual(hash) {
+
+			break
+		}
+
+		require.NoError(tb, ctx.Err())
+		runtime.Gosched()
+	}
+
+	require.NoError(tb, manager.Stop())
+	stopSource()
+
+	// Zero-history cases still require a newly mined target; the existing
+	// stat result is the publication decision, independently of Wallet signing.
+	if prepareTarget {
+		bwtest.SaveSyncBenchmarkTarget(
+			ctx, tb, dir, target, rpc, stopNode, scenario, history,
+		)
+	} else {
+		stopNode()
+	}
+
+	saveSQLBenchmarkFixture(tb, native, fixture)
+	tb.Logf("fixture preparation: %s; base=%d:%s",
+		time.Since(started), height, hash)
+
+	return native, fixture, target
+}
+
+// signSQLSyncBenchmarkInput adapts the public signer to the graph builder.
+// Witness-v0 and taproot require different native sighash modes.
+func signSQLSyncBenchmarkInput(ctx context.Context, w *wallet.Wallet,
+	tx *wire.MsgTx, index int, output *wire.TxOut,
+	hashes *txscript.TxSigHashes) (wire.TxWitness, error) {
+
+	hashType := txscript.SigHashAll
+	if txscript.IsPayToTaproot(output.PkScript) {
+		hashType = txscript.SigHashDefault
+	}
+
+	unlock, err := w.ComputeUnlockingScript(ctx,
+		&wallet.UnlockingScriptParams{
+			Tx: tx, InputIndex: index, Output: output,
+			SigHashes: hashes, HashType: hashType,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sign startup wallet input: %w", err)
+	}
+
+	return unlock.Witness, nil
+}
 
 // setupSQLBenchmarkWallet restores private storage before Wallet startup and
 // unlock. A missing snapshot uses the common node seed; every run follows the
@@ -126,10 +267,33 @@ func saveSQLBenchmarkFixture(tb testing.TB,
 	require.NoError(tb, os.Rename(pending, fixture))
 }
 
-// seedSQLBenchmarkWallet uses normal Manager account/key allocation followed by
-// Store history writes. The standalone seeding Store has no key deriver.
+// seedSQLBenchmarkWallet retains read fixture history application after
+// allocation; startup preparation reuses allocation without synthetic writes.
 func seedSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
 	store db.Store, workload bwtest.NodeBenchmarkWorkload) {
+
+	tb.Helper()
+
+	w, scripts := allocateSQLBenchmarkWallet(tb, manager, workload)
+
+	phaseStarted := time.Now()
+
+	// SQL can persist the complete normalized graph and final tip through
+	// its existing batch transaction; no legacy sync-tip progression is
+	// needed.
+	require.NoError(tb, store.ApplyTxBatch(
+		tb.Context(), workload.Batch(w.ID(), scripts),
+	))
+	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+
+	// Validate committed data before a newly prepared snapshot can be saved.
+	bwtest.AssertNodeBenchmarkWallet(tb, store, w.ID(), workload)
+}
+
+// allocateSQLBenchmarkWallet creates the shared accounts and key inventory
+// through public APIs, leaving its caller to choose real-chain or read history.
+func allocateSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
+	workload bwtest.NodeBenchmarkWorkload) (*wallet.Wallet, [][]byte) {
 
 	tb.Helper()
 
@@ -225,18 +389,8 @@ func seedSQLBenchmarkWallet(tb testing.TB, manager *wallet.Manager,
 	}
 
 	tb.Logf("fixture allocation: %s", time.Since(phaseStarted))
-	phaseStarted = time.Now()
 
-	// SQL can persist the complete normalized graph and final tip through
-	// its existing batch transaction; no legacy sync-tip progression is
-	// needed.
-	require.NoError(tb, store.ApplyTxBatch(
-		tb.Context(), workload.Batch(w.ID(), scripts),
-	))
-	tb.Logf("fixture history: %s", time.Since(phaseStarted))
-
-	// Validate committed data before a newly prepared snapshot can be saved.
-	bwtest.AssertNodeBenchmarkWallet(tb, store, w.ID(), workload)
+	return w, scripts
 }
 
 // RunSQLBenchmark restores each shared case using the build-selected backend:
