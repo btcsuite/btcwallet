@@ -58,6 +58,225 @@ func psbtTestSnapshot(t *testing.T, packets ...*psbt.Packet) string {
 	return string(encoded)
 }
 
+// psbtFundedCoinDerivation reads the wallet origin of a funded coin being
+// spent, for comparison with the decorated input's metadata.
+func psbtFundedCoinDerivation(h *bwtest.HarnessTest, w *wallet.Wallet,
+	output *wire.TxOut) *psbt.Bip32Derivation {
+
+	h.Helper()
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		output.PkScript, h.NetParams(),
+	)
+	require.NoError(h, err)
+	require.Len(h, addrs, 1)
+	derivation, err := w.GetDerivationInfo(h.Context(), addrs[0])
+	require.NoError(h, err)
+
+	return derivation
+}
+
+// testPsbtManagerDecorateOwnedInputs proves that real wallet UTXOs and public
+// origins enrich both supported witness families without rewriting the
+// caller's transaction or unrelated packet records. The wallet stays locked.
+func testPsbtManagerDecorateOwnedInputs(h *bwtest.HarnessTest) {
+	w, native := h.NewWallet(bwtest.WalletFixture{
+		Seed:     h.SeedFromTestName(),
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{100_000},
+	})
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, 100_000)
+	nativeOp, taprootOp := native.WalletOutpoints[0], taproot.WalletOutpoints[0]
+	nativeOutput := native.Tx.TxOut[nativeOp.Index]
+	taprootOutput := taproot.Tx.TxOut[taprootOp.Index]
+	nativeOrigin := psbtFundedCoinDerivation(h, w, nativeOutput)
+	taprootOrigin := psbtFundedCoinDerivation(h, w, taprootOutput)
+	packet := psbtTestPacket(h.T, nativeOp, taprootOp)
+	packet.Unknowns = psbtTestUnknown(1)
+	packet.Inputs[0].Unknowns = psbtTestUnknown(2)
+	packet.Inputs[1].Unknowns = psbtTestUnknown(3)
+	packet.Outputs[0].Unknowns = psbtTestUnknown(4)
+	tx := packet.UnsignedTx
+	want := psbtTestPacket(h.T, nativeOp, taprootOp)
+	want.Unknowns = psbtTestUnknown(1)
+	want.Outputs[0].Unknowns = psbtTestUnknown(4)
+	want.Inputs[0] = psbt.PInput{
+		NonWitnessUtxo: native.Tx,
+		WitnessUtxo:    nativeOutput,
+		SighashType:    txscript.SigHashAll,
+		Bip32Derivation: []*psbt.Bip32Derivation{
+			nativeOrigin,
+		},
+		Unknowns: psbtTestUnknown(2),
+	}
+	want.Inputs[1] = psbt.PInput{
+		WitnessUtxo:        taprootOutput,
+		TaprootInternalKey: taprootOrigin.PubKey[1:],
+		TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
+			XOnlyPubKey:          taprootOrigin.PubKey[1:],
+			MasterKeyFingerprint: taprootOrigin.MasterKeyFingerprint,
+			Bip32Path:            taprootOrigin.Bip32Path,
+		}},
+		Unknowns: psbtTestUnknown(3),
+	}
+
+	result, err := w.DecorateInputs(h.Context(), packet, false)
+
+	require.NoError(h, err)
+	require.Same(h, packet, result)
+	require.Same(h, tx, packet.UnsignedTx)
+	require.Equal(h, want, packet)
+}
+
+// testPsbtManagerDecorateSkipUnknown proves that a foreign input and its
+// metadata are left alone while a subsequent owned input is still enriched.
+func testPsbtManagerDecorateSkipUnknown(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Seed:     h.SeedFromTestName(),
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{100_000},
+	})
+	require.NotEmpty(h, funding.ForeignOutpoints)
+	foreign, owned := funding.ForeignOutpoints[0], funding.WalletOutpoints[0]
+	output := funding.Tx.TxOut[owned.Index]
+	origin := psbtFundedCoinDerivation(h, w, output)
+	packet := psbtTestPacket(h.T, foreign, owned)
+	packet.Inputs[0].Unknowns = psbtTestUnknown(1)
+	packet.Inputs[0].WitnessUtxo = funding.Tx.TxOut[foreign.Index]
+	want := psbtTestPacket(h.T, foreign, owned)
+	want.Inputs[0].Unknowns = psbtTestUnknown(1)
+	want.Inputs[0].WitnessUtxo = funding.Tx.TxOut[foreign.Index]
+	want.Inputs[1] = psbt.PInput{
+		NonWitnessUtxo:  funding.Tx,
+		WitnessUtxo:     output,
+		SighashType:     txscript.SigHashAll,
+		Bip32Derivation: []*psbt.Bip32Derivation{origin},
+	}
+
+	result, err := w.DecorateInputs(h.Context(), packet, true)
+
+	require.NoError(h, err)
+	require.Same(h, packet, result)
+	require.Equal(h, want, packet)
+}
+
+// testPsbtManagerDecorateRejectUnknown protects decoration's partial in-place
+// contract: an ownership error retains earlier enrichment and stops traversal.
+func testPsbtManagerDecorateRejectUnknown(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Seed:     h.SeedFromTestName(),
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{100_000, 200_000},
+	})
+	require.NotEmpty(h, funding.ForeignOutpoints)
+	// last is owned; its bare record proves we stopped at the foreign input.
+	first, last := funding.WalletOutpoints[0], funding.WalletOutpoints[1]
+	foreign := funding.ForeignOutpoints[0]
+	output := funding.Tx.TxOut[first.Index]
+	origin := psbtFundedCoinDerivation(h, w, output)
+	packet := psbtTestPacket(h.T, first, foreign, last)
+	packet.Inputs[0].Unknowns = psbtTestUnknown(1)
+	packet.Inputs[1].Unknowns = psbtTestUnknown(2)
+	packet.Inputs[2].Unknowns = psbtTestUnknown(3)
+	want := psbtTestPacket(h.T, first, foreign, last)
+	want.Inputs[0] = psbt.PInput{
+		NonWitnessUtxo:  funding.Tx,
+		WitnessUtxo:     output,
+		SighashType:     txscript.SigHashAll,
+		Bip32Derivation: []*psbt.Bip32Derivation{origin},
+		Unknowns:        psbtTestUnknown(1),
+	}
+	want.Inputs[1].Unknowns = psbtTestUnknown(2)
+	want.Inputs[2].Unknowns = psbtTestUnknown(3)
+
+	result, err := w.DecorateInputs(h.Context(), packet, false)
+
+	require.ErrorIs(h, err, wallet.ErrNotMine)
+	require.Nil(h, result)
+	require.Equal(h, want, packet)
+}
+
+// testPsbtManagerDecorateRejectNil proves a missing packet or unsigned
+// transaction is rejected before ownership handling.
+func testPsbtManagerDecorateRejectNil(h *bwtest.HarnessTest) {
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+
+	cases := []struct {
+		name   string
+		packet *psbt.Packet
+	}{
+		{name: "nil packet"},
+		{name: "missing transaction", packet: &psbt.Packet{}},
+	}
+	for _, tc := range cases {
+		h.Run(tc.name, func(t *testing.T) {
+			before := psbtTestSnapshot(t, tc.packet)
+
+			result, err := w.DecorateInputs(
+				h.Context(), tc.packet, false,
+			)
+
+			require.ErrorIs(t, err, wallet.ErrPacketNil)
+			require.Nil(t, result)
+			require.Equal(t, before, psbtTestSnapshot(t, tc.packet))
+		})
+	}
+}
+
+// testPsbtManagerDecorateRejectMalformed proves unreadable packet structure is
+// rejected before enrichment or ownership handling. Each row owns its records
+// and takes its baseline inside the subtest.
+func testPsbtManagerDecorateRejectMalformed(h *bwtest.HarnessTest) {
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	input := wire.OutPoint{Hash: chainhash.Hash{1}}
+
+	cases := []struct {
+		name     string
+		txInputs []*wire.TxIn
+		inputs   []psbt.PInput
+		outputs  []psbt.POutput
+	}{
+		{
+			name:     "missing inputs",
+			txInputs: psbtTestPacket(h.T, input).UnsignedTx.TxIn,
+			outputs:  []psbt.POutput{{}},
+		},
+		{
+			name:     "extra inputs",
+			txInputs: psbtTestPacket(h.T, input).UnsignedTx.TxIn,
+			inputs:   []psbt.PInput{{}, {}},
+			outputs:  []psbt.POutput{{}},
+		},
+		{
+			name:     "missing outputs",
+			txInputs: psbtTestPacket(h.T, input).UnsignedTx.TxIn,
+			inputs:   []psbt.PInput{{}},
+		},
+		{
+			name:     "nil transaction input",
+			txInputs: []*wire.TxIn{nil},
+			inputs:   []psbt.PInput{{}},
+			outputs:  []psbt.POutput{{}},
+		},
+	}
+	for _, tc := range cases {
+		h.Run(tc.name, func(t *testing.T) {
+			packet := psbtTestPacket(t, input)
+			packet.UnsignedTx.TxIn = tc.txInputs
+			packet.Inputs, packet.Outputs = tc.inputs, tc.outputs
+			before := psbtTestSnapshot(t, packet)
+
+			result, err := w.DecorateInputs(
+				h.Context(), packet, false,
+			)
+
+			require.ErrorIs(t, err, wallet.ErrPacketMalformed)
+			require.Nil(t, result)
+			require.Equal(t, before, psbtTestSnapshot(t, packet))
+		})
+	}
+}
+
 // testPsbtManagerCombinePackets proves metadata from independent participants
 // is combined for the same transaction, including owned witness inputs and a
 // foreign coin, without changing either source.

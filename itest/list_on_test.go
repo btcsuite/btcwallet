@@ -588,6 +588,26 @@ var allTestCases = []*testCase{
 		TestFunc: testFundPsbtWatchOnly,
 	},
 	{
+		Name:     "psbtmanager decorate owned inputs",
+		TestFunc: testPsbtManagerDecorateOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager decorate skip unknown",
+		TestFunc: testPsbtManagerDecorateSkipUnknown,
+	},
+	{
+		Name:     "psbtmanager decorate reject unknown",
+		TestFunc: testPsbtManagerDecorateRejectUnknown,
+	},
+	{
+		Name:     "psbtmanager decorate reject nil",
+		TestFunc: testPsbtManagerDecorateRejectNil,
+	},
+	{
+		Name:     "psbtmanager decorate reject malformed",
+		TestFunc: testPsbtManagerDecorateRejectMalformed,
+	},
+	{
 		Name:     "psbtmanager combine packets",
 		TestFunc: testPsbtManagerCombinePackets,
 	},
