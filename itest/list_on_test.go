@@ -588,6 +588,14 @@ var allTestCases = []*testCase{
 		TestFunc: testFundPsbtWatchOnly,
 	},
 	{
+		Name:     "psbtmanager combine reject nil",
+		TestFunc: testPsbtManagerCombineRejectNil,
+	},
+	{
+		Name:     "psbtmanager combine reject malformed",
+		TestFunc: testPsbtManagerCombineRejectMalformed,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
