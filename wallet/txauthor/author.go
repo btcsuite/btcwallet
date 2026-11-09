@@ -239,6 +239,23 @@ func SelectInputs(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 	fetchInputs InputSource, changeInfo ChangeScriptInfo) (*InputSelection,
 	error) {
 
+	return SelectInputsWithWitnessSizes(
+		outputs, feeRatePerKb, fetchInputs, changeInfo, nil,
+	)
+}
+
+// SelectInputsWithWitnessSizes selects inputs like SelectInputs, using caller
+// bounds for Taproot witnesses whose size cannot be inferred from the prevout.
+// Each bound is the maximum serialized witness-stack size in bytes, including
+// its compact-size prefixes and all stack elements, but excluding marker/flag.
+// Callers must cover the complete satisfaction they will finalize, including
+// any annex. Bounds never reduce the normal key-path estimate, and entries for
+// unselected or non-Taproot inputs are ignored.
+func SelectInputsWithWitnessSizes(outputs []*wire.TxOut,
+	feeRatePerKb btcutil.Amount, fetchInputs InputSource,
+	changeInfo ChangeScriptInfo,
+	witnessSizes map[wire.OutPoint]uint32) (*InputSelection, error) {
+
 	if changeInfo.ScriptSize > txscript.MaxScriptSize {
 		return nil, fmt.Errorf("%w: %d bytes, maximum %d",
 			errChangeScriptSizeOutOfRange, changeInfo.ScriptSize,
@@ -278,16 +295,11 @@ func SelectInputs(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			return nil, err
 		}
 
-		// We count the types of inputs, which we'll use to estimate
-		// the vsize of the transaction.
-		p2pkh, p2tr, p2wpkh, nested := countInputTypes(scripts)
-
-		maxSignedSize := txsizes.EstimateVirtualSize(
-			p2pkh, p2tr, p2wpkh, nested, outputs, changeScriptSize,
-		)
-
-		maxRequiredFee, err := CheckedFeeForSerializeSize(
-			feeRatePerKb, maxSignedSize,
+		// Sizing the complete selected set here lets a larger witness
+		// bound trigger the same fee-sufficiency retry as another input.
+		maxRequiredFee, err := requiredFeeWithWitnessSizes(
+			feeRatePerKb, inputs, scripts, outputs,
+			changeScriptSize, witnessSizes,
 		)
 		if err != nil {
 			return nil, err
@@ -320,6 +332,52 @@ func SelectInputs(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			changeInfo:      changeInfo,
 		}, nil
 	}
+}
+
+// requiredFeeWithWitnessSizes adds caller-bounded script witness data to the
+// ordinary input-type estimate before computing the fee for a selected set.
+func requiredFeeWithWitnessSizes(feeRatePerKb btcutil.Amount,
+	inputs []*wire.TxIn, scripts [][]byte, outputs []*wire.TxOut,
+	changeScriptSize int,
+	witnessSizes map[wire.OutPoint]uint32) (btcutil.Amount, error) {
+
+	// Prevout types still determine every non-witness byte and the normal
+	// key-path witness, so explicit bounds only need to supply the excess.
+	p2pkh, p2tr, p2wpkh, nested := countInputTypes(scripts)
+	maxSignedSize := txsizes.EstimateVirtualSize(
+		p2pkh, p2tr, p2wpkh, nested, outputs, changeScriptSize,
+	)
+
+	// Caller bounds are uint32, so widening before summing keeps the
+	// arithmetic safe even when a bound cannot fit a valid transaction.
+	var extraWitness uint64
+	for i, input := range inputs {
+		if !txscript.IsPayToTaproot(scripts[i]) {
+			continue
+		}
+
+		size := witnessSizes[input.PreviousOutPoint]
+		if size > txsizes.RedeemP2TRInputWitnessWeight {
+			extraWitness += uint64(size -
+				txsizes.RedeemP2TRInputWitnessWeight)
+		}
+	}
+
+	// A block cannot contain this much witness data. Bound the result
+	// before conversion to int, including on platforms with 32-bit ints.
+	if extraWitness > blockchain.MaxBlockWeight {
+		return 0, errors.New("input witness size exceeds " +
+			"maximum block weight")
+	}
+
+	// Rounding the extra witness separately is conservative by at most
+	// one virtual byte, regardless of the number of script-path inputs.
+	extraSize := int(extraWitness)
+
+	maxSignedSize += (extraSize + blockchain.WitnessScaleFactor - 1) /
+		blockchain.WitnessScaleFactor
+
+	return CheckedFeeForSerializeSize(feeRatePerKb, maxSignedSize)
 }
 
 // fetchFunding asks fetchInputs for inputs covering targetAmount plus
