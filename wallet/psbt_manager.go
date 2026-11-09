@@ -2585,6 +2585,11 @@ func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 		return nil, ErrNoPsbtsToCombine
 	}
 
+	err := validatePsbtMergePointers(psbts)
+	if err != nil {
+		return nil, err
+	}
+
 	base := psbts[0]
 	baseTxHash := base.UnsignedTx.TxHash()
 	nInputs := len(base.Inputs)
@@ -2607,6 +2612,16 @@ func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 		}
 	}
 
+	// Compatibility alone cannot detect a malformed base, or contributions
+	// that repeat the same malformed shape. Individual fragments need not yet
+	// contain the UTXO metadata supplied by the other participants.
+	for i, p := range psbts {
+		err := validatePacketShape(p)
+		if err != nil {
+			return nil, fmt.Errorf("packet index %d: %w", i, err)
+		}
+	}
+
 	// Initialize a fresh packet using a deep copy of the unsigned
 	// transaction to ensure we don't mutate any of the input packets.
 	combined := &psbt.Packet{
@@ -2617,6 +2632,24 @@ func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 	}
 
 	return combined, nil
+}
+
+// validatePsbtMergePointers checks pointer safety before transaction hashing,
+// leaving metadata cardinality to the established compatibility checks and
+// subsequent shape validation.
+func validatePsbtMergePointers(psbts []*psbt.Packet) error {
+	for i, p := range psbts {
+		if p == nil || p.UnsignedTx == nil {
+			return fmt.Errorf("%w: packet index %d", ErrPacketNil, i)
+		}
+
+		err := validatePacketPointers(p)
+		if err != nil {
+			return fmt.Errorf("packet index %d: %w", i, err)
+		}
+	}
+
+	return nil
 }
 
 // mergePsbtInputs merges the source input into the destination input.

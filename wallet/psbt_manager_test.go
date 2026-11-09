@@ -5496,10 +5496,11 @@ func TestCombinePsbt(t *testing.T) {
 		w, _ := createStartedWalletWithMocks(t)
 
 		// Act: Attempt to combine with no packets.
-		_, err := w.CombinePsbt(t.Context())
+		result, err := w.CombinePsbt(t.Context())
 
-		// Assert: Verify it returns the expected error.
+		// Assert: No contribution means an error with no result packet.
 		require.ErrorIs(t, err, ErrNoPsbtsToCombine)
+		require.Nil(t, result)
 	})
 
 	t.Run("mismatch tx", func(t *testing.T) {
