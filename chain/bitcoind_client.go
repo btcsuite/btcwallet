@@ -962,23 +962,13 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 	// the height, as the hash can change during a reorganization, which we
 	// catch by testing connectivity from known blocks to the previous
 	// block.
-	bestHash, bestHeight, err := c.GetBestBlock()
+	_, bestHeight, err := c.GetBestBlock()
 	if err != nil {
 		return err
-	}
-	bestHeader, err := c.GetBlockHeaderVerbose(bestHash)
-	if err != nil {
-		return err
-	}
-	bestBlock := waddrmgr.BlockStamp{
-		Hash:      *bestHash,
-		Height:    bestHeight,
-		Timestamp: time.Unix(bestHeader.Time, 0),
 	}
 
 	// Create a list of headers sorted in forward order. We'll use this in
 	// the event that we need to backtrack due to a chain reorg.
-	headers := list.New()
 	previousHeader, err := c.GetBlockHeaderVerbose(&start)
 	if err != nil {
 		return err
@@ -987,14 +977,83 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 	if err != nil {
 		return err
 	}
-	headers.PushBack(previousHeader)
+
+	headers := []*btcjson.GetBlockHeaderVerboseResult{previousHeader}
+
+	// Undo our last published block before replaying a replacement. Live
+	// notifications may already have disconnected it before this rescan
+	// published its stale RPC response, so the rescan must also unwind it.
+	rewind := func() error {
+		var parent *btcjson.GetBlockHeaderVerboseResult
+		if len(headers) > 1 {
+			parent = headers[len(headers)-2]
+		} else {
+			hash, err := chainhash.NewHashFromStr(
+				previousHeader.PreviousHash,
+			)
+			if err != nil {
+				return err
+			}
+
+			parent, err = c.GetBlockHeaderVerbose(hash)
+			if err != nil {
+				return err
+			}
+		}
+
+		parentHash, err := chainhash.NewHashFromStr(parent.Hash)
+		if err != nil {
+			return err
+		}
+
+		c.onBlockDisconnected(
+			previousHash, previousHeader.Height,
+			time.Unix(previousHeader.Time, 0),
+		)
+
+		headers = headers[:len(headers)-1]
+		if len(headers) == 0 {
+			headers = append(headers, parent)
+		}
+
+		previousHeader, previousHash = parent, parentHash
+
+		return nil
+	}
 
 	log.Debugf("Rescanning from block height %v to %v",
-		previousHeader.Height+1, bestBlock.Height)
+		previousHeader.Height+1, bestHeight)
 
 	// Cycle through all of the blocks known to bitcoind, being mindful of
 	// reorgs.
-	for i := previousHeader.Height + 1; i <= bestBlock.Height; i++ {
+	for {
+		i := previousHeader.Height + 1
+		if i > bestHeight {
+			bestHash, height, err := c.GetBestBlock()
+			if err != nil {
+				return err
+			}
+
+			bestHeight = height
+
+			// Only finish at the tip we actually scanned. A replaced
+			// final block has no successor to reveal the fork.
+			if previousHeader.Height == height &&
+				*previousHash == *bestHash {
+
+				break
+			}
+		}
+
+		if i > bestHeight {
+			err = rewind()
+			if err != nil {
+				return err
+			}
+
+			continue
+		}
+
 		hash, err := c.GetBlockHash(int64(i))
 		if err != nil {
 			return err
@@ -1032,60 +1091,14 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 			}
 		}
 
-		for block.Header.PrevBlock.String() != previousHeader.Hash {
-			// If we're in this for loop, it looks like we've been
-			// reorganized. We now walk backwards to the common
-			// ancestor between the best chain and the known chain.
-			//
-			// First, we signal a disconnected block to rewind the
-			// rescan state.
-			c.onBlockDisconnected(
-				previousHash, previousHeader.Height,
-				time.Unix(previousHeader.Time, 0),
-			)
-
-			// Get the previous block of the best chain.
-			hash, err := c.GetBlockHash(int64(i - 1))
+		if block.Header.PrevBlock != *previousHash {
+			err = rewind()
 			if err != nil {
 				return err
 			}
-			block, err = c.GetBlock(hash)
-			if err != nil {
-				return err
-			}
-
-			// Then, we'll the get the header of this previous
-			// block.
-			if headers.Back() != nil {
-				// If it's already in the headers list, we can
-				// just get it from there and remove the
-				// current hash.
-				headers.Remove(headers.Back())
-				if headers.Back() != nil {
-					previousHeader = headers.Back().
-						Value.(*btcjson.GetBlockHeaderVerboseResult)
-					previousHash, err = chainhash.NewHashFromStr(
-						previousHeader.Hash,
-					)
-					if err != nil {
-						return err
-					}
-				}
-			} else {
-				// Otherwise, we get it from bitcoind.
-				previousHash, err = chainhash.NewHashFromStr(
-					previousHeader.PreviousHash,
-				)
-				if err != nil {
-					return err
-				}
-				previousHeader, err = c.GetBlockHeaderVerbose(
-					previousHash,
-				)
-				if err != nil {
-					return err
-				}
-			}
+			// The next iteration must fetch the successor of the new
+			// cursor, not label a predecessor with the old height.
+			continue
 		}
 
 		// Now that we've ensured we haven't come across a reorg, we'll
@@ -1098,7 +1111,7 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 			PreviousHash: block.Header.PrevBlock.String(),
 			Time:         block.Header.Timestamp.Unix(),
 		}
-		headers.PushBack(previousHeader)
+		headers = append(headers, previousHeader)
 
 		// Notify the block and any of its relevant transacations.
 		_ = c.filterBlock(block, i, true)
@@ -1109,27 +1122,12 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 			)
 		}
 
-		// If we've reached the previously best known block, check to
-		// make sure the underlying node hasn't synchronized additional
-		// blocks. If it has, update the best known block and continue
-		// to rescan to that point.
-		if i == bestBlock.Height {
-			bestHash, bestHeight, err = c.GetBestBlock()
-			if err != nil {
-				return err
-			}
-			bestHeader, err = c.GetBlockHeaderVerbose(bestHash)
-			if err != nil {
-				return err
-			}
-
-			bestBlock.Hash = *bestHash
-			bestBlock.Height = bestHeight
-			bestBlock.Timestamp = time.Unix(bestHeader.Time, 0)
-		}
 	}
 
-	c.onRescanFinished(bestHash, bestHeight, time.Unix(bestHeader.Time, 0))
+	c.onRescanFinished(
+		previousHash, previousHeader.Height,
+		time.Unix(previousHeader.Time, 0),
+	)
 
 	return nil
 }
