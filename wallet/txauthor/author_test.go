@@ -747,3 +747,43 @@ func TestIsDustChangeMatchesRelayPolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestSelectInputsWitnessSizeInsufficientFunds checks that a script witness
+// bound participates in fee sufficiency before a selection can be returned.
+func TestSelectInputsWitnessSizeInsufficientFunds(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The single input covers a 155-sat key-path fee but not the
+	// long script's witness. The source always returns that same exact
+	// input, including when selection retries with its larger fee target.
+	const inputAmount = btcutil.Amount(1_000_000)
+
+	outpoint := wire.OutPoint{Index: 1}
+
+	script := append(
+		[]byte{txscript.OP_1, txscript.OP_DATA_32},
+		make([]byte, 32)...,
+	)
+	outputs := []*wire.TxOut{wire.NewTxOut(
+		int64(inputAmount-200), script,
+	)}
+	source := func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		return inputAmount,
+			[]*wire.TxIn{wire.NewTxIn(&outpoint, nil, nil)},
+			[]btcutil.Amount{inputAmount}, [][]byte{script}, nil
+	}
+
+	// Act: Budget the full serialized script-path witness rather than
+	// assuming the 67-byte key-path witness implied by the prevout alone.
+	selection, err := SelectInputsWithWitnessSizes(
+		outputs, 1_000, source, NewChangeScriptInfo(script),
+		map[wire.OutPoint]uint32{outpoint: 1_138},
+	)
+
+	// Assert: The larger fee cannot be paid, so no underfunded transaction
+	// escapes from selection even though the old estimate would succeed.
+	require.ErrorAs(t, err, new(InputSourceError))
+	require.Nil(t, selection)
+}
