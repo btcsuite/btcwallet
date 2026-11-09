@@ -7,6 +7,7 @@ package wallet
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -921,6 +922,7 @@ func TestDecorateInputsInternalKey(t *testing.T) {
 
 // TestDecorateInputsRejectsNilDerivation guards the public admission boundary
 // against nil origin records that originless decoration would dereference.
+// Rejection must leave all caller records intact.
 func TestDecorateInputsRejectsNilDerivation(t *testing.T) {
 	t.Parallel()
 
@@ -952,6 +954,9 @@ func TestDecorateInputsRejectsNilDerivation(t *testing.T) {
 			w, _ := createStartedWalletWithMocks(t)
 			packet := testFundingPacket(validUTXO)
 			packet.Inputs[0] = test.input
+			// JSON preserves malformed records without PSBT serialization.
+			before, err := json.Marshal(packet)
+			require.NoError(t, err)
 
 			// Act: Submit the malformed list through public decoration,
 			// without relying on funding's separate packet validation.
@@ -961,6 +966,10 @@ func TestDecorateInputsRejectsNilDerivation(t *testing.T) {
 			// error and no result, rather than crashing the Wallet worker.
 			require.ErrorIs(t, err, ErrPacketMalformed)
 			require.Nil(t, result)
+
+			after, err := json.Marshal(packet)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
 		})
 	}
 }

@@ -404,6 +404,9 @@ type PsbtManager interface {
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
 	//
+	// The supplied packet is enriched in place and returned on success. An
+	// error may leave earlier inputs enriched, without returning a packet.
+	//
 	// Owned key-path Taproot inputs receive the Wallet's internal key. A
 	// conflicting caller internal key, or one on a non-Taproot input,
 	// returns ErrConflictingInputMetadata.
@@ -534,6 +537,9 @@ type finalizePsbtReq struct {
 //     transaction (`NonWitnessUtxo`) or output (`WitnessUtxo`), along with
 //     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
+//
+// The supplied packet is modified in place. Earlier enrichment remains if a
+// later input fails; errors return no packet and do not roll back those edits.
 //
 // Owned key-path Taproot inputs receive the Wallet's internal key. A
 // conflicting caller internal key, or one on a non-Taproot input,
