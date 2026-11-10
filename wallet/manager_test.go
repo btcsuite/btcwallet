@@ -415,99 +415,99 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 func TestManagerChainRollbackCreate(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Hold the backend rollback for one published Wallet. Return a
-	// second Wallet's dependencies only when Create obtains the Manager lock;
-	// its existing startup mocks isolate publication from SQL persistence.
-	w, wDeps := createTestWalletWithMocks(t)
-	w.cfg.Name = testWalletName
-	w.id = 1
-	startLoadedWalletForTest(t, w)
-	wDeps.vault.On("Lock").Return().Once()
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	// Register dependency cleanup before Manager cleanup so Stop joins the
-	// created Wallet before its fixture verifies the shutdown expectation.
-	_, createdDeps := createTestWalletWithMocks(t)
-	backend := &managerBackendMock{}
-	backend.On("close").Return(nil).Once()
-	m := newManagerLifecycleTest(t, backend)
-	m.started.Store(true)
-	m.wallets[w.cfg.Name] = w
+		// Arrange: Hold the shared rewind for one published Wallet. A new
+		// writer may reach Store only after that rewind settles; startup mocks
+		// isolate successful publication from SQL persistence.
+		w, wDeps := createTestWalletWithMocks(t)
+		w.cfg.Name = testWalletName
+		w.id = 1
+		startLoadedWalletForTest(t, w)
+		wDeps.vault.On("Lock").Return().Once()
 
-	events := make(chan chainEvent, 1)
-	w.chainEventChan = events
+		// Register dependency cleanup before Manager cleanup so Stop joins the
+		// created Wallet before its fixture verifies the shutdown expectation.
+		_, createdDeps := createTestWalletWithMocks(t)
+		backend := &managerBackendMock{}
+		backend.On("close").Return(nil).Once()
 
-	entered, release := make(chan struct{}), make(chan struct{})
-	releaseWork := sync.OnceFunc(func() { close(release) })
-	t.Cleanup(releaseWork)
-	backend.On("rollbackToBlock", mock.Anything, db.Block{Height: 8}).
-		Run(func(mock.Arguments) {
-			close(entered)
-			<-release
-		}).Return(nil).Once()
+		notifications := make(chan any)
+		m := newManagerLifecycleTest(t, backend, notifications)
+		m.started.Store(true)
+		m.wallets[w.cfg.Name] = w
 
-	params := managerLifecycleCreateParams("created")
-	backend.On("create", mock.Anything, params, (*hdkeychain.ExtendedKey)(nil)).
-		Return(&walletData{
+		events := make(chan chainEvent, 1)
+		w.chainEventChan = events
+
+		entered, release := make(chan struct{}), make(chan struct{})
+		settled := make(chan struct{})
+		releaseWork := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseWork)
+		backend.On("rollbackToBlock", mock.Anything, db.Block{Height: 8}).
+			Run(func(mock.Arguments) {
+				close(entered)
+				<-release
+				close(settled)
+			}).Return(nil).Once()
+
+		params := managerLifecycleCreateParams("created")
+		backend.On(
+			"create", mock.Anything, params, (*hdkeychain.ExtendedKey)(nil),
+		).Return(&walletData{
 			id:    2,
 			name:  params.Name,
 			store: createdDeps.store,
 			vault: createdDeps.vault,
-		}, nil).Once()
-	createdDeps.store.On("GetWallet", mock.Anything, params.Name).
-		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
-	createdDeps.store.On("ListAccounts", mock.Anything,
-		db.ListAccountsQuery{WalletID: 2}).
-		Return([]db.AccountInfo{}, nil).Once()
-	createdDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
-		Return(nil).Once()
-	createdDeps.vault.On("Lock").Return().Once()
+		}, nil).Run(func(mock.Arguments) {
+			// A new writer may borrow Store only after the rewind commits.
+			select {
+			case <-settled:
+			default:
+				t.Error("Create reached storage before rollback settled")
+			}
+		}).Once()
+		createdDeps.store.On("GetWallet", mock.Anything, params.Name).
+			Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+		createdDeps.store.On("ListAccounts", mock.Anything,
+			db.ListAccountsQuery{WalletID: 2}).
+			Return([]db.AccountInfo{}, nil).Once()
+		createdDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
+			Return(nil).Once()
+		createdDeps.vault.On("Lock").Return().Once()
 
-	chainSource, ok := m.config.ChainSource.(*bwmock.Chain)
-	require.True(t, ok)
-	chainSource.On("IsCurrent").Return(false).Maybe()
+		chainSource, ok := m.config.ChainSource.(*bwmock.Chain)
+		require.True(t, ok)
+		chainSource.On("IsCurrent").Return(false).Maybe()
 
-	// Act: Race Create against the held rollback. The direct mutex probe
-	// keeps this regression independent of when the Create goroutine is run.
-	rolled, created := make(chan error, 1), make(chan error, 1)
-	go func() {
-		rolled <- m.dispatchChainEvent(t.Context(),
-			chain.BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
-	}()
+		// Act: Race public Create against the held shared rewind. Its strict
+		// backend callback checks Store ordering before a new writer starts.
+		created := make(chan error, 1)
 
-	req, ok := (<-events).notification.(prepareRollbackReq)
-	require.True(t, ok)
+		notifications <- chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 8},
+		}
 
-	// The Manager lock must exclude new writers while the existing worker
-	// is still acknowledging, not only while Store rollback is held.
-	locked := m.TryLock()
-	if locked {
-		m.Unlock()
-	}
+		req, ok := (<-events).notification.(prepareRollbackReq)
+		require.True(t, ok)
 
-	require.False(t, locked, "Create acquires lock before rollback readiness")
-	close(req.readyForRollback)
-	<-entered
+		close(req.readyForRollback)
+		<-entered
 
-	locked = m.TryLock()
-	if locked {
-		m.Unlock()
-	}
+		go func() {
+			_, err := m.Create(params)
+			created <- err
+		}()
 
-	require.False(t, locked, "rollback releases Manager lock early")
+		releaseWork()
 
-	go func() {
-		_, err := m.Create(params)
-		created <- err
-	}()
-
-	releaseWork()
-
-	// Assert: Successful publication follows rollback and the fully started
-	// created Wallet belongs to a Manager that remains Running.
-	require.NoError(t, <-rolled)
-	require.NoError(t, <-created)
-	require.Contains(t, m.String(), params.Name)
-	require.True(t, m.started.Load())
+		// Assert: Successful publication follows rollback and the fully started
+		// created Wallet belongs to a Manager that remains Running.
+		require.NoError(t, <-created)
+		require.Contains(t, m.String(), params.Name)
+		require.True(t, m.started.Load())
+	})
 }
 
 // TestManagerChainRollbackStop joins accepted persistence and leaves cleanup
@@ -1028,30 +1028,16 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Allow no backend calls so each rejected input must
-			// fail before Vault preparation or Store mutation can begin.
+			// Arrange: Reject malformed input before backend mutation; the
+			// lifecycle fixture owns closure and mock verification.
 			backend := &managerBackendMock{}
 			params := tc.params
 			params.Name = testWalletName
 
-			// No worker starts here; cancel the owned lifetime without
-			// closing the strictly untouched backend used by validation.
-			lifetimeCtx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			m := &Manager{
-				lifetimeCtx: lifetimeCtx,
-				cancel:      cancel,
-				wallets:     make(map[string]*Wallet),
-				backend:     backend,
-				config: ManagerConfig{
-					ChainSource: &bwmock.Chain{},
-					ChainParams: chainParams,
-				},
-			}
-
-			m.chainSyncer = newChainSyncer(
-				m.config.ChainSource, &m.config.ChainParams,
-			)
+			// Routine fixture cleanup closes only ownership; unexpected
+			// creation calls still fail the strict backend mock immediately.
+			backend.On("close").Return(nil).Once()
+			m := newManagerLifecycleTest(t, backend)
 			m.started.Store(true)
 
 			// Act: Ask Manager to create from the selected parameter shape,
@@ -1073,8 +1059,6 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			if tc.wantErrMsg != "" {
 				require.ErrorContains(t, err, tc.wantErrMsg)
 			}
-
-			backend.AssertExpectations(t)
 		})
 	}
 }
@@ -1289,7 +1273,7 @@ func (b *managerBackendMock) close() error {
 // newManagerLifecycleTest supplies strict backend and chain dependencies;
 // fixture cleanup joins runtime work before verifying their expected calls.
 func newManagerLifecycleTest(t *testing.T,
-	backend *managerBackendMock) *Manager {
+	backend *managerBackendMock, notifications ...<-chan any) *Manager {
 
 	t.Helper()
 
@@ -1299,6 +1283,7 @@ func newManagerLifecycleTest(t *testing.T,
 	manager := &Manager{
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
+		requestChan: make(chan any),
 		wallets:     make(map[string]*Wallet),
 		backend:     backend,
 		config: ManagerConfig{
@@ -1308,6 +1293,13 @@ func newManagerLifecycleTest(t *testing.T,
 	}
 
 	manager.chainSyncer = newChainSyncer(chain, &manager.config.ChainParams)
+
+	// Seed the stream before launching, so test setup never races the select.
+	if len(notifications) != 0 {
+		manager.chainEvents = notifications[0]
+	}
+
+	manager.wg.Go(manager.mainLoop)
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
 	t.Cleanup(func() {
@@ -2442,20 +2434,11 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			t.Parallel()
 
 			// Arrange: Capture the live root at the existing backend boundary
-			// and return mock-backed data with the required startup reads.
+			// and return a candidate without unrelated runtime startup.
 			params := tc.params
 			params.Name = testWalletName
 			params.PrivatePassphrase = []byte("private")
 			_, deps := createTestWalletWithMocks(t)
-			deps.store.On("GetWallet", mock.Anything, params.Name).
-				Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).
-				Once()
-			deps.store.On("ListAccounts", mock.Anything,
-				db.ListAccountsQuery{WalletID: 1}).
-				Return([]db.AccountInfo{}, nil).Once()
-			deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
-				Return(nil).Once()
-			deps.vault.On("Lock").Return().Once()
 
 			var observedRoot *hdkeychain.ExtendedKey
 
@@ -2472,16 +2455,18 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 				require.True(t, ok)
 				require.True(t, observedRoot.IsPrivate())
 			}).Once()
-			backend.On("close").Return(nil).Once()
-			manager := newManagerLifecycleTest(t, backend)
-			manager.started.Store(true)
-			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
-			require.True(t, ok)
-			chain.On("IsCurrent").Return(false).Maybe()
+			t.Cleanup(func() { backend.AssertExpectations(t) })
 
-			// Act: Complete public creation, including private runtime startup,
-			// before examining the captured preparation root and caller input.
-			wallet, err := manager.Create(params)
+			manager := &Manager{
+				config: ManagerConfig{
+					ChainParams: chainParams,
+				},
+				backend: backend,
+			}
+
+			// Act: Prepare the candidate so its root-clearing defer runs before
+			// inspecting the captured key and the caller's borrowed input.
+			wallet, err := manager.createWallet(t.Context(), params)
 
 			// Assert: Derived roots no longer expose key material; borrowed
 			// roots and seeds retain their bytes and remain useful to callers.
@@ -2502,7 +2487,7 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			}
 
 			// Preserved seed bytes must still reproduce the declared master
-			// after public creation has returned.
+			// after preparation has returned.
 			if tc.wantSeedMaster != "" {
 				master, err := hdkeychain.NewMaster(
 					params.Seed, &chainParams,
@@ -2539,13 +2524,18 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 				require.True(t, ok)
 				require.True(t, observedRoot.IsPrivate())
 			}).Once()
-			backend.On("close").Return(nil).Once()
-			manager := newManagerLifecycleTest(t, backend)
-			manager.started.Store(true)
+			t.Cleanup(func() { backend.AssertExpectations(t) })
 
-			// Act: Let the public request return its backend failure before
+			cfg := ManagerConfig{ChainParams: chainParams}
+
+			manager := &Manager{
+				config:  cfg,
+				backend: backend,
+			}
+
+			// Act: Let preparation return its backend failure before
 			// inspecting the original root object and borrowed input bytes.
-			wallet, err := manager.Create(params)
+			wallet, err := manager.createWallet(t.Context(), params)
 
 			// Assert: Failure preserves the original error and borrowed
 			// material, but leaves no usable Manager-derived root or Wallet.
@@ -2655,14 +2645,17 @@ func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
 		require.True(t, observedRoot.IsPrivate())
 		panic(errDBMock)
 	}).Once()
-	backend.On("close").Return(nil).Once()
-	manager := newManagerLifecycleTest(t, backend)
-	manager.started.Store(true)
+	t.Cleanup(func() { backend.AssertExpectations(t) })
 
-	// Act: Recover around the public call so assertions observe the original
-	// key only after Manager's deferred cleanup has finished unwinding.
+	manager := &Manager{
+		config:  ManagerConfig{ChainParams: chainParams},
+		backend: backend,
+	}
+
+	// Act: Recover in the preparation caller so the root-clearing defer has
+	// unwound before inspecting the captured key; no runtime is involved.
 	require.PanicsWithValue(t, errDBMock, func() {
-		_, _ = manager.Create(params)
+		_, _ = manager.createWallet(t.Context(), params)
 	})
 
 	// Assert: The captured master no longer exposes private material even
