@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -231,6 +232,8 @@ func TestReleaseOutputAlreadyUnlocked(t *testing.T) {
 func TestDeleteExpiredLeases(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Persist an expired and an active lease. Ordinary inputs keep
+	// both credit transactions readable when mined history is reconciled.
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -243,20 +246,38 @@ func TestDeleteExpiredLeases(t *testing.T) {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 		recExpired, err := wtxmgr.NewTxRecordFromMsgTx(
-			&wire.MsgTx{Version: 1, TxOut: []*wire.TxOut{{
-				Value:    1000,
-				PkScript: []byte{0x51},
-			}}}, time.Now(),
+			&wire.MsgTx{
+				Version: 1,
+				TxIn: []*wire.TxIn{
+					{
+						PreviousOutPoint: wire.OutPoint{
+							Hash: chainhash.Hash{1},
+						},
+					},
+				},
+				TxOut: []*wire.TxOut{
+					{Value: 1000, PkScript: []byte{0x51}},
+				},
+			}, time.Now(),
 		)
 		if err != nil {
 			return err
 		}
 
 		recActive, err := wtxmgr.NewTxRecordFromMsgTx(
-			&wire.MsgTx{Version: 1, TxOut: []*wire.TxOut{{
-				Value:    2000,
-				PkScript: []byte{0x51},
-			}}}, time.Now(),
+			&wire.MsgTx{
+				Version: 1,
+				TxIn: []*wire.TxIn{
+					{
+						PreviousOutPoint: wire.OutPoint{
+							Hash: chainhash.Hash{2},
+						},
+					},
+				},
+				TxOut: []*wire.TxOut{
+					{Value: 2000, PkScript: []byte{0x51}},
+				},
+			}, time.Now(),
 		)
 		if err != nil {
 			return err
@@ -298,9 +319,12 @@ func TestDeleteExpiredLeases(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Act: Run lease expiry at the Store boundary after both writes commit.
 	err = store.DeleteExpiredLeases(t.Context(), 0)
 	require.NoError(t, err)
 
+	// Assert: Reading the persisted locks leaves only the active lease;
+	// transaction serialization does not change either lease's expiry.
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		locked, err := txStore.ListLockedOutputs(ns)
