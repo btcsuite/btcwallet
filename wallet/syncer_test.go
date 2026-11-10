@@ -736,11 +736,13 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	// tip is on the main chain and no rollback is triggered.
 	expectMatchingRollbackBatch(store, mockChain)
 
-	// Act & Assert: Verify that checkRollback completes without error
-	// and no rollback is triggered when hashes match.
+	// Act: Compare the stored tip with the current backend branch.
 	err := s.checkRollback(t.Context())
+
+	// Assert: Matching hashes need no rollback or worker restart.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestCheckRollbackMissingHistoricalBlock verifies that a Store-backed wallet
@@ -755,16 +757,27 @@ func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {
 	s := newTestSyncer(Config{Chain: mockChain}, nil, nil, nil, store, 0)
 
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
-	expectSyncedTip(store, tip)
+	store.On("GetWallet", mock.Anything, s.cfg.Name).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Hash: tip.Hash, Height: 100}}, nil,
+	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(nil, db.ErrBlockNotFound).Once()
+
+	// The individual tip is unavailable too; retain the existing remote
+	// identity proof rather than treating the whole range as corrupt.
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 100,
+		EndHeight:   100,
+	}).Return(nil, db.ErrBlockNotFound).Once()
 	mockChain.On("GetBlockHash", int64(100)).Return(&tip.Hash, nil).Once()
 
-	// Act & Assert: The persisted tip proves the wallet remains on the main
-	// chain, so no rollback is necessary.
+	// Act: Resolve the missing range and singleton against the persisted tip.
 	err := s.checkRollback(t.Context())
+
+	// Assert: The accepted remote identity keeps the current Wallet usable
+	// without submitting any rollback for the missing historical range.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
@@ -868,6 +881,9 @@ func TestCheckRollbackDetected(t *testing.T) {
 		"GetBlockHashes", int64(91), int64(100),
 	).Return(remoteHashes, nil).Once()
 
+	mockChain.On("GetBestBlock").
+		Return(&chainhash.Hash{}, int32(100), nil).Once()
+
 	// Mock header retrieval for the detected fork point at height 95.
 	forkHash := chainhash.Hash{byte(95)}
 	header := &wire.BlockHeader{Timestamp: time.Now()}
@@ -880,11 +896,14 @@ func TestCheckRollbackDetected(t *testing.T) {
 		"RollbackToBlock", mock.Anything, uint32(96),
 	).Return(nil).Once()
 
-	// Act & Assert: Verify that checkRollback correctly identifies the
-	// fork and performs the rollback.
+	// Act: Compare the committed Store history against the diverging branch.
 	err := s.checkRollback(t.Context())
+
+	// Assert: Recovery synchronously commits the fork boundary through one
+	// atomic Store rollback, using only the expected backend reads.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestInitChainSync verifies the initial synchronization sequence.
@@ -4551,6 +4570,9 @@ func expectMatchingRollbackBatch(store *walletmock.Store,
 		end   uint32 = 100
 	)
 
+	mockChain.On("GetBestBlock").
+		Return(&chainhash.Hash{}, int32(end), nil).Once()
+
 	localBlocks := make([]db.Block, 0, end-start+1)
 	remoteHashes := make([]chainhash.Hash, 0, end-start+1)
 
@@ -5355,11 +5377,16 @@ func TestCheckRollback_RemoteError(t *testing.T) {
 	mockChain.On("GetBlockHashes", int64(91), int64(100)).Return(
 		([]chainhash.Hash)(nil), errRemote).Once()
 
-	// Act: Perform a rollback check.
+	mockChain.On("GetBestBlock").
+		Return(&chainhash.Hash{}, int32(100), nil).Once()
+
+	// Act: Compare the saved batch with source hashes to exercise its error.
 	err := s.checkRollback(t.Context())
 
-	// Assert: Verify failure.
+	// Assert: Preserve the lookup error and verify both stop reading at it.
 	require.ErrorIs(t, err, errRemote)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestFilterBatch_NilFilter verifies logging and forcing download.
@@ -5500,9 +5527,6 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 		Hash:   hashB,
 		Height: 101,
 	})
-	mockChain.On("GetBlockHashes", int64(101), int64(101)).Return(
-		[]chainhash.Hash{hashC}, nil,
-	).Once()
 
 	// The store returns the local synced blocks for the range [92, 101]
 	// ascending: heights 92..99 are unique fillers, height 100 is hashA and
@@ -5536,11 +5560,16 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 	mockChain.On("GetBlockHeader", &hashA).Return(
 		(*wire.BlockHeader)(nil), errHeader).Once()
 
-	// Act: Perform the rollback check.
+	mockChain.On("GetBestBlock").
+		Return(&chainhash.Hash{}, int32(101), nil).Once()
+
+	// Act: Resolve the common ancestor and request its failing source header.
 	err := s.checkRollback(t.Context())
 
-	// Assert: Verify failure.
+	// Assert: Retain the header error and verify reads stop at that failure.
 	require.ErrorIs(t, err, errHeader)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestFilterBatch_Match verifies positive match logic.
@@ -6259,22 +6288,33 @@ func TestBroadcastUnminedTxnsStoreSortsDependencies(t *testing.T) {
 func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Store owns the ascending recorded range and exact read.
 	store := &walletmock.Store{}
 	s := newTestSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
 	s.store = store
 	s.walletID = 88
 
-	blocks := []db.Block{{Hash: chainhash.Hash{88}, Height: 100}, {
-		Hash:   chainhash.Hash{89},
-		Height: 101,
-	}}
+	blocks := []db.Block{
+		{
+			Hash:   chainhash.Hash{88},
+			Height: 100,
+		},
+		{
+			Hash:   chainhash.Hash{89},
+			Height: 101,
+		},
+	}
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
 		StartHeight: 100,
 		EndHeight:   101,
 	}).Return(blocks, nil).Once()
 
-	hashes, err := s.syncedBlockHashes(t.Context(), 100, 101)
+	// Act: Read hashes and their aligned starting height through Store.
+	hashes, startHeight, err := s.syncedBlockHashes(t.Context(), 100, 101)
+
+	// Assert: The returned origin and hash order match the recorded range.
 	require.NoError(t, err)
+	require.Equal(t, int32(100), startHeight)
 	require.Len(t, hashes, 2)
 	require.Equal(t, blocks[0].Hash, *hashes[0])
 	require.Equal(t, blocks[1].Hash, *hashes[1])
@@ -7249,12 +7289,10 @@ func TestAdvanceChainSync_LargeGap(t *testing.T) {
 	require.Equal(t, uint32(syncStateSyncing), s.state.Load())
 }
 
-// TestCheckRollbackStoreSyncedTip verifies that checkRollback reads the synced
-// tip from the Store rather than the legacy addrStore. The Store reports a
-// current tip while the legacy addrStore is nil, so any read of the legacy tip
-// would panic; checkRollback must still scan from the Store tip and detect the
-// reorg. This guards a Store-backed backend that does not mirror its tip into
-// the legacy manager, where a stale legacy height could skip a needed rollback.
+// TestCheckRollbackStoreSyncedTip verifies a Store tip above a shorter backend
+// tip compares only the available prefix and synchronously rewinds to that
+// matching backend tip. This guards against above-tip hash requests while
+// retaining the Store as the tip source: the legacy addrStore is nil.
 func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	t.Parallel()
 
@@ -7294,20 +7332,17 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
 
-	// Remote hashes fork at height 95: 91..95 match, 96..100 differ.
-	remoteHashes := make([]chainhash.Hash, 10)
-	for i := range 10 {
-		h := 91 + i
-		if h > 95 {
-			remoteHashes[i] = chainhash.Hash{0xff}
-		} else {
-			remoteHashes[i] = chainhash.Hash{byte(h)}
-		}
+	// The backend branch ends at ninety-five, below the saved tip. Only
+	// the available prefix can be compared, even though all local rows exist.
+	remoteHashes := make([]chainhash.Hash, 0, 5)
+	for h := uint32(91); h <= 95; h++ {
+		remoteHashes = append(remoteHashes, chainhash.Hash{byte(h)})
 	}
 
-	mockChain.On(
-		"GetBlockHashes", int64(91), int64(100),
-	).Return(remoteHashes, nil).Once()
+	mockChain.On("GetBestBlock").
+		Return(&chainhash.Hash{95}, int32(95), nil).Once()
+	mockChain.On("GetBlockHashes", int64(91), int64(95)).
+		Return(remoteHashes, nil).Once()
 
 	forkHash := chainhash.Hash{byte(95)}
 	header := &wire.BlockHeader{Timestamp: time.Unix(95, 0).UTC()}
@@ -7321,11 +7356,11 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 		"RollbackToBlock", mock.Anything, uint32(96),
 	).Return(nil).Once()
 
-	// Act: run the rollback check.
+	// Act: Check the saved tip against the shorter current branch.
 	err := s.checkRollback(t.Context())
 
-	// Assert: the reorg was detected from the Store tip and rolled back
-	// without ever consulting the legacy addrStore.
+	// Assert: Recovery synchronously rewinds to the matching backend tip
+	// through Store, without an above-tip RPC or legacy metadata read.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
@@ -7931,7 +7966,7 @@ func TestScanBatchAncestry(t *testing.T) {
 	nextHash := next.BlockHash()
 
 	client.On("GetBestBlock").Unset()
-	client.On("GetBestBlock").Return(&nextHash, int32(2), nil).Times(4)
+	client.On("GetBestBlock").Return(&nextHash, int32(2), nil).Times(5)
 	client.On("GetBlockHashes", int64(2), int64(2)).
 		Return([]chainhash.Hash{nextHash}, nil).Once()
 	client.On("GetBlocks", []chainhash.Hash{nextHash}).
