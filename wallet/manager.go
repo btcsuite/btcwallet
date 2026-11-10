@@ -173,6 +173,16 @@ type Manager struct {
 	// cancel signals terminal reader shutdown before draining Wallet work.
 	cancel context.CancelFunc
 
+	// stopReq pins the first Stop caller before lifetime cancellation.
+	// Its response carries cleanup errors; wg remains the completion boundary.
+	stopReq atomic.Pointer[stopManagerReq]
+
+	// chainEvents is the borrowed stream enabled after successful startup.
+	chainEvents <-chan any
+
+	// requestChan sends Wallet operations to the main loop.
+	requestChan chan any
+
 	// wg joins routing after releasing the lock needed by recipient snapshots.
 	wg sync.WaitGroup
 }
@@ -252,6 +262,55 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
 
 	return m, nil
+}
+
+// managerInfoReq asks for the current Wallet names.
+type managerInfoReq struct {
+	resp chan string
+}
+
+// startManagerReq keeps the caller's context while startup completes.
+type startManagerReq struct {
+	reqCtx
+
+	resp chan startManagerResp
+}
+
+// startManagerResp returns the complete Wallet set or startup cleanup error.
+type startManagerResp struct {
+	wallets []*Wallet
+	err     error
+}
+
+// createWalletReq keeps creation context through preparation and startup.
+type createWalletReq struct {
+	reqCtx
+
+	params CreateWalletParams
+	resp   chan createWalletResp
+}
+
+// createWalletResp keeps the result until the caller collects it.
+type createWalletResp struct {
+	wallet *Wallet
+	err    error
+}
+
+// stopManagerReq requests cleanup and optionally returns its error.
+type stopManagerReq struct {
+	resp chan error
+}
+
+// sendReq queues work while the Manager and caller are still running.
+func (m *Manager) sendReq(ctx context.Context, req any) error {
+	select {
+	case m.requestChan <- req:
+		return nil
+	case <-m.lifetimeCtx.Done():
+		return ErrManagerStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // startWallets assembles and starts durable Wallets in stable identifier order.
