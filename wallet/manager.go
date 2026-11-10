@@ -451,36 +451,55 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 		}
 	}()
 
-	err := ctx.Err()
+	// Run the extracted body under the existing lock until ownership moves
+	// to the prepared request loop.
+	req := startManagerReq{
+		reqCtx: reqCtx{ctx: ctx},
+	}
+	wallets, _, err := m.handleStartReq(&req)
 	if err != nil {
 		return nil, err
 	}
 
-	// Cleanup closes and clears the backend, making this Manager terminal.
-	if m.backend == nil {
-		return nil, ErrManagerStopped
-	}
-
-	if m.started.Swap(true) {
-		return nil, fmt.Errorf(
-			"manager already started: %w", ErrStateForbidden,
-		)
-	}
-
-	wallets, err := m.startWallets(ctx)
-	if err != nil {
-		// No candidate is published on failure; join its work before closing
-		// shared storage and making the Manager terminal.
-		return nil, errors.Join(err, m.stopWallets(wallets))
-	}
-
-	// Enroll under admission so shutdown cannot miss a reader whose
+	// Count this reader before starting it so Stop also waits when its
 	// goroutine has not yet been scheduled.
 	m.wg.Add(1)
 
 	go m.startChainSyncer()
 
 	return wallets, nil
+}
+
+// handleStartReq starts the complete Wallet set or finishes failed cleanup.
+// Its cleanup result tells the loop not to close storage a second time.
+func (m *Manager) handleStartReq(req *startManagerReq) (
+	[]*Wallet, bool, error) {
+
+	err := req.ctx.Err()
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Preserve terminal rejection while the original locked lifecycle owns
+	// cleanup; loop ownership later makes the lifetime authoritative.
+	if m.backend == nil {
+		return nil, false, ErrManagerStopped
+	}
+
+	if m.started.Swap(true) {
+		return nil, false, fmt.Errorf(
+			"manager already started: %w", ErrStateForbidden,
+		)
+	}
+
+	wallets, err := m.startWallets(req.ctx)
+	if err != nil {
+		// Failed candidates stay private; join their work before closing
+		// storage and returning the startup error.
+		return nil, true, errors.Join(err, m.stopWallets(wallets))
+	}
+
+	return wallets, false, nil
 }
 
 // Stop terminally drains every Wallet and closes the owned database.
@@ -507,6 +526,17 @@ func (m *Manager) Stop() error {
 	m.started.Store(true)
 
 	return m.stopWallets(nil)
+}
+
+// handleStopReq finishes cleanup before returning its error to the caller.
+// Automatic shutdown has no caller, so unexpected cleanup errors are logged.
+func (m *Manager) handleStopReq(req stopManagerReq) {
+	err := m.stopWallets(nil)
+	if req.resp != nil {
+		req.resp <- err
+	} else if err != nil {
+		log.Errorf("Unable to stop manager: %v", err)
+	}
 }
 
 // startChainSyncer reads the shared stream until shutdown or source loss.
@@ -665,6 +695,12 @@ func (m *Manager) String() string {
 	m.RLock()
 	defer m.RUnlock()
 
+	// Share the same name formatting while the existing lock owns reads.
+	return m.handleInfoReq()
+}
+
+// handleInfoReq lists current Wallet names in stable order.
+func (m *Manager) handleInfoReq() string {
 	names := make([]string, 0, len(m.wallets))
 	for name := range m.wallets {
 		names = append(names, name)
@@ -708,15 +744,36 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
+	// Keep accepted creation independent of the old Stop cancellation while
+	// reusing the final request handler under the existing lock.
+	req := createWalletReq{
+		reqCtx: reqCtx{ctx: context.Background()},
+		params: params,
+	}
+
+	wallet, _, err := m.handleCreateWalletReq(&req)
+
+	return wallet, err
+}
+
+// handleCreateWalletReq prepares and starts a Wallet before sharing it.
+// Its cleanup result tells the loop not to close storage a second time.
+func (m *Manager) handleCreateWalletReq(req *createWalletReq) (
+	*Wallet, bool, error) {
+
+	params := req.params
+
 	// The existing active set rejects duplicates before backend work. Skip
 	// absent names so kvdb's unnamed startup entry cannot mask name validation.
 	if params.Name != "" && m.wallets[params.Name] != nil {
-		return nil, fmt.Errorf("wallet %q: %w", params.Name, ErrWalletExists)
+		return nil, false, fmt.Errorf(
+			"wallet %q: %w", params.Name, ErrWalletExists,
+		)
 	}
 
-	// Durable preparation and private startup stay under the admission lock;
-	// Stop cannot close storage until the accepted creation has settled.
-	w, err := m.createWallet(params)
+	// Finish preparation and startup before the next loop operation
+	// can close storage or observe this Wallet.
+	w, err := m.createWallet(req.ctx, params)
 	if err != nil {
 		// Backend occupancy gains one public identity; retain its cause and
 		// leave unrelated validation, constraint and write errors unchanged.
@@ -724,28 +781,28 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
 		}
 
-		return nil, err
+		return nil, false, err
 	}
 
 	// Parameter validation permits initial accounts only in shell mode, so
 	// import any requested accounts before the Wallet starts.
 	if len(params.InitialAccounts) > 0 {
 		err = w.importInitialAccounts(
-			context.Background(), params.InitialAccounts,
+			req.ctx, params.InitialAccounts,
 		)
 		if err != nil {
-			return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+			return nil, true, errors.Join(err, m.stopWallets([]*Wallet{w}))
 		}
 	}
 
-	err = w.start(context.Background())
+	err = w.start(req.ctx)
 	if err != nil {
-		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+		return nil, true, errors.Join(err, m.stopWallets([]*Wallet{w}))
 	}
 
 	m.wallets[w.cfg.Name] = w
 
-	return w, nil
+	return w, false, nil
 }
 
 // checkCreate rejects terminal admission after Stop cancels the reader, even
@@ -769,7 +826,9 @@ func (m *Manager) checkCreate() error {
 
 // createWallet prepares a durable candidate while Create holds the Manager
 // lock. A returned Wallet must be started or cleaned up before releasing it.
-func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
+func (m *Manager) createWallet(ctx context.Context,
+	params CreateWalletParams) (*Wallet, error) {
+
 	// Validate identity before key derivation or Store work can produce a less
 	// useful error or side effect.
 	err := validateManagedWalletName(params.Name)
@@ -814,7 +873,7 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		walletCfg.RecoveryWindow = *params.RecoveryWindow
 	}
 
-	data, err := m.backend.create(context.Background(), params, rootKey)
+	data, err := m.backend.create(ctx, params, rootKey)
 	if err != nil {
 		return nil, err
 	}
