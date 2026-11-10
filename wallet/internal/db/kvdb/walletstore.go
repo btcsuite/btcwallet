@@ -184,7 +184,9 @@ func (s *Store) ListSyncedBlocks(_ context.Context,
 			return errMissingAddrmgrNamespace
 		}
 
-		for height := query.StartHeight; ; height++ {
+		// Checked int32 heights fail before an unsigned counter can wrap,
+		// so the inclusive bound also owns normal loop termination.
+		for height := query.StartHeight; height <= query.EndHeight; height++ {
 			height32, err := db.Uint32ToInt32(height)
 			if err != nil {
 				return fmt.Errorf("convert block height %d: %w",
@@ -193,6 +195,12 @@ func (s *Store) ListSyncedBlocks(_ context.Context,
 
 			hash, err := s.addrStore.BlockHash(ns, height32)
 			if err != nil {
+				// Recovery consumes the Store sentinel for absent history;
+				// preserve all other native failures and height context.
+				if waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) {
+					err = db.ErrBlockNotFound
+				}
+
 				return fmt.Errorf("get block hash %d: %w", height, err)
 			}
 
@@ -200,9 +208,6 @@ func (s *Store) ListSyncedBlocks(_ context.Context,
 				Hash:   *hash,
 				Height: height,
 			})
-			if height == query.EndHeight {
-				break
-			}
 		}
 
 		return nil
