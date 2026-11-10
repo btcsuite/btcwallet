@@ -213,7 +213,8 @@ type WalletStore interface {
 		query ListWalletsQuery) iter.Seq2[WalletInfo, error]
 
 	// ListSyncedBlocks returns the wallet's synced block metadata for the
-	// requested inclusive height range.
+	// requested inclusive height range, returning ErrBlockNotFound if any
+	// requested height has no recorded block.
 	ListSyncedBlocks(ctx context.Context,
 		query ListSyncedBlocksQuery) ([]Block, error)
 

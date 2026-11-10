@@ -819,30 +819,6 @@ func TestResolveMissingHistoricalBlockChainLookupError(t *testing.T) {
 	mockChain.AssertExpectations(t)
 }
 
-// TestResolveMissingHistoricalBlockLegacyManagerError verifies that legacy
-// kvdb manager not-found errors remain compatible with rollback handling.
-func TestResolveMissingHistoricalBlockLegacyManagerError(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: A legacy kvdb manager reports a missing historical block and the
-	// persisted synced tip matches the chain backend.
-	mockChain := &bwmock.Chain{}
-	s := newTestSyncer(Config{Chain: mockChain}, nil, nil, nil, nil, 0)
-	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
-	mockChain.On("GetBlockHash", int64(tip.Height)).Return(
-		&tip.Hash, nil,
-	).Once()
-
-	listErr := waddrmgr.ManagerError{ErrorCode: waddrmgr.ErrBlockNotFound}
-
-	// Act: Resolve the legacy missing historical block error.
-	err := s.resolveMissingHistoricalBlock(listErr, tip)
-
-	// Assert: The matching chain tip permits rollback initialization.
-	require.NoError(t, err)
-	mockChain.AssertExpectations(t)
-}
-
 // TestCheckRollbackDetected verifies checkRollback when reorg is detected.
 func TestCheckRollbackDetected(t *testing.T) {
 	t.Parallel()
@@ -4492,8 +4468,8 @@ func TestSyncerFullRun(t *testing.T) {
 
 	// Arrange: Initialize a store-backed syncer and set up extensive mocks
 	// to simulate a full run loop execution. The synced tip and unmined
-	// transactions are read through the store; the legacy address manager
-	// only supplies the backend birthday.
+	// transactions are read through the Store, keeping initialization on
+	// the same committed metadata boundary as recovery.
 	mockChain := &bwmock.Chain{}
 	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
@@ -4505,7 +4481,6 @@ func TestSyncerFullRun(t *testing.T) {
 	)
 
 	// Mock initial chain sync sequence.
-	mockAddrStore.On("Birthday").Return(time.Now()).Once()
 	mockChain.On("IsCurrent").Return(true).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
@@ -4550,10 +4525,15 @@ func TestSyncerFullRun(t *testing.T) {
 		cancel()
 	}()
 
-	// Act & Assert: Execute the syncer's run loop and verify that it
-	// completes all initial sync steps and enters the idle loop.
+	// Act: Execute the run loop through initialization and its next state
+	// transition, using the persisted Store tip for the rollback check.
 	err := s.run(ctx)
+
+	// Assert: Initialization and idle processing finish cleanly when the
+	// context ends, consuming each required Store and backend operation.
 	require.NoError(t, err)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 var (
@@ -4631,16 +4611,19 @@ func TestInitChainSync_BackendNotSynced(t *testing.T) {
 		&walletmock.Store{}, 0,
 	)
 
-	mockAddrStore.On("Birthday").Return(time.Now()).Once()
-	mockChain.On("IsCurrent").Return(false)
+	mockChain.On("IsCurrent").Return(false).Once()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	// Act & Assert: Verify that initialization fails due to timeout
-	// when the backend never becomes current.
+	// Act: Initialize while the backend remains behind, letting the
+	// context deadline end the existing readiness wait.
 	err := s.initChainSync(ctx)
-	require.Error(t, err)
+
+	// Assert: Readiness waiting preserves the caller's deadline rather
+	// than progressing to rollback or watch registration.
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	mockChain.AssertExpectations(t)
 }
 
 // TestDispatchScanStrategy_CFilterFail verifies fallback.
@@ -4982,18 +4965,20 @@ func TestSyncerRun_InitError(t *testing.T) {
 		store, uint32(0),
 	)
 
-	addrStore.On("Birthday").Return(time.Now()).Once()
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
 		([]db.Block)(nil), errDBMock).Once()
 
-	// Act: Run the syncer.
+	// Act: Run initialization until its first recorded-history read fails.
 	err := s.run(t.Context())
 
-	// Assert: Verify error propagation.
-	require.ErrorContains(t, err, "db error")
+	// Assert: The initialization failure retains its cause and consumes
+	// only the expected tip and history reads.
+	require.ErrorIs(t, err, errDBMock)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestDispatchScanStrategy_AutoFallback verifies fallback to full blocks
@@ -5797,12 +5782,15 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 		CS: mockCS,
 	}
 	mockAddrStore := &bwmock.AddrStore{}
-	// Birthday called by SetStartTime.
-	mockAddrStore.On("Birthday").Return(time.Time{}).Once()
+
+	// SetStartTime reads birthday metadata through the durable Store.
+	store := &walletmock.Store{}
+	store.On("GetWallet", mock.Anything, "").
+		Return(&db.WalletInfo{}, nil).Once()
 
 	s := newTestSyncer(
 		Config{Chain: nc}, mockAddrStore, nil, nil,
-		&walletmock.Store{}, 0,
+		store, 0,
 	)
 
 	// Cancel context immediately to abort waitUntilBackendSynced.
@@ -5812,9 +5800,9 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 	// Act: Attempt chain sync initialization.
 	err := s.initChainSync(ctx)
 
-	// Assert: Verify cancellation error and that Birthday was accessed.
+	// Assert: Initialization propagates cancellation after durable metadata.
 	require.Error(t, err)
-	mockAddrStore.AssertExpectations(t)
+	store.AssertExpectations(t)
 }
 
 // TestFetchAndFilterBlocks_HeaderScan verifies the optimization for empty scan
