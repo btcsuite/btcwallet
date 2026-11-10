@@ -2958,112 +2958,158 @@ func TestApplyTxBatchRejectsNilTx(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrInvalidParam)
 }
 
-// TestApplyTxBatchConfirmedChildBeforeParentSpendsParent verifies that a batch
-// listing a confirmed child before its in-batch confirmed parent still records
-// the child's spend of the parent's wallet-owned output. The confirmed write
-// path records a debit only against an already-inserted parent credit, so
-// applying the child first would find no credit to spend and silently leave the
-// parent output unspent. ApplyTxBatch sorts the batch parents-first to close
-// that gap.
+// TestApplyTxBatchConfirmedChildBeforeParentSpendsParent verifies that a
+// confirmed child spends its parent's credit whether they arrive together or
+// in separate payloads, including a later-block child and promotion without
+// repeating the parent credit metadata.
 func TestApplyTxBatchConfirmedChildBeforeParentSpendsParent(t *testing.T) {
 	t.Parallel()
 
-	dbConn, cleanup := newTestDB(t)
-	t.Cleanup(cleanup)
+	// The rows select the same transaction identities in different payload
+	// orders; ownership need not be repeated when an unmined parent confirms.
+	const (
+		child = iota
+		parent
+		unminedParent
+	)
 
-	newAddrmgrNamespace(t, dbConn)
-	txStore := newTxStore(t, dbConn)
-
-	addr, script := newTestAddressScript(t)
-	managedAddr := &bwmock.ManagedAddress{}
-	managedAddr.On("Internal").Return(true).Maybe()
-	managedAddr.On("Address").Return(addr).Maybe()
-	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
-	managedAddr.On("Imported").Return(false).Maybe()
-	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
-	managedAddr.On("Compressed").Return(true).Maybe()
-	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
-	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
-
-	addrStore := &bwmock.AddrStore{}
-	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
-	addrStore.On("Address", mock.Anything, mock.Anything).
-		Return(managedAddr, nil)
-	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
-	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
-	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
-	store := NewStore(dbConn, txStore, addrStore)
-
-	// The parent spends an external input and credits the wallet at output 0.
-	parentTx := &wire.MsgTx{Version: 1}
-	parentTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
-		Hash: chainhash.Hash{91},
-	}})
-	parentTx.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: script})
-	parentOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
-
-	// The child spends the parent's wallet-owned output and credits the wallet
-	// at its own output 0.
-	childTx := &wire.MsgTx{Version: 1}
-	childTx.AddTxIn(&wire.TxIn{PreviousOutPoint: parentOutPoint})
-	childTx.AddTxOut(&wire.TxOut{Value: 9_000, PkScript: script})
-	childOutPoint := wire.OutPoint{Hash: childTx.TxHash(), Index: 0}
-
-	block := &db.Block{
-		Hash:      chainhash.Hash{92},
-		Height:    200,
-		Timestamp: time.Unix(1710005000, 0),
+	tests := []struct {
+		name          string
+		batchSizes    []int
+		childBlock    *db.Block
+		order         []int
+		parentCredits map[uint32]address.Address
+	}{
+		{
+			name:          "single payload",
+			batchSizes:    []int{2},
+			childBlock:    someBlock(t, 200),
+			order:         []int{child, parent},
+			parentCredits: map[uint32]address.Address{0: nil},
+		},
+		{
+			name:          "split same block",
+			batchSizes:    []int{1, 1},
+			childBlock:    someBlock(t, 200),
+			order:         []int{child, parent},
+			parentCredits: map[uint32]address.Address{0: nil},
+		},
+		{
+			name:          "split later block",
+			batchSizes:    []int{1, 1},
+			childBlock:    someBlock(t, 201),
+			order:         []int{child, parent},
+			parentCredits: map[uint32]address.Address{0: nil},
+		},
+		{
+			name:       "promoted parent",
+			batchSizes: []int{1, 1, 1},
+			childBlock: someBlock(t, 201),
+			order:      []int{unminedParent, child, parent},
+		},
 	}
 
-	// Deliberately list the confirmed child before its in-batch confirmed
-	// parent. A caller-order apply would record the child first and drop its
-	// spend of the not-yet-stored parent output.
-	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
-		WalletID: 0,
-		Transactions: []db.CreateTxParams{
-			{
-				WalletID: 0,
-				Tx:       childTx,
-				Received: time.Unix(1710005100, 0),
-				Block:    block,
-				Status:   db.TxStatusPublished,
-				Credits:  map[uint32]address.Address{0: addr},
-			},
-			{
-				WalletID: 0,
-				Tx:       parentTx,
-				Received: time.Unix(1710005101, 0),
-				Block:    block,
-				Status:   db.TxStatusPublished,
-				Credits:  map[uint32]address.Address{0: addr},
-			},
-		},
-		SyncedTo: block,
-	})
-	require.NoError(t, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	// The parent output must be spent and the child output unspent: only the
-	// child's own credit should remain in the unspent set. Without the
-	// parents-first ordering the parent output would be left unspent and both
-	// outputs would appear in the unspent set.
-	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		require.NotNil(t, ns)
+			// Arrange: Use real transaction persistence and nil-credit
+			// ownership so only the two required chain-parameter reads are
+			// mocked. The child spends the parent's wallet-owned output.
+			dbConn, cleanup := newTestDB(t)
+			t.Cleanup(cleanup)
+			newAddrmgrNamespace(t, dbConn)
+			txStore := newTxStore(t, dbConn)
+			_, script := newTestAddressScript(t)
+			addrStore := &bwmock.AddrStore{}
+			addrStore.On("ChainParams").
+				Return(&chaincfg.RegressionNetParams).Twice()
+			store := NewStore(dbConn, txStore, addrStore)
 
-		unspent, err := txStore.UnspentOutputs(ns)
-		require.NoError(t, err)
+			parentTx := wire.NewMsgTx(1)
+			parentTx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash: chainhash.Hash{91},
+				},
+			})
+			parentTx.AddTxOut(&wire.TxOut{
+				Value: 10_000, PkScript: script,
+			})
+			parentOut := wire.OutPoint{Hash: parentTx.TxHash()}
+			childTx := wire.NewMsgTx(1)
+			childTx.AddTxIn(&wire.TxIn{PreviousOutPoint: parentOut})
+			childTx.AddTxOut(&wire.TxOut{
+				Value: 9_000, PkScript: script,
+			})
+			childOut := wire.OutPoint{Hash: childTx.TxHash()}
+			candidates := []db.CreateTxParams{
+				{
+					Tx:       childTx,
+					Received: time.Unix(1710005100, 0),
+					Block:    test.childBlock,
+					Status:   db.TxStatusPublished,
+					Credits:  map[uint32]address.Address{0: nil},
+				},
+				{
+					Tx:       parentTx,
+					Received: time.Unix(1710005101, 0),
+					Block:    someBlock(t, 200),
+					Status:   db.TxStatusPublished,
+					Credits:  test.parentCredits,
+				},
+				{
+					Tx:       parentTx,
+					Received: time.Unix(1710005099, 0),
+					Status:   db.TxStatusPublished,
+					Credits:  map[uint32]address.Address{0: nil},
+				},
+			}
 
-		unspentSet := make(map[wire.OutPoint]struct{}, len(unspent))
-		for _, credit := range unspent {
-			unspentSet[credit.OutPoint] = struct{}{}
-		}
+			transactions := make([]db.CreateTxParams, len(test.order))
+			for i, index := range test.order {
+				transactions[i] = candidates[index]
+			}
 
-		require.NotContains(t, unspentSet, parentOutPoint)
-		require.Contains(t, unspentSet, childOutPoint)
+			// Act: Commit the reversed transactions in the supplied payload
+			// sizes; the promotion row first records ownership unmined, then
+			// confirms without repeating it after the child is already mined.
+			offset := 0
+			for _, size := range test.batchSizes {
+				batch := transactions[offset : offset+size]
+				err := store.ApplyTxBatch(
+					t.Context(), db.TxBatchParams{
+						Transactions: batch,
+					},
+				)
+				require.NoError(t, err)
 
-		return nil
-	})
-	require.NoError(t, err)
+				offset += size
+			}
+
+			// Assert: A confirmed child's spend excludes its parent from
+			// both the unspent set and the public mined balance, regardless
+			// of the payload or block boundary used to discover the credit.
+			err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+				ns := tx.ReadBucket(wtxmgrNamespaceKey)
+				unspent, err := txStore.UnspentOutputs(ns)
+				require.NoError(t, err)
+				require.Len(t, unspent, 1)
+				require.Equal(
+					t, childOut, unspent[0].OutPoint,
+				)
+
+				balance, err := txStore.Balance(
+					ns, 1, int32(test.childBlock.Height),
+				)
+				require.NoError(t, err)
+				require.Equal(t, btcutil.Amount(9_000), balance)
+
+				return nil
+			})
+			require.NoError(t, err)
+			addrStore.AssertExpectations(t)
+		})
+	}
 }
 
 // TestApplyScanBatchConfirmedChildBeforeParentSpendsParent verifies that a
