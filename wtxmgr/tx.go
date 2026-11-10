@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -562,6 +563,32 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		}
 	}
 
+	// Confirmation can omit ownership already stored in the unmined set.
+	// Reconcile those promoted credits after balance and unmined cleanup.
+	for i := range rec.MsgTx.TxOut {
+		output := int64(i)
+		if output < 0 || output > math.MaxUint32 {
+			return storeError(ErrInput, "transaction output index "+
+				"overflows uint32", nil)
+		}
+
+		index := uint32(output)
+
+		_, value := existsCredit(ns, &rec.Hash, index, &block.Block)
+		if value == nil {
+			continue
+		}
+
+		outPoint := wire.OutPoint{Hash: rec.Hash, Index: index}
+
+		_, err := s.spendCreditByRecordedChild(
+			ns, outPoint, block.Height,
+		)
+		if err != nil {
+			return fmt.Errorf("reconcile promoted credit: %w", err)
+		}
+	}
+
 	// As there may be unconfirmed transactions that are invalidated by this
 	// transaction (either being duplicates, or double spends), remove them
 	// from the unconfirmed set.  This also handles removing unconfirmed
@@ -597,8 +624,8 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 }
 
 // AddCredit marks a transaction record as containing a transaction output
-// spendable by wallet.  The output is added unspent, and is marked spent
-// when a new transaction spending the output is inserted into the store.
+// spendable by wallet. An already-recorded confirmed child marks the output
+// spent immediately; otherwise it remains unspent until its spender is added.
 //
 // TODO(jrick): This should not be necessary.  Instead, pass the indexes
 // that are known to contain credits when a transaction or merkleblock is
@@ -617,8 +644,8 @@ func (s *Store) AddCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Blo
 }
 
 // addCredit is an AddCredit helper that runs in an update transaction.  The
-// bool return specifies whether the unspent output is newly added (true) or a
-// duplicate (false).
+// bool return reports a newly unspent output; duplicates and credits already
+// spent by a recorded confirmed child return false.
 func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta, index uint32, change bool) (bool, error) {
 	txOutAmt := btcutil.Amount(rec.MsgTx.TxOut[index].Value)
 
@@ -682,7 +709,53 @@ func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Blo
 		return false, err
 	}
 
-	return true, putUnspent(ns, &cred.outPoint, &block.Block)
+	err = putUnspent(ns, &cred.outPoint, &block.Block)
+	if err != nil {
+		return false, err
+	}
+
+	// A child can be committed before a later payload reveals this credit.
+	// Reuse mined debit accounting before reporting a newly unspent output.
+	spent, err := s.spendCreditByRecordedChild(
+		ns, cred.outPoint, cred.block.Height,
+	)
+	if err != nil {
+		return false, fmt.Errorf("reconcile recorded spend: %w", err)
+	}
+
+	return !spent, nil
+}
+
+// spendCreditByRecordedChild reconciles a late credit against confirmed inputs
+// from its block onward, keeping debit, balance and unspent updates together.
+func (s *Store) spendCreditByRecordedChild(ns walletdb.ReadWriteBucket,
+	outPoint wire.OutPoint, height int32) (bool, error) {
+
+	// The mined-only traversal treats -1 as the upper bound. It finds children
+	// in the same block or a later block without adding another spend index.
+	return s.rangeBlockTransactions(
+		ns, height, -1,
+		func(details []TxDetails) (bool, error) {
+			for i := range details {
+				child := &details[i]
+				for _, input := range child.MsgTx.TxIn {
+					if input.PreviousOutPoint != outPoint {
+						continue
+					}
+
+					// Replaying existing accounting spends the new credit;
+					// recorded inputs without an unspent credit are skipped.
+					err := s.updateMinedBalance(
+						ns, &child.TxRecord, &child.Block,
+					)
+
+					return true, err
+				}
+			}
+
+			return false, nil
+		},
+	)
 }
 
 // Rollback removes all blocks at height onwards, moving any transactions within
