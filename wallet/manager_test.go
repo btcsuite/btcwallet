@@ -2046,12 +2046,12 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 }
 
 // TestManagerCreateLifecycleStartFailureStopsManager preserves startup/cleanup
-// errors and releases membership before joining a reader waiting on that lock.
+// errors until cleanup finishes before Create or concurrent Stop returns.
 func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Hold the failing birthday read while Create owns admission,
-	// so the real reader can consume an event and wait on its membership lock.
+	// Arrange: Hold the failing birthday read while candidate startup runs.
+	// A queued event must not bypass the cleanup caused by this failure.
 	_, deps := createTestWalletWithMocks(t)
 	createErr := errors.New("candidate birthday")
 	closeErr := errors.New("backend close")
@@ -2109,8 +2109,8 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Once Create owns admission, give the reader an event before allowing
-	// startup to fail. A join under that same lock would deadlock its snapshot.
+	// Act: Queue an event while creation is held, then let startup fail.
+	// Keep cleanup held to check both Create and the concurrent Stop.
 	go func() {
 		w, err := manager.Create(params)
 		created <- createOutcome{
@@ -2123,9 +2123,6 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 
 	notifications <- chain.BlockConnected{}
 
-	require.Eventually(t, func() bool {
-		return len(notifications) == 0
-	}, time.Second, time.Millisecond)
 	releaseBirthday()
 
 	select {
@@ -2137,7 +2134,7 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	go func() { stopped <- manager.Stop() }()
 
 	// Assert: Neither the candidate nor its primary error escapes before the
-	// held cleanup finishes. Returning then requires an unlocked reader join.
+	// held cleanup finishes. Both callers must wait for storage cleanup.
 	select {
 	case result := <-created:
 		t.Fatalf("Create returned before cleanup completed: %v", result.err)
@@ -2150,14 +2147,14 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	select {
 	case outcome = <-created:
 	case <-time.After(5 * time.Second):
-		t.Fatal("failed Create did not release membership and join its reader")
+		t.Fatal("failed Create did not finish storage cleanup")
 	}
 
 	select {
 	case stopErr := <-stopped:
 		require.NoError(t, stopErr)
 	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent Stop did not join terminal cleanup")
+		t.Fatal("concurrent Stop did not finish after cleanup")
 	}
 
 	require.Nil(t, outcome.wallet)
@@ -3409,21 +3406,23 @@ func TestManagerChainSourceClosed(t *testing.T) {
 		)
 	}
 
+	// Automatic shutdown must reject creation before an external Stop can
+	// establish that state itself or hide a running-but-disconnected Manager.
+	w, err := manager.Create(CreateWalletParams{Name: "late"})
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrManagerStopped)
+
 	require.NoError(t, manager.Stop())
 }
 
-// TestManagerChainEventOrder proves source order and bounded asynchronous
-// admission while an uncancelled Wallet deliberately stops draining its inbox.
+// TestManagerChainEventOrder proves source order and bounded delivery
+// while an uncancelled Wallet deliberately stops draining its inbox.
 func TestManagerChainEventOrder(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A data-only recipient isolates admission from Store processing.
+	// Arrange: A data-only Wallet isolates delivery from Store processing.
 	// Three headers expose the capacity-one bound without extra worker queues.
-	client := createTestChain(t)
 	notifications := make(chan any, 3)
-
-	client.On("Notifications").Unset()
-	client.On("Notifications").Return((<-chan any)(notifications)).Once()
 
 	w := &Wallet{
 		id:             1,
@@ -3431,32 +3430,20 @@ func TestManagerChainEventOrder(t *testing.T) {
 		chainEventChan: make(chan chainEvent, 1),
 	}
 
-	// This routing-only fixture has no Store/Wallet workers to stop. Join
-	// its sole reader explicitly after canceling the Manager-owned lifetime.
-	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	// Reuse owned cleanup so the same source fixture remains valid when the
+	// loop becomes responsible for terminal storage release.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+	manager := newManagerLifecycleTest(t, backend, notifications)
+	manager.wallets["first"] = w
 
-	manager := &Manager{
-		wallets:     map[string]*Wallet{"first": w},
-		chainSyncer: newChainSyncer(client, &chainParams),
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-	}
-	defer func() {
-		manager.cancel()
-		manager.wg.Wait()
-	}()
-
+	// Act: Queue three headers and let the loop block its second delivery
+	// behind the full first mailbox; it cannot consume the third event.
 	for height := int32(1); height <= 3; height++ {
 		notifications <- chain.BlockConnected{
 			Block: wtxmgr.Block{Height: height},
 		}
 	}
-
-	// Act: Enroll and launch the one reader, then wait until the second
-	// delivery blocks behind the first; it cannot consume the third event.
-	manager.wg.Add(1)
-
-	go manager.startChainSyncer()
 
 	require.Eventually(
 		t, func() bool {
@@ -3465,7 +3452,7 @@ func TestManagerChainEventOrder(t *testing.T) {
 	)
 
 	// Assert: Releasing capacity admits each unchanged header in FIFO order.
-	// The first acceptance did not wait for Wallet persistence or processing.
+	// The first delivery did not wait for Wallet persistence or processing.
 	for height := int32(1); height <= 3; height++ {
 		select {
 		case event := <-w.chainEventChan:
@@ -3473,17 +3460,17 @@ func TestManagerChainEventOrder(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, height, header.Height)
 		case <-time.After(time.Second):
-			t.Fatal("reader failed to resume after mailbox drain")
+			t.Fatal("delivery failed to resume after mailbox drain")
 		}
 	}
 }
 
-// TestManagerChainEventMembership verifies snapshots include a newly published
-// Wallet without retaining the Manager lock during mailbox delivery.
+// TestManagerChainEventMembership includes a newly added Wallet in the next
+// event after the preceding delivery has completed.
 func TestManagerChainEventMembership(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Only the first Wallet is published for the initial snapshot.
+	// Arrange: Only the first Wallet is present for the initial event.
 	first := &Wallet{
 		id:             1,
 		lifetimeCtx:    t.Context(),
@@ -3495,26 +3482,24 @@ func TestManagerChainEventMembership(t *testing.T) {
 		chainEventChan: make(chan chainEvent, 1),
 	}
 
-	manager := &Manager{
-		wallets:     map[string]*Wallet{"first": first},
-		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
-	}
+	// The existing fixture owns cleanup; no routing-only nil backend path
+	// is needed when lifetime cancellation starts joined shutdown.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
 
-	// Act: Publish under the existing membership lock between two events.
-	require.NoError(
-		t, manager.dispatchChainEvent(
-			t.Context(), chain.BlockConnected{},
-		),
-	)
-	manager.Lock()
-	manager.wallets["second"] = second
-	manager.Unlock()
+	notifications := make(chan any)
+	manager := newManagerLifecycleTest(t, backend, notifications)
+	manager.wallets["first"] = first
+
+	// Act: Complete the first delivery before adding the next Wallet. The
+	// subsequent event must include it without a separately cached list.
+	notifications <- chain.BlockConnected{}
+
 	<-first.chainEventChan
-	require.NoError(
-		t, manager.dispatchChainEvent(
-			t.Context(), chain.ClientConnected{},
-		),
-	)
+
+	manager.wallets["second"] = second
+
+	notifications <- chain.ClientConnected{}
 
 	// Assert: Both current members receive the next control event unchanged.
 	require.IsType(
@@ -3526,7 +3511,7 @@ func TestManagerChainEventMembership(t *testing.T) {
 }
 
 // TestManagerChainEventBlockedStop verifies terminal cancellation releases a
-// reader blocked on a real Wallet whose asynchronous initialization is pending.
+// delivery blocked on a Wallet whose asynchronous initialization is pending.
 func TestManagerChainEventBlockedStop(t *testing.T) {
 	t.Parallel()
 
@@ -3567,7 +3552,7 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 		}, time.Second, time.Millisecond,
 	)
 
-	// Act: Stop while reader delivery has no available mailbox capacity.
+	// Act: Stop while event delivery has no available mailbox capacity.
 	stopped := make(chan error, 1)
 	go func() {
 		stopped <- manager.Stop()
@@ -3576,8 +3561,8 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 	<-w.lifetimeCtx.Done()
 	releaseBackend()
 
-	// Assert: Stop joins both reader and Wallet rather than waiting for
-	// initialization to become ready or closing Store underneath either one.
+	// Assert: Stop finishes after delivery and Wallet workers have stopped,
+	// even though initialization could not make progress before cancellation.
 	select {
 	case err := <-stopped:
 		require.NoError(t, err)
@@ -3596,6 +3581,11 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	// Arrange real stores while syncing, with an owned credit persisted by a
 	// mined notification that does not advance the earlier complete sync tip.
 	source := bwmock.NewGenesisChain(t, true)
+
+	notifications := make(chan any)
+
+	source.On("Notifications").Unset()
+	source.On("Notifications").Return((<-chan any)(notifications)).Once()
 	source.On("TestMempoolAccept", mock.Anything, float64(0)).
 		Return(nil, chain.ErrTxAlreadyInMempool).Maybe()
 	m, err := NewManager(t.Context(), ManagerConfig{
@@ -3667,9 +3657,15 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	require.Equal(t, stamp, mgr.SyncedTo())
 
 	// Act on the disconnect while the manager is still below the orphan.
-	require.NoError(t, m.dispatchChainEvent(
-		t.Context(), chain.BlockDisconnected(old),
-	))
+	notifications <- chain.BlockDisconnected(old)
+	// Reading the following control event requires the rewind to finish.
+	select {
+	case notifications <- chain.ClientConnected{}:
+	case <-m.lifetimeCtx.Done():
+		t.Fatal("disconnect stopped Manager")
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnect did not finish")
+	}
 
 	// Assert the orphan and its credit are already unmined before any
 	// replacement or later rescan; its earlier full sync stamp is unchanged.
@@ -3691,9 +3687,16 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 		},
 		matches: liveMatches(newTx),
 	}))
-	require.NoError(t, m.dispatchChainEvent(
-		t.Context(), chain.BlockDisconnected(old),
-	))
+
+	notifications <- chain.BlockDisconnected(old)
+	// Reading the following control event requires the rewind to finish.
+	select {
+	case notifications <- chain.ClientConnected{}:
+	case <-m.lifetimeCtx.Done():
+		t.Fatal("disconnect stopped Manager")
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnect did not finish")
+	}
 
 	// Assert one complete history query resolves the replacement, while the
 	// old transaction remains in the unmined pool with its credit intact.
