@@ -184,6 +184,43 @@ func TestListSyncedBlocksReadsTip(t *testing.T) {
 	require.Equal(t, uint32(7), blocks[0].Height)
 }
 
+// TestListSyncedBlocksNormalizesMissingHeight verifies that callers can
+// recognize absent legacy history through the shared Store error contract.
+func TestListSyncedBlocksNormalizesMissingHeight(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist a tip at seven without recording height six, using
+	// the real legacy manager so the read produces its native missing error.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		return mgr.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+			Hash:   chainhash.Hash{7},
+			Height: 7,
+		})
+	})
+	require.NoError(t, err)
+
+	store := NewStore(dbConn, nil, mgr)
+
+	// Act: Request a range whose first height was never recorded, rather
+	// than treating the recorded endpoint as proof of a contiguous history.
+	_, err = store.ListSyncedBlocks(t.Context(), db.ListSyncedBlocksQuery{
+		StartHeight: 6,
+		EndHeight:   7,
+	})
+
+	// Assert: Recovery callers see the Store sentinel without depending on
+	// the concrete address-manager error type.
+	require.ErrorIs(t, err, db.ErrBlockNotFound)
+}
+
 // TestListSyncedBlocksRejectsFullUint32Range verifies kvdb rejects a
 // full-width height range before the inclusive span wraps or iteration starts.
 func TestListSyncedBlocksRejectsFullUint32Range(t *testing.T) {
