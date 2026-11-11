@@ -41,6 +41,11 @@ var allTestCases = []*testCase{
 	},
 
 	{
+		Name:     "address manager reject taproot script import",
+		TestFunc: testAddressManagerRejectTaprootScriptImport,
+	},
+
+	{
 		Name:     "address manager allocate key",
 		TestFunc: testAddressManagerAllocateKey,
 	},
