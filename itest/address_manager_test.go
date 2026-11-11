@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -1444,7 +1445,7 @@ func testAddressManagerLookupUnknownAddress(h *bwtest.HarnessTest) {
 }
 
 // testAddressManagerNewAddressFingerprint proves receiving results carry
-// the account's root fingerprint, the field the shared cases leave out.
+// the account's root fingerprint and expose the same public BIP32 origin.
 func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 	// Arrange: the oracle takes the fingerprint from the account read, so
 	// address metadata must agree with the account it was derived from.
@@ -1459,6 +1460,20 @@ func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 	require.NotZero(h, *account.MasterKeyFingerprint)
 	want := createTestAddressInfos(h, account, false, 1)[0]
 
+	// The existing XPub oracle supplies the expected key and origin without
+	// trusting either the receiving result or its public derivation query.
+	wantDerivation := &psbt.Bip32Derivation{
+		PubKey:               want.PubKey.SerializeCompressed(),
+		MasterKeyFingerprint: want.Derivation.MasterKeyFingerprint,
+		Bip32Path: []uint32{
+			scope.Purpose + hdkeychain.HardenedKeyStart,
+			scope.Coin + hdkeychain.HardenedKeyStart,
+			want.Derivation.Account + hdkeychain.HardenedKeyStart,
+			want.Derivation.Branch,
+			want.Derivation.Index,
+		},
+	}
+
 	// Act: request the account's first receiving address.
 	info, err := w.NewAddress(
 		ctx, wallet.NewAccountSelectorByName(scope, accountName), false,
@@ -1467,6 +1482,14 @@ func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 	// Assert: full equality, fingerprint included.
 	require.NoError(h, err)
 	require.Equal(h, want, info)
+
+	// Act: resolve the same receiving identity through the public origin API.
+	derivation, err := w.GetDerivationInfo(ctx, info.Addr)
+
+	// Assert: a real derived address retains its complete origin, providing a
+	// positive control for the raw imports that must never acquire one.
+	require.NoError(h, err)
+	require.Equal(h, wantDerivation, derivation)
 }
 
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
@@ -1612,6 +1635,14 @@ func testAddressManagerRawImportTracking(h *bwtest.HarnessTest) {
 
 		// Store the full address result as the independent reopen snapshot.
 		tc.info = info
+
+		// Act: ask for an HD origin rather than inferring it from ownership.
+		derivation, err := w.GetDerivationInfo(ctx, tc.addr)
+
+		// Assert: raw imports cannot supply a BIP32 path even when their
+		// public metadata and confirmed output are known to this Wallet.
+		require.ErrorIs(h, err, wallet.ErrDerivationPathNotFound)
+		require.Nil(h, derivation)
 	}
 
 	// Act: cross the supported close/reopen boundary visibly. Readiness
@@ -1653,6 +1684,14 @@ func testAddressManagerRawImportTracking(h *bwtest.HarnessTest) {
 		utxo, err := w.GetUtxo(ctx, tc.outpoint)
 		require.NoError(h, err)
 		require.Contains(h, afterUtxos, utxo)
+
+		// Act: repeat the public origin query across the existing reopen.
+		derivation, err := w.GetDerivationInfo(ctx, tc.addr)
+
+		// Assert: durable raw ownership must not turn into a fabricated HD
+		// identity when the Manager reconstructs its runtime from storage.
+		require.ErrorIs(h, err, wallet.ErrDerivationPathNotFound)
+		require.Nil(h, derivation)
 	}
 
 	// Assert: the reopened Wallet retains script bytes but has no private key
