@@ -8244,45 +8244,90 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 	}
 }
 
-// TestTxSubscriptionCommitFailure verifies a failed Store commit preserves its
-// error and never attempts notification reads or closes the public stream.
+// TestTxSubscriptionCommitFailure retains definite rejection but stops on an
+// actual ambiguous write during backoff, without notifying subscribers.
 func TestTxSubscriptionCommitFailure(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Subscribe before injecting a failed Store commit. Expect only
-	// the write; fixture cleanup checks it once and
-	// any unexpected notification read fails through the existing Store mock.
-	w, deps := createStartedWalletWithMocks(t)
-	s := newSyncer(
-		w.cfg, w.addrStore, w.txStore, w,
-		deps.store, w.id, w.chainSyncer, w.chainEventChan,
+	// Arrange: Share the real engine and its mailbox with a fully assembled
+	// owner. Subscribe before either failed write, and hold retries for an
+	// hour so only the queued observation can initiate terminal cleanup.
+	w, deps := createTestWalletWithMocks(t)
+	w.cfg.WalletSyncRetryInterval = time.Hour
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+	t.Cleanup(func() { backend.AssertExpectations(t) })
+	lifetimeCtx, cancel := context.WithCancel(
+		context.WithoutCancel(t.Context()),
 	)
-	events, _, err := w.SubscribeTxns(t.Context())
-	require.NoError(t, err)
+	manager := &Manager{
+		wallets:     map[string]*Wallet{w.cfg.Name: w},
+		backend:     backend,
+		lifetimeCtx: lifetimeCtx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+	}
+	routing := newChainSyncer(
+		deps.chain, &chainParams, manager.cancel,
+	)
+	manager.chainSyncer = routing
+	manager.started.Store(true)
+
+	w.chainSyncer = routing
+	s := newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, deps.store, w.id,
+		routing, w.chainEventChan,
+	)
+	w.sync = s
+	w.state = newWalletState(s)
+
+	t.Cleanup(func() { _ = manager.Stop() })
+	deps.vault.On("Lock").Return().Once()
 
 	tx := subscriptionTx([]byte{txscript.OP_TRUE}, 5)
 	record, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	require.NoError(t, err)
+
+	rejected := deps.store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Return(db.ErrTxInputConflict).Once()
+	deps.chain.On("IsCurrent").Return(true).Once()
+	initializing := deps.store.On("GetWallet", mock.Anything, "").
+		Return((*db.WalletInfo)(nil), errDBMock).Once().NotBefore(rejected)
 	deps.store.On("ApplyTxBatch", mock.Anything, mock.Anything).
-		Return(errDBMock).Once()
+		Return(&dbruntime.AmbiguousTxCommitError{
+			Err: errDBMock,
+		}).Once().NotBefore(initializing)
+	startLoadedWalletForTest(t, w)
 
-	// Act: Attempt the batch through the existing syncer path, stopping at its
-	// failed persistence boundary before notification preparation can begin.
-	err = s.applyStoreTxBatch(t.Context(), TxEntries{
-		{
-			Rec: record,
-		},
-	}, nil, nil)
+	events, _, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
 
-	// Assert: The caller receives the original write error and the live public
-	// stream has no event for the transaction that failed to commit.
-	require.ErrorIs(t, err, errDBMock)
-
-	select {
-	case notification := <-events:
-		t.Fatalf("failed commit delivered or closed stream: %v", notification)
-	default:
+	event := chainEvent{
+		notification: chain.RelevantTx{TxRecord: record},
+		matches:      liveMatches(record),
 	}
+
+	// Act: Reject one observation definitely, then let the same real engine
+	// fail initialization and consume an ambiguous write from its retry wait.
+	err = s.processChainEvent(t.Context(), event)
+	require.ErrorIs(t, err, db.ErrTxInputConflict)
+	require.NoError(t, manager.lifetimeCtx.Err())
+
+	w.chainEventChan <- event
+
+	manager.wg.Go(func() { manager.mainLoop() })
+	w.wg.Go(w.runSyncLoop)
+
+	// Assert: Internal terminal propagation starts cleanup before public Stop
+	// joins it. The closed stream contains no notification for either write;
+	// existing fixture cleanup verifies each exact dependency call once.
+	require.Eventually(t, func() bool {
+		return manager.lifetimeCtx.Err() != nil
+	}, time.Second, time.Millisecond)
+	require.NoError(t, manager.Stop())
+
+	_, open := <-events
+	require.False(t, open)
 }
 
 // TestManagerRollbackKvdbSparseFork resolves a canonical retained header

@@ -878,6 +878,12 @@ func (s *syncer) waitForBackoff(ctx context.Context, startTime time.Time,
 				return 0, ctx.Err()
 			}
 
+			// Retry observations cross the same persistence boundary as an
+			// active attempt. Unknown effects must reach the lifetime owner.
+			if errors.Is(err, db.ErrIndeterminateCommit) {
+				return 0, err
+			}
+
 			if err != nil {
 				// Retain the scheduled retry after an observation fails, just
 				// as a failed sync attempt returns here instead of stopping.
