@@ -345,3 +345,12 @@ func (b *kvdbManagerBackend) close() error {
 
 	return nil
 }
+
+// startWallet starts the legacy Wallet with its background registration retry.
+func (b *kvdbManagerBackend) startWallet(ctx context.Context,
+	wallet *Wallet) error {
+
+	// KVDB can start offline; its existing sync worker establishes watches
+	// when the caller's borrowed chain client becomes available.
+	return wallet.start(ctx)
+}

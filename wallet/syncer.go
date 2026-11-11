@@ -250,6 +250,9 @@ type prepareRollbackReq struct {
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
+	// prepareLiveWatches establishes SQL subscriptions before publication.
+	prepareLiveWatches(ctx context.Context) error
+
 	// run owns initialization and retries until shutdown. A non-nil result
 	// is terminal and must be reported by the Wallet lifecycle owner.
 	run(ctx context.Context) error

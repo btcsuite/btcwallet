@@ -403,7 +403,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
 		wallets = append(wallets, wallet)
 
-		err = wallet.start(ctx)
+		err = m.backend.startWallet(ctx, wallet)
 		if err != nil {
 			return wallets, err
 		}
@@ -801,7 +801,7 @@ func (m *Manager) handleCreateWalletReq(req *createWalletReq) (
 		}
 	}
 
-	err = w.start(req.ctx)
+	err = m.backend.startWallet(req.ctx, w)
 	if err != nil {
 		return nil, true, errors.Join(err, m.stopWallets([]*Wallet{w}))
 	}
