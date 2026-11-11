@@ -30,7 +30,8 @@ env:
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
-  BTCD_VERSION_LATEST: v0.25.0
+  # Share the current miner pin with the btcd job's named version axis.
+  BTCD_VERSION_LATEST: &btcd_latest v0.27.0
 
 jobs:
   ########################
@@ -229,16 +230,17 @@ jobs:
   ########################
   # Run bwtest integration tests against each supported chain backend.
   #
-  # btcd and neutrino run with kvdb and sqlite. The bitcoind matrix crosses
-  # every supported bitcoind version with kvdb, sqlite, and postgres so it
-  # catches compatibility bugs specific to a node version and wallet database.
+  # Ordinary CI checks current daemon releases across the existing databases.
+  # Historical release compatibility runs in the release-check workflow.
   ########################
   itest-btcd:
-    name: Wallet itest (btcd, ${{ matrix.db }})
+    name: Wallet itest (btcd ${{ matrix.btcd_version }}, ${{ matrix.db }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # Keep the current release visible in job and failure-artifact names.
+        btcd_version: [*btcd_latest]
         db: [kvdb, sqlite]
     steps:
       - name: git checkout
@@ -252,14 +254,15 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
+      # The harness resolves both daemon executables through this PATH.
       - name: add go bin to PATH
-        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: install btcd ${{ env.BTCD_VERSION_LATEST }}
-        run: go install -v github.com/btcsuite/btcd@${{ env.BTCD_VERSION_LATEST }}
-
-      - name: check btcd version
-        run: btcd --version
+      # Share authenticated installation and the exact backend/miner version guard.
+      - name: install and check btcd ${{ matrix.btcd_version }}
+        env:
+          BTCD_VERSION: ${{ matrix.btcd_version }}
+        run: scripts/install-btcd.sh "$BTCD_VERSION"
 
       # The btcd backend job runs btcd for both the shared miner and the chain
       # backend under test.
@@ -270,7 +273,8 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: itest-logs-btcd-${{ matrix.db }}
+          # Identify the exact daemon/database pair when a lane fails.
+          name: itest-logs-btcd-${{ matrix.btcd_version }}-${{ matrix.db }}
           path: itest/test-logs
           retention-days: 5
 
@@ -302,14 +306,15 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
+      # Expose the verified miner on the PATH used by the harness.
       - name: add go bin to PATH
-        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: install btcd ${{ env.BTCD_VERSION_LATEST }}
-        run: go install -v github.com/btcsuite/btcd@${{ env.BTCD_VERSION_LATEST }}
-
-      - name: check btcd version
-        run: btcd --version
+      # Share authenticated installation and the exact backend/miner version guard.
+      - name: install and check btcd ${{ env.BTCD_VERSION_LATEST }}
+        env:
+          BTCD_VERSION: ${{ env.BTCD_VERSION_LATEST }}
+        run: scripts/install-btcd.sh "$BTCD_VERSION"
 
       # Neutrino runs in-process, but it still relies on the shared btcd miner
       # for chain data and peer connectivity.
@@ -329,18 +334,20 @@ jobs:
   #
   # Job flow:
   # - Install btcd `${{ env.BTCD_VERSION_LATEST }}` as the shared miner.
-  # - Cross bitcoind versions `30` (latest) and `28` (older) with every wallet
-  #   database so each version/database combination is tested independently.
-  # - Extract each matrix binary from the docker image and run
-  #   `make itest chain=bitcoind db=${{ matrix.db }}`.
+  # - Test the current Core release on every existing wallet database.
+  # - Verify its official archive before running the complete suite; older
+  #   supported releases run in the release-check workflow.
   ########################
   itest-bitcoind:
-    name: Wallet itest (bitcoind v${{ matrix.bitcoind_version }}, ${{ matrix.db }})
+    name: Wallet itest (bitcoind v${{ matrix.bitcoind.version }}, ${{ matrix.db }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        bitcoind_version: ['30', '28']
+        # Pin the current Core artifact independently of mutable image tags.
+        bitcoind:
+          - version: '32.1'
+            sha256: '61545c17c3120fb7412f896d248b11993af04ec8817aad3649c55b2afb044963'
         db: [kvdb, sqlite, postgres]
     steps:
       - name: git checkout
@@ -354,35 +361,22 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
+      # Core and its btcd miner must resolve to the provisioned executables.
       - name: add go bin to PATH
-        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: install btcd ${{ env.BTCD_VERSION_LATEST }}
-        run: go install -v github.com/btcsuite/btcd@${{ env.BTCD_VERSION_LATEST }}
+      # Share authenticated installation and the exact backend/miner version guard.
+      - name: install and check btcd ${{ env.BTCD_VERSION_LATEST }}
+        env:
+          BTCD_VERSION: ${{ env.BTCD_VERSION_LATEST }}
+        run: scripts/install-btcd.sh "$BTCD_VERSION"
 
-      - name: check btcd version
-        run: btcd --version
-
-      # For bitcoind backend tests, btcd remains the shared miner while the
-      # matrix covers both bitcoind v30 (latest) and v28 (older).
-      - name: extract bitcoind from docker image (${{ matrix.bitcoind_version }})
-        run: |-
-          IMAGE=${{ env.BITCOIND_IMAGE }}:${{ matrix.bitcoind_version }}
-          docker pull $IMAGE
-
-          BIN_PATH=$(docker run --rm --entrypoint sh $IMAGE -c '
-            command -v bitcoind ||
-            find /opt /usr -type f -name bitcoind 2>/dev/null | head -n 1
-          ')
-          if [ -z "$BIN_PATH" ]; then
-            echo "could not locate bitcoind in $IMAGE" >&2
-            exit 1
-          fi
-
-          CONTAINER_ID=$(docker create $IMAGE)
-          sudo docker cp $CONTAINER_ID:$BIN_PATH /usr/local/bin/bitcoind
-          docker rm $CONTAINER_ID
-          bitcoind --version
+      # Verify the pinned archive and installed version before running Core.
+      - name: install bitcoind ${{ matrix.bitcoind.version }}
+        env:
+          CORE_VERSION: ${{ matrix.bitcoind.version }}
+          CORE_SHA256: ${{ matrix.bitcoind.sha256 }}
+        run: scripts/install-bitcoind.sh "$CORE_VERSION" "$CORE_SHA256"
 
       - name: run itest (bitcoind, ${{ matrix.db }})
         run: make itest chain=bitcoind db=${{ matrix.db }}
@@ -391,7 +385,8 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: itest-logs-bitcoind-${{ matrix.bitcoind_version }}-${{ matrix.db }}
+          # Keep failure uploads distinct for each exact Core/database pair.
+          name: itest-logs-bitcoind-${{ matrix.bitcoind.version }}-${{ matrix.db }}
           path: itest/test-logs
           retention-days: 5
 
