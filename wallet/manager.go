@@ -359,11 +359,9 @@ func (m *Manager) handleReq(raw any) bool {
 		}
 
 		if err == nil {
-			// Stop already waits for the loop, so it also joins this reader
-			// if the notification getter is still starting.
-			m.wg.Add(1)
-
-			go m.startChainSyncer()
+			// Return startup before this contextless getter, but keep it
+			// on the joined owner loop so Stop cannot close storage early.
+			m.chainEvents = m.config.ChainSource.Notifications()
 		}
 
 	case createWalletReq:
@@ -507,24 +505,12 @@ func translateDatabaseIdentityError(err error) error {
 // construct a fresh Manager to reopen the database.
 // Cancellation or failure cleans up all candidates before returning an error.
 func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
-	// Reject without waiting for the lock held by startup or shutdown. Claim
-	// under that lock below so Stop cannot overtake an admitted startup.
+	// Reject another Start without waiting for queued startup or cleanup.
 	if m.started.Load() {
 		return nil, fmt.Errorf(
 			"manager already started: %w", ErrStateForbidden,
 		)
 	}
-
-	m.Lock()
-	defer func() {
-		// A terminal startup must release membership before joining a
-		// reader; successful startup leaves that reader running.
-		m.Unlock()
-
-		if m.lifetimeCtx.Err() != nil {
-			m.wg.Wait()
-		}
-	}()
 
 	req := startManagerReq{
 		reqCtx: reqCtx{ctx: ctx},
@@ -578,17 +564,14 @@ func (m *Manager) handleStartReq(req *startManagerReq) (
 // It waits for startup, accepted creation, and any other Stop to finish.
 // After shutdown, Stop is a no-op.
 func (m *Manager) Stop() error {
-	// Release a reader blocked on a full mailbox before waiting for admission.
+	// Release blocked event work and join its owner before closing storage.
 	m.cancel()
+	m.wg.Wait()
 
 	m.Lock()
-
-	// LIFO releases membership before joining, including repeated Stop after
-	// storage closed. The reader can be parked on its recipient snapshot.
-	defer m.wg.Wait()
 	defer m.Unlock()
 
-	// Preserve terminal admission on repeated no-op shutdown calls.
+	// Later Stop calls have no remaining resources to close.
 	if m.backend == nil {
 		return nil
 	}
@@ -608,25 +591,6 @@ func (m *Manager) handleStopReq(req stopManagerReq) {
 		req.resp <- err
 	} else if err != nil {
 		log.Errorf("Unable to stop manager: %v", err)
-	}
-}
-
-// startChainSyncer reads the shared stream until shutdown or source loss.
-// Its caller enrolls it before launch so terminal shutdown joins the reader.
-func (m *Manager) startChainSyncer() {
-	err := m.chainSyncer.run(m.lifetimeCtx, m.dispatchChainEvent)
-
-	// No reader work follows Done. Automatic teardown can therefore
-	// reuse Stop without waiting for this goroutine to join itself.
-	m.wg.Done()
-
-	if err != nil && m.lifetimeCtx.Err() == nil {
-		log.Warnf("Chain notification reader stopped: %v", err)
-
-		err := m.Stop()
-		if err != nil {
-			log.Errorf("Unable to stop manager: %v", err)
-		}
 	}
 }
 
@@ -694,7 +658,7 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 }
 
 // handleRollbackEvent settles published writers around one backend rollback.
-// Success releases workers and lets the source reader dispatch its next event.
+// Success releases workers before the loop handles its next chain event.
 // A rollback error stops every Wallet before any worker can write again.
 func (m *Manager) handleRollbackEvent(ctx context.Context,
 	event chain.BlockDisconnected) error {
@@ -740,17 +704,8 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
 	if err != nil {
 		err = fmt.Errorf("rollback chain: %w", err)
-		if m.lifetimeCtx.Err() == nil {
-			// No Stop owns cleanup yet. Cancel and join writers on this
-			// reader without self-joining, then release its completion.
-			err = errors.Join(err, m.stopWallets(nil))
-
-			close(rollbackDone)
-		}
-
-		// If Stop already canceled, it owns cleanup and its close error.
-		// Otherwise cleanup canceled the reader's outer report, so include
-		// the joined close failure in this single persistence error log.
+		// Leave workers paused. The owner loop performs terminal cleanup
+		// after this operation returns, before any later event or request.
 		log.Errorf("Unable to roll back chain to height %d: %v",
 			block.Height, err)
 
@@ -764,9 +719,6 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 
 // String returns a summary of the active wallets managed by the Manager.
 func (m *Manager) String() string {
-	m.RLock()
-	defer m.RUnlock()
-
 	// Read names on the same loop that changes the current Wallets.
 	req := managerInfoReq{resp: make(chan string, 1)}
 
@@ -807,20 +759,13 @@ func validateManagedWalletName(name string) error {
 // TODO(yy): Add a context parameter once wallet creation uses a single atomic
 // database transaction.
 func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
-	m.Lock()
-	defer func() {
-		// Failed creation terminally drains the Manager; its reader may
-		// still need membership, so join only after releasing admission.
-		m.Unlock()
+	// Check lifecycle at the public API before queueing a new writer.
+	if m.lifetimeCtx.Err() != nil {
+		return nil, ErrManagerStopped
+	}
 
-		if m.lifetimeCtx.Err() != nil {
-			m.wg.Wait()
-		}
-	}()
-
-	err := m.checkCreate()
-	if err != nil {
-		return nil, err
+	if !m.started.Load() {
+		return nil, ErrStateForbidden
 	}
 
 	// Keep accepted creation running through Stop; the same owned context
@@ -831,7 +776,7 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		resp:   make(chan createWalletResp, 1),
 	}
 
-	err = m.sendReq(req.ctx, req)
+	err := m.sendReq(req.ctx, req)
 	if err != nil {
 		return nil, err
 	}
