@@ -915,8 +915,8 @@ func TestCheckRollbackDetected(t *testing.T) {
 func TestInitChainSync(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a store-backed syncer and mock its dependencies
-	// for the initial synchronization sequence.
+	// Arrange: Keep the backend current at genesis and its stored watch set
+	// empty, so initialization registers without needing a historical scan.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	mockPublisher := &mockTxPublisher{}
@@ -930,16 +930,7 @@ func TestInitChainSync(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	expectEmptyLiveWatches(store, 0)
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -952,9 +943,11 @@ func TestInitChainSync(t *testing.T) {
 	store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{}, nil).Once()
 
-	// Act & Assert: Verify that the initial chain synchronization
-	// sequence completes successfully.
+	// Act: Initialize against the existing empty-watch registration boundary.
 	err := s.initChainSync(t.Context())
+
+	// Assert: Startup succeeds after all required registration reads and native
+	// calls; each dependency verifies its exact expectations once below.
 	require.NoError(t, err)
 
 	store.AssertExpectations(t)
@@ -3505,6 +3498,23 @@ func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
 	require.NotNil(t, importedProps)
 	require.Equal(t, importedNumber, importedProps.AccountNumber)
 	require.True(t, importedProps.IsWatchOnly)
+}
+
+// expectEmptyLiveWatches requires one explicit SQL startup reconstruction.
+// Callers opt into exact reads; other Store mocks retain no defaults.
+func expectEmptyLiveWatches(store *walletmock.Store, walletID uint32,
+	addresses ...db.AddressInfo) {
+
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:      walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{Items: addresses},
+	)
+	store.On("ListOutputsToWatch", mock.Anything, walletID).
+		Return([]db.UtxoInfo(nil), nil).Once()
 }
 
 // expectImportedScanAddressPage expects the Store scan path to page raw imports
