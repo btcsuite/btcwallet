@@ -7818,12 +7818,7 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	require.NoError(t, block.AddTransaction(funding))
 	hash := block.BlockHash()
 	point := wire.OutPoint{Hash: funding.TxHash()}
-	external, err := address.NewAddressWitnessPubKeyHash(
-		bytes.Repeat([]byte{9}, 20), &chainParams,
-	)
-	require.NoError(t, err)
-	externalScript, err := txscript.PayToAddrScript(external)
-	require.NoError(t, err)
+	externalScript := []byte{txscript.OP_TRUE}
 
 	spend := wire.NewMsgTx(2)
 	spend.AddTxIn(wire.NewTxIn(&point, nil, nil))
@@ -7831,73 +7826,42 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	record, err := wtxmgr.NewTxRecordFromMsgTx(spend, time.Now())
 	require.NoError(t, err)
 
-	// Hold registration after the new tip commits so Info can observe the
-	// gap before its failure and retry. Cleanup releases a failed assertion.
+	// Hold registration after commit so readiness and the saved checkpoint
+	// remain observable before explicit restart. Release on assertion failure.
 	registering := make(chan struct{})
 
 	release := make(chan struct{})
-	defer close(release)
+
+	releaseRegistration := sync.OnceFunc(func() { close(release) })
+	defer releaseRegistration()
 
 	// Registration rejects the committed credit once. Only its successful
 	// replay admits the spend notification; no receiving output can match it.
 	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Times(3)
-	client.On("NotifyBlocks").Return(nil).Twice()
+		Return(nil).Twice()
+	client.On("NotifyBlocks").Return(nil).Once()
 	client.On("NotifySpent", []*wire.OutPoint{&point}).
 		Run(func(mock.Arguments) {
 			close(registering)
 			<-release
 		}).Return(errors.New("registration rejected")).Once()
-	client.On("NotifySpent", []*wire.OutPoint{&point}).
-		Run(func(mock.Arguments) {
-			notifications <- chain.RelevantTx{TxRecord: record}
-		}).Return(nil).Once()
 	client.On("GetBestBlock").Unset()
 	client.On("GetBestBlock").Return(chainParams.GenesisHash, int32(0), nil)
 	client.On("GetBlockHashes", int64(1), int64(1)).
 		Return([]chainhash.Hash{hash}, nil).Once()
 	client.On("GetBlocks", []chainhash.Hash{hash}).
 		Return([]*wire.MsgBlock{block}, nil).Once()
-	client.On("GetBlockHashes", int64(0), int64(1)).
-		Return([]chainhash.Hash{*chainParams.GenesisHash, hash}, nil).Once()
-
-	// Delivery can race Stop before its normal rebroadcast. Keep that
-	// optional call local to the existing publisher mock, without writing
-	// the spend through the Wallet's publish API before the assertion.
-	publisher := &mockTxPublisher{}
-	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
-		func(tx *wire.MsgTx) bool {
-			return tx.TxHash() == record.Hash
-		},
-	), "").Return(nil).Maybe()
 
 	s, ok := w.sync.(*syncer)
 	require.True(t, ok)
 
 	s.cfg.SyncMethod = SyncMethodFullBlocks
 
-	// Preserve real Wallet notification while replacing only rebroadcast
-	// for this retry scenario's existing publication mock.
-	s.txManager = struct {
-		TxPublisher
-		txNotifier
-	}{
-		TxPublisher: publisher,
-		txNotifier:  w,
-	}
-
-	// Declare both readiness calls before releasing the worker; the retry
-	// uses the same already-open gate and the existing backoff path.
-	ready := make(chan struct{})
-
 	client.On("IsCurrent").Unset()
-	client.On("IsCurrent").Run(func(mock.Arguments) {
-		<-ready
-	}).Return(true).Twice()
+	client.On("IsCurrent").Return(true).Once()
 
 	// Finish initial synchronization at genesis before introducing the small
 	// gap; a startup-only test would never begin in the ready state.
-	close(ready)
 	require.Eventually(t, func() bool {
 		info, err := w.Info(t.Context())
 		return err == nil && info.Synced
@@ -7922,23 +7886,107 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	require.Equal(t, hash, info.SyncedTo.Hash)
 	require.False(t, info.Synced)
 
-	release <- struct{}{}
+	// Arrange: A newly admitted empty Wallet stays at genesis while its
+	// sibling owns the held post-commit watch. Both must reopen independently.
+	client.On("WatchAddrsFromTip", mock.Anything, []address.Address(nil)).
+		Return(nil).Once()
+	client.On("NotifyBlocks").Return(nil).Once()
+	client.On("IsCurrent").Return(false).Maybe()
 
-	// The public transaction view eventually receives the unmined
-	// external spend through replay. Stop joins the worker before the shared
-	// fixture checks expectations, including the single historical block read.
-	require.Eventually(t, func() bool {
-		_, err := w.GetTx(t.Context(), record.Hash)
-		return err == nil
-	}, 5*time.Second, time.Millisecond)
-	got, err := w.GetTx(t.Context(), record.Hash)
+	_, err = manager.Create(managerLifecycleCreateParams("behind"))
 	require.NoError(t, err)
-	require.Nil(t, got.Block)
-	info, err = w.Info(t.Context())
-	require.NoError(t, err)
-	require.True(t, info.Synced)
+
+	// Act: Release the ordinary registration failure and explicitly stop
+	// to cross the durability boundary; registration itself is locally retried.
+	releaseRegistration()
 	require.NoError(t, manager.Stop())
-	publisher.AssertExpectations(t)
+
+	// Arrange: Restore the input watch during startup and hold only the
+	// behind Wallet's historical read to expose independent catch-up.
+	freshChain := createTestChain(t)
+	replayed := make(chan any, 1)
+
+	freshChain.On("Notifications").Unset()
+	freshChain.On("Notifications").Return((<-chan any)(replayed)).Once()
+	freshChain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	freshChain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Times(4)
+	freshChain.On("NotifySpent", mock.Anything).Unset()
+	freshChain.On("NotifySpent", []*wire.OutPoint{&point}).
+		Run(func(mock.Arguments) {
+			replayed <- chain.RelevantTx{TxRecord: record}
+		}).Return(nil).Once()
+	freshChain.On("NotifySpent", []*wire.OutPoint{&point}).Return(nil).Once()
+	freshChain.On("NotifyBlocks").Unset()
+	freshChain.On("NotifyBlocks").Return(nil).Times(4)
+	freshChain.On("GetBestBlock").Unset()
+	freshChain.On("GetBestBlock").Return(&hash, int32(1), nil).Maybe()
+	freshChain.On("GetBlockHashes", int64(0), int64(1)).
+		Return([]chainhash.Hash{*chainParams.GenesisHash, hash}, nil).Once()
+	freshChain.On("GetBlockHashes", int64(1), int64(1)).
+		Return([]chainhash.Hash{hash}, nil).Once()
+
+	reading := make(chan struct{})
+	scanRelease := make(chan struct{})
+
+	releaseScan := sync.OnceFunc(func() { close(scanRelease) })
+	defer releaseScan()
+
+	freshChain.On("GetBlockHeaders", []chainhash.Hash{hash}).
+		Run(func(mock.Arguments) {
+			close(reading)
+			<-scanRelease
+		}).Return([]*wire.BlockHeader{&block.Header}, nil).Once()
+
+	// The observed spend is already in the backend mempool; use the
+	// existing native mock instead of replacing the Wallet's publisher.
+	freshChain.On("TestMempoolAccept", mock.MatchedBy(
+		func(txs []*wire.MsgTx) bool {
+			return len(txs) == 1 && txs[0].TxHash() == record.Hash
+		},
+	), float64(0)).
+		Return(nil, chain.ErrTxAlreadyInMempool).Maybe().Once()
+	freshChain.On("IsCurrent").Unset()
+	freshChain.On("IsCurrent").Return(true).Twice()
+
+	cfg := manager.config
+	cfg.ChainSource = freshChain
+	cfg.SyncMethod = SyncMethodFullBlocks
+	fresh, err := NewManager(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fresh.Stop() })
+
+	// Act: Reopen from unequal committed checkpoints and release both workers.
+	wallets, err := fresh.Start(t.Context())
+	require.NoError(t, err)
+	require.Len(t, wallets, 2)
+	current, lagging := wallets[0], wallets[1]
+
+	<-reading
+
+	// Assert: The current Wallet receives its unmined spend and becomes
+	// usable while the sibling remains at genesis behind its own scan.
+	require.Eventually(t, func() bool {
+		info, readErr := current.Info(t.Context())
+		tx, txErr := current.GetTx(t.Context(), record.Hash)
+
+		return readErr == nil && info.Synced && txErr == nil && tx.Block == nil
+	}, 5*time.Second, time.Millisecond)
+	pending, err := lagging.Info(t.Context())
+	require.NoError(t, err)
+	require.False(t, pending.Synced)
+	require.EqualValues(t, 0, pending.SyncedTo.Height)
+
+	// Act: Finish the one outstanding scan without replaying the current tip.
+	releaseScan()
+
+	// Assert: Independent catch-up reaches the same committed tip; strict
+	// chain expectations permit no historical refetch by the current Wallet.
+	require.Eventually(t, func() bool {
+		info, readErr := lagging.Info(t.Context())
+		return readErr == nil && info.Synced && info.SyncedTo.Hash == hash
+	}, 5*time.Second, time.Millisecond)
+	require.NoError(t, fresh.Stop())
 }
 
 // TestLiveWatchTargetedScanFailure keeps readiness revoked when registration
