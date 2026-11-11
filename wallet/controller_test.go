@@ -2845,15 +2845,15 @@ func TestControllerLock_StateError(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
-// TestSyncBackoffStableRun verifies a stable sync run resets to the
-// Wallet-local retry policy instead of an independent controller constant.
+// TestSyncBackoffStableRun verifies a stable attempt resets to the configured
+// retry interval before exponential growth resumes.
 func TestSyncBackoffStableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Give a Wallet a distinctive Manager-owned retry interval and a
+	// Arrange: Give a syncer a distinctive Manager-owned retry interval and a
 	// timer seam that records the reset value while firing immediately.
 	retryInterval := 3 * time.Second
-	w := &Wallet{
+	s := &syncer{
 		cfg: Config{
 			WalletSyncRetryInterval: retryInterval,
 		},
@@ -2870,7 +2870,7 @@ func TestSyncBackoffStableRun(t *testing.T) {
 	}
 
 	// Act: Apply retry backoff after a run long enough to be stable.
-	nextBackoff, err := w.waitForBackoff(
+	nextBackoff, err := s.waitForBackoff(
 		context.Background(), startTime, currentBackoff, timerFn,
 	)
 
@@ -2887,7 +2887,7 @@ func TestSyncBackoffUnstableRun(t *testing.T) {
 
 	// Arrange: Keep the previous attempt short and use an immediate timer
 	// to observe the existing exponential policy without a real delay.
-	w := &Wallet{}
+	s := &syncer{}
 
 	// Mock a start time that is recent (unstable).
 	startTime := time.Now()
@@ -2905,7 +2905,7 @@ func TestSyncBackoffUnstableRun(t *testing.T) {
 	}
 
 	// Act: Complete the retry delay after an unstable attempt.
-	nextBackoff, err := w.waitForBackoff(
+	nextBackoff, err := s.waitForBackoff(
 		context.Background(), startTime, currentBackoff, timerFn,
 	)
 
@@ -2922,7 +2922,7 @@ func TestSyncBackoffMaxBackoffCap(t *testing.T) {
 
 	// Arrange: Start at the retry ceiling and fire its timer immediately
 	// so the next interval can be checked without waiting five minutes.
-	w := &Wallet{}
+	s := &syncer{}
 
 	startTime := time.Now()
 	// Current backoff is already high enough that doubling it would exceed
@@ -2939,7 +2939,7 @@ func TestSyncBackoffMaxBackoffCap(t *testing.T) {
 	}
 
 	// Act: Complete a retry delay that would otherwise double past the cap.
-	nextBackoff, err := w.waitForBackoff(
+	nextBackoff, err := s.waitForBackoff(
 		context.Background(), startTime, currentBackoff, timerFn,
 	)
 
@@ -2959,7 +2959,7 @@ func TestSyncBackoffShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	w := &Wallet{}
+	s := &syncer{}
 
 	startTime := time.Now()
 	currentBackoff := time.Second
@@ -2969,9 +2969,9 @@ func TestSyncBackoffShutdown(t *testing.T) {
 		return make(chan time.Time)
 	}
 
-	// Act: Wait using the canceled lifetime rather than an implicit Wallet
+	// Act: Wait using the canceled lifetime rather than an implicit owner
 	// context, as required by the blocking helper's contract.
-	nextBackoff, err := w.waitForBackoff(
+	nextBackoff, err := s.waitForBackoff(
 		ctx, startTime, currentBackoff, timerFn,
 	)
 

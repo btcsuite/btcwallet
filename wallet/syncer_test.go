@@ -4967,33 +4967,41 @@ func TestHandleScanReq_Errors(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
-// TestSyncerRun_InitError verifies run failure when initChainSync fails.
-func TestSyncerRun_InitError(t *testing.T) {
+// TestSyncerRunRetriesInitError keeps a failed initialization inside the
+// same worker lifetime until the caller cancels a later attempt.
+func TestSyncerRunRetriesInitError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer where initialization fails
-	// because the synced-block read errors during the rollback check.
-	mockChain := &bwmock.Chain{}
-	addrStore := &bwmock.AddrStore{}
-	store := &walletmock.Store{}
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	s := newTestSyncer(
-		Config{Chain: mockChain}, addrStore, nil, nil,
-		store, uint32(0),
-	)
+		// Arrange: Reject the first tip read and cancel during the next one.
+		// Exact calls prove a real retry occurred without completing init or
+		// leaving a second owner responsible for the worker's timer.
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 
-	addrStore.On("Birthday").Return(time.Now()).Once()
-	mockChain.On("IsCurrent").Return(true).Once()
+		client := &bwmock.Chain{}
+		store := &walletmock.Store{}
+		s := newTestSyncer(Config{Chain: client}, nil, nil, nil, store, 0)
+		client.On("IsCurrent").Return(true).Twice()
+		first := store.On("GetWallet", mock.Anything, "").
+			Return((*db.WalletInfo)(nil), errDBMock).Once()
+		store.On("GetWallet", mock.Anything, "").
+			Run(func(mock.Arguments) { cancel() }).
+			Return((*db.WalletInfo)(nil), errDBMock).Once().
+			NotBefore(first)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		([]db.Block)(nil), errDBMock).Once()
+		// Act: Let the real engine own the failed attempt and retry delay;
+		// synctest advances its timer when no runnable work remains.
+		err := s.run(ctx)
 
-	// Act: Run the syncer.
-	err := s.run(t.Context())
-
-	// Assert: Verify error propagation.
-	require.ErrorContains(t, err, "db error")
+		// Assert: Cancellation ends the entire retry lifetime normally. Each
+		// dependency checks its required attempts once, without another run.
+		require.NoError(t, err)
+		client.AssertExpectations(t)
+		store.AssertExpectations(t)
+	})
 }
 
 // TestDispatchScanStrategy_AutoFallback verifies fallback to full blocks
