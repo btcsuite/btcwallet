@@ -258,7 +258,9 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		requestChan: make(chan any),
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.chainSyncer = newChainSyncer(
+		m.config.ChainSource, &m.config.ChainParams, m.cancel,
+	)
 
 	// Track the loop before returning Manager so Stop can join it.
 	m.wg.Go(m.mainLoop)

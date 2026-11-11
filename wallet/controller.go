@@ -223,6 +223,9 @@ func (w *Wallet) runSyncLoop() {
 
 	if err != nil {
 		log.Errorf("Chain sync loop exited with error: %v", err)
+		// run has exhausted safe local handling. Signal the owner and return
+		// so its single cleanup can join this worker before closing storage.
+		w.chainSyncer.requestStop()
 
 		return
 	}

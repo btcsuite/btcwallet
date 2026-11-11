@@ -34,6 +34,9 @@ type chainRouter interface {
 
 	// notifyBlocks enables the backend's existing block/control notifications.
 	notifyBlocks(ctx context.Context) error
+
+	// requestStop reports unsafe effects without joining the sending worker.
+	requestStop()
 }
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
@@ -47,6 +50,9 @@ type chainSyncer struct {
 
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
+
+	// cancelManager releases delivery so Manager can join a failing worker.
+	cancelManager context.CancelFunc
 }
 
 // chainSyncer implements the behavior shared by Manager and its Wallets.
@@ -68,17 +74,26 @@ type watchRegistry struct {
 }
 
 // newChainSyncer retains the caller-owned source without starting any work.
+// Worker failures cancel Manager's lifetime; the caller still owns the client.
 func newChainSyncer(source chain.Interface,
-	params *chaincfg.Params) *chainSyncer {
+	params *chaincfg.Params, cancelManager context.CancelFunc) *chainSyncer {
 
 	return &chainSyncer{
-		source: source,
-		params: params,
+		source:        source,
+		params:        params,
+		cancelManager: cancelManager,
 		watches: &watchRegistry{
 			addresses: make(map[string]map[uint32]struct{}),
 			outpoints: make(map[wire.OutPoint]map[uint32]struct{}),
 		},
 	}
+}
+
+// requestStop reports unsafe effects without waiting for its sending worker.
+func (s *chainSyncer) requestStop() {
+	// The owner may be blocked on this worker's full mailbox. Cancellation
+	// releases that send; returning lets its cleanup join this worker.
+	s.cancelManager()
 }
 
 // recordAddresses associates recipients before backend activation can emit

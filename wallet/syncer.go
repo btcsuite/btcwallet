@@ -813,6 +813,12 @@ func (s *syncer) run(ctx context.Context) error {
 			return nil
 		}
 
+		// Unknown persistence effects cannot be replayed by another attempt.
+		// Return to Wallet so the owner can join this worker before closure.
+		if errors.Is(err, db.ErrIndeterminateCommit) {
+			return err
+		}
+
 		log.Errorf("Chain sync loop exited with error: %v", err)
 
 		// Service ordered observations and barriers against the original
