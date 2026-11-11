@@ -154,17 +154,16 @@ func TestManagerCreateRecoveryValidation(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestManagerChainRollbackOrder fences both published recipients before one
-// Store rollback and permits the next complete connected delivery afterward.
+// TestManagerChainRollbackOrder retains a native source event across hint
+// recovery and prevents a later stale hint from rewinding replacement history.
 func TestManagerChainRollbackOrder(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
 		t.Helper()
 
-		// Arrange: Capacity-one mailboxes first accept an ordinary event.
-		// An exact block receipt exposes rollback before both workers
-		// acknowledge and detects any lost block hash or timestamp.
+		// Arrange: Seed the native stream and two manual recipients before any
+		// event can observe them. Both views use the same stored block history.
 		first, firstDeps := createTestWalletWithMocks(t)
 		first.cfg.Name = testWalletName
 		first.id = 1
@@ -174,42 +173,75 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 		second, secondDeps := createTestWalletWithMocks(t)
 		second.cfg.Name = "second"
 		second.id = 2
+		second.store = first.store
 		startLoadedWalletForTest(t, second)
 		secondDeps.vault.On("Lock").Return().Once()
 
 		backend := &managerBackendMock{}
 		backend.On("close").Return(nil).Once()
 
-		notifications := make(chan any)
+		notifications := make(chan any, 1)
 		m := newManagerLifecycleTest(t, backend, notifications)
 		m.started.Store(true)
+
 		m.wallets[first.cfg.Name], m.wallets[second.cfg.Name] = first, second
 		firstEvents := make(chan chainEvent, 1)
 		secondEvents := make(chan chainEvent, 1)
 		first.chainEventChan, second.chainEventChan = firstEvents, secondEvents
-		event := chain.FilteredBlockConnected{
-			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 8}},
-		}
-		persisted := make(chan struct{})
+
 		expected := db.Block{
 			Height: 8, Hash: chainhash.Hash{8}, Timestamp: time.Unix(8, 0),
 		}
+		query := db.ListSyncedBlocksQuery{StartHeight: 8, EndHeight: 8}
+		firstDeps.store.On("ListSyncedBlocks", mock.Anything, query).
+			Return([]db.Block{expected}, nil).Once()
+		replacement := expected
+		replacement.Hash = chainhash.Hash{9}
+		firstDeps.store.On("ListSyncedBlocks", mock.Anything, query).
+			Return([]db.Block{replacement}, nil).Once()
+
+		entered, release := make(chan struct{}), make(chan struct{})
+		releaseRollback := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseRollback)
 		backend.On("rollbackToBlock", mock.Anything, expected).
-			Run(func(mock.Arguments) { close(persisted) }).Return(nil).Once()
+			Run(func(mock.Arguments) {
+				close(entered)
+				<-release
+			}).Return(nil).Once()
 
-		// Act: One source caller accepts the prior event before rollback;
-		// each simulated worker acknowledges only after that event is read.
-		notifications <- event
-
-		require.Equal(t, event, (<-firstEvents).notification)
-		require.Equal(t, event, (<-secondEvents).notification)
-
-		notifications <- chain.BlockDisconnected{
+		prior := chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 8}},
+		}
+		event := chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 9, Hash: replacement.Hash},
+				Time:  time.Unix(9, 0),
+			},
+		}
+		hint := chainRecoveryRequest{
 			Block: wtxmgr.Block{Height: 8, Hash: expected.Hash},
 			Time:  expected.Timestamp,
 		}
 
+		// Act: Coalesce recovery during full-mailbox fanout. Drain prior work
+		// before each writer acknowledges; hold the actual shared Store write.
+		firstEvents <- chainEvent{}
+
+		secondEvents <- chainEvent{}
+
+		notifications <- prior
+
+		synctest.Wait()
+		m.chainSyncer.requestRollback(t.Context(), hint)
+		m.chainSyncer.requestRollback(t.Context(), hint)
+		<-firstEvents
+		<-secondEvents
+		require.Equal(t, prior, (<-firstEvents).notification)
+		require.Equal(t, prior, (<-secondEvents).notification)
+
 		for range 2 {
+			synctest.Wait()
+
 			var raw chainEvent
 			select {
 			case raw = <-firstEvents:
@@ -218,21 +250,60 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 
 			req, ok := raw.notification.(prepareRollbackReq)
 			require.True(t, ok)
-			synctest.Wait()
-			require.Empty(t, persisted)
+
+			select {
+			case <-entered:
+				t.Fatal("rollback reached Store before all acknowledgments")
+			default:
+			}
+
 			close(req.readyForRollback)
 		}
 
-		// Assert: The sole rollback completes after both receipts; no raw
-		// disconnect reaches a Wallet, its full identity matches the backend
-		// expectation, and later full fanout still succeeds.
-		<-persisted
-		require.True(t, m.started.Load())
+		<-entered
 
 		notifications <- event
 
+		// Assert: The native event waits for the held commit, then reaches each
+		// recipient once before the stale hint can prepare another rollback.
+		require.Empty(t, firstEvents)
+		require.Empty(t, secondEvents)
+		releaseRollback()
 		require.Equal(t, event, (<-firstEvents).notification)
 		require.Equal(t, event, (<-secondEvents).notification)
+
+		// Act: Only after replacement delivery, offer the old identity again.
+		// This avoids assuming priority between source events and fork hints.
+		m.chainSyncer.requestRollback(t.Context(), hint)
+
+		var resumes []<-chan struct{}
+
+		for range 2 {
+			synctest.Wait()
+
+			var raw chainEvent
+			select {
+			case raw = <-firstEvents:
+			case raw = <-secondEvents:
+			}
+
+			req, ok := raw.notification.(prepareRollbackReq)
+			require.True(t, ok)
+
+			resumes = append(resumes, req.rollbackDone)
+			close(req.readyForRollback)
+		}
+
+		// Assert: Replaced history closes both releases without another Store
+		// write; the backend's Once expectation rejects a stale rewind.
+		for _, resume := range resumes {
+			<-resume
+		}
+
+		synctest.Wait()
+		require.Empty(t, firstEvents)
+		require.Empty(t, secondEvents)
+		require.NoError(t, m.Stop())
 	})
 }
 
@@ -1352,16 +1423,19 @@ func newManagerLifecycleTest(t *testing.T,
 		},
 	}
 
-	manager.chainSyncer = newChainSyncer(
+	routing := newChainSyncer(
 		chain, &manager.config.ChainParams, manager.cancel,
 	)
+	manager.chainSyncer = routing
 
 	// Seed the stream before launching, so test setup never races the select.
 	if len(notifications) != 0 {
 		manager.chainEvents = notifications[0]
 	}
 
-	manager.wg.Go(manager.mainLoop)
+	manager.wg.Go(func() {
+		manager.mainLoop(routing.recoveryRequests)
+	})
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
 	t.Cleanup(func() {

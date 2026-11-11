@@ -258,12 +258,16 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		requestChan: make(chan any),
 	}
 
-	m.chainSyncer = newChainSyncer(
+	routing := newChainSyncer(
 		m.config.ChainSource, &m.config.ChainParams, m.cancel,
 	)
 
+	m.chainSyncer = routing
+
 	// Track the loop before returning Manager so Stop can join it.
-	m.wg.Go(m.mainLoop)
+	m.wg.Go(func() {
+		m.mainLoop(routing.recoveryRequests)
+	})
 
 	return m, nil
 }
@@ -305,10 +309,12 @@ type stopManagerReq struct {
 	resp chan error
 }
 
-// mainLoop handles Manager requests and native chain events until shutdown.
-func (m *Manager) mainLoop() {
+// mainLoop handles Manager requests and chain events until cleanup finishes.
+func (m *Manager) mainLoop(recoveries <-chan chainRecoveryRequest) {
 	// Cancellation stops new iterations after transferred work settles.
 	for m.lifetimeCtx.Err() == nil {
+		var err error
+
 		select {
 		case raw := <-m.requestChan:
 			if m.handleReq(raw) {
@@ -323,14 +329,22 @@ func (m *Manager) mainLoop() {
 				continue
 			}
 
-			err := m.dispatchChainEvent(m.lifetimeCtx, event)
-			if err != nil && m.lifetimeCtx.Err() == nil {
-				log.Errorf("Unable to process chain event: %v", err)
-				m.cancel()
-			}
+			err = m.dispatchChainEvent(m.lifetimeCtx, event)
+
+		case event := <-recoveries:
+			err = m.handleRollbackEvent(
+				m.lifetimeCtx, chain.BlockDisconnected(event), true,
+			)
 
 		case <-m.lifetimeCtx.Done():
 			// Rejoin the single cleanup boundary before selecting more work.
+		}
+
+		// Native and hinted failures request the same joined cleanup. A
+		// concurrent Stop already owns cancellation and its cleanup reply.
+		if err != nil && m.lifetimeCtx.Err() == nil {
+			log.Errorf("Unable to process chain event: %v", err)
+			m.cancel()
 		}
 	}
 
@@ -603,7 +617,7 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 	// Settle their earlier writes and rewind Store once before the next
 	// source event; independent Wallet delivery cannot order that rewind.
 	if disconnect, ok := n.(chain.BlockDisconnected); ok {
-		return m.handleRollbackEvent(ctx, disconnect)
+		return m.handleRollbackEvent(ctx, disconnect, false)
 	}
 
 	wallets := m.chainRecipients()
@@ -647,7 +661,7 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 // Success releases workers before the loop handles its next chain event.
 // On error, the owner loop stops Wallets before any worker can write again.
 func (m *Manager) handleRollbackEvent(ctx context.Context,
-	event chain.BlockDisconnected) error {
+	event chain.BlockDisconnected, recovery bool) error {
 
 	// Preserve hash and time as well as height for storage that needs to
 	// distinguish a stale disconnect from a replacement at the same height.
@@ -673,6 +687,14 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 
+	// Another recovery may already have replaced this queued fork identity.
+	// No write is needed then, but paused workers still need their release.
+	if recovery && !m.recoveryStillNeeded(ctx, *block) {
+		close(rollbackDone)
+
+		return nil
+	}
+
 	// Accepted persistence settles even if its caller or Stop cancels.
 	// The owner loop keeps Store open until this one rollback completes.
 	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
@@ -689,6 +711,34 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	close(rollbackDone)
 
 	return nil
+}
+
+// recoveryStillNeeded checks queued evidence against the shared stored branch.
+// All published Wallet stores expose that history; one read is sufficient.
+func (m *Manager) recoveryStillNeeded(ctx context.Context,
+	block db.Block) bool {
+
+	for _, wallet := range m.wallets {
+		blocks, err := wallet.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				StartHeight: block.Height,
+				EndHeight:   block.Height,
+			},
+		)
+		if errors.Is(err, db.ErrBlockNotFound) {
+			return false
+		}
+
+		if err != nil {
+			log.Warnf("Unable to check recovery hint: %v", err)
+
+			return false
+		}
+
+		return len(blocks) != 0 && blocks[0].Hash == block.Hash
+	}
+
+	return false
 }
 
 // String returns a summary of the active wallets managed by the Manager.

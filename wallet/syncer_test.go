@@ -7702,7 +7702,9 @@ func TestLiveWatchTargetedCommitUncertainty(t *testing.T) {
 		matches:      liveMatches(record),
 	}
 
-	manager.wg.Go(func() { manager.mainLoop() })
+	manager.wg.Go(func() {
+		manager.mainLoop(routing.recoveryRequests)
+	})
 	w.wg.Go(w.runSyncLoop)
 	<-entered
 
@@ -8315,7 +8317,9 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 
 	w.chainEventChan <- event
 
-	manager.wg.Go(func() { manager.mainLoop() })
+	manager.wg.Go(func() {
+		manager.mainLoop(routing.recoveryRequests)
+	})
 	w.wg.Go(w.runSyncLoop)
 
 	// Assert: Internal terminal propagation starts cleanup before public Stop
