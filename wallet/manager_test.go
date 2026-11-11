@@ -401,6 +401,75 @@ func TestManagerChainRollbackStopsOnError(t *testing.T) {
 	}
 }
 
+// TestManagerRecoveryFailureStops verifies a failed background fork recovery
+// cancels its paused processor and closes storage without an external Stop.
+func TestManagerRecoveryFailureStops(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Report a stored abandoned block through the worker's fork hint.
+	// An uncertain shared rewind must leave writers paused until cleanup joins
+	// the real processor, rather than returning to the owner's event select.
+	w, deps := createTestWalletWithMocks(t)
+	w.cfg.Name = testWalletName
+	w.id = 1
+	startLoadedWalletForTest(t, w)
+	deps.vault.On("Lock").Return().Once()
+
+	block := db.Block{Height: 8, Hash: chainhash.Hash{8}}
+	query := db.ListSyncedBlocksQuery{StartHeight: 8, EndHeight: 8}
+	deps.store.On("ListSyncedBlocks", mock.Anything, query).
+		Return([]db.Block{block}, nil).Once()
+
+	closed := make(chan struct{})
+	backend := &managerBackendMock{}
+	backend.On("rollbackToBlock", mock.Anything, block).
+		Return(dbruntime.ErrAmbiguousTxCommit).Once()
+	backend.On("close").Run(func(mock.Arguments) {
+		close(closed)
+	}).Return(nil).Once()
+	m := newManagerLifecycleTest(t, backend)
+	m.started.Store(true)
+	m.wallets[w.cfg.Name] = w
+	events := make(chan chainEvent, 1)
+	w.chainEventChan = events
+	processor := newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		m.chainSyncer, events,
+	)
+	processed := make(chan error, 1)
+
+	// Act: Acknowledge the pause through the actual Wallet processor. The
+	// Wallet's owned group makes Store closure depend on its canceled exit.
+	m.chainSyncer.requestRollback(t.Context(), chainRecoveryRequest{
+		Block: wtxmgr.Block{Height: 8, Hash: block.Hash},
+	})
+
+	raw := <-events
+	req, ok := raw.notification.(prepareRollbackReq)
+	require.True(t, ok)
+	w.wg.Go(func() {
+		processed <- processor.processChainEvent(w.lifetimeCtx, raw)
+	})
+
+	// Assert: Observe automatic storage cleanup before invoking public Stop
+	// to join. Failed recovery must never release the abandoned write barrier.
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed recovery did not stop Manager")
+	}
+
+	require.ErrorIs(t, <-processed, context.Canceled)
+
+	select {
+	case <-req.rollbackDone:
+		t.Fatal("failed recovery resumed writers")
+	default:
+	}
+
+	require.NoError(t, m.Stop())
+}
+
 // TestManagerChainRollbackWithoutWallet verifies a running pristine KVDB
 // Manager accepts disconnects before its first Wallet opens a Store.
 func TestManagerChainRollbackWithoutWallet(t *testing.T) {
