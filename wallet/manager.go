@@ -316,31 +316,32 @@ func (m *Manager) mainLoop() {
 			}
 
 		case event, ok := <-m.chainEvents:
-			// Stop owns cleanup once it cancels the service. A simultaneous
-			// source close must not take its cleanup result away.
-			if m.lifetimeCtx.Err() != nil {
-				continue
-			}
-
 			if !ok {
 				log.Warnf("Chain notification source closed")
-				m.handleStopReq(stopManagerReq{})
+				m.cancel()
 
-				return
+				continue
 			}
 
 			err := m.dispatchChainEvent(m.lifetimeCtx, event)
 			if err != nil && m.lifetimeCtx.Err() == nil {
 				log.Errorf("Unable to process chain event: %v", err)
-				m.handleStopReq(stopManagerReq{})
-
-				return
+				m.cancel()
 			}
 
 		case <-m.lifetimeCtx.Done():
-			return
+			// Rejoin the single cleanup boundary before selecting more work.
 		}
 	}
+
+	// Stop pins its reply before cancellation; automatic shutdown has no
+	// caller. Both causes use this same joined cleanup after event work.
+	req := stopManagerReq{}
+	if registered := m.stopReq.Load(); registered != nil {
+		req = *registered
+	}
+
+	m.handleStopReq(req)
 }
 
 // handleReq finishes a transferred request before the next shutdown boundary.
@@ -428,6 +429,8 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 // from failed Start/Create calls that are not in m.wallets.
 // The caller holds the write lock and must have a non-nil backend.
 func (m *Manager) stopWallets(wallets []*Wallet) error {
+	// Reject another Start until terminal cleanup has completed.
+	m.started.Store(true)
 	m.cancel()
 
 	for _, wallet := range m.wallets {
@@ -564,23 +567,23 @@ func (m *Manager) handleStartReq(req *startManagerReq) (
 // It waits for startup, accepted creation, and any other Stop to finish.
 // After shutdown, Stop is a no-op.
 func (m *Manager) Stop() error {
-	// Release blocked event work and join its owner before closing storage.
-	m.cancel()
-	m.wg.Wait()
-
-	m.Lock()
-	defer m.Unlock()
-
-	// Later Stop calls have no remaining resources to close.
-	if m.backend == nil {
-		return nil
+	// Pin the first caller before cancellation releases blocked delivery.
+	// Other callers only join; completion belongs exclusively to the loop.
+	req := stopManagerReq{resp: make(chan error, 1)}
+	if m.stopReq.CompareAndSwap(nil, &req) {
+		m.cancel()
 	}
 
-	// Construction already owns an open backend, so shutdown must reject
-	// Start even when no startup attempt has claimed the guard yet.
-	m.started.Store(true)
+	m.wg.Wait()
 
-	return m.stopWallets(nil)
+	// Automatic cleanup may already own shutdown. Only a caller whose
+	// registered request was served receives the cleanup error.
+	select {
+	case err := <-req.resp:
+		return err
+	default:
+		return nil
+	}
 }
 
 // handleStopReq finishes cleanup before returning its error to the caller.
@@ -693,9 +696,9 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 
 	err = m.prepareWalletsForRollback(ctx, rollbackDone)
 	if err != nil {
-		// Only Stop's lifetime cancellation interrupts preparation. Leave
-		// completion held and cleanup to that waiting caller so it receives
-		// close errors; prepared workers exit through Wallet cancellation.
+		// Lifetime cancellation interrupts preparation. Keep workers paused;
+		// the loop cleans up and replies to the registered Stop caller.
+		// Prepared workers exit through their Wallet lifetimes.
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 

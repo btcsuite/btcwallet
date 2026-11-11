@@ -1647,7 +1647,7 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 	second := make(chan error, 1)
 	callingStop := make(chan struct{})
 
-	// Act: Hold shutdown, reject Start, and overlap another
+	// Act: Hold shutdown, reject new Start/Create work, and overlap another
 	// Stop. Both Stop callers check the shared completion boundary directly.
 	go func() {
 		err := manager.Stop()
@@ -1664,6 +1664,10 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 	<-entered
 
 	wallets, startErr := manager.Start(t.Context())
+	created, createErr := manager.Create(CreateWalletParams{
+		Name: "late",
+	})
+
 	go func() {
 		close(callingStop)
 
@@ -1687,6 +1691,9 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 
 	// Assert: Only the call doing cleanup returns its failure. Neither
 	// overlapping nor repeated calls create detached work or replay errors.
+	// Strict mocks reject any backend work from the late Create.
+	require.Nil(t, created)
+	require.ErrorIs(t, createErr, ErrManagerStopped)
 	require.Nil(t, wallets)
 	require.ErrorIs(t, startErr, ErrStateForbidden)
 	require.ErrorIs(t, firstErr, closeErr)
