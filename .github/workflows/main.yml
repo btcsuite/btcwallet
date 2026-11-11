@@ -7,9 +7,11 @@ on:
   pull_request:
     branches:
       - "**"
+  # Release candidates call these same jobs at their tested commit.
+  workflow_call:
 concurrency:
-  # Cancel any previous workflows if they are from a PR or push.
-  group: ${{ github.event.pull_request.number || github.ref }}
+  # Separate standalone/called CI from its release caller to avoid cancellation.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -334,7 +336,7 @@ jobs:
   #
   # Job flow:
   # - Install btcd `${{ env.BTCD_VERSION_LATEST }}` as the shared miner.
-  # - Test the current Core release on every existing wallet database.
+  # - Test the pinned Core release on every existing wallet database.
   # - Verify its official archive before running the complete suite; older
   #   supported releases run in the release-check workflow.
   ########################
