@@ -291,6 +291,101 @@ func testAddressManagerRawImportTaprootScript(h *bwtest.HarnessTest) {
 	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
 }
 
+// testAddressManagerRejectTaprootScriptImport verifies malformed import forms
+// return no metadata and leave imported-address inventories unchanged.
+func testAddressManagerRejectTaprootScriptImport(h *bwtest.HarnessTest) {
+	// Include every public family in the inventory so a malformed script
+	// cannot leave an import behind under another output or representation.
+	addrTypes := []waddrmgr.AddressType{
+		waddrmgr.PubKeyHash,
+		waddrmgr.Script,
+		waddrmgr.RawPubKey,
+		waddrmgr.NestedWitnessPubKey,
+		waddrmgr.WitnessPubKey,
+		waddrmgr.WitnessScript,
+		waddrmgr.TaprootPubKey,
+		waddrmgr.TaprootScript,
+	}
+
+	// Keep valid deterministic public material for each row's other fields,
+	// so only the selected missing component or unknown type causes rejection.
+	internalKey := btcec.Generator()
+	leafScript := []byte{txscript.OP_TRUE}
+	controlBlock := &txscript.ControlBlock{
+		InternalKey: internalKey,
+		LeafVersion: txscript.BaseLeafVersion,
+	}
+
+	// Each row isolates an uncovered guard while retaining the other public
+	// fixture material; no encoder or successful-import matrix is repeated.
+	tests := []struct {
+		name      string
+		tapscript waddrmgr.Tapscript
+	}{
+		{
+			name: "missing control block",
+			tapscript: waddrmgr.Tapscript{
+				Type:           waddrmgr.TapscriptTypePartialReveal,
+				RevealedScript: leafScript,
+			},
+		},
+		{
+			name: "missing revealed leaf",
+			tapscript: waddrmgr.Tapscript{
+				Type:         waddrmgr.TapscriptTypePartialReveal,
+				ControlBlock: controlBlock,
+			},
+		},
+		{
+			name: "unknown tapscript type",
+			tapscript: waddrmgr.Tapscript{
+				Type:           waddrmgr.TapscriptType(255),
+				ControlBlock:   controlBlock,
+				RevealedScript: leafScript,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: unlock uniformly so a SQL vault encryption failure
+			// cannot mask validation, and snapshot every imported family.
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+			before := make([][]wallet.AddressProperty, len(addrTypes))
+			for i, addrType := range addrTypes {
+				listed, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+
+				before[i] = listed
+			}
+
+			// Act: submit the incomplete or unknown representation through
+			// the real Wallet rather than invoking its validator directly.
+			info, err := w.ImportTaprootScript(ctx, tc.tapscript)
+
+			// Assert: malformed shapes have no public sentinel, but must
+			// return no metadata and preserve all imported inventories,
+			// including any unexpected output a partial import could create.
+			require.Error(h, err)
+			require.Zero(h, info)
+
+			for i, addrType := range addrTypes {
+				after, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+				require.ElementsMatch(h, before[i], after)
+			}
+		})
+	}
+}
+
 // createTestAddressInfo independently derives address metadata from the
 // fixture account and requested branch; only the chosen child index comes from
 // allocation, since BIP32 permits the allocator to skip invalid children.
