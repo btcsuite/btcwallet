@@ -325,7 +325,6 @@ func TestManagerChainRollbackStopsOnError(t *testing.T) {
 			require.Nil(t, late)
 			require.ErrorIs(t, err, ErrManagerStopped)
 			require.False(t, m.started.Load())
-			require.Nil(t, m.backend)
 		})
 	}
 }
@@ -728,7 +727,6 @@ func TestManagerChainRollbackStopDuringPreparation(t *testing.T) {
 				require.ErrorIs(t, stopErr, errDBFail)
 				require.ErrorIs(t, w.state.validateStarted(), ErrWalletStopped)
 				require.False(t, m.started.Load())
-				require.Nil(t, m.backend)
 			})
 		})
 	}
@@ -833,9 +831,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			// Verify internal state: Ensure the manager is tracking the
 			// newly created wallet in its internal map, keyed by the
 			// durable request name.
-			m.RLock()
 			loadedW, ok := m.wallets[testWalletName]
-			m.RUnlock()
 			require.True(t, ok)
 			require.Same(t, w, loadedW)
 

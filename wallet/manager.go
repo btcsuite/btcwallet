@@ -144,15 +144,13 @@ type CreateWalletParams struct {
 // to manage multiple distinct wallets (e.g., for different coins or different
 // accounts) simultaneously.
 type Manager struct {
-	sync.RWMutex
-
 	// started rejects another Start while starting, running or stopping.
-	// The Manager lock serializes resource changes and terminal admission.
+	// The main loop serializes Wallet changes and cleanup.
 	started atomic.Bool
 
 	// wallets holds fully initialized and started Wallets keyed by unique
-	// name. The Manager lock serializes Store access, runtime assembly, and
-	// publication after initial-account import and private startup complete.
+	// name. The main loop adds each Wallet after initial-account import
+	// and private startup complete.
 	wallets map[string]*Wallet
 
 	// backend owns the database and resolves the storage dependencies for
@@ -167,10 +165,10 @@ type Manager struct {
 
 	// lifetimeCtx outlives construction and startup requests. Wallets keep
 	// their own lifetimes; canceling this one releases shared event delivery.
-	//nolint:containedctx // Manager owns and joins the shared reader lifetime.
+	//nolint:containedctx // Manager owns and joins its service lifetime.
 	lifetimeCtx context.Context
 
-	// cancel signals terminal reader shutdown before draining Wallet work.
+	// cancel releases event waits and requests joined terminal cleanup.
 	cancel context.CancelFunc
 
 	// stopReq pins the first Stop caller before lifetime cancellation.
@@ -180,10 +178,10 @@ type Manager struct {
 	// chainEvents is the borrowed stream enabled after successful startup.
 	chainEvents <-chan any
 
-	// requestChan sends Wallet operations to the main loop.
+	// requestChan sends Manager operations to the main loop.
 	requestChan chan any
 
-	// wg joins routing after releasing the lock needed by recipient snapshots.
+	// wg joins the main loop after storage cleanup has finished.
 	wg sync.WaitGroup
 }
 
@@ -388,7 +386,7 @@ func (m *Manager) sendReq(ctx context.Context, req any) error {
 }
 
 // startWallets assembles and starts durable Wallets in stable identifier order.
-// It publishes only the complete set while the caller holds the write lock.
+// The main loop shares only the complete set after startup succeeds.
 func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 	data, err := m.backend.listWallets(ctx)
 	if err != nil {
@@ -427,7 +425,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 
 // stopWallets stops all Wallets before closing storage. The slice holds Wallets
 // from failed Start/Create calls that are not in m.wallets.
-// The caller holds the write lock and must have a non-nil backend.
+// The main loop calls this after its current operation has settled.
 func (m *Manager) stopWallets(wallets []*Wallet) error {
 	// Reject another Start until terminal cleanup has completed.
 	m.started.Store(true)
@@ -454,13 +452,8 @@ func (m *Manager) stopWallets(wallets []*Wallet) error {
 		}
 	}
 
-	// Clear runtime ownership after shutdown has settled. The nil backend
-	// keeps later Start calls from reopening a terminal Manager. Wallet work
-	// is drained. Reader rollback holds this same lock through Store use;
-	// the reader itself joins only after its caller unlocks.
 	err := errors.Join(errs...)
 	err = errors.Join(err, m.backend.close())
-	m.backend = nil
 
 	clear(m.wallets)
 	m.started.Store(false)
@@ -541,12 +534,6 @@ func (m *Manager) handleStartReq(req *startManagerReq) (
 		return nil, false, err
 	}
 
-	// Preserve terminal rejection while the original locked lifecycle owns
-	// cleanup; loop ownership later makes the lifetime authoritative.
-	if m.backend == nil {
-		return nil, false, ErrManagerStopped
-	}
-
 	if m.started.Swap(true) {
 		return nil, false, fmt.Errorf(
 			"manager already started: %w", ErrStateForbidden,
@@ -597,12 +584,9 @@ func (m *Manager) handleStopReq(req stopManagerReq) {
 	}
 }
 
-// chainRecipients fixes active membership without holding the Manager lock
-// across matching or potentially blocked delivery to a Wallet mailbox.
+// chainRecipients lists current Wallets for matching and delivery.
+// The main loop calls it between serialized Wallet changes.
 func (m *Manager) chainRecipients() []*Wallet {
-	m.RLock()
-	defer m.RUnlock()
-
 	wallets := make([]*Wallet, 0, len(m.wallets))
 	for _, w := range m.wallets {
 		wallets = append(wallets, w)
@@ -612,8 +596,8 @@ func (m *Manager) chainRecipients() []*Wallet {
 }
 
 // dispatchChainEvent admits source-ordered events to existing Wallet workers.
-// Capacity-one mailboxes deliberately backpressure the sole reader; Wallet
-// and reader cancellation both release delivery during terminal shutdown.
+// Capacity-one mailboxes backpressure the loop; Wallet and Manager lifetime
+// cancellation release blocked delivery during terminal shutdown.
 // Shared storage disconnects settle rollback before the next source event.
 func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 	// A disconnect changes the history that Wallet workers are writing.
@@ -662,21 +646,9 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 
 // handleRollbackEvent settles published writers around one backend rollback.
 // Success releases workers before the loop handles its next chain event.
-// A rollback error stops every Wallet before any worker can write again.
+// On error, the owner loop stops Wallets before any worker can write again.
 func (m *Manager) handleRollbackEvent(ctx context.Context,
 	event chain.BlockDisconnected) error {
-
-	// Keep the Wallet set fixed, exclude Create's new writers, and prevent
-	// Stop from closing Store until rollback or terminal cleanup finishes.
-	m.Lock()
-	defer m.Unlock()
-
-	// Stop may have cleared backend before this callback acquired the lock.
-	// Reject that stopped Manager before using its storage.
-	err := m.checkCreate()
-	if err != nil {
-		return err
-	}
 
 	// Preserve hash and time as well as height for storage that needs to
 	// distinguish a stale disconnect from a replacement at the same height.
@@ -703,7 +675,7 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	}
 
 	// Accepted persistence settles even if its caller or Stop cancels.
-	// The Manager lock keeps Store open until this one rollback completes.
+	// The owner loop keeps Store open until this one rollback completes.
 	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
 	if err != nil {
 		err = fmt.Errorf("rollback chain: %w", err)
@@ -839,27 +811,8 @@ func (m *Manager) handleCreateWalletReq(req *createWalletReq) (
 	return w, false, nil
 }
 
-// checkCreate rejects terminal admission after Stop cancels the reader, even
-// before Stop obtains admission and closes storage. The caller holds the lock.
-func (m *Manager) checkCreate() error {
-	if m.lifetimeCtx.Err() != nil {
-		return ErrManagerStopped
-	}
-
-	if !m.started.Load() {
-		err := ErrStateForbidden
-		if m.backend == nil {
-			err = ErrManagerStopped
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-// createWallet prepares a durable candidate while Create holds the Manager
-// lock. A returned Wallet must be started or cleaned up before releasing it.
+// createWallet prepares a durable candidate on the main loop.
+// Start or clean up the returned Wallet before the next operation.
 func (m *Manager) createWallet(ctx context.Context,
 	params CreateWalletParams) (*Wallet, error) {
 
@@ -894,8 +847,8 @@ func (m *Manager) createWallet(ctx context.Context,
 		defer rootKey.Zero()
 	}
 
-	// The Manager mutex keeps runtime assembly, Store mutation, and cache
-	// publication atomic so no partial Wallet becomes observable.
+	// Serialized assembly and publication keep a partial Wallet private
+	// until its initial imports and startup have succeeded.
 	walletCfg, err := m.config.walletConfig(params.Name)
 	if err != nil {
 		return nil, err
