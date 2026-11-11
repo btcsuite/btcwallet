@@ -334,14 +334,7 @@ func (m *Manager) mainLoop() {
 		}
 	}
 
-	// Stop pins its reply before cancellation; automatic shutdown has no
-	// caller. Both causes use this same joined cleanup after event work.
-	req := stopManagerReq{}
-	if registered := m.stopReq.Load(); registered != nil {
-		req = *registered
-	}
-
-	m.handleStopReq(req)
+	m.handleStopReq()
 }
 
 // handleReq finishes a transferred request before the next shutdown boundary.
@@ -577,9 +570,13 @@ func (m *Manager) Stop() error {
 
 // handleStopReq finishes cleanup before returning its error to the caller.
 // Automatic shutdown has no caller, so unexpected cleanup errors are logged.
-func (m *Manager) handleStopReq(req stopManagerReq) {
+func (m *Manager) handleStopReq() {
+	// Stop pins its first reply before cancellation. Capture it before
+	// cleanup so a later joining caller does not become the result owner.
+	req := m.stopReq.Load()
+
 	err := m.stopWallets(nil)
-	if req.resp != nil {
+	if req != nil {
 		req.resp <- err
 	} else if err != nil {
 		log.Errorf("Unable to stop manager: %v", err)
