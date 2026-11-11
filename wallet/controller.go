@@ -254,12 +254,10 @@ func (w *Wallet) runSyncLoop() {
 
 		log.Errorf("Chain sync loop exited with error: %v", err)
 
-		var shouldContinue bool
-
-		backoff, shouldContinue = w.waitForBackoff(
-			startTime, backoff, time.After,
+		backoff, err = w.waitForBackoff(
+			w.lifetimeCtx, startTime, backoff, time.After,
 		)
-		if !shouldContinue {
+		if err != nil {
 			return
 		}
 	}
@@ -278,9 +276,10 @@ func (w *Wallet) initialSyncBackoff() time.Duration {
 // waitForBackoff handles the delay between synchronization retry attempts. It
 // resets the backoff if the previous run was stable, waits for the calculated
 // delay, and then returns the updated backoff duration for the next attempt.
-// It returns false if the wallet is shutting down.
-func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
-	timerFn func(time.Duration) <-chan time.Time) (time.Duration, bool) {
+// Cancellation interrupts the wait and returns the caller's context error.
+func (w *Wallet) waitForBackoff(ctx context.Context, startTime time.Time,
+	backoff time.Duration,
+	timerFn func(time.Duration) <-chan time.Time) (time.Duration, error) {
 
 	// If the syncer ran for a significant amount of time, we consider it a
 	// "stable" run and reset the backoff.
@@ -296,9 +295,9 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 	for {
 		select {
 		case event := <-w.chainEventChan:
-			err := w.sync.processChainEventBeforeSync(w.lifetimeCtx, event)
-			if w.lifetimeCtx.Err() != nil {
-				return 0, false
+			err := w.sync.processChainEventBeforeSync(ctx, event)
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
 			}
 
 			if err != nil {
@@ -315,12 +314,12 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 				backoff = maxBackoff
 			}
 
-			return backoff, true
+			return backoff, nil
 
-		case <-w.lifetimeCtx.Done():
+		case <-ctx.Done():
 			log.Debug("Backoff interrupted by wallet shutdown")
 
-			return 0, false
+			return 0, ctx.Err()
 		}
 	}
 }

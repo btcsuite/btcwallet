@@ -2845,16 +2845,15 @@ func TestControllerLock_StateError(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
-// TestWaitForBackoffStableRun verifies a stable sync run resets to the
+// TestSyncBackoffStableRun verifies a stable sync run resets to the
 // Wallet-local retry policy instead of an independent controller constant.
-func TestWaitForBackoffStableRun(t *testing.T) {
+func TestSyncBackoffStableRun(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Give a Wallet a distinctive Manager-owned retry interval and a
 	// timer seam that records the reset value while firing immediately.
 	retryInterval := 3 * time.Second
 	w := &Wallet{
-		lifetimeCtx: context.Background(),
 		cfg: Config{
 			WalletSyncRetryInterval: retryInterval,
 		},
@@ -2871,23 +2870,24 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 	}
 
 	// Act: Apply retry backoff after a run long enough to be stable.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	nextBackoff, err := w.waitForBackoff(
+		context.Background(), startTime, currentBackoff, timerFn,
+	)
 
 	// Assert: Verify the configured interval was used and exponential growth
 	// continues from that Manager-owned reset point.
-	require.True(t, ok)
+	require.NoError(t, err)
 	require.Equal(t, retryInterval*2, nextBackoff)
 }
 
-// TestWaitForBackoff_UnstableRun verifies that the backoff duration doubles
+// TestSyncBackoffUnstableRun verifies that the backoff duration doubles
 // when the syncer fails quickly (unstable run).
-func TestWaitForBackoff_UnstableRun(t *testing.T) {
+func TestSyncBackoffUnstableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet.
-	w := &Wallet{
-		lifetimeCtx: context.Background(),
-	}
+	// Arrange: Keep the previous attempt short and use an immediate timer
+	// to observe the existing exponential policy without a real delay.
+	w := &Wallet{}
 
 	// Mock a start time that is recent (unstable).
 	startTime := time.Now()
@@ -2904,23 +2904,25 @@ func TestWaitForBackoff_UnstableRun(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	// Act: Complete the retry delay after an unstable attempt.
+	nextBackoff, err := w.waitForBackoff(
+		context.Background(), startTime, currentBackoff, timerFn,
+	)
 
-	// Assert: Verify that the operation continued and backoff doubled.
-	require.True(t, ok)
+	// Assert: A short attempt retains its scheduled interval and doubles
+	// the next one, rather than resetting to the configured initial delay.
+	require.NoError(t, err)
 	require.Equal(t, currentBackoff*2, nextBackoff)
 }
 
-// TestWaitForBackoff_MaxBackoffCap verifies that the backoff duration is
+// TestSyncBackoffMaxBackoffCap verifies that the backoff duration is
 // capped at maxBackoff.
-func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
+func TestSyncBackoffMaxBackoffCap(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet.
-	w := &Wallet{
-		lifetimeCtx: context.Background(),
-	}
+	// Arrange: Start at the retry ceiling and fire its timer immediately
+	// so the next interval can be checked without waiting five minutes.
+	w := &Wallet{}
 
 	startTime := time.Now()
 	// Current backoff is already high enough that doubling it would exceed
@@ -2936,26 +2938,28 @@ func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	// Act: Complete a retry delay that would otherwise double past the cap.
+	nextBackoff, err := w.waitForBackoff(
+		context.Background(), startTime, currentBackoff, timerFn,
+	)
 
-	// Assert: Verify that the backoff is capped.
-	require.True(t, ok)
+	// Assert: Successful delay completion keeps the next interval at the cap
+	// rather than allowing exponential growth to extend it.
+	require.NoError(t, err)
 	require.Equal(t, maxBackoff, nextBackoff)
 }
 
-// TestWaitForBackoff_Shutdown verifies that waitForBackoff returns early if
+// TestSyncBackoffShutdown verifies that waitForBackoff returns early if
 // the wallet is shutting down.
-func TestWaitForBackoff_Shutdown(t *testing.T) {
+func TestSyncBackoffShutdown(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet with a canceled context.
+	// Arrange: Cancel the supplied lifetime before waiting, and keep the
+	// timer inert so cancellation is the only possible completion.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	w := &Wallet{
-		lifetimeCtx: ctx,
-	}
+	w := &Wallet{}
 
 	startTime := time.Now()
 	currentBackoff := time.Second
@@ -2965,11 +2969,15 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 		return make(chan time.Time)
 	}
 
-	// Act: Wait for backoff.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	// Act: Wait using the canceled lifetime rather than an implicit Wallet
+	// context, as required by the blocking helper's contract.
+	nextBackoff, err := w.waitForBackoff(
+		ctx, startTime, currentBackoff, timerFn,
+	)
 
-	// Assert: Verify that the operation was aborted.
-	require.False(t, ok)
+	// Assert: Cancellation returns its identity and no next retry interval;
+	// the caller must leave the worker instead of restarting it.
+	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, time.Duration(0), nextBackoff)
 }
 
