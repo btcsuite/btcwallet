@@ -257,9 +257,13 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		config:      cfg,
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
+		requestChan: make(chan any),
 	}
 
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+
+	// Track the loop before returning Manager so Stop can join it.
+	m.wg.Go(m.mainLoop)
 
 	return m, nil
 }
@@ -522,23 +526,20 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 		}
 	}()
 
-	// Run the extracted body under the existing lock until ownership moves
-	// to the prepared request loop.
 	req := startManagerReq{
 		reqCtx: reqCtx{ctx: ctx},
+		resp:   make(chan startManagerResp, 1),
 	}
-	wallets, _, err := m.handleStartReq(&req)
+
+	err := m.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	// Count this reader before starting it so Stop also waits when its
-	// goroutine has not yet been scheduled.
-	m.wg.Add(1)
+	// Wait for startup and failed-candidate cleanup before returning.
+	result := <-req.resp
 
-	go m.startChainSyncer()
-
-	return wallets, nil
+	return result.wallets, result.err
 }
 
 // handleStartReq starts the complete Wallet set or finishes failed cleanup.
@@ -766,8 +767,15 @@ func (m *Manager) String() string {
 	m.RLock()
 	defer m.RUnlock()
 
-	// Share the same name formatting while the existing lock owns reads.
-	return m.handleInfoReq()
+	// Read names on the same loop that changes the current Wallets.
+	req := managerInfoReq{resp: make(chan string, 1)}
+
+	err := m.sendReq(m.lifetimeCtx, req)
+	if err != nil {
+		return "active_wallets=[]"
+	}
+
+	return <-req.resp
 }
 
 // handleInfoReq lists current Wallet names in stable order.
@@ -815,16 +823,23 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	// Keep accepted creation independent of the old Stop cancellation while
-	// reusing the final request handler under the existing lock.
+	// Keep accepted creation running through Stop; the same owned context
+	// covers preparation, imports and startup without partial cancellation.
 	req := createWalletReq{
-		reqCtx: reqCtx{ctx: context.Background()},
+		reqCtx: reqCtx{ctx: context.WithoutCancel(m.lifetimeCtx)},
 		params: params,
+		resp:   make(chan createWalletResp, 1),
 	}
 
-	wallet, _, err := m.handleCreateWalletReq(&req)
+	err = m.sendReq(req.ctx, req)
+	if err != nil {
+		return nil, err
+	}
 
-	return wallet, err
+	// Accepted creation finishes setup and any failed-candidate cleanup.
+	result := <-req.resp
+
+	return result.wallet, result.err
 }
 
 // handleCreateWalletReq prepares and starts a Wallet before sharing it.
