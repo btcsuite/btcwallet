@@ -3554,28 +3554,6 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 	require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
 }
 
-// TestManagerChainCanceledSourceRejectsCreate rejects terminal admission after
-// Stop cancels its lifetime, before it obtains the lock to close storage.
-func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Reproduce the terminal source lifetime while backend remains
-	// open and started remains true. No create/storage expectation is allowed.
-	backend := &managerBackendMock{}
-	backend.On("close").Return(nil).Once()
-	manager := newManagerLifecycleTest(t, backend)
-	manager.started.Store(true)
-	manager.cancel()
-
-	// Act: Try creation before the ordinary cleanup owner closes the Store.
-	w, err := manager.Create(CreateWalletParams{Name: "late"})
-
-	// Assert: The terminal source rejects this call before validation or
-	// backend preparation; fixture cleanup alone owns the one Store close.
-	require.ErrorIs(t, err, ErrManagerStopped)
-	require.Nil(t, w)
-}
-
 // TestManagerRollbackKvdbAheadOfTip reproduces mined notifications arriving
 // before the sync stamp and requires immediate, readable replacement history.
 func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {

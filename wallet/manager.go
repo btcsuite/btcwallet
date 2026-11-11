@@ -301,6 +301,77 @@ type stopManagerReq struct {
 	resp chan error
 }
 
+// mainLoop handles Manager requests and native chain events until shutdown.
+func (m *Manager) mainLoop() {
+	// Cancellation stops new iterations after transferred work settles.
+	for m.lifetimeCtx.Err() == nil {
+		select {
+		case raw := <-m.requestChan:
+			if m.handleReq(raw) {
+				return
+			}
+
+		case event, ok := <-m.chainEvents:
+			// Stop owns cleanup once it cancels the service. A simultaneous
+			// source close must not take its cleanup result away.
+			if m.lifetimeCtx.Err() != nil {
+				continue
+			}
+
+			if !ok {
+				log.Warnf("Chain notification source closed")
+				m.handleStopReq(stopManagerReq{})
+
+				return
+			}
+
+			err := m.dispatchChainEvent(m.lifetimeCtx, event)
+			if err != nil && m.lifetimeCtx.Err() == nil {
+				log.Errorf("Unable to process chain event: %v", err)
+				m.handleStopReq(stopManagerReq{})
+
+				return
+			}
+
+		case <-m.lifetimeCtx.Done():
+			return
+		}
+	}
+}
+
+// handleReq finishes a transferred request before the next shutdown boundary.
+// A true result means failed setup already completed terminal cleanup.
+func (m *Manager) handleReq(raw any) bool {
+	switch req := raw.(type) {
+	case managerInfoReq:
+		req.resp <- m.handleInfoReq()
+
+	case startManagerReq:
+		wallets, stopped, err := m.handleStartReq(&req)
+		req.resp <- startManagerResp{wallets: wallets, err: err}
+
+		if stopped {
+			return true
+		}
+
+		if err == nil {
+			// Stop already waits for the loop, so it also joins this reader
+			// if the notification getter is still starting.
+			m.wg.Add(1)
+
+			go m.startChainSyncer()
+		}
+
+	case createWalletReq:
+		wallet, stopped, err := m.handleCreateWalletReq(&req)
+		req.resp <- createWalletResp{wallet: wallet, err: err}
+
+		return stopped
+	}
+
+	return false
+}
+
 // sendReq queues work while the Manager and caller are still running.
 func (m *Manager) sendReq(ctx context.Context, req any) error {
 	select {
