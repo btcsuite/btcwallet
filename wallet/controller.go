@@ -14,21 +14,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
-const (
-	// initialBackoff is the initial delay between synchronization retry
-	// attempts.
-	initialBackoff = 1 * time.Second
-
-	// maxBackoff is the maximum delay allowed between synchronization retry
-	// attempts.
-	maxBackoff = 5 * time.Minute
-
-	// stableRunTime is the minimum amount of time the syncer must run
-	// without error to be considered "stable", at which point the retry
-	// backoff is reset to initialBackoff.
-	stableRunTime = 10 * time.Minute
-)
-
 var (
 	// errWalletAlreadyStarted reports a repeated private start attempt.
 	errWalletAlreadyStarted = errors.New("wallet already started")

@@ -62,6 +62,21 @@ var (
 )
 
 const (
+	// initialBackoff is the initial delay between synchronization retry
+	// attempts.
+	initialBackoff = 1 * time.Second
+
+	// maxBackoff is the maximum delay allowed between synchronization retry
+	// attempts.
+	maxBackoff = 5 * time.Minute
+
+	// stableRunTime is the minimum amount of time the syncer must run
+	// without error to be considered "stable", at which point the retry
+	// backoff is reset to initialBackoff.
+	stableRunTime = 10 * time.Minute
+)
+
+const (
 	// syncStateSwitchThreshold is the number of blocks behind the chain
 	// tip at which the wallet switches to the "Syncing" state. Gaps
 	// smaller than this are handled silently (blocking DB lock) to avoid
@@ -754,8 +769,15 @@ func (s *syncer) findForkPoint(localHashes []*chainhash.Hash,
 	return -1
 }
 
-// run executes the main synchronization loop.
+// run executes the synchronization attempt within the caller's lifetime.
 func (s *syncer) run(ctx context.Context) error {
+	return s.runAttempt(ctx)
+}
+
+// runAttempt initializes and advances synchronization until it stops or fails.
+// Keeping an attempt separate lets its caller own retries without duplicating
+// initialization or event processing.
+func (s *syncer) runAttempt(ctx context.Context) error {
 	// Initialize the chain sync state.
 	err := s.initChainSync(ctx)
 	if err != nil {
