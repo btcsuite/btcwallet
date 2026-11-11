@@ -111,6 +111,80 @@ func testAddressManagerRawImportPublicKey(h *bwtest.HarnessTest) {
 	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
 }
 
+// testAddressManagerRejectPublicKeyImport verifies unsupported requests cannot
+// grant public ownership, even though the supplied key itself is valid.
+func testAddressManagerRejectPublicKeyImport(h *bwtest.HarnessTest) {
+	// ListAddresses selects one family at a time; snapshot every public
+	// family so a rejected request cannot hide an off-target import.
+	addrTypes := []waddrmgr.AddressType{
+		waddrmgr.PubKeyHash,
+		waddrmgr.Script,
+		waddrmgr.RawPubKey,
+		waddrmgr.NestedWitnessPubKey,
+		waddrmgr.WitnessPubKey,
+		waddrmgr.WitnessScript,
+		waddrmgr.TaprootPubKey,
+		waddrmgr.TaprootScript,
+	}
+
+	// These inputs fail at distinct public boundaries: the wallet type mapping
+	// and reconstruction of an address type that requires a script, not a key.
+	tests := []struct {
+		name     string
+		addrType waddrmgr.AddressType
+		wantErr  error
+	}{
+		{
+			name:     "unknown address type",
+			addrType: waddrmgr.AddressType(255),
+			wantErr:  wallet.ErrUnknownAddrType,
+		},
+		{
+			name:     "script address type",
+			addrType: waddrmgr.WitnessScript,
+			wantErr:  waddrmgr.ErrUnsupportedAddressType,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: capture the locked wallet's imported inventory before
+			// submitting the valid key with an unsupported representation.
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{})
+			pubKey := btcec.Generator()
+
+			before := make([][]wallet.AddressProperty, len(addrTypes))
+			for i, addrType := range addrTypes {
+				listed, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+
+				before[i] = listed
+			}
+
+			// Act: attempt to import a valid key using an unsupported
+			// address representation through the public Wallet boundary.
+			err := w.ImportPublicKey(ctx, pubKey, tc.addrType)
+
+			// Assert: preserve the error identity and compare complete
+			// inventories, including writes under an unexpected script.
+			require.ErrorIs(h, err, tc.wantErr)
+
+			for i, addrType := range addrTypes {
+				after, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+				require.ElementsMatch(h, before[i], after)
+			}
+		})
+	}
+}
+
 // testAddressManagerRawImportTaprootScript proves repeated imports retain the
 // original encrypted script across an output-key-only repeat, then receive a
 // future unmined payment through the real full-node watch.
