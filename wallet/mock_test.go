@@ -118,18 +118,15 @@ type mockChainProcessor struct {
 // chainProcessor interface.
 var _ chainProcessor = (*mockChainProcessor)(nil)
 
-// run implements the chainProcessor interface.
-func (m *mockChainProcessor) run(ctx context.Context) error {
+// prepareLiveWatches records synchronous SQL readiness before publication.
+func (m *mockChainProcessor) prepareLiveWatches(ctx context.Context) error {
 	args := m.Called(ctx)
 	return args.Error(0)
 }
 
-// processChainEventBeforeSync records ordered mailbox work during startup or
-// retry so controller tests can require its exact acceptance and result.
-func (m *mockChainProcessor) processChainEventBeforeSync(ctx context.Context,
-	event chainEvent) error {
-
-	args := m.Called(ctx, event)
+// run implements the chainProcessor interface.
+func (m *mockChainProcessor) run(ctx context.Context) error {
+	args := m.Called(ctx)
 	return args.Error(0)
 }
 

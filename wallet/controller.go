@@ -14,21 +14,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
-const (
-	// initialBackoff is the initial delay between synchronization retry
-	// attempts.
-	initialBackoff = 1 * time.Second
-
-	// maxBackoff is the maximum delay allowed between synchronization retry
-	// attempts.
-	maxBackoff = 5 * time.Minute
-
-	// stableRunTime is the minimum amount of time the syncer must run
-	// without error to be considered "stable", at which point the retry
-	// backoff is reset to initialBackoff.
-	stableRunTime = 10 * time.Minute
-)
-
 var (
 	// errWalletAlreadyStarted reports a repeated private start attempt.
 	errWalletAlreadyStarted = errors.New("wallet already started")
@@ -226,103 +211,26 @@ func (w *Wallet) start(startCtx context.Context) error {
 	return nil
 }
 
-// runSyncLoop executes the main chain synchronization loop with automatic
-// retries and exponential backoff. It ensures the wallet attempts to stay
-// synced even if the backend connection is flaky.
+// runSyncLoop keeps synchronization within the Wallet's joined lifetime.
+// The syncer owns retries; a returned failure is terminal to this worker.
 func (w *Wallet) runSyncLoop() {
-	backoff := w.initialSyncBackoff()
+	err := w.sync.run(w.lifetimeCtx)
+	if w.lifetimeCtx.Err() != nil {
+		log.Info("Chain sync loop exiting due to wallet shutdown")
 
-	for {
-		startTime := time.Now()
+		return
+	}
 
-		// Block until the syncer exits.
-		err := w.sync.run(w.lifetimeCtx)
-
-		// If the wallet is shutting down, we can exit immediately.
-		if w.lifetimeCtx.Err() != nil {
-			log.Info("Chain sync loop exiting due to wallet shutdown")
-
-			return
-		}
-
-		// If the syncer exited cleanly (nil error), it generally means it was
-		// requested to stop, so we shouldn't restart.
-		if err == nil {
-			log.Info("Chain sync loop exited normally")
-			return
-		}
-
+	if err != nil {
 		log.Errorf("Chain sync loop exited with error: %v", err)
+		// run has exhausted safe local handling. Signal the owner and return
+		// so its single cleanup can join this worker before closing storage.
+		w.chainSyncer.requestStop()
 
-		var shouldContinue bool
-
-		backoff, shouldContinue = w.waitForBackoff(
-			startTime, backoff, time.After,
-		)
-		if !shouldContinue {
-			return
-		}
-	}
-}
-
-// initialSyncBackoff returns the Wallet-local retry policy, preserving the
-// controller default for legacy or test Wallets assembled without Manager.
-func (w *Wallet) initialSyncBackoff() time.Duration {
-	if w.cfg.WalletSyncRetryInterval <= 0 {
-		return initialBackoff
+		return
 	}
 
-	return w.cfg.WalletSyncRetryInterval
-}
-
-// waitForBackoff handles the delay between synchronization retry attempts. It
-// resets the backoff if the previous run was stable, waits for the calculated
-// delay, and then returns the updated backoff duration for the next attempt.
-// It returns false if the wallet is shutting down.
-func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
-	timerFn func(time.Duration) <-chan time.Time) (time.Duration, bool) {
-
-	// If the syncer ran for a significant amount of time, we consider it a
-	// "stable" run and reset the backoff.
-	if time.Since(startTime) > stableRunTime {
-		backoff = w.initialSyncBackoff()
-	}
-
-	log.Infof("Restarting sync loop in %v...", backoff)
-
-	// Keep the original retry deadline while servicing the same mailbox.
-	// A failed initialization must not prevent rollback from repairing it.
-	retry := timerFn(backoff)
-	for {
-		select {
-		case event := <-w.chainEventChan:
-			err := w.sync.processChainEventBeforeSync(w.lifetimeCtx, event)
-			if w.lifetimeCtx.Err() != nil {
-				return 0, false
-			}
-
-			if err != nil {
-				// Retain the scheduled retry after an observation fails, just
-				// as a failed sync attempt returns here instead of stopping.
-				log.Errorf("Chain event processing failed during retry: %v",
-					err)
-			}
-
-		case <-retry:
-			// Increase backoff for the next attempt, capping it.
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-
-			return backoff, true
-
-		case <-w.lifetimeCtx.Done():
-			log.Debug("Backoff interrupted by wallet shutdown")
-
-			return 0, false
-		}
-	}
+	log.Info("Chain sync loop exited normally")
 }
 
 // performRuntimeSetup executes the synchronous initialization tasks required

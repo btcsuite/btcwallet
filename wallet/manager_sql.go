@@ -170,3 +170,17 @@ func newSQLAddressDeriver(
 		return deriveAddressData(chainParams, params)
 	}
 }
+
+// startWallet starts workers and installs persisted watches before publication.
+func (b *sqlManagerBackend) startWallet(ctx context.Context,
+	wallet *Wallet) error {
+
+	// Runtime setup resolves the Wallet's subscriptions before SQL promises
+	// synchronous native registration to Manager's caller.
+	err := wallet.start(ctx)
+	if err != nil {
+		return err
+	}
+
+	return wallet.sync.prepareLiveWatches(ctx)
+}

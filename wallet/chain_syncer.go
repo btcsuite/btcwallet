@@ -34,7 +34,16 @@ type chainRouter interface {
 
 	// notifyBlocks enables the backend's existing block/control notifications.
 	notifyBlocks(ctx context.Context) error
+
+	// requestStop reports unsafe effects without joining the sending worker.
+	requestStop()
+
+	// requestRollback offers fork evidence without waiting on its own worker.
+	requestRollback(ctx context.Context, event chainRecoveryRequest)
 }
+
+// chainRecoveryRequest identifies the first abandoned block for shared rewind.
+type chainRecoveryRequest chain.BlockDisconnected
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
 // Manager reads native notifications and calls this passive matching layer.
@@ -47,6 +56,12 @@ type chainSyncer struct {
 
 	// watches records live ownership independently of Wallet persistence.
 	watches *watchRegistry
+
+	// cancelManager releases delivery so Manager can join a failing worker.
+	cancelManager context.CancelFunc
+
+	// recoveryRequests retains one fork while the owner is busy.
+	recoveryRequests chan chainRecoveryRequest
 }
 
 // chainSyncer implements the behavior shared by Manager and its Wallets.
@@ -68,16 +83,40 @@ type watchRegistry struct {
 }
 
 // newChainSyncer retains the caller-owned source without starting any work.
+// Worker failures cancel Manager's lifetime; the caller still owns the client.
 func newChainSyncer(source chain.Interface,
-	params *chaincfg.Params) *chainSyncer {
+	params *chaincfg.Params, cancelManager context.CancelFunc) *chainSyncer {
 
 	return &chainSyncer{
-		source: source,
-		params: params,
+		source:           source,
+		params:           params,
+		cancelManager:    cancelManager,
+		recoveryRequests: make(chan chainRecoveryRequest, 1),
 		watches: &watchRegistry{
 			addresses: make(map[string]map[uint32]struct{}),
 			outpoints: make(map[wire.OutPoint]map[uint32]struct{}),
 		},
+	}
+}
+
+// requestStop reports unsafe effects without waiting for its sending worker.
+func (s *chainSyncer) requestStop() {
+	// The owner may be blocked on this worker's full mailbox. Cancellation
+	// releases that send; returning lets its cleanup join this worker.
+	s.cancelManager()
+}
+
+// requestRollback retains the first pending fork and coalesces later offers.
+// Blocking here could prevent this worker from acknowledging Manager's pause.
+func (s *chainSyncer) requestRollback(ctx context.Context,
+	event chainRecoveryRequest) {
+
+	select {
+	case s.recoveryRequests <- event:
+	case <-ctx.Done():
+	default:
+		// Another pending identity already prompts recovery; workers reread
+		// committed history on retry if a later fork still needs attention.
 	}
 }
 
