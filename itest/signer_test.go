@@ -621,14 +621,22 @@ func testSignerAccountIdentityReopen(h *bwtest.HarnessTest) {
 	require.Equal(h, uint32(*account.AccountNumber), info.Derivation.Account)
 
 	// A fixed hash supplies a reproducible, non-identity peer scalar, so this
-	// oracle cannot pass by returning the receiving public key's X coordinate.
+	// oracle cannot pass by hashing the receiving public key itself.
 	peerKey, _ := btcec.PrivKeyFromBytes(
 		chainhash.HashB([]byte("signer identity peer")),
 	)
 	defer peerKey.Zero()
 
-	var wantSecret [32]byte
-	copy(wantSecret[:], btcec.GenerateSharedSecret(peerKey, info.PubKey))
+	// The peer computes its own shared point and hashes the compressed
+	// encoding to match the public ECDH contract, including the Y parity.
+	var walletPoint, shared btcec.JacobianPoint
+	info.PubKey.AsJacobian(&walletPoint)
+	btcec.ScalarMultNonConst(&peerKey.Key, &walletPoint, &shared)
+	shared.ToAffine()
+
+	wantSecret := sha256.Sum256(
+		btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed(),
+	)
 
 	// Derivation selects the account by name while signing uses the address's
 	// numeric path; both must identify the key committed by its output script.
