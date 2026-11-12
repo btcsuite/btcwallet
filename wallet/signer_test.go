@@ -1988,77 +1988,9 @@ func TestScriptForOutputScriptClasses(t *testing.T) {
 func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Use a stub deriver and real identity for the imported address.
-	deriveAddress := func(context.Context,
-		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
-
-		return nil, errDerivationFailed
-	}
-	identity, err := db.NewDatabaseIdentity(&chainParams, nil)
-	require.NoError(t, err)
-	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
-		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
-		DeriveAddress: deriveAddress,
-		Identity:      identity,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	// Real watch-only wallet secrets, so the vault derives its script key
-	// from the passphrase exactly as production does.
-	passphrase := []byte("watch-only-passphrase")
-	secrets, err := keyvault.CreateWalletSecrets(passphrase, nil, true)
-	require.NoError(t, err)
-
-	walletInfo, err := store.CreateWallet(
-		t.Context(), db.CreateWalletParams{
-			Name:                "sql-watch-only-taproot",
-			ManagerVersion:      1,
-			MasterKeyPrivParams: secrets.MasterPrivParams,
-			EncryptedCryptoScriptKey: secrets.
-				EncryptedCryptoScriptKey,
-			IsWatchOnly: true,
-		},
-	)
-	require.NoError(t, err)
-
-	vault := keyvault.NewWalletVault(store, walletInfo.ID, true)
-	require.NoError(t, vault.Unlock(t.Context(), passphrase))
-	t.Cleanup(vault.Lock)
-
-	chain := &bwmock.Chain{}
-	// This fixture assembles its own runtime; the shared start helper
-	// only starts the request loop and joins it before storage cleanup.
-	ctx, cancel := context.WithCancel(t.Context())
-
-	w := &Wallet{
-		lifetimeCtx: ctx,
-		cancel:      cancel,
-		requestChan: make(chan any),
-		lockTimer:   time.NewTimer(time.Hour),
-		store:       store,
-		keyVault:    vault,
-		unsafeVault: vault,
-		cache:       newStoreRuntimeCache(store),
-		state:       newWalletState(nil),
-		isWatchOnly: true,
-		cfg: Config{
-			Chain:       chain,
-			ChainParams: &chainParams,
-		},
-		id: walletInfo.ID,
-	}
-
-	// Supply the same routing dependency as Manager assembly before address
-	// or import calls can activate native notifications on this fixture.
-	w.chainSyncer = newChainSyncer(chain, &chainParams)
-	w.chainEventChan = make(chan chainEvent, 1)
-
-	// Disable auto-lock timing so this fixture exercises only its API call.
-	w.lockTimer.Stop()
-	startLoadedWalletForTest(t, w)
+	// Arrange: A watch-only SQLite wallet with the production vault.
+	store, vault, walletID := newSQLScriptVault(t)
+	w, chain := startSQLScriptWallet(t, store, vault, walletID)
 
 	tapscript := newTestTapscript(t)
 	leafScript := tapscript.Leaves[0].Script
@@ -2093,7 +2025,7 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 
 	secret, err := store.GetAddressSecret(
 		t.Context(), db.GetAddressSecretQuery{
-			WalletID:     walletInfo.ID,
+			WalletID:     walletID,
 			ScriptPubKey: pkScript,
 		},
 	)
@@ -3676,4 +3608,96 @@ func TestSignerRejectsUnsetRequiredParams(t *testing.T) {
 	// Assert: The unset interface is reported before any key is derived.
 	require.ErrorIs(t, err, ErrNilArguments)
 	require.Nil(t, rawSig)
+}
+
+// newSQLScriptVault returns a SQLite store with one watch-only wallet and the
+// production vault for that wallet, already unlocked. A watch-only wallet still
+// derives the script key that seals script bodies.
+func newSQLScriptVault(t *testing.T) (db.Store, *keyvault.WalletVault,
+	uint32) {
+
+	t.Helper()
+
+	// Script imports derive no addresses, so the deriver only fails.
+	deriveAddress := func(context.Context,
+		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		return nil, errDerivationFailed
+	}
+	identity, err := db.NewDatabaseIdentity(&chainParams, nil)
+	require.NoError(t, err)
+
+	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
+		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
+		DeriveAddress: deriveAddress,
+		Identity:      identity,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	passphrase := []byte("watch-only-passphrase")
+	secrets, err := keyvault.CreateWalletSecrets(passphrase, nil, true)
+	require.NoError(t, err)
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), db.CreateWalletParams{
+			Name:                "sql-watch-only-scripts",
+			ManagerVersion:      1,
+			MasterKeyPrivParams: secrets.MasterPrivParams,
+			EncryptedCryptoScriptKey: secrets.
+				EncryptedCryptoScriptKey,
+			IsWatchOnly: true,
+		},
+	)
+	require.NoError(t, err)
+
+	vault := keyvault.NewWalletVault(store, walletInfo.ID, true)
+	require.NoError(t, vault.Unlock(t.Context(), passphrase))
+	t.Cleanup(vault.Lock)
+
+	return store, vault, walletInfo.ID
+}
+
+// startSQLScriptWallet starts a watch-only wallet over store and vault.
+func startSQLScriptWallet(t *testing.T, store db.Store,
+	vault *keyvault.WalletVault, walletID uint32) (*Wallet, *bwmock.Chain) {
+
+	t.Helper()
+
+	chain := &bwmock.Chain{}
+
+	// This fixture assembles its own runtime; the shared start helper
+	// only starts the request loop and joins it before storage cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+
+	w := &Wallet{
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+		lockTimer:   time.NewTimer(time.Hour),
+		store:       store,
+		keyVault:    vault,
+		unsafeVault: vault,
+		cache:       newStoreRuntimeCache(store),
+		state:       newWalletState(nil),
+		isWatchOnly: true,
+		cfg: Config{
+			Chain:       chain,
+			ChainParams: &chainParams,
+		},
+		id: walletID,
+	}
+
+	// Supply the same routing dependency as Manager assembly before address
+	// or import calls can activate native notifications on this fixture.
+	w.chainSyncer = newChainSyncer(chain, &chainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
+
+	// Disable auto-lock timing so this fixture exercises only its API call.
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
+
+	return w, chain
 }
