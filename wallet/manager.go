@@ -653,12 +653,14 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, fmt.Errorf("wallet %q: %w", params.Name, ErrWalletExists)
 	}
 
-	// Durable preparation and private startup stay under the admission lock;
-	// Stop cannot close storage until the accepted creation has settled.
-	w, err := m.createWallet(params)
+	// Finish preparation and startup before Stop closes storage. One context
+	// keeps those phases together until the operation completes.
+	ctx := context.WithoutCancel(m.lifetimeCtx)
+
+	w, err := m.createWallet(ctx, params)
 	if err != nil {
-		// Backend occupancy gains one public identity; retain its cause and
-		// leave unrelated validation, constraint and write errors unchanged.
+		// Backend occupancy retains both its native cause and the public
+		// duplicate identity; unrelated preparation failures pass through.
 		if errors.Is(err, db.ErrWalletExists) {
 			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
 		}
@@ -670,14 +672,14 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 	// import any requested accounts before the Wallet starts.
 	if len(params.InitialAccounts) > 0 {
 		err = w.importInitialAccounts(
-			context.Background(), params.InitialAccounts,
+			ctx, params.InitialAccounts,
 		)
 		if err != nil {
 			return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
 		}
 	}
 
-	err = w.start(context.Background())
+	err = w.start(ctx)
 	if err != nil {
 		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
 	}
@@ -706,9 +708,11 @@ func (m *Manager) checkCreate() error {
 	return nil
 }
 
-// createWallet prepares a durable candidate while Create holds the Manager
-// lock. A returned Wallet must be started or cleaned up before releasing it.
-func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
+// createWallet validates and prepares a durable candidate. Its caller owns
+// initialization and cleanup; preparation errors never expose a partial Wallet.
+func (m *Manager) createWallet(ctx context.Context,
+	params CreateWalletParams) (*Wallet, error) {
+
 	// Validate identity before key derivation or Store work can produce a less
 	// useful error or side effect.
 	err := validateManagedWalletName(params.Name)
@@ -753,7 +757,7 @@ func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 		walletCfg.RecoveryWindow = *params.RecoveryWindow
 	}
 
-	data, err := m.backend.create(context.Background(), params, rootKey)
+	data, err := m.backend.create(ctx, params, rootKey)
 	if err != nil {
 		return nil, err
 	}
