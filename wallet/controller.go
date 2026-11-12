@@ -362,6 +362,35 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	return nil
 }
 
+// pauseForRollback waits until the sync worker has finished earlier writes.
+// The caller keeps resume open through shared rollback; failed rollback leaves
+// the worker paused until Wallet shutdown cancels its own lifetime.
+func (w *Wallet) pauseForRollback(ctx context.Context,
+	resume <-chan struct{}) error {
+
+	// Only the sync worker can confirm its current historical or live write
+	// has settled, so send preparation through its existing ordered mailbox.
+	req := prepareRollbackReq{
+		readyForRollback: make(chan struct{}),
+		rollbackDone:     resume,
+	}
+
+	select {
+	case w.chainEventChan <- chainEvent{notification: req}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Cancellation releases the caller without resuming a worker that may
+	// still require terminal cleanup after an interrupted preparation.
+	select {
+	case <-req.readyForRollback:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // stop performs the Wallet's complete terminal teardown synchronously. The
 // Manager serializes lifecycle operations, so this method never runs alongside
 // start or another stop and needs no additional synchronization primitive.
