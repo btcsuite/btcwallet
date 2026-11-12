@@ -96,5 +96,16 @@ func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
 	return b
 }
 
+// DecryptScript forwards to the configured testify expectations.
+func (m *Vault) DecryptScript(ctx context.Context,
+	scriptPubKey []byte) ([]byte, error) {
+
+	args := m.Called(ctx, scriptPubKey)
+
+	script, _ := args.Get(0).([]byte)
+
+	return script, args.Error(1)
+}
+
 // A compile-time check that the mock satisfies the interface it stands in for.
 var _ keyvault.UnsafeVault = (*Vault)(nil)
