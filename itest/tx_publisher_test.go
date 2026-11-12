@@ -596,6 +596,10 @@ func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
 
 	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 
+	// This case owns the completed shutdown; harness teardown must not
+	// attempt another Stop on the terminal Manager.
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+
 	// The gate refuses the transaction before anything looks at its
 	// content, so this only has to be non-nil. It is never published.
 	tx := wire.NewMsgTx(wire.TxVersion)
@@ -620,6 +624,10 @@ func testBroadcastWalletState(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to create wallet")
 
 	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
+
+	// This case owns the completed shutdown; harness teardown must not
+	// attempt another Stop on the terminal Manager.
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 
 	// The gate refuses the transaction before anything looks at its
 	// content, so this only has to be non-nil. It is never published.
