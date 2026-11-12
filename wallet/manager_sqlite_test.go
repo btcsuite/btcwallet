@@ -418,7 +418,7 @@ func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
 		ChainSource: &bwmock.Chain{},
 	})
 	require.NoError(t, err)
-	require.NoError(t, manager.Stop())
+	require.NoError(t, stopManagerForTest(t, manager))
 
 	// Act: Reopen the same file through the public API with testnet identity.
 	rejected, err := NewManager(t.Context(), ManagerConfig{
