@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -1209,12 +1210,99 @@ func isScriptSpendAddress(addressInfo AddressInfo) bool {
 		spendType == waddrmgr.SpendTypeTaprootScriptPath
 }
 
+// storedScriptForOutput resolves the plaintext redeem, witness, or Taproot leaf
+// script for a script-based output.
+//
+// On SQL wallets the vault loads and decrypts the stored script itself, so the
+// Wallet never sees the encrypted secret. kvdb wallets keep the
+// Store-and-Decrypt path in scriptForAddressInfo.
+func (w *Wallet) storedScriptForOutput(ctx context.Context,
+	addressInfo AddressInfo, scriptPubKey []byte) ([]byte, error) {
+
+	// kvdb wallets fall back to the legacy Store-and-Decrypt flow.
+	if w.addrStore != nil {
+		return w.scriptForAddressInfo(ctx, addressInfo, scriptPubKey)
+	}
+
+	stored, err := w.keyVault.DecryptScript(ctx, scriptPubKey)
+	switch {
+	// The wallet cannot reconstruct the script of an unknown output, or of
+	// an address without an encrypted script.
+	case errors.Is(err, keyvault.ErrScriptNotFound):
+		return nil, ErrNoAssocPrivateKey
+
+	case err != nil:
+		return nil, fmt.Errorf("decrypt script: %w", err)
+	}
+
+	return spendingScriptFromStored(
+		addressInfo, stored, waddrmgr.DecodeTaprootScript,
+	)
+}
+
+// tapscriptDecoder decodes an encoded Tapscript. It borrows its input and must
+// not retain it.
+type tapscriptDecoder func([]byte) (*waddrmgr.Tapscript, error)
+
+// spendingScriptFromStored returns the spending script held in the decrypted
+// stored script of a script-based output. It takes ownership of stored.
+//
+// P2SH and P2WSH store the redeem or witness script itself, so stored is
+// returned to the caller. Taproot script-path imports store an encoded
+// Tapscript; its single revealed leaf is returned as a new copy, and stored
+// and the decoded Tapscript are cleared on success, error, and panic.
+//
+// Production callers pass waddrmgr.DecodeTaprootScript as decode; tests pass a
+// failing decoder to prove the cleanup on panic.
+func spendingScriptFromStored(addressInfo AddressInfo, stored []byte,
+	decode tapscriptDecoder) ([]byte, error) {
+
+	if addressInfo.AddrType.SpendType() !=
+		waddrmgr.SpendTypeTaprootScriptPath {
+
+		return stored, nil
+	}
+
+	defer clear(stored)
+
+	tapscript, err := decode(stored)
+	defer clearTapscript(tapscript)
+
+	if err != nil {
+		return nil, fmt.Errorf("decode tapscript: %w", err)
+	}
+
+	leaf, err := revealedTapscriptLeaf(tapscript)
+	if err != nil {
+		return nil, fmt.Errorf("%w: addr %v", err, addressInfo.Addr)
+	}
+
+	return bytes.Clone(leaf), nil
+}
+
+// clearTapscript clears the script bytes of a decoded Tapscript. Its public
+// keys are not secret and stay as they are.
+func clearTapscript(tapscript *waddrmgr.Tapscript) {
+	if tapscript == nil {
+		return
+	}
+
+	clear(tapscript.RevealedScript)
+
+	for i := range tapscript.Leaves {
+		clear(tapscript.Leaves[i].Script)
+	}
+
+	if tapscript.ControlBlock != nil {
+		clear(tapscript.ControlBlock.InclusionProof)
+	}
+}
+
 // scriptForAddressInfo resolves the plaintext redeem or witness script for a
-// script-based output from its encrypted material in the store. The stored
-// script is decrypted through the key vault under the script crypto key. For
-// taproot script-path addresses the stored blob is a TLV-encoded Tapscript, so
-// it is decoded and the revealed leaf script returned; for P2SH and P2WSH the
-// decrypted bytes are the redeem or witness script directly.
+// script-based output from its encrypted material in the store. It serves kvdb
+// wallets, whose vault does not implement Vault.DecryptScript. Stored scripts
+// are decrypted with their legacy key class, then interpreted and cleared by
+// the same helper as SQL scripts.
 //
 // An address that exists but carries no encrypted script (a watch-only import)
 // yields ErrNoAssocPrivateKey, matching the private-key surface: the wallet
@@ -1254,27 +1342,9 @@ func (w *Wallet) scriptForAddressInfo(ctx context.Context,
 		return nil, fmt.Errorf("decrypt script: %w", err)
 	}
 
-	// Non-taproot script families store the redeem or witness script
-	// directly, so the decrypted bytes are the script itself.
-	if addressInfo.AddrType.SpendType() !=
-		waddrmgr.SpendTypeTaprootScriptPath {
-
-		return plaintext, nil
-	}
-
-	// Taproot script-path imports store a TLV-encoded Tapscript; decode it
-	// and return the single revealed leaf script.
-	tapscript, err := waddrmgr.DecodeTaprootScript(plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("decode tapscript: %w", err)
-	}
-
-	script, err := revealedTapscriptLeaf(tapscript)
-	if err != nil {
-		return nil, fmt.Errorf("%w: addr %v", err, addressInfo.Addr)
-	}
-
-	return script, nil
+	return spendingScriptFromStored(
+		addressInfo, plaintext, waddrmgr.DecodeTaprootScript,
+	)
 }
 
 // revealedTapscriptLeaf returns the single leaf script a taproot script-path

@@ -1652,7 +1652,7 @@ func (w *Wallet) scriptForOutput(ctx context.Context, output wire.TxOut) (
 	// encrypted redeem or witness script. Resolve it through the store and
 	// key vault rather than the pubkey-derived script path below.
 	if isScriptSpendAddress(addressInfo) {
-		script, err := w.scriptForAddressInfo(
+		script, err := w.storedScriptForOutput(
 			ctx, addressInfo, output.PkScript,
 		)
 		if err != nil {
