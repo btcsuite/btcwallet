@@ -1842,131 +1842,123 @@ func TestComputeUnlockingScriptImportedAddress(t *testing.T) {
 }
 
 // TestScriptForOutputScriptClasses verifies that ScriptForOutput resolves each
-// stored script class through the same lookup and returns the caller-visible
-// script: the redeem script verbatim for P2SH, the witness script verbatim for
-// P2WSH, and the decoded leaf script for an imported taproot Tapscript.
+// stored script class through the vault script operation and maps each vault
+// result to its public result: the redeem script verbatim for P2SH, the witness
+// script verbatim for P2WSH, and the decoded leaf script for an imported
+// Taproot Tapscript. The wallet must not read the address secret or call raw
+// Decrypt.
 func TestScriptForOutputScriptClasses(t *testing.T) {
 	t.Parallel()
 
+	vectors := sqlScriptVectors(t)
+	p2sh, p2wsh, p2tr := vectors[0], vectors[1], vectors[2]
+
+	twoLeaves := newTestTapscript(t)
+	twoLeaves.Leaves = append(twoLeaves.Leaves, newTestTapscript(t).Leaves...)
+	ambiguous, err := waddrmgr.EncodeTaprootScript(&twoLeaves)
+	require.NoError(t, err)
+
 	tests := []struct {
-		name     string
-		addrType db.AddressType
-
-		// build returns the address to resolve, the blob the store
-		// persists as the encrypted script, and the script the wallet
-		// must hand back.
-		build func(*testing.T, *Wallet) (address.Address, []byte,
-			[]byte)
+		name        string
+		vector      sqlScriptVector
+		stored      []byte
+		vaultErr    error
+		wantErr     error
+		wantMsg     string
+		wantCleared bool
 	}{{
-		name:     "p2sh redeem script",
-		addrType: db.ScriptHash,
-		build: func(t *testing.T, w *Wallet) (address.Address, []byte,
-			[]byte) {
-
-			t.Helper()
-
-			_, pubKey := deterministicPrivKey(t)
-
-			// A representative multisig redeem script; its exact
-			// contents are opaque to the wallet, which stores and
-			// returns it verbatim.
-			redeemScript, err := txscript.NewScriptBuilder().
-				AddOp(txscript.OP_1).
-				AddData(pubKey.SerializeCompressed()).
-				AddOp(txscript.OP_1).
-				AddOp(txscript.OP_CHECKMULTISIG).
-				Script()
-			require.NoError(t, err)
-
-			addr, err := address.NewAddressScriptHash(
-				redeemScript, w.cfg.ChainParams,
-			)
-			require.NoError(t, err)
-
-			return addr, redeemScript, redeemScript
-		},
+		name:   "p2sh redeem script",
+		vector: p2sh,
+		stored: p2sh.stored,
 	}, {
-		name:     "p2wsh witness script",
-		addrType: db.WitnessScript,
-		build: func(t *testing.T, w *Wallet) (address.Address, []byte,
-			[]byte) {
-
-			t.Helper()
-
-			_, pubKey := deterministicPrivKey(t)
-
-			witnessScript, err := txscript.NewScriptBuilder().
-				AddData(pubKey.SerializeCompressed()).
-				AddOp(txscript.OP_CHECKSIG).
-				Script()
-			require.NoError(t, err)
-
-			scriptHash := sha256.Sum256(witnessScript)
-			addr, err := address.NewAddressWitnessScriptHash(
-				scriptHash[:], w.cfg.ChainParams,
-			)
-			require.NoError(t, err)
-
-			return addr, witnessScript, witnessScript
-		},
+		name:   "p2wsh witness script",
+		vector: p2wsh,
+		stored: p2wsh.stored,
 	}, {
-		name:     "taproot leaf script",
-		addrType: db.TaprootPubKey,
-		build: func(t *testing.T, w *Wallet) (address.Address, []byte,
-			[]byte) {
-
-			t.Helper()
-
-			_, internalKey := deterministicPrivKey(t)
-
-			// A single-leaf taproot script tree and the imported
-			// Tapscript committing to it, mirroring
-			// ImportTaprootScript's persisted shape.
-			leafScript, err := txscript.NewScriptBuilder().
-				AddData(schnorr.SerializePubKey(internalKey)).
-				AddOp(txscript.OP_CHECKSIG).
-				Script()
-			require.NoError(t, err)
-
-			leaf := txscript.NewBaseTapLeaf(leafScript)
-			tapscript := &waddrmgr.Tapscript{
-				Type:   waddrmgr.TapscriptTypeFullTree,
-				Leaves: []txscript.TapLeaf{leaf},
-				ControlBlock: &txscript.ControlBlock{
-					InternalKey: internalKey,
-				},
-			}
-
-			taprootKey, err := tapscript.TaprootKey()
-			require.NoError(t, err)
-
-			addr, err := address.NewAddressTaproot(
-				schnorr.SerializePubKey(taprootKey),
-				w.cfg.ChainParams,
-			)
-			require.NoError(t, err)
-
-			// The store persists the TLV-encoded Tapscript as the
-			// encrypted script; the vault decrypts it, and
-			// ScriptForOutput decodes it back to the leaf script.
-			encoded, err := waddrmgr.EncodeTaprootScript(tapscript)
-			require.NoError(t, err)
-
-			return addr, encoded, leafScript
-		},
+		name:        "taproot leaf script",
+		vector:      p2tr,
+		stored:      p2tr.stored,
+		wantCleared: true,
+	}, {
+		name:     "script not found",
+		vector:   p2wsh,
+		vaultErr: keyvault.ErrScriptNotFound,
+		wantErr:  ErrNoAssocPrivateKey,
+	}, {
+		name:     "vault locked",
+		vector:   p2wsh,
+		vaultErr: keyvault.ErrVaultLocked,
+		wantErr:  keyvault.ErrVaultLocked,
+		wantMsg:  "decrypt script",
+	}, {
+		name:        "malformed tapscript",
+		vector:      p2tr,
+		stored:      []byte{0xff, 0xff, 0xff},
+		wantMsg:     "decode tapscript",
+		wantCleared: true,
+	}, {
+		name:        "tapscript without unique leaf",
+		vector:      p2tr,
+		stored:      ambiguous,
+		wantErr:     ErrDerivationPathNotFound,
+		wantMsg:     "addr ",
+		wantCleared: true,
 	}}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, mocks := createUnlockedSQLWalletWithMocks(t)
-			addr, stored, want := test.build(t, w)
+			// Arrange: A SQL wallet output and its vault result.
+			w, deps := createUnlockedSQLWalletWithMocks(t)
+			vector := test.vector
 
-			script := assertScriptForOutput(
-				t, w, mocks, addr, test.addrType, stored,
+			addr := extractAddrFromPKScript(
+				vector.scriptPubKey, w.cfg.ChainParams,
 			)
-			require.Equal(t, want, script)
+			expectStoreAddressInfo(t, w, deps, addr, &db.AddressInfo{
+				ScriptPubKey: vector.scriptPubKey,
+				AddrType:     vector.addrType,
+				IsImported:   true,
+				HasScript:    true,
+			})
+
+			stored := bytes.Clone(test.stored)
+			deps.vault.On(
+				"DecryptScript", mock.Anything, vector.scriptPubKey,
+			).Return(stored, test.vaultErr).Once()
+
+			// Act: Resolve the output.
+			info, err := w.ScriptForOutput(
+				t.Context(), wire.TxOut{PkScript: vector.scriptPubKey},
+			)
+
+			if test.wantCleared {
+				require.Equal(t, make([]byte, len(stored)), stored)
+			}
+
+			// Assert: The vault result maps to the public result.
+			deps.store.AssertNotCalled(
+				t, "GetAddressSecret", mock.Anything, mock.Anything,
+			)
+			deps.vault.AssertNotCalled(
+				t, "Decrypt", mock.Anything, mock.Anything,
+			)
+
+			if test.wantErr == nil && test.wantMsg == "" {
+				require.NoError(t, err)
+				require.Equal(t, vector.want, info.Script)
+
+				return
+			}
+
+			require.Nil(t, info.Script)
+
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+			}
+
+			require.ErrorContains(t, err, test.wantMsg)
 		})
 	}
 }
@@ -2054,40 +2046,6 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	require.ErrorIs(t, err, keyvault.ErrVaultLocked)
 
 	chain.AssertExpectations(t)
-}
-
-// assertScriptForOutput drives ScriptForOutput for a script-based output whose
-// stored script decrypts to storedScript, and returns the resolved
-// OutputScriptInfo.Script. It programs the store address lookup as a script
-// address and the vault script operation as the stored script.
-func assertScriptForOutput(t *testing.T, w *Wallet, mocks *mockWalletDeps,
-	addr address.Address, addrType db.AddressType,
-	storedScript []byte) []byte {
-
-	t.Helper()
-
-	pkScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
-	// The store owns the address as an imported script address.
-	expectStoreAddressInfo(t, w, mocks, addr, &db.AddressInfo{
-		ScriptPubKey: pkScript,
-		AddrType:     addrType,
-		IsImported:   true,
-		HasScript:    true,
-	})
-
-	// The vault returns its own copy of the decrypted stored script.
-	mocks.vault.On("DecryptScript", mock.Anything, pkScript).Return(
-		bytes.Clone(storedScript), nil,
-	).Once()
-
-	info, err := w.ScriptForOutput(
-		t.Context(), wire.TxOut{PkScript: pkScript},
-	)
-	require.NoError(t, err)
-
-	return info.Script
 }
 
 // TestComputeUnlockingScriptFail_UnsupportedAddr tests failure when the
@@ -3700,4 +3658,355 @@ func startSQLScriptWallet(t *testing.T, store db.Store,
 	startLoadedWalletForTest(t, w)
 
 	return w, chain
+}
+
+// sqlScriptVector is one stored script output and the script that
+// ScriptForOutput must return for it.
+type sqlScriptVector struct {
+	name         string
+	addrType     db.AddressType
+	scriptPubKey []byte
+	stored       []byte
+	want         []byte
+}
+
+// sqlScriptVectors returns a P2SH, a P2WSH, and a Taproot output. Each stores
+// the body that the import path would encrypt for it.
+func sqlScriptVectors(t *testing.T) []sqlScriptVector {
+	t.Helper()
+
+	_, pubKey := deterministicPrivKey(t)
+
+	redeemScript, err := txscript.NewScriptBuilder().
+		AddOp(txscript.OP_1).
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_1).
+		AddOp(txscript.OP_CHECKMULTISIG).
+		Script()
+	require.NoError(t, err)
+
+	p2sh, err := address.NewAddressScriptHash(redeemScript, &chainParams)
+	require.NoError(t, err)
+
+	witnessScript, err := txscript.NewScriptBuilder().
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(t, err)
+
+	scriptHash := sha256.Sum256(witnessScript)
+	p2wsh, err := address.NewAddressWitnessScriptHash(
+		scriptHash[:], &chainParams,
+	)
+	require.NoError(t, err)
+
+	tapscript := newTestTapscript(t)
+	encodedTapscript, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	taprootKey, err := tapscript.TaprootKey()
+	require.NoError(t, err)
+
+	p2tr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(taprootKey), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript := func(addr address.Address) []byte {
+		script, err := txscript.PayToAddrScript(addr)
+		require.NoError(t, err)
+
+		return script
+	}
+
+	return []sqlScriptVector{{
+		name:         "p2sh redeem script",
+		addrType:     db.ScriptHash,
+		scriptPubKey: pkScript(p2sh),
+		stored:       redeemScript,
+		want:         redeemScript,
+	}, {
+		name:         "p2wsh witness script",
+		addrType:     db.WitnessScript,
+		scriptPubKey: pkScript(p2wsh),
+		stored:       witnessScript,
+		want:         witnessScript,
+	}, {
+		name:         "taproot leaf script",
+		addrType:     db.TaprootPubKey,
+		scriptPubKey: pkScript(p2tr),
+		stored:       encodedTapscript,
+		want:         tapscript.Leaves[0].Script,
+	}}
+}
+
+// importSQLScript persists one script output with its body encrypted by the
+// production vault, as the import path does. A nil body imports the output
+// without a script.
+func importSQLScript(t *testing.T, store db.Store,
+	vault *keyvault.WalletVault, walletID uint32, addrType db.AddressType,
+	scriptPubKey, body []byte) {
+
+	t.Helper()
+
+	var encrypted []byte
+	if body != nil {
+		var err error
+
+		encrypted, err = vault.Encrypt(waddrmgr.CKTScript, body)
+		require.NoError(t, err)
+	}
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			AddressType:     addrType,
+			ScriptPubKey:    scriptPubKey,
+			EncryptedScript: encrypted,
+		},
+	)
+	require.NoError(t, err)
+}
+
+// TestScriptForOutputSQLVaultVectors verifies that a SQL wallet resolves P2SH,
+// P2WSH, and Taproot scripts through the production vault, and that a caller
+// that changes a returned script does not change a later result.
+func TestScriptForOutputSQLVaultVectors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A SQL wallet with the production vault.
+	store, vault, walletID := newSQLScriptVault(t)
+	w, _ := startSQLScriptWallet(t, store, vault, walletID)
+
+	vectors := sqlScriptVectors(t)
+	for _, vector := range vectors {
+		importSQLScript(
+			t, store, vault, walletID, vector.addrType,
+			vector.scriptPubKey, vector.stored,
+		)
+	}
+
+	for _, vector := range vectors {
+		output := wire.TxOut{PkScript: vector.scriptPubKey}
+
+		// Act: Resolve the script, change it, and resolve it again.
+		first, err := w.ScriptForOutput(t.Context(), output)
+		require.NoError(t, err, vector.name)
+		require.Equal(t, vector.want, first.Script, vector.name)
+
+		for i := range first.Script {
+			first.Script[i] ^= 0xff
+		}
+
+		second, err := w.ScriptForOutput(t.Context(), output)
+
+		// Assert: The second result still holds the stored script.
+		require.NoError(t, err, vector.name)
+		require.Equal(t, vector.want, second.Script, vector.name)
+	}
+}
+
+// TestScriptForOutputSQLVaultErrors verifies the not-mine and missing-script
+// results of a SQL wallet, and that a locked vault skips script lookup.
+func TestScriptForOutputSQLVaultErrors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The P2SH output has no script and Taproot is not the wallet's.
+	store, vault, walletID := newSQLScriptVault(t)
+	w, _ := startSQLScriptWallet(t, store, vault, walletID)
+
+	vectors := sqlScriptVectors(t)
+	p2sh, p2tr := vectors[0], vectors[2]
+	importSQLScript(
+		t, store, vault, walletID, p2sh.addrType, p2sh.scriptPubKey, nil,
+	)
+
+	// Act: Resolve each output while unlocked, then while locked.
+	_, notMineErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: p2tr.scriptPubKey},
+	)
+	_, missingErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: p2sh.scriptPubKey},
+	)
+
+	vault.Lock()
+
+	_, lockedMissingErr := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: p2sh.scriptPubKey},
+	)
+
+	// Assert: Each result keeps its public error.
+	require.ErrorIs(t, notMineErr, ErrAddressNotFound)
+	require.ErrorIs(t, missingErr, ErrNoAssocPrivateKey)
+	require.ErrorIs(t, lockedMissingErr, keyvault.ErrVaultLocked)
+}
+
+// scriptAddressInfo returns address metadata of the given type for the
+// spending script helpers.
+func scriptAddressInfo(t *testing.T, vector sqlScriptVector) AddressInfo {
+	t.Helper()
+
+	info, err := addressInfoFromStoreAddress(&db.AddressInfo{
+		ScriptPubKey: vector.scriptPubKey,
+		AddrType:     vector.addrType,
+		IsImported:   true,
+		HasScript:    true,
+	}, &chainParams)
+	require.NoError(t, err)
+
+	return info
+}
+
+// TestScriptForOutputLegacyVaultFallback verifies that kvdb keeps its legacy
+// decryption and uses the shared spending-script ownership and cleanup rules.
+func TestScriptForOutputLegacyVaultFallback(t *testing.T) {
+	t.Parallel()
+
+	for _, vector := range sqlScriptVectors(t) {
+		t.Run(vector.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: A kvdb output and its decrypted stored bytes.
+			w, deps := createUnlockedWalletWithMocks(t)
+			addr := extractAddrFromPKScript(
+				vector.scriptPubKey, w.cfg.ChainParams,
+			)
+			expectStoreAddressInfo(t, w, deps, addr, &db.AddressInfo{
+				ScriptPubKey: vector.scriptPubKey,
+				AddrType:     vector.addrType,
+				IsImported:   true,
+				HasScript:    true,
+			})
+			deps.store.On("GetAddressSecret", mock.Anything,
+				db.GetAddressSecretQuery{
+					WalletID:     w.id,
+					ScriptPubKey: vector.scriptPubKey,
+				}).Return(&db.AddressSecret{
+				EncryptedScript: vector.stored,
+				ScriptIsSecret:  true,
+			}, nil).Once()
+			plaintext := bytes.Clone(vector.stored)
+			deps.vault.On(
+				"Decrypt", waddrmgr.CKTScript, vector.stored,
+			).Return(plaintext, nil).Once()
+
+			// Act: Resolve through legacy decryption and shared decoding.
+			info, err := w.ScriptForOutput(
+				t.Context(), wire.TxOut{PkScript: vector.scriptPubKey},
+			)
+
+			// Assert: The returned script survives any temporary cleanup.
+			require.NoError(t, err)
+			require.Equal(t, vector.want, info.Script)
+			deps.vault.AssertNotCalled(
+				t, "DecryptScript", mock.Anything, mock.Anything,
+			)
+
+			if vector.addrType == db.TaprootPubKey {
+				require.Equal(t, make([]byte, len(plaintext)), plaintext)
+			} else {
+				require.Same(t, &plaintext[0], &info.Script[0])
+			}
+		})
+	}
+}
+
+// TestSpendingScriptFromStoredPanic verifies that a decoder panic propagates
+// only after the encoded Tapscript the Wallet owns has been cleared.
+func TestSpendingScriptFromStoredPanic(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A decoder that panics while borrowing the plaintext input.
+	vector := sqlScriptVectors(t)[2]
+	stored := bytes.Clone(vector.stored)
+	panicDecoder := func(data []byte) (*waddrmgr.Tapscript, error) {
+		require.Equal(t, vector.stored, data)
+		panic(errDerivationFailed)
+	}
+
+	// Act: Unwind the decoder panic through the Wallet cleanup boundary.
+	require.PanicsWithValue(t, errDerivationFailed, func() {
+		_, _ = spendingScriptFromStored(
+			scriptAddressInfo(t, vector), stored, panicDecoder,
+		)
+	})
+
+	// Assert: The encoded input is erased even though decoding never
+	// returns.
+	require.Equal(t, make([]byte, len(stored)), stored)
+}
+
+// TestSpendingScriptFromStoredDecodedCleanup verifies that resolving a leaf
+// clears the decoder's leaf buffers, which ScriptForOutput does not expose.
+func TestSpendingScriptFromStoredDecodedCleanup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Retain the real decoder's result without changing ownership.
+	vector := sqlScriptVectors(t)[2]
+	stored := bytes.Clone(vector.stored)
+
+	var decoded *waddrmgr.Tapscript
+
+	decode := func(data []byte) (*waddrmgr.Tapscript, error) {
+		tapscript, err := waddrmgr.DecodeTaprootScript(data)
+		decoded = tapscript
+
+		return tapscript, err
+	}
+
+	// Act: Resolve the leaf through its cleanup owner.
+	script, err := spendingScriptFromStored(
+		scriptAddressInfo(t, vector), stored, decode,
+	)
+
+	// Assert: Cleanup erases the decoded leaf, not the caller's copy.
+	require.NoError(t, err)
+	require.Equal(t, vector.want, script)
+	require.NotNil(t, decoded)
+	require.Len(t, decoded.Leaves, 1)
+	require.NotEmpty(t, decoded.Leaves[0].Script)
+	require.Equal(
+		t, make([]byte, len(decoded.Leaves[0].Script)),
+		decoded.Leaves[0].Script,
+	)
+}
+
+// TestSpendingScriptFromStoredDecodedCleanupAmbiguous verifies that rejecting
+// multiple leaves still clears every decoded leaf buffer.
+func TestSpendingScriptFromStoredDecodedCleanupAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Retain both decoded leaves from an ambiguous Tapscript.
+	vector := sqlScriptVectors(t)[2]
+	tapscript := newTestTapscript(t)
+	tapscript.Leaves = append(
+		tapscript.Leaves, newTestTapscript(t).Leaves...,
+	)
+	stored, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	var decoded *waddrmgr.Tapscript
+
+	decode := func(data []byte) (*waddrmgr.Tapscript, error) {
+		tapscript, err := waddrmgr.DecodeTaprootScript(data)
+		decoded = tapscript
+
+		return tapscript, err
+	}
+
+	// Act: Reject the ambiguous leaf selection through its cleanup owner.
+	script, err := spendingScriptFromStored(
+		scriptAddressInfo(t, vector), stored, decode,
+	)
+
+	// Assert: The error path erases all decoded leaves.
+	require.ErrorIs(t, err, ErrDerivationPathNotFound)
+	require.Nil(t, script)
+	require.NotNil(t, decoded)
+	require.Len(t, decoded.Leaves, 2)
+
+	for _, leaf := range decoded.Leaves {
+		require.NotEmpty(t, leaf.Script)
+		require.Equal(t, make([]byte, len(leaf.Script)), leaf.Script)
+	}
 }
