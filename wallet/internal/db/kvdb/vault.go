@@ -104,6 +104,16 @@ func (v *LegacyWalletVault) Decrypt(keyType waddrmgr.CryptoKeyType,
 	return v.crypt(v.mgr.Decrypt, keyType, ciphertext, "decrypt")
 }
 
+// DecryptScript returns keyvault.ErrNotImplemented. kvdb callers resolve
+// scripts through the legacy Store lookup and Decrypt.
+//
+// Deprecated: remove this method with kvdb support.
+func (v *LegacyWalletVault) DecryptScript(context.Context, []byte) ([]byte,
+	error) {
+
+	return nil, keyvault.ErrNotImplemented
+}
+
 // crypt forwards a cipher operation to the address manager and maps its
 // sentinels onto the keyvault ones. The crypto-key class stays a caller
 // argument here: the legacy format records per script row which key protects

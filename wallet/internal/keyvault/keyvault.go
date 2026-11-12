@@ -20,6 +20,16 @@ var ErrEmptyPassphrase = errors.New("empty vault passphrase")
 // was attempted while the vault was locked.
 var ErrVaultLocked = errors.New("vault is locked")
 
+// ErrScriptNotFound reports that the wallet stores no encrypted script for the
+// selected script pubkey: the script pubkey is unknown, it has no secret row,
+// or the row holds no script.
+var ErrScriptNotFound = errors.New("no encrypted script")
+
+// ErrNotImplemented reports that a vault does not serve an operation. Only the
+// legacy kvdb vault returns it, for operations that its callers still run
+// through UnsafeVault during the kvdb migration.
+var ErrNotImplemented = errors.New("vault operation not implemented")
+
 // ErrVaultUnlocked reports that an unlock operation was attempted while the
 // vault was already unlocked.
 var ErrVaultUnlocked = errors.New("vault is already unlocked")
@@ -45,6 +55,12 @@ type Vault interface {
 	// Encrypt encrypts plaintext key material with the selected crypto key
 	// type.
 	Encrypt(keyType waddrmgr.CryptoKeyType, plaintext []byte) ([]byte, error)
+
+	// DecryptScript returns the plaintext script stored for the output with
+	// the given script pubkey, as a new copy that the caller owns. It
+	// returns ErrVaultLocked if already locked, or ErrScriptNotFound when
+	// no script is stored.
+	DecryptScript(ctx context.Context, scriptPubKey []byte) ([]byte, error)
 
 	// ChangePassphrase re-wraps the persisted wallet secrets according to
 	// params.
