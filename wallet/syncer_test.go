@@ -2538,6 +2538,115 @@ func matchStoreScanBlock(block *db.Block,
 		block.Timestamp.Equal(fixture.block.Time)
 }
 
+// TestSyncerRetainedForkRecovery verifies that a refused canonical scan offers
+// the stored orphan's identity for Manager recovery before refetching.
+func TestSyncerRetainedForkRecovery(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An interrupted rewind left a conflicting block above the saved
+	// tip. The fetched block is canonical, but Store rejects the entire batch.
+	store := &walletmock.Store{}
+	backend := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{
+			Chain: backend,
+		}, nil, nil, nil, store, 11,
+	)
+	routing := newChainSyncer(backend, &chainParams, nil)
+	s.chainSyncer = routing
+	fixture := newStoreScanBatchFixture(t)
+	state := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(state, fixture)
+
+	abandoned := db.Block{
+		Hash:      chainhash.Hash{0xaa},
+		Height:    uint32(fixture.block.Height),
+		Timestamp: fixture.block.Time.Add(-time.Minute),
+	}
+
+	store.On(
+		"ApplyScanBatch", mock.Anything,
+		matchStoreScanBatch(11, fixture, true),
+	).Return(db.ErrBlockMismatch).Once()
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: abandoned.Height,
+		EndHeight:   abandoned.Height,
+	}).Return([]db.Block{abandoned}, nil).Once()
+	backend.On("GetBlockHash", int64(abandoned.Height)).
+		Return(&fixture.block.Hash, nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		backend.AssertExpectations(t)
+	})
+
+	// Act: Persist the fetched batch through the ordinary sync commit path;
+	// refusal must hand off recovery without waiting on this worker's barrier.
+	err := s.putSyncBatch(t.Context(), state, []scanResult{fixture.result})
+
+	// Assert: Retain the strict refusal and request a fresh scan after Manager
+	// receives the abandoned identity, rather than the new canonical identity.
+	require.ErrorIs(t, err, db.ErrBlockMismatch)
+	require.ErrorIs(t, err, ErrStateChanged)
+
+	request := <-routing.recoveryRequests
+	require.Equal(t, abandoned.Hash, request.Hash)
+	require.EqualValues(t, abandoned.Height, request.Height)
+	require.Equal(t, abandoned.Timestamp, request.Time)
+}
+
+// TestSyncerRetainedForkRejectsStaleScan verifies that a stale fetched block
+// cannot authorize shared recovery when a scan batch is refused.
+func TestSyncerRetainedForkRejectsStaleScan(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The retained block conflicts with the fetched batch, but the
+	// source now identifies a different branch from that batch as canonical.
+	store := &walletmock.Store{}
+	backend := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{
+			Chain: backend,
+		}, nil, nil, nil, store, 11,
+	)
+	routing := newChainSyncer(backend, &chainParams, nil)
+	s.chainSyncer = routing
+	fixture := newStoreScanBatchFixture(t)
+	state := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(state, fixture)
+
+	abandoned := db.Block{
+		Hash:      chainhash.Hash{0xaa},
+		Height:    uint32(fixture.block.Height),
+		Timestamp: fixture.block.Time.Add(-time.Minute),
+	}
+	currentHash := chainhash.Hash{0xbb}
+
+	store.On(
+		"ApplyScanBatch", mock.Anything,
+		matchStoreScanBatch(11, fixture, true),
+	).Return(db.ErrBlockMismatch).Once()
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: abandoned.Height,
+		EndHeight:   abandoned.Height,
+	}).Return([]db.Block{abandoned}, nil).Once()
+	backend.On("GetBlockHash", int64(abandoned.Height)).
+		Return(&currentHash, nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		backend.AssertExpectations(t)
+	})
+
+	// Act: Refuse the stale batch through the same persistence path, letting
+	// the source distinguish stale fetches from retained orphan history.
+	err := s.putSyncBatch(t.Context(), state, []scanResult{fixture.result})
+
+	// Assert: Preserve Store's refusal without reporting an authorized recovery
+	// or offering an abandoned identity that could rewind the shared database.
+	require.ErrorIs(t, err, db.ErrBlockMismatch)
+	require.NotErrorIs(t, err, ErrStateChanged)
+	require.Empty(t, routing.recoveryRequests)
+}
+
 // TestPutSyncBatchStore verifies sync scan writes use the store batch API.
 func TestPutSyncBatchStore(t *testing.T) {
 	t.Parallel()
