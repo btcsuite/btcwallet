@@ -29,6 +29,18 @@ func TestLegacyWalletVaultChangePassphraseValidatesBeforeContext(t *testing.T) {
 	require.ErrorContains(t, err, "vault ChangePassphrase")
 }
 
+// TestLegacyWalletVaultDecryptScriptNotImplemented verifies that the legacy
+// vault refuses the typed script operation, so the Wallet keeps its kvdb
+// Store-and-Decrypt path.
+func TestLegacyWalletVaultDecryptScriptNotImplemented(t *testing.T) {
+	t.Parallel()
+
+	vault := &LegacyWalletVault{}
+	script, err := vault.DecryptScript(t.Context(), []byte("script pubkey"))
+	require.Nil(t, script)
+	require.ErrorIs(t, err, keyvault.ErrNotImplemented)
+}
+
 // TestLegacyWalletVaultTranslatesManagerSentinels verifies that the adapter
 // surfaces keyvault sentinels rather than leaking the underlying waddrmgr
 // sentinels, so callers can handle keyvault.Vault errors backend-independently
