@@ -1195,6 +1195,15 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	// loop makes forward progress regardless of whether a given backend
 	// also mirrors the tip into the legacy addrStore.
 	err = s.store.ApplyScanBatch(ctx, params)
+	if errors.Is(err, db.ErrBlockMismatch) {
+		// A refused batch made no writes. Reuse Manager's nonblocking
+		// recovery handoff; the existing defer settles pending observations
+		// before this worker can acknowledge Manager's rollback barrier.
+		err = errors.Join(
+			err, s.reconcileScanBlocks(ctx, params.SyncedBlocks),
+		)
+	}
+
 	if err != nil {
 		return fmt.Errorf("apply sync scan batch: %w", err)
 	}
@@ -1209,6 +1218,79 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	// finish registration before catch-up reports this batch complete.
 	if refreshWatches {
 		return s.refreshLiveWatches(ctx)
+	}
+
+	return nil
+}
+
+// reconcileScanBlocks locates an orphan retained above an interrupted rewind.
+// A current source hash authorizes Manager reconciliation; same-hash metadata
+// errors and stale fetched branches keep the original strict Store refusal.
+func (s *syncer) reconcileScanBlocks(ctx context.Context,
+	blocks []db.Block) error {
+
+	for _, block := range blocks {
+		// A healthy checkpoint does not expose orphan rows above it; find
+		// the conflicting retained row within the entire refused batch.
+		retained, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				StartHeight: block.Height,
+				EndHeight:   block.Height,
+			},
+		)
+		if errors.Is(err, db.ErrBlockNotFound) {
+			// This sparse height has no retained conflict; the refusal
+			// must come from another fetched height in this batch.
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("read recovery block: %w", err)
+		}
+
+		for _, stored := range retained {
+			if stored.Hash == block.Hash {
+				// SQL identity compares seconds. A timestamp conflict
+				// with the same hash is not evidence of an orphan.
+				if stored.Timestamp.Unix() != block.Timestamp.Unix() {
+					return nil
+				}
+
+				continue
+			}
+
+			// Only a currently canonical fetched block proves an orphan.
+			// Keep the Store refusal for stale fetches so retry refetches
+			// them rather than rewinding shared history on old evidence.
+			hash, err := s.cfg.Chain.GetBlockHash(int64(block.Height))
+			if err != nil {
+				return fmt.Errorf("get recovery block hash: %w", err)
+			}
+
+			if !block.Hash.IsEqual(hash) {
+				return nil
+			}
+
+			// Range-check the Store height for Manager's int32 identity.
+			// It rechecks this abandoned row after pausing its writers;
+			// the fetched replacement cannot identify the row to remove.
+			boundary, err := db.BlockStampFromBlock(&stored)
+			if err != nil {
+				return fmt.Errorf("convert retained block: %w", err)
+			}
+
+			s.chainSyncer.requestRollback(ctx, chainRecoveryRequest{
+				Block: wtxmgr.Block{
+					Height: boundary.Height,
+					Hash:   stored.Hash,
+				},
+				Time: stored.Timestamp,
+			})
+
+			// Manager owns the shared rewind; the existing retry loop
+			// rereads committed state and refetches the refused batch.
+			return ErrStateChanged
+		}
 	}
 
 	return nil
