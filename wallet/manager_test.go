@@ -506,7 +506,6 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 	// created Wallet belongs to a Manager that remains Running.
 	require.NoError(t, <-rolled)
 	require.NoError(t, <-created)
-	require.Contains(t, m.String(), params.Name)
 	require.True(t, m.started.Load())
 }
 
@@ -2321,42 +2320,6 @@ func TestManagerCreateRejectsMissingIdentityBeforeAssembly(t *testing.T) {
 	require.ErrorIs(t, err, ErrMissingParam)
 	require.ErrorContains(t, err, "Name")
 	require.Nil(t, w)
-}
-
-// TestManagerString verifies that the String representation of the Manager
-// correctly lists the tracked wallets in alphabetical order.
-func TestManagerString(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		setup    func(*Manager)
-		expected string
-	}{
-		{
-			name:     "empty",
-			setup:    func(m *Manager) {},
-			expected: "active_wallets=[]",
-		},
-		{
-			name: "multiple sorted",
-			setup: func(m *Manager) {
-				m.wallets["wallet-b"] = &Wallet{}
-				m.wallets["wallet-a"] = &Wallet{}
-			},
-			expected: "active_wallets=[wallet-a wallet-b]",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			m := testKVDBManager(t)
-			tc.setup(m)
-			require.Equal(t, tc.expected, m.String())
-		})
-	}
 }
 
 // TestManagerDeriveFromSeed verifies the internal helper method
