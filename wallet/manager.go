@@ -601,21 +601,6 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	return nil
 }
 
-// String returns a summary of the active wallets managed by the Manager.
-func (m *Manager) String() string {
-	m.RLock()
-	defer m.RUnlock()
-
-	names := make([]string, 0, len(m.wallets))
-	for name := range m.wallets {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return fmt.Sprintf("active_wallets=%v", names)
-}
-
 // validateManagedWalletName rejects an absent durable identity before cache,
 // key-derivation, or Store work can obscure the caller error.
 func validateManagedWalletName(name string) error {
