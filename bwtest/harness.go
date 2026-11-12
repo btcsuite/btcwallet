@@ -173,24 +173,11 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 	st.setUpWalletDB()
 
 	st.Cleanup(func() {
-		// If a test fails, we still try to stop wallets to avoid leaking
-		// goroutines into the next test, but we skip assertions.
-		if st.Failed() {
-			err := st.teardownWallets()
-			if err != nil {
-				st.Logf("failed to stop wallets during failed-test cleanup: %v",
-					err)
-			}
-
+		// Managers register shutdown when acquired, so this earlier cleanup
+		// checks shared postconditions only after their resources have joined.
+		if st.Failed() || st.cleaned {
 			return
 		}
-
-		if st.cleaned {
-			return
-		}
-
-		err := st.teardownWallets()
-		require.NoError(st, err, "failed to stop wallets")
 
 		mempool, err := st.getRawMempool()
 		require.NoError(st, err, "failed to query miner mempool")
@@ -253,6 +240,22 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 
 	h.wallets[manager] = make(walletRegistration)
 	h.mu.Unlock()
+
+	// Register after acquisition so even a replacement client's earlier
+	// cleanup runs only after the Managers borrowing it have joined.
+	h.Cleanup(func() {
+		err := h.teardownWallets()
+		if h.Failed() {
+			if err != nil {
+				h.Logf("failed to stop wallets during failed-test cleanup: %v",
+					err)
+			}
+
+			return
+		}
+
+		require.NoError(h, err, "failed to stop wallets")
+	})
 
 	// Verify the Manager opened the backend requested by the -db flag without
 	// adding a production accessor solely for the test.
