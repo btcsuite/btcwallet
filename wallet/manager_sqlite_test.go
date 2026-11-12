@@ -415,7 +415,7 @@ func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
 		Backend:     DBBackendSQLite,
 		DataSource:  dbPath,
 		ChainParams: chainParams,
-		ChainSource: &bwmock.Chain{},
+		ChainSource: createTestChain(t),
 	})
 	require.NoError(t, err)
 	require.NoError(t, stopManagerForTest(t, manager))

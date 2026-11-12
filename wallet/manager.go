@@ -173,6 +173,9 @@ type Manager struct {
 	// cancel signals terminal reader shutdown before draining Wallet work.
 	cancel context.CancelFunc
 
+	// chainEvents borrows the already-started source's one native stream.
+	chainEvents <-chan any
+
 	// wg joins routing after releasing the lock needed by recipient snapshots.
 	wg sync.WaitGroup
 }
@@ -244,6 +247,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 
 	m := &Manager{
 		wallets:     make(map[string]*Wallet),
+		chainEvents: cfg.ChainSource.Notifications(),
 		backend:     backend,
 		config:      cfg,
 		lifetimeCtx: lifetimeCtx,
@@ -430,7 +434,26 @@ func (m *Manager) Stop() error {
 // startChainSyncer reads the shared stream until shutdown or source loss.
 // Its caller enrolls it before launch so terminal shutdown joins the reader.
 func (m *Manager) startChainSyncer() {
-	err := m.chainSyncer.run(m.lifetimeCtx, m.dispatchChainEvent)
+	// Manager owns the borrowed input; chainSyncer only matches recipients
+	// and installs native subscriptions for Wallet workers.
+	err := func() error {
+		for {
+			select {
+			case <-m.lifetimeCtx.Done():
+				return m.lifetimeCtx.Err()
+
+			case event, ok := <-m.chainEvents:
+				if !ok {
+					return errors.New("chain notification source closed")
+				}
+
+				err := m.dispatchChainEvent(m.lifetimeCtx, event)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}()
 
 	// No reader work follows Done. Automatic teardown can therefore
 	// reuse Stop without waiting for this goroutine to join itself.
