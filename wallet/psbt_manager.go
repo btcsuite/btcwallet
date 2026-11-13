@@ -404,6 +404,9 @@ type PsbtManager interface {
 	// recognize; otherwise, it will return an error if any input is not
 	// found in the wallet's transaction store.
 	//
+	// The supplied packet is enriched in place and returned on success. An
+	// error may leave earlier inputs enriched, without returning a packet.
+	//
 	// Owned key-path Taproot inputs receive the Wallet's internal key. A
 	// conflicting caller internal key, or one on a non-Taproot input,
 	// returns ErrConflictingInputMetadata.
@@ -469,6 +472,7 @@ type PsbtManager interface {
 	//
 	// This method is essential for collaborative workflows (e.g. Multisig,
 	// CoinJoin) where no single party holds all necessary keys.
+	// The returned packet owns its data independently of the source packets.
 	CombinePsbt(ctx context.Context, psbts ...*psbt.Packet) (
 		*psbt.Packet, error)
 }
@@ -533,6 +537,9 @@ type finalizePsbtReq struct {
 //     transaction (`NonWitnessUtxo`) or output (`WitnessUtxo`), along with
 //     known BIP32 paths (`Bip32Derivation` or `TaprootBip32Derivation`)
 //     and script information.
+//
+// The supplied packet is modified in place. Earlier enrichment remains if a
+// later input fails; errors return no packet and do not roll back those edits.
 //
 // Owned key-path Taproot inputs receive the Wallet's internal key. A
 // conflicting caller internal key, or one on a non-Taproot input,
@@ -2574,7 +2581,9 @@ func (w *Wallet) CombinePsbt(_ context.Context, psbts ...*psbt.Packet) (
 			err)
 	}
 
-	return combined, nil
+	// Merge helpers may borrow nested records from the contributions. Publish
+	// an independent packet so later caller edits cannot change a source.
+	return clonePacket(combined), nil
 }
 
 // validatePsbtMerge checks that a set of PSBT packets are compatible for
@@ -2583,6 +2592,11 @@ func (w *Wallet) CombinePsbt(_ context.Context, psbts ...*psbt.Packet) (
 func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 	if len(psbts) == 0 {
 		return nil, ErrNoPsbtsToCombine
+	}
+
+	err := validatePsbtMergePointers(psbts)
+	if err != nil {
+		return nil, err
 	}
 
 	base := psbts[0]
@@ -2607,6 +2621,16 @@ func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 		}
 	}
 
+	// Compatibility alone cannot detect a malformed base, or contributions
+	// that repeat the same malformed shape. Individual fragments need not yet
+	// contain the UTXO metadata supplied by the other participants.
+	for i, p := range psbts {
+		err := validatePacketShape(p)
+		if err != nil {
+			return nil, fmt.Errorf("packet index %d: %w", i, err)
+		}
+	}
+
 	// Initialize a fresh packet using a deep copy of the unsigned
 	// transaction to ensure we don't mutate any of the input packets.
 	combined := &psbt.Packet{
@@ -2617,6 +2641,24 @@ func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 	}
 
 	return combined, nil
+}
+
+// validatePsbtMergePointers checks pointer safety before transaction hashing,
+// leaving metadata cardinality to the established compatibility checks and
+// subsequent shape validation.
+func validatePsbtMergePointers(psbts []*psbt.Packet) error {
+	for i, p := range psbts {
+		if p == nil || p.UnsignedTx == nil {
+			return fmt.Errorf("%w: packet index %d", ErrPacketNil, i)
+		}
+
+		err := validatePacketPointers(p)
+		if err != nil {
+			return fmt.Errorf("packet index %d: %w", i, err)
+		}
+	}
+
+	return nil
 }
 
 // mergePsbtInputs merges the source input into the destination input.
@@ -2650,6 +2692,11 @@ func mergePsbtInputs(dest, src *psbt.PInput) error {
 	dest.TaprootBip32Derivation = deduplicateTaprootBip32Derivations(
 		dest.TaprootBip32Derivation, src.TaprootBip32Derivation,
 	)
+
+	err = mergeInputTaprootInternalKey(dest, src)
+	if err != nil {
+		return err
+	}
 
 	err = mergeTaprootKeySpendSig(dest, src)
 	if err != nil {
@@ -2938,6 +2985,24 @@ func mergeNonWitnessUtxo(dest, src *psbt.PInput) error {
 
 	if dest.NonWitnessUtxo == nil {
 		dest.NonWitnessUtxo = src.NonWitnessUtxo
+	}
+
+	return nil
+}
+
+// mergeInputTaprootInternalKey retains a Taproot input's internal key and
+// rejects disagreeing contributions using the existing field conflict contract.
+func mergeInputTaprootInternalKey(dest, src *psbt.PInput) error {
+	if len(dest.TaprootInternalKey) > 0 &&
+		len(src.TaprootInternalKey) > 0 &&
+		!bytes.Equal(dest.TaprootInternalKey, src.TaprootInternalKey) {
+
+		return fmt.Errorf("%w: taproot internal key mismatch",
+			ErrPsbtMergeConflict)
+	}
+
+	if len(dest.TaprootInternalKey) == 0 {
+		dest.TaprootInternalKey = src.TaprootInternalKey
 	}
 
 	return nil

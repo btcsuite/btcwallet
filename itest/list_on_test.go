@@ -588,6 +588,54 @@ var allTestCases = []*testCase{
 		TestFunc: testFundPsbtWatchOnly,
 	},
 	{
+		Name:     "psbtmanager decorate owned inputs",
+		TestFunc: testPsbtManagerDecorateOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager decorate skip unknown",
+		TestFunc: testPsbtManagerDecorateSkipUnknown,
+	},
+	{
+		Name:     "psbtmanager decorate reject unknown",
+		TestFunc: testPsbtManagerDecorateRejectUnknown,
+	},
+	{
+		Name:     "psbtmanager decorate reject nil",
+		TestFunc: testPsbtManagerDecorateRejectNil,
+	},
+	{
+		Name:     "psbtmanager decorate reject malformed",
+		TestFunc: testPsbtManagerDecorateRejectMalformed,
+	},
+	{
+		Name:     "psbtmanager combine packets",
+		TestFunc: testPsbtManagerCombinePackets,
+	},
+	{
+		Name:     "psbtmanager combine result ownership",
+		TestFunc: testPsbtManagerCombineResultOwnership,
+	},
+	{
+		Name:     "psbtmanager combine reject transactions",
+		TestFunc: testPsbtManagerCombineRejectTransactions,
+	},
+	{
+		Name:     "psbtmanager combine reject nil",
+		TestFunc: testPsbtManagerCombineRejectNil,
+	},
+	{
+		Name:     "psbtmanager combine reject malformed",
+		TestFunc: testPsbtManagerCombineRejectMalformed,
+	},
+	{
+		Name:     "psbtmanager combine reject sighash",
+		TestFunc: testPsbtManagerCombineRejectSighash,
+	},
+	{
+		Name:     "psbtmanager combine reject internal key",
+		TestFunc: testPsbtManagerCombineRejectInternalKey,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
