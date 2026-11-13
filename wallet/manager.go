@@ -517,28 +517,15 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 	return nil
 }
 
-// prepareWalletsForRollback waits for each worker to finish earlier chain
-// writes. The caller holds the Manager lock, keeping membership fixed;
-// Manager cancellation interrupts either request delivery or readiness wait.
-func (m *Manager) prepareWalletsForRollback(
-	rollbackDone <-chan struct{}) error {
+// prepareWalletsForRollback waits for earlier sync writes on every Wallet.
+// The caller keeps the Wallet set fixed while each worker pauses for rollback.
+func (m *Manager) prepareWalletsForRollback(ctx context.Context,
+	resume <-chan struct{}) error {
 
 	for _, wallet := range m.wallets {
-		req := prepareRollbackReq{
-			readyForRollback: make(chan struct{}),
-			rollbackDone:     rollbackDone,
-		}
-
-		select {
-		case wallet.chainEventChan <- chainEvent{notification: req}:
-		case <-m.lifetimeCtx.Done():
-			return ErrManagerStopped
-		}
-
-		select {
-		case <-req.readyForRollback:
-		case <-m.lifetimeCtx.Done():
-			return ErrManagerStopped
+		err := wallet.pauseForRollback(ctx, resume)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -579,7 +566,7 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	// workers first, so a failed rewind cannot resume old writes.
 	rollbackDone := make(chan struct{})
 
-	err = m.prepareWalletsForRollback(rollbackDone)
+	err = m.prepareWalletsForRollback(ctx, rollbackDone)
 	if err != nil {
 		// Only Stop's lifetime cancellation interrupts preparation. Leave
 		// completion held and cleanup to that waiting caller so it receives
