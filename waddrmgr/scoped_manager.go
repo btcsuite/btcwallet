@@ -1129,6 +1129,90 @@ func (s *ScopedKeyManager) rowInterfaceToManaged(ns walletdb.ReadBucket,
 	return nil, managerError(ErrDatabase, str, nil)
 }
 
+// publicOnlyRowToManaged returns a managed address for enumeration callers
+// that only need address.Address. Chained rows are rebuilt from the account
+// public key. Imported and script rows keep their existing conversion.
+//
+// The chained result is not cached and is not appended to deriveOnUnlock.
+// keyToManaged must not be used here: a public child is queued for private
+// derivation on the next unlock, which enumeration must not retain.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) publicOnlyRowToManaged(ns walletdb.ReadBucket,
+	rowInterface any) (ManagedAddress, error) {
+
+	switch row := rowInterface.(type) {
+	case *dbChainAddressRow:
+		return s.publicOnlyChainAddressRowToManaged(ns, row)
+
+	case *dbImportedAddressRow:
+		return s.importedAddressRowToManaged(row)
+
+	case *dbScriptAddressRow:
+		return s.scriptAddressRowToManaged(row)
+
+	case *dbWitnessScriptAddressRow:
+		return s.witnessScriptAddressRowToManaged(row)
+	}
+
+	str := fmt.Sprintf("unsupported address type %T", rowInterface)
+
+	return nil, managerError(ErrDatabase, str, nil)
+}
+
+// publicOnlyChainAddressRowToManaged reconstructs one chained address from
+// the account public key. The temporary extended key is zeroed on every exit.
+// No private child is derived, encrypted, or validated.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) publicOnlyChainAddressRowToManaged(
+	ns walletdb.ReadBucket, row *dbChainAddressRow) (ManagedAddress, error) {
+
+	// Always pass private=false. loadAccountInfo may still decrypt an
+	// uncached account key, but the child itself stays public.
+	addressKey, acctKey, masterKeyFingerprint, err := s.deriveKeyFromPath(
+		ns, row.account, row.branch, row.index, false,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Zero the derived extended key on every exit, including public-key
+	// parsing and address construction failures.
+	defer addressKey.Zero()
+
+	acctInfo, err := s.loadAccountInfo(ns, row.account)
+	if err != nil {
+		return nil, err
+	}
+
+	pubKey, err := addressKey.ECPubKey()
+	if err != nil {
+		return nil, err
+	}
+
+	internal := row.branch == InternalBranch
+
+	managedAddr, err := newManagedAddressWithoutPrivKey(
+		s, DerivationPath{
+			InternalAccount:      row.account,
+			Account:              acctKey.ChildIndex(),
+			Branch:               row.branch,
+			Index:                row.index,
+			MasterKeyFingerprint: masterKeyFingerprint,
+		}, pubKey, true, s.accountAddrType(acctInfo, internal),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if internal {
+		managedAddr.internal = true
+	}
+
+	return managedAddr, nil
+}
+
 // loadAndCacheAddress attempts to load the passed address from the database
 // and caches the associated managed address.
 //
@@ -2881,6 +2965,11 @@ func (s *ScopedKeyManager) ForEachActiveAccountAddress(ns walletdb.ReadBucket, a
 
 // ForEachActiveAddress calls the given function with each active address
 // stored in the manager, breaking early on error.
+//
+// Chained addresses are loaded from the account public key. Callers only
+// receive address.Address, so this path does not derive or validate a
+// private key per address. The write lock stays: loadAccountInfo mutates
+// the account cache, so a read lock is not sufficient.
 func (s *ScopedKeyManager) ForEachActiveAddress(ns walletdb.ReadBucket,
 	fn func(addr address.Address) error) error {
 
@@ -2888,7 +2977,7 @@ func (s *ScopedKeyManager) ForEachActiveAddress(ns walletdb.ReadBucket,
 	defer s.mtx.Unlock()
 
 	addrFn := func(rowInterface interface{}) error {
-		managedAddr, err := s.rowInterfaceToManaged(ns, rowInterface)
+		managedAddr, err := s.publicOnlyRowToManaged(ns, rowInterface)
 		if err != nil {
 			return err
 		}
@@ -2904,7 +2993,9 @@ func (s *ScopedKeyManager) ForEachActiveAddress(ns walletdb.ReadBucket,
 }
 
 // ForEachInternalActiveAddress invokes the given closure on each _internal_
-// active address belonging to the scoped key manager, breaking early on error.
+// active address belonging to the scoped key manager, breaking early on
+// error. Chained rows use the same public-only conversion as
+// ForEachActiveAddress.
 func (s *ScopedKeyManager) ForEachInternalActiveAddress(ns walletdb.ReadBucket,
 	fn func(addr address.Address) error) error {
 
@@ -2912,14 +3003,16 @@ func (s *ScopedKeyManager) ForEachInternalActiveAddress(ns walletdb.ReadBucket,
 	defer s.mtx.Unlock()
 
 	addrFn := func(rowInterface interface{}) error {
-		managedAddr, err := s.rowInterfaceToManaged(ns, rowInterface)
+		managedAddr, err := s.publicOnlyRowToManaged(ns, rowInterface)
 		if err != nil {
 			return err
 		}
+
 		// Skip any non-internal branch addresses.
 		if !managedAddr.Internal() {
 			return nil
 		}
+
 		return fn(managedAddr.Address())
 	}
 
