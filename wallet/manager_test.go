@@ -822,12 +822,9 @@ func TestManagerCreateSuccess(t *testing.T) {
 			require.NotNil(t, w)
 			require.Zero(t, w.ID())
 
-			// Verify internal state: Ensure the manager is tracking the
-			// newly created wallet in its internal map, keyed by the
-			// durable request name.
-			m.RLock()
+			// Creation has settled, and this fixture has no native input
+			// or further requests that could change the published Wallet set.
 			loadedW, ok := m.wallets[testWalletName]
-			m.RUnlock()
 			require.True(t, ok)
 			require.Same(t, w, loadedW)
 
@@ -1067,14 +1064,14 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			params := tc.params
 			params.Name = testWalletName
 
-			// No worker starts here; cancel the owned lifetime without
-			// closing the strictly untouched backend used by validation.
+			// Validation uses the real owner loop but never touches storage.
+			// Join that loop without closing the strictly untouched backend.
 			lifetimeCtx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
 			m := &Manager{
 				lifetimeCtx: lifetimeCtx,
 				cancel:      cancel,
 				wallets:     make(map[string]*Wallet),
+				requestChan: make(chan createWalletReq),
 				backend:     backend,
 				config: ManagerConfig{
 					ChainSource: &bwmock.Chain{},
@@ -1086,6 +1083,11 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 				m.config.ChainSource, &m.config.ChainParams,
 			)
 			m.started.Store(true)
+			m.wg.Go(m.mainLoop)
+			t.Cleanup(func() {
+				cancel()
+				m.wg.Wait()
+			})
 
 			// Act: Ask Manager to create from the selected parameter shape,
 			// allowing validation to decide whether backend mutation begins.
@@ -1334,6 +1336,7 @@ func newManagerLifecycleTest(t *testing.T,
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
 		wallets:     make(map[string]*Wallet),
+		requestChan: make(chan createWalletReq),
 		chainEvents: chain.Notifications(),
 		backend:     backend,
 		config: ManagerConfig{
@@ -2140,6 +2143,11 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 
 		<-birthdayEntered
 
+		// Let Stop claim shutdown and wait for the owner while startup is held.
+		go func() { stopped <- manager.Stop() }()
+
+		synctest.Wait()
+
 		releaseBirthday()
 
 		select {
@@ -2147,8 +2155,6 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("failed Create did not reach storage cleanup")
 		}
-
-		go func() { stopped <- manager.Stop() }()
 
 		// Assert: Neither the candidate nor its error escapes while storage
 		// cleanup is held. Stop must wait for that same cleanup.
@@ -2471,6 +2477,8 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 
 			var observedRoot *hdkeychain.ExtendedKey
 
+			var observedPrivate bool
+
 			backend := &managerBackendMock{}
 			backend.On("create", mock.Anything, params, mock.Anything).
 				Return(&walletData{
@@ -2479,14 +2487,14 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 					store: deps.store,
 					vault: deps.vault,
 				}, nil).Run(func(args mock.Arguments) {
-				var ok bool
-				observedRoot, ok = args.Get(2).(*hdkeychain.ExtendedKey)
-				require.True(t, ok)
-				require.True(t, observedRoot.IsPrivate())
+				observedRoot, _ = args.Get(2).(*hdkeychain.ExtendedKey)
+				observedPrivate = observedRoot != nil &&
+					observedRoot.IsPrivate()
 			}).Once()
 			backend.On("close").Return(nil).Once()
 			manager := newManagerLifecycleTest(t, backend)
 			manager.started.Store(true)
+			manager.wg.Go(manager.mainLoop)
 			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 			require.True(t, ok)
 			chain.On("IsCurrent").Return(false).Maybe()
@@ -2499,6 +2507,7 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			// roots and seeds retain their bytes and remain useful to callers.
 			require.NoError(t, err)
 			require.NotNil(t, wallet)
+			require.True(t, observedPrivate)
 			require.Equal(t, tc.wantRoot, observedRoot.String())
 			require.Equal(t, tc.wantRootPrivate, observedRoot.IsPrivate())
 			require.Equal(t, tc.wantSeed, params.Seed)
@@ -2543,17 +2552,19 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 
 			var observedRoot *hdkeychain.ExtendedKey
 
+			var observedPrivate bool
+
 			backend := &managerBackendMock{}
 			backend.On("create", mock.Anything, params, mock.Anything).
 				Return(nil, errDBMock).Run(func(args mock.Arguments) {
-				var ok bool
-				observedRoot, ok = args.Get(2).(*hdkeychain.ExtendedKey)
-				require.True(t, ok)
-				require.True(t, observedRoot.IsPrivate())
+				observedRoot, _ = args.Get(2).(*hdkeychain.ExtendedKey)
+				observedPrivate = observedRoot != nil &&
+					observedRoot.IsPrivate()
 			}).Once()
 			backend.On("close").Return(nil).Once()
 			manager := newManagerLifecycleTest(t, backend)
 			manager.started.Store(true)
+			manager.wg.Go(manager.mainLoop)
 
 			// Act: Let the public request return its backend failure before
 			// inspecting the original root object and borrowed input bytes.
@@ -2563,6 +2574,7 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 			// material, but leaves no usable Manager-derived root or Wallet.
 			require.ErrorIs(t, err, errDBMock)
 			require.Nil(t, wallet)
+			require.True(t, observedPrivate)
 			require.Equal(t, tc.wantRoot, observedRoot.String())
 			require.Equal(t, tc.wantRootPrivate, observedRoot.IsPrivate())
 			require.Equal(t, tc.wantSeed, params.Seed)
@@ -2667,14 +2679,19 @@ func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
 		require.True(t, observedRoot.IsPrivate())
 		panic(errDBMock)
 	}).Once()
-	backend.On("close").Return(nil).Once()
-	manager := newManagerLifecycleTest(t, backend)
-	manager.started.Store(true)
+	t.Cleanup(func() { backend.AssertExpectations(t) })
 
-	// Act: Recover around the public call so assertions observe the original
-	// key only after Manager's deferred cleanup has finished unwinding.
+	manager := &Manager{
+		config: ManagerConfig{
+			ChainParams: chainParams,
+		},
+		backend: backend,
+	}
+
+	// Act: Recover in the preparation caller so the root-clearing defer has
+	// unwound before inspecting the captured key; no runtime is involved.
 	require.PanicsWithValue(t, errDBMock, func() {
-		_, _ = manager.Create(params)
+		_, _ = manager.createWallet(t.Context(), params)
 	})
 
 	// Assert: The captured master no longer exposes private material even
