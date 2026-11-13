@@ -655,6 +655,29 @@ func testLeaseOutputNoExpiryRenewal(h *bwtest.HarnessTest) {
 	}}, leases, "renewal changed the lease")
 }
 
+// testLeaseOutputNoExpiryDuration verifies that WithNoExpiry rejects a
+// duration with the public ErrInvalidParam and leaves the output unleased.
+func testLeaseOutputNoExpiryDuration(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		Amounts: []btcutil.Amount{oneBTC},
+	})
+	op := funding.WalletOutpoints[0]
+
+	_, errLease := w.LeaseOutput(
+		h.Context(), wtxmgr.LockID{1}, op, leaseDuration,
+		wallet.WithNoExpiry(),
+	)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leases")
+
+	require.ErrorIs(
+		h, errLease, wallet.ErrInvalidParam,
+		"lease without expiry accepted a duration",
+	)
+	require.Empty(h, leases, "rejected lease was stored")
+}
+
 // testLeaseOutputNoExpiryReload verifies that a lease without expiry keeps its
 // owner and policy across a wallet reload.
 func testLeaseOutputNoExpiryReload(h *bwtest.HarnessTest) {

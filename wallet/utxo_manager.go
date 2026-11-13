@@ -473,8 +473,10 @@ func (w *Wallet) handleGetUtxo(r getUtxoReq) {
 // which records the lease under the supplied LockID and returns its expiration
 // time. The store's internal sentinels are translated into the public,
 // wallet-owned errors: an unknown or already-spent output becomes
-// ErrUnknownOutput and an output held under a different lock ID becomes
-// ErrOutputAlreadyLocked; any other store error is wrapped for context.
+// ErrUnknownOutput, an output held under a different lock ID becomes
+// ErrOutputAlreadyLocked, and a non-positive duration, or a duration with
+// WithNoExpiry, becomes ErrInvalidParam; any other store error is wrapped for
+// context.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
 func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
@@ -555,6 +557,9 @@ func translateLeaseErr(err error) error {
 
 	case errors.Is(err, db.ErrUtxoNotFound):
 		return ErrUnknownOutput
+
+	case errors.Is(err, db.ErrInvalidParam):
+		return fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
 
 	default:
 		return err
