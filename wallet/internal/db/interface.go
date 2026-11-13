@@ -477,6 +477,8 @@ type TxStore interface {
 	// block metadata for one tx, but it must not perform branch invalidation.
 	// Callers must use CreateTx, InvalidateUnminedTx, or RollbackToBlock for
 	// graph-affecting lifecycle changes.
+	// SQL stores reject state patches that revive terminal history or settle
+	// competing inputs with ErrInvalidParam, without changing label or state.
 	UpdateTx(ctx context.Context, params UpdateTxParams) error
 
 	// ApplyTxBatch atomically records a batch of transaction records and an

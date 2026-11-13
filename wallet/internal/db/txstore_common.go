@@ -1488,6 +1488,11 @@ type UpdateTxOps interface {
 	// params needed for the later row update.
 	PrepareState(ctx context.Context, state UpdateTxState) error
 
+	// CheckGraphState rejects a prepared state patch requiring peer settlement
+	// or terminal recovery, which belong to the existing graph event APIs.
+	CheckGraphState(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) error
+
 	// UpdateLabel applies one user-visible label patch.
 	UpdateLabel(ctx context.Context, walletID uint32, txHash chainhash.Hash,
 		label string) error
@@ -1521,6 +1526,13 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 		err = ops.PrepareState(ctx, *params.State)
 		if err != nil {
 			return fmt.Errorf("prepare tx state update: %w", err)
+		}
+
+		// Refuse graph-level changes before any metadata mutation; the backend
+		// transaction keeps this decision ordered with concurrent chain writes.
+		err = ops.CheckGraphState(ctx, params.WalletID, params.Txid)
+		if err != nil {
+			return fmt.Errorf("check tx graph state: %w", err)
 		}
 	}
 

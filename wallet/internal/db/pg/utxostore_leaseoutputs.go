@@ -18,6 +18,13 @@ func (s *Store) LeaseOutputs(ctx context.Context,
 	var leases []db.LeasedOutput
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Input claims no longer update the credit row. Order admission with
+		// recording and confirmed lease cleanup before taking its snapshot.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		acquired, err := db.LeaseOutputsWithOps(
 			ctx, params, &leaseOutputOps{qtx: qtx},
 		)

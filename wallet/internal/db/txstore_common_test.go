@@ -1498,6 +1498,15 @@ func (m *mockUpdateTxOps) PrepareState(ctx context.Context,
 	return args.Error(0)
 }
 
+// CheckGraphState implements UpdateTxOps using the arranged admission result.
+func (m *mockUpdateTxOps) CheckGraphState(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) error {
+
+	args := m.Called(ctx, walletID, txHash)
+
+	return args.Error(0)
+}
+
 // UpdateLabel implements UpdateTxOps.
 func (m *mockUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, label string) error {
@@ -1826,6 +1835,8 @@ func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
 	ops.On("PrepareState", mock.Anything, UpdateTxState{
 		Status: TxStatusPublished,
 	}).Return(nil).Once()
+	ops.On("CheckGraphState", mock.Anything, uint32(5), chainhash.Hash{1}).
+		Return(nil).Once()
 
 	ops.On("UpdateLabel", mock.Anything, uint32(5), chainhash.Hash{1},
 		label).Return(nil).Run(func(args mock.Arguments) {

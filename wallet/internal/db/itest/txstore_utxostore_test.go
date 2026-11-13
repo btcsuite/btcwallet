@@ -5323,3 +5323,61 @@ func TestStoreBackfillsTransactionInputs(t *testing.T) {
 		require.NoError(t, restored.Close())
 	}
 }
+
+// TestUpdateTxRejectsCompetingConfirmation verifies row-local patches cannot
+// settle competing inputs or change the label while refusing that transition.
+func TestUpdateTxRejectsCompetingConfirmation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two pending transactions share an external input. Their facts
+	// precede credit discovery, so input facts identify the conflict.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "state-claim-guard")
+	input := randomOutPoint()
+	a := newRegularTx(
+		[]wire.OutPoint{input}, []*wire.TxOut{
+			{Value: 6000, PkScript: []byte{0x51}},
+		},
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+
+	for _, tx := range []*wire.MsgTx{a, b} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending, Label: "original",
+				},
+			),
+		)
+	}
+
+	block := CreateBlockFixture(t, store.Queries(), 220)
+	label := "changed"
+
+	// Act: Try to attach B to a block and edit its label through row-local
+	// metadata mutation instead of the graph-owning CreateTx event.
+	err := store.UpdateTx(
+		t.Context(), db.UpdateTxParams{
+			WalletID: walletID, Txid: b.TxHash(), Label: &label,
+			State: &db.UpdateTxState{
+				Block:  &block,
+				Status: db.TxStatusPublished,
+			},
+		},
+	)
+
+	// Assert: Neither label nor state changed; the error directs the caller to
+	// graph lifecycle API; isolated confirmation remains supported.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	info, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: b.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "original", info.Label)
+	require.Equal(t, db.TxStatusPending, info.Status)
+	require.Nil(t, info.Block)
+}
