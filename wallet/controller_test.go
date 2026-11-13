@@ -368,8 +368,16 @@ func TestControllerChangePassphraseDrainsDuringManagerStop(t *testing.T) {
 				)
 				startLoadedWalletForTest(t, w)
 
+				// Start the empty owner before publishing the synthetic Wallet;
+				// public Stop must only run after a successful Manager Start.
 				backend := &managerBackendMock{}
+				backend.On("listWallets", mock.Anything).
+					Return([]*walletData{}, nil).Once()
 				manager := newManagerLifecycleTest(t, backend)
+
+				_, err := manager.Start(t.Context())
+				require.NoError(t, err)
+
 				manager.wallets[w.cfg.Name] = w
 
 				entered := make(chan context.Context, 1)

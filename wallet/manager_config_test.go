@@ -233,7 +233,7 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	m, err := NewManager(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_ = m.Stop()
+		_ = stopManagerForTest(t, m)
 	})
 
 	zeroCfg := cfg
@@ -242,7 +242,7 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	zeroManager, err := NewManager(t.Context(), zeroCfg)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_ = zeroManager.Stop()
+		_ = stopManagerForTest(t, zeroManager)
 	})
 
 	_, err = m.Start(t.Context())
@@ -280,8 +280,8 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	require.Equal(t, m.config.RecoveryWindow, w.cfg.RecoveryWindow)
 	require.Equal(t, m.config.AutoLockDuration, w.cfg.AutoLockDuration)
 	require.Equal(t, m.config.MaxCFilterItems, w.cfg.MaxCFilterItems)
-	require.NoError(t, m.Stop())
-	require.NoError(t, zeroManager.Stop())
+	require.NoError(t, stopManagerForTest(t, m))
+	require.NoError(t, stopManagerForTest(t, zeroManager))
 }
 
 // TestNewManagerRejectsInvalidSQLIdentity proves identity precedes SQL setup.

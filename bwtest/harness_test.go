@@ -145,7 +145,9 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	manager := h.NewWalletManager()
 	require.NotNil(t, h.wallets[manager])
 
-	// Act: the test stops the Manager before releasing teardown ownership.
+	// Act: Start and stop the Manager before releasing teardown ownership.
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
 	require.NoError(t, manager.Stop())
 	require.True(t, h.ReleaseManager(manager))
 
@@ -163,6 +165,8 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	require.NoError(
 		t, err, "released Manager must leave the database available",
 	)
+	_, err = reopened.Start(t.Context())
+	require.NoError(t, err)
 	require.NoError(t, reopened.Stop())
 	chainSource.AssertExpectations(t)
 }
@@ -265,6 +269,8 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 
 	reopened, err := wallet.NewManager(t.Context(), reopenCfg)
 	require.NoError(t, err, "teardown must release the database")
+	_, err = reopened.Start(t.Context())
+	require.NoError(t, err)
 	require.NoError(t, reopened.Stop())
 	chainSource.AssertExpectations(t)
 }

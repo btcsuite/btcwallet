@@ -1350,7 +1350,7 @@ func newManagerLifecycleTest(t *testing.T,
 		chain.AssertExpectations(t)
 	})
 	t.Cleanup(func() {
-		_ = manager.Stop()
+		_ = stopManagerForTest(t, manager)
 	})
 
 	return manager
@@ -2039,123 +2039,118 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	require.ErrorIs(t, outcome.wallet.Lock(t.Context()), ErrWalletStopped)
 }
 
-// TestManagerCreateLifecycleStartFailureStopsManager preserves startup/cleanup
-// errors and releases membership before joining a reader waiting on that lock.
+// TestManagerCreateLifecycleStartFailureStopsManager keeps startup and cleanup
+// errors with Create until its failed candidate and shared storage close.
 func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Hold the failing birthday read while Create owns admission,
-	// so the real reader can consume an event and wait on its membership lock.
-	_, deps := createTestWalletWithMocks(t)
-	createErr := errors.New("candidate birthday")
-	closeErr := errors.New("backend close")
-	birthdayEntered := make(chan struct{})
-	birthdayRelease := make(chan struct{})
-	deps.store.On("GetWallet", mock.Anything, "candidate").Run(
-		func(mock.Arguments) {
-			close(birthdayEntered)
-			<-birthdayRelease
-		},
-	).Return(nil, createErr).Once()
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	params := managerLifecycleCreateParams("candidate")
-	backend := &managerBackendMock{}
-	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
-	backend.On("create", mock.Anything, params, mock.Anything).
-		Return(&walletData{
-			id:    1,
-			name:  params.Name,
-			store: deps.store,
-			vault: deps.vault,
-		}, nil).Once()
-	// Hold storage closure so returning a primary Create error cannot hide
-	// unfinished terminal cleanup. A concurrent Stop must join that cleanup.
-	closing := make(chan struct{})
-	release := make(chan struct{})
-	backend.On("close").Run(func(mock.Arguments) {
-		close(closing)
-		<-release
-	}).Return(closeErr).Once()
+		// Arrange: Hold startup and storage closure separately. Failure must
+		// finish cleanup before either lifecycle caller completes.
+		_, deps := createTestWalletWithMocks(t)
+		createErr := errors.New("candidate birthday")
+		closeErr := errors.New("backend close")
+		birthdayEntered := make(chan struct{})
+		birthdayRelease := make(chan struct{})
+		deps.store.On("GetWallet", mock.Anything, "candidate").Run(
+			func(mock.Arguments) {
+				close(birthdayEntered)
+				<-birthdayRelease
+			},
+		).Return(nil, createErr).Once()
 
-	manager := newManagerLifecycleTest(t, backend)
-	// Release test gates before fixture Stop, even after failed assertions.
-	releaseBirthday := sync.OnceFunc(func() { close(birthdayRelease) })
-	releaseClose := sync.OnceFunc(func() { close(release) })
+		params := managerLifecycleCreateParams("candidate")
+		backend := &managerBackendMock{}
+		backend.On("listWallets", mock.Anything).
+			Return([]*walletData{}, nil).Once()
+		backend.On("create", mock.Anything, params, mock.Anything).
+			Return(&walletData{
+				id:    1,
+				name:  params.Name,
+				store: deps.store,
+				vault: deps.vault,
+			}, nil).Once()
+		// Hold storage closure so returning a primary Create error cannot hide
+		// unfinished cleanup. Concurrent Stop must wait for the same result.
+		closing := make(chan struct{})
+		release := make(chan struct{})
+		backend.On("close").Run(func(mock.Arguments) {
+			close(closing)
+			<-release
+		}).Return(closeErr).Once()
 
-	t.Cleanup(releaseBirthday)
-	t.Cleanup(releaseClose)
+		manager := newManagerLifecycleTest(t, backend)
+		// Release test gates before fixture Stop, even after failed assertions.
+		releaseBirthday := sync.OnceFunc(func() { close(birthdayRelease) })
+		releaseClose := sync.OnceFunc(func() { close(release) })
 
-	// The fixture has already borrowed its stream; provide the held source
-	// before Start launches the reader that exercises this join regression.
-	notifications := make(chan any, 1)
-	manager.chainEvents = notifications
+		t.Cleanup(releaseBirthday)
+		t.Cleanup(releaseClose)
 
-	_, err := manager.Start(t.Context())
-	require.NoError(t, err)
+		_, err := manager.Start(t.Context())
+		require.NoError(t, err)
 
-	// Carry both results across held cleanup; a failed candidate cannot escape.
-	type createOutcome struct {
-		wallet *Wallet
-		err    error
-	}
-
-	created := make(chan createOutcome, 1)
-	stopped := make(chan error, 1)
-
-	// Act: Once Create owns admission, give the reader an event before allowing
-	// startup to fail. A join under that same lock would deadlock its snapshot.
-	go func() {
-		w, err := manager.Create(params)
-		created <- createOutcome{
-			wallet: w,
-			err:    err,
+		// Keep both results pending until cleanup finishes.
+		type createOutcome struct {
+			wallet *Wallet
+			err    error
 		}
-	}()
 
-	<-birthdayEntered
+		created := make(chan createOutcome, 1)
+		stopped := make(chan error, 1)
 
-	notifications <- chain.BlockConnected{}
+		// Act: Run creation into the held dependency, then observe Stop and
+		// the failing request while storage cleanup is still blocked.
+		go func() {
+			w, err := manager.Create(params)
+			created <- createOutcome{
+				wallet: w,
+				err:    err,
+			}
+		}()
 
-	require.Eventually(t, func() bool {
-		return len(notifications) == 0
-	}, time.Second, time.Millisecond)
-	releaseBirthday()
+		<-birthdayEntered
 
-	select {
-	case <-closing:
-	case <-time.After(5 * time.Second):
-		t.Fatal("failed Create did not reach storage cleanup")
-	}
+		releaseBirthday()
 
-	go func() { stopped <- manager.Stop() }()
+		select {
+		case <-closing:
+		case <-time.After(5 * time.Second):
+			t.Fatal("failed Create did not reach storage cleanup")
+		}
 
-	// Assert: Neither the candidate nor its primary error escapes before the
-	// held cleanup finishes. Returning then requires an unlocked reader join.
-	select {
-	case result := <-created:
-		t.Fatalf("Create returned before cleanup completed: %v", result.err)
-	default:
-	}
+		go func() { stopped <- manager.Stop() }()
 
-	releaseClose()
+		// Assert: Neither the candidate nor its error escapes while storage
+		// cleanup is held. Stop must wait for that same cleanup.
+		select {
+		case result := <-created:
+			t.Fatalf("Create returned before cleanup completed: %v", result.err)
+		default:
+		}
 
-	var outcome createOutcome
-	select {
-	case outcome = <-created:
-	case <-time.After(5 * time.Second):
-		t.Fatal("failed Create did not release membership and join its reader")
-	}
+		releaseClose()
 
-	select {
-	case stopErr := <-stopped:
-		require.NoError(t, stopErr)
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent Stop did not join terminal cleanup")
-	}
+		var outcome createOutcome
+		select {
+		case outcome = <-created:
+		case <-time.After(5 * time.Second):
+			t.Fatal("failed Create did not finish cleanup")
+		}
 
-	require.Nil(t, outcome.wallet)
-	require.ErrorIs(t, outcome.err, createErr)
-	require.ErrorIs(t, outcome.err, closeErr)
+		select {
+		case stopErr := <-stopped:
+			require.NoError(t, stopErr)
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent Stop did not join terminal cleanup")
+		}
+
+		require.Nil(t, outcome.wallet)
+		require.ErrorIs(t, outcome.err, createErr)
+		require.ErrorIs(t, outcome.err, closeErr)
+	})
 }
 
 // TestSQLManagerBackendListsWallets verifies ordered complete listing and
@@ -2307,7 +2302,7 @@ func TestKVDBManagerBackendListsZeroOrOneWallet(t *testing.T) {
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			_ = manager.Stop()
+			_ = stopManagerForTest(t, manager)
 		})
 
 		pubPassphrase[0] ^= 0xff
