@@ -5189,3 +5189,109 @@ func TestUpdateTxRejectsCompetingConfirmation(t *testing.T) {
 	require.Equal(t, db.TxStatusPending, info.Status)
 	require.Nil(t, info.Block)
 }
+
+// TestStoreSettlesLegacyInputConflicts verifies startup repairs an old missed
+// external-input conflict while preserving immutable history across reopening.
+func TestStoreSettlesLegacyInputConflicts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The current recorder settles a confirmed peer, then the real
+	// version10 fixture restores the stale statuses produced by the old store.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID := newWallet(t, store, "legacy-input-conflict")
+	shared := randomOutPoint()
+	loser := newRegularTx(
+		[]wire.OutPoint{shared}, []*wire.TxOut{
+			{
+				Value: 6000, PkScript: []byte{0x51},
+			},
+		},
+	)
+	childInput := wire.OutPoint{Hash: loser.TxHash(), Index: 0}
+
+	child := newRegularTx(
+		[]wire.OutPoint{childInput}, []*wire.TxOut{
+			{
+				Value: 5000, PkScript: []byte{0x51},
+			},
+		},
+	)
+	for _, tx := range []*wire.MsgTx{loser, child} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending, Label: "retained attempt",
+				},
+			),
+		)
+	}
+
+	winner := loser.Copy()
+	winner.TxOut[0].Value = 4000
+	block := CreateBlockFixture(t, store.Queries(), 320)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: winner, Received: time.Unix(2, 0),
+				Status: db.TxStatusPublished, Block: &block,
+			},
+		),
+	)
+	prepareLegacyInputHistory(t, store.DB())
+	setTxStatus(t, store, walletID, loser.TxHash(), db.TxStatusPending)
+	setTxStatus(t, store, walletID, child.TxHash(), db.TxStatusPublished)
+	require.NoError(t, store.Close())
+
+	// Act: Public reopening indexes all facts before resolving the confirmed
+	// winner. A second open must preserve the same settled result and inputs.
+	for range 2 {
+		restored := reopen()
+
+		// Assert: The direct root is Replaced and its child Failed, while raw
+		// inputs, labels and current winning block keep their separate facts.
+		loserInfo, err := restored.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: loser.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusReplaced, loserInfo.Status)
+		require.Nil(t, loserInfo.Block)
+		require.Equal(t, "retained attempt", loserInfo.Label)
+		childInfo, err := restored.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: child.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusFailed, childInfo.Status)
+		require.Nil(t, childInfo.Block)
+		winnerInfo, err := restored.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: winner.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, winnerInfo.Block)
+		require.Equal(t, block.Hash, winnerInfo.Block.Hash)
+		require.Equal(t, block.Height, winnerInfo.Block.Height)
+		require.Equal(
+			t, block.Timestamp.Unix(),
+			winnerInfo.Block.Timestamp.Unix(),
+		)
+		require.Equal(
+			t, map[int64]wire.OutPoint{0: shared},
+			txInputOutPoints(t, restored, walletID, loser.TxHash()),
+		)
+		require.Equal(
+			t, map[int64]wire.OutPoint{0: childInput},
+			txInputOutPoints(t, restored, walletID, child.TxHash()),
+		)
+		require.Equal(
+			t, map[int64]wire.OutPoint{0: shared},
+			txInputOutPoints(t, restored, walletID, winner.TxHash()),
+		)
+		require.NoError(t, restored.Close())
+	}
+}

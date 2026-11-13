@@ -532,5 +532,56 @@ func backfillWalletTxInputs(ctx context.Context, qtx *sqlc.Queries,
 		}
 	}
 
-	return nil
+	return reconcileInputHistory(ctx, req.Params.WalletID, ops)
+}
+
+// reconcileInputHistory applies recorded chain authority after full backfill.
+// Reuse settlement without replaying publication or credited outputs.
+func reconcileInputHistory(ctx context.Context, walletID uint32,
+	ops *createTxOps) error {
+
+	winners, err := ops.qtx.ListConfirmedInputConflicts(ctx, int64(walletID))
+	if err != nil {
+		return fmt.Errorf("list confirmed input conflicts: %w", err)
+	}
+
+	// Discover each winner's entire direct-root group before status mutations
+	// can make one peer look like a mere descendant of another direct peer.
+	for _, winner := range winners {
+		hash, err := chainhash.NewHash(winner.TxHash)
+		if err != nil {
+			return fmt.Errorf("confirmed input winner hash: %w", err)
+		}
+
+		roots, hashes, err := ops.ListConflictTxns(
+			ctx, db.CreateTxRequest{
+				Params: db.CreateTxParams{WalletID: walletID},
+				TxHash: *hash,
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		err = db.ReplaceUnminedTxConflicts(
+			ctx, int64(walletID), roots,
+			hashes, winner.ID, ops,
+		)
+		if err != nil {
+			return fmt.Errorf("settle confirmed input conflict: %w", err)
+		}
+	}
+
+	// Older unknown-parent histories can have live descendants of an invalid
+	// row. The shared eligibility view already includes that required ancestry.
+	invalidIDs, err := ops.qtx.ListIneligibleUnminedTxIDs(ctx, int64(walletID))
+	if err != nil {
+		return fmt.Errorf("list ineligible input history: %w", err)
+	}
+
+	if len(invalidIDs) == 0 {
+		return nil
+	}
+
+	return ops.MarkTxnsFailed(ctx, int64(walletID), invalidIDs)
 }
