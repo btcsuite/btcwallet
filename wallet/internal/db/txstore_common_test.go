@@ -725,6 +725,7 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 
 	ops.On("InsertInputs", mock.Anything, req, int64(11)).
 		Return(nil).Once()
+	ops.On("ValidateInputs", mock.Anything, req).Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Run(
 		func(args mock.Arguments) {
 			txID, ok := args.Get(2).(int64)
@@ -804,6 +805,7 @@ func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
 	ops.On("InsertInputs", mock.Anything, req, int64(4)).
 		Return(nil).Once()
+	ops.On("ValidateInputs", mock.Anything, req).Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
 
@@ -974,6 +976,7 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	).Once()
 	ops.On("InsertInputs", mock.Anything, req, int64(7)).
 		Return(nil).Once()
+	ops.On("ValidateInputs", mock.Anything, req).Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
 
@@ -1039,6 +1042,7 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 
 	ops.On("InsertInputs", mock.Anything, req, int64(11)).
 		Return(nil).Once()
+	ops.On("ValidateInputs", mock.Anything, req).Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
@@ -1291,6 +1295,15 @@ func (m *mockCreateTxOps) InsertInputs(ctx context.Context,
 	req CreateTxRequest, txID int64) error {
 
 	args := m.Called(ctx, req, txID)
+
+	return args.Error(0)
+}
+
+// ValidateInputs implements CreateTxOps through the arranged admission result.
+func (m *mockCreateTxOps) ValidateInputs(ctx context.Context,
+	req CreateTxRequest) error {
+
+	args := m.Called(ctx, req)
 
 	return args.Error(0)
 }

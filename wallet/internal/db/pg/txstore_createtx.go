@@ -308,6 +308,35 @@ func (o *createTxOps) InsertInputs(ctx context.Context,
 	return nil
 }
 
+// ValidateInputs rejects invalid known ancestry and a second confirmed claim.
+// Unconfirmed alternatives retain independent claims; parent credits need not
+// have been discovered for their immutable relationships to count.
+func (o *createTxOps) ValidateInputs(ctx context.Context,
+	req db.CreateTxRequest) error {
+
+	validity, err := o.qtx.GetTxInputValidity(
+		ctx, sqlc.GetTxInputValidityParams{
+			WalletID: int64(req.Params.WalletID),
+			TxHash:   req.TxHash[:],
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("check transaction input claims: %w", err)
+	}
+
+	// A real confirming block is authoritative for the target even if a
+	// previously invalid parent has not yet been observed in its new chain.
+	if req.Params.Block == nil && validity.HasInvalidParent {
+		return db.ErrTxInputInvalidParent
+	}
+
+	if validity.HasConfirmedConflict {
+		return db.ErrTxInputConflict
+	}
+
+	return nil
+}
+
 // InsertCredits stores any wallet-owned outputs created by the transaction.
 func (o *createTxOps) InsertCredits(ctx context.Context,
 	req db.CreateTxRequest, txID int64) error {

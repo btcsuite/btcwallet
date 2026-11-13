@@ -869,6 +869,10 @@ type CreateTxOps interface {
 	// Replaying the same input position preserves its immutable identity.
 	InsertInputs(ctx context.Context, req CreateTxRequest, txID int64) error
 
+	// ValidateInputs admits the indexed request against known parent validity
+	// and confirmed claimants. Backfill skips request admission.
+	ValidateInputs(ctx context.Context, req CreateTxRequest) error
+
 	// InsertCredits records every wallet-owned output that the caller
 	// marked as a credit for this transaction.
 	InsertCredits(ctx context.Context, req CreateTxRequest, txID int64) error
@@ -1251,6 +1255,13 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 	err := ops.InsertInputs(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx inputs: %w", err)
+	}
+
+	// Incoming requests need live claim admission; startup deliberately reuses
+	// only InsertInputs so terminal history keeps its immutable input facts.
+	err = ops.ValidateInputs(ctx, req)
+	if err != nil {
+		return fmt.Errorf("validate tx inputs: %w", err)
 	}
 
 	// Credits only describe outputs created by the tx itself, so they do not
