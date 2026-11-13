@@ -10,6 +10,13 @@ which defines the schema and its invariants.
 It focuses on the workflow phases, the invariants each phase must preserve,
 and the backend guarantees that follow from that model.
 
+**Scope:** The phases below describe the current pointer-based implementation.
+[ADR 0018](./adr/0018-unconfirmed-transaction-candidates.md) governs the target
+input-index design, as explained by the updated data model. Clearing spend
+edges here means clearing mutable credit pointers, not deleting `tx_inputs`.
+Target input rows survive invalidation and rollback; owning-transaction
+deletion removes them. Target integration and status restoration remain open.
+
 ## 1. Wallet Events and Scope
 
 From the wallet's point of view, a small set of events can change tx history:
