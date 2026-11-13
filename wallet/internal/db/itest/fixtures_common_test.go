@@ -5,12 +5,64 @@ package itest
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/stretchr/testify/require"
 )
+
+// rollbackInputHistoryMigrations restores version10 through real downgrades.
+// Reopening exercises dependent schema changes and retained input backfill.
+func rollbackInputHistoryMigrations(t *testing.T, sqlDB *sql.DB,
+	migrationDir string) {
+
+	t.Helper()
+
+	entries, err := os.ReadDir(migrationDir)
+	require.NoError(t, err)
+
+	// A single transaction preserves the fixture if a downgrade refuses its
+	// history. ReadDir's lexical order matches the fixed-width version names.
+	tx, err := sqlDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+
+	for i := len(entries) - 1; i >= 0; i-- {
+		name := entries[i].Name()
+		if !strings.HasSuffix(name, ".down.sql") {
+			continue
+		}
+
+		version, err := strconv.Atoi(strings.SplitN(name, "_", 2)[0])
+		require.NoError(t, err)
+
+		if version <= 10 {
+			continue
+		}
+
+		down, err := os.ReadFile(filepath.Join(migrationDir, name))
+		require.NoError(t, err)
+		_, err = tx.ExecContext(t.Context(), string(down))
+		require.NoError(t, err)
+	}
+
+	// Keep the migration marker and schema atomic; NewStore must see the
+	// actual legacy version rather than an already-current empty input index.
+	_, err = tx.ExecContext(
+		t.Context(),
+		"UPDATE schema_migrations SET version = 10, dirty = FALSE",
+	)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
 
 // CreateWalletParamsFixture creates test parameters for wallet creation.
 func CreateWalletParamsFixture(name string) db.CreateWalletParams {

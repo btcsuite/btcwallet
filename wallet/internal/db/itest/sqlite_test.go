@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -451,16 +450,5 @@ func txInputOutPoints(t *testing.T, store *sqlite.Store, walletID uint32,
 func prepareLegacyInputHistory(t *testing.T, sqlDB *sql.DB) {
 	t.Helper()
 
-	// Reuse the checked-in downgrade instead of fabricating an empty current
-	// table; the version marker makes NewStore execute the actual upgrade.
-	down, err := os.ReadFile(
-		"../../sql/sqlite/migrations/000011_tx_inputs.down.sql",
-	)
-	require.NoError(t, err)
-	_, err = sqlDB.ExecContext(t.Context(), string(down))
-	require.NoError(t, err)
-	_, err = sqlDB.ExecContext(t.Context(),
-		"UPDATE schema_migrations SET version = 10, dirty = FALSE",
-	)
-	require.NoError(t, err)
+	rollbackInputHistoryMigrations(t, sqlDB, "../../sql/sqlite/migrations")
 }
