@@ -350,6 +350,10 @@ func testLabelTxWalletState(h *bwtest.HarnessTest) {
 
 	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 
+	// This case owns the completed shutdown; harness teardown must not
+	// attempt another Stop on the terminal Manager.
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+
 	// The gate refuses before anything looks the transaction up, so this
 	// only has to be a hash. Nothing is labeled.
 	txHash := unknownOutpoint().Hash
