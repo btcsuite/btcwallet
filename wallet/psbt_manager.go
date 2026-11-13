@@ -1494,6 +1494,31 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// Sign a clone, copied back to the caller only on success.
 	packet := clonePacket(r.params.Packet)
 
+	signedInputs, err := w.signPacket(r.ctx, packet, r.params.InputTweaks)
+	if err != nil {
+		r.respChan <- signPsbtResp{err: err}
+
+		return
+	}
+
+	*r.params.Packet = *packet
+
+	// Finally, return the result, which includes the list of inputs that
+	// were successfully signed and the caller's now (partially) signed
+	// PSBT packet.
+	r.respChan <- signPsbtResp{
+		result: &SignPsbtResult{
+			SignedInputs: signedInputs,
+			Packet:       r.params.Packet,
+		},
+	}
+}
+
+// signPacket signs every input of a validated clone that the wallet can sign,
+// and returns the indices it signed. The clone may be partly signed on error.
+func (w *Wallet) signPacket(ctx context.Context, packet *psbt.Packet,
+	tweaks map[int]KeyTweak) ([]uint32, error) {
+
 	// signedInputs will track the indices of all inputs that we
 	// successfully sign during this operation. This is useful for callers
 	// (e.g., LND) to know which inputs were partially signed by this
@@ -1505,13 +1530,9 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// has at least a WitnessUtxo or NonWitnessUtxo, which is crucial for
 	// signature generation. If this check fails, it indicates a malformed
 	// or incomplete PSBT that cannot be signed.
-	err = psbt.InputsReadyToSign(packet)
+	err := psbt.InputsReadyToSign(packet)
 	if err != nil {
-		r.respChan <- signPsbtResp{
-			err: fmt.Errorf("psbt inputs not ready: %w", err),
-		}
-
-		return
+		return nil, fmt.Errorf("psbt inputs not ready: %w", err)
 	}
 
 	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
@@ -1522,11 +1543,7 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// signatures for each input.
 	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
 	if err != nil {
-		r.respChan <- signPsbtResp{
-			err: fmt.Errorf("error creating prevOutFetcher: %w", err),
-		}
-
-		return
+		return nil, fmt.Errorf("error creating prevOutFetcher: %w", err)
 	}
 
 	sigHashes := txscript.NewTxSigHashes(
@@ -1537,20 +1554,14 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// they must verify first.
 	err = authorizeSignRecords(packet, sigHashes, prevOutFetcher)
 	if err != nil {
-		r.respChan <- signPsbtResp{err: err}
-
-		return
+		return nil, err
 	}
 
 	// Plan every input before signing any, so a problem with one input is
 	// reported before a private key is looked up for another.
-	plans, err := w.planPsbtInputs(
-		r.ctx, packet, sigHashes, r.params.InputTweaks,
-	)
+	plans, err := w.planPsbtInputs(ctx, packet, sigHashes, tweaks)
 	if err != nil {
-		r.respChan <- signPsbtResp{err: err}
-
-		return
+		return nil, err
 	}
 
 	// Iterate through each planned input. For each one, we attempt to
@@ -1558,13 +1569,9 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 	// loop handles both Taproot (SegWit v1) and legacy/SegWit v0 inputs,
 	// adapting the signing process accordingly.
 	for _, plan := range plans {
-		signed, err := w.signPlannedInput(r.ctx, packet, plan)
+		signed, err := w.signPlannedInput(ctx, packet, plan)
 		if err != nil {
-			r.respChan <- signPsbtResp{
-				err: fmt.Errorf("input %d: %w", plan.idx, err),
-			}
-
-			return
+			return nil, fmt.Errorf("input %d: %w", plan.idx, err)
 		}
 
 		if signed {
@@ -1580,17 +1587,7 @@ func (w *Wallet) handleSignPsbt(r signPsbtReq) {
 		}
 	}
 
-	*r.params.Packet = *packet
-
-	// Finally, return the result, which includes the list of inputs that
-	// were successfully signed and the caller's now (partially) signed
-	// PSBT packet.
-	r.respChan <- signPsbtResp{
-		result: &SignPsbtResult{
-			SignedInputs: signedInputs,
-			Packet:       r.params.Packet,
-		},
-	}
+	return signedInputs, nil
 }
 
 // psbtSignPlan is the signature one input is to receive, settled before any
