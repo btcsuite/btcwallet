@@ -11,8 +11,8 @@
 - **Supersedes:** None.
 - **Amended by:** [ADR 0015](0015-sql-shared-chain-ownership.md) for SQL block
   identity and canonical-frontier semantics;
-  [ADR 0018](0018-unconfirmed-transaction-candidates.md) for input relationships,
-  derived spend availability and competing transaction history.
+  [ADR 0018](0018-unconfirmed-transaction-candidates.md) for input
+  relationships, derived spend availability and competing transaction history.
 - **Superseded by:** None.
 
 ## 1. Context

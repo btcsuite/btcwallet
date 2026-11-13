@@ -1,8 +1,14 @@
 # Wallet Data Model and Lifecycle
 
-This document defines the core data model, state machines, and design philosophy of the `btcwallet` transaction subsystem. It serves as the definitive reference for understanding how the wallet manages money, history, and state.
+This guide explains the target wallet model governed by
+[ADR 0006](./adr/0006-wtxmgr-sql-schema.md), as amended by
+[ADR 0018](./adr/0018-unconfirmed-transaction-candidates.md).
+ADR0018 is authoritative for input relationships and spend lookup. Its target
+is not yet fully implemented; precise rollback status restoration remains open.
 
-For the exact write-path rules that apply transaction ingress, invalidation, and rollback to the stored graph, see [Transaction Invalidation Flows](./tx_invalidation_flows.md).
+[Transaction Invalidation Flows](./tx_invalidation_flows.md) describes the
+current implementation's mutable credit-pointer cleanup. Those instructions
+do not authorize clearing the target model's retained transaction inputs.
 
 ## 1. Design Philosophy
 
@@ -19,41 +25,55 @@ Our data model distinguishes between data integrity and operational efficiency:
 
 ### 1.2 The "Immutable History" Policy
 
-We adhere to a strict **"Never Delete History"** policy.
-*   **Chain Data is Immutable:** Once a transaction is mined, it happened. We record it.
-*   **Intent is Immutable:** If a user attempts a transaction that later fails (e.g., RBF replaced), that attempt is part of the wallet's audit trail.
-*   **Soft Deletion:** We do not physically `DELETE` rows. Invalid or replaced transactions are marked with a status (`failed`, `replaced`) so they are ignored by balance calculations but preserved for history.
+Ordinary confirmation, invalidation and rollback retain transaction history,
+including the inputs of replaced or failed transactions. Status and current
+block association determine eligibility without erasing those input facts.
+
+Existing explicit branch deletion and recognized malformed/script-rejection
+cleanup are exceptions. Deleting a transaction also deletes its input rows
+through their cascading foreign key. Credit deletion follows the existing
+[ADR 0011](./adr/0011-no-addresses-used-column.md) address-use rules. This model
+introduces no separate input GC or history-pruning policy.
 
 ---
 
 ## 2. The Data Model
 
-The wallet state is composed of four primary entities.
+The wallet state is composed of five primary entities.
 
 ```mermaid
 classDiagram
+    %% Retain every input claimant independently of owned credits.
+    %% The dotted prevout match is optional lookup, not a parent-credit FK.
     direction LR
-    
+
     class Block {
         Height
         Hash
         Timestamp
     }
-    
+
     class Transaction {
         TxHash
         RawBytes
         Status
         BlockHeight (FK)
     }
-    
+
+    class TransactionInput {
+        WalletID
+        SpendingTxID
+        InputIndex
+        PrevTxHash
+        PrevOutputIndex
+    }
+
     class UTXO {
         OutPoint (TxHash:Index)
         Amount
         Address
-        SpentBy (FK)
     }
-    
+
     class Lease {
         LockID
         Expiration
@@ -61,11 +81,15 @@ classDiagram
 
     Block "1" --> "0..*" Transaction : Confirms
     Transaction "1" --> "0..*" UTXO : Creates
-    Transaction "0..1" --> "0..*" UTXO : Spends (Inputs)
+    Transaction "1" --> "0..*" TransactionInput : Records
+    TransactionInput "0..*" ..> "0..1" UTXO : Matches prevout
     UTXO "1" --> "0..1" Lease : Locks
 ```
 
-Note: This diagram is conceptual and uses natural identifiers like `TxHash` and an outpoint (`TxHash:Index`). The SQL schema uses surrogate keys (for example `transactions.id`) and scopes all `wtxmgr` rows by `wallet_id`.
+The diagram uses conceptual identifiers. SQL scopes records by wallet and uses
+surrogate transaction IDs. An input can reference an external or undiscovered
+parent with no owned credit row. Several inputs from competing transactions
+can match one credit; there is no parent-UTXO foreign key.
 
 Mapping (conceptual -> SQL):
 
@@ -73,7 +97,9 @@ Mapping (conceptual -> SQL):
 | --- | --- |
 | `TxHash` | `transactions.tx_hash` (unique per `wallet_id`) |
 | Transaction row ID | `(transactions.wallet_id, transactions.id)` |
-| OutPoint (`TxHash:Index`) | `(utxos.wallet_id, utxos.tx_id, utxos.output_index)` |
+| Owned outpoint | `(utxos.tx_id, utxos.output_index)`; wallet/hash from its creating transaction |
+| Recorded input | `(tx_inputs.wallet_id, tx_inputs.tx_id, tx_inputs.input_index)` |
+| Referenced outpoint | `(tx_inputs.wallet_id, tx_inputs.prev_tx_hash, tx_inputs.prev_output_index)` |
 | Address (address book) | `addresses.id` (address-manager schema) |
 | Confirmation | `transactions.block_height` (FK to `blocks(block_height)`) |
 | Lease | `(utxo_leases.wallet_id, utxo_leases.utxo_id)` |
@@ -81,7 +107,11 @@ Mapping (conceptual -> SQL):
 ### 2.1 Entity Roles
 
 *   **Block:** The anchor for time and confirmation. It handles reorgs. If a block is disconnected, linked transactions automatically lose their confirmation status.
-*   **Transaction:** The provenance record. It stores the *intent* (Who sent? When?) and the *status* (Confirmed? Failed?).
+*   **Transaction:** Retains raw bytes, wallet metadata, lifecycle status and
+    current block association.
+*   **TransactionInput:** Indexes an immutable input from those raw bytes.
+    Confirmation and invalidation do not rewrite it; deleting its owning
+    transaction removes it.
 *   **UTXO:** The unit of value. This is the "Coin". It is the bridge between transactions.
 *   **Lease:** A temporary, memory-like lock on a UTXO to prevent double-spending within the wallet application (e.g., reserving a coin for a Lightning channel open).
 
@@ -93,29 +123,48 @@ A Transaction represents an event that *moves* value. Its lifecycle tracks the j
 
 ### 3.1 State Machine
 
+This graph describes the SQL target model using the five stored `tx_status`
+values and derived confirmation. Its Published node has `block_height IS NULL`;
+Confirmed means Published with a current block association. The initial marker
+means no retained row; every retained row has a non-NULL status.
+
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending : User Creates
-    [*] --> Published : Publication / Chain Observation
-    
-    %% Publication tracking begins before registration or sending can fail.
-    Pending --> Published : Publication / Chain Observation
-    
-    %% Confirmation is orthogonal (BlockHeight != NULL)
-    
-    Published --> Replaced : RBF (Higher Fee Tx Wins)
-    Published --> Failed : Double-Spend (Other Tx Wins)
-    Published --> Orphaned : Reorged Coinbase
-
-    Pending --> Failed : Inputs Spent Elsewhere
-
-    %% Coinbase can re-enter the best chain after a reorg.
-    Orphaned --> Published : Reconfirmed
-    
-    Replaced --> [*]
-    Failed --> [*]
-    Orphaned --> [*]
+    %% Split Published by block association without storing confirmation twice.
+    %% Invalid-history confirmation arrows expose required target recovery.
+    state "Published (unconfirmed)" as Published
+    state "Confirmed (derived)" as Confirmed
+    [*] --> Pending : Retained locally
+    [*] --> Published : Track publication or observe unconfirmed tx
+    [*] --> Confirmed : Observe tx in current chain
+    Pending --> Published : Record publication before send
+    Pending --> Confirmed : Current chain confirms tx
+    Published --> Confirmed : Current chain confirms tx
+    Replaced --> Confirmed : Current chain confirms tx (target)
+    Failed --> Confirmed : Current chain confirms tx (target)
+    Orphaned --> Confirmed : Coinbase reconfirms
+    Confirmed --> Published : Ordinary tx block disconnects
+    Confirmed --> Orphaned : Coinbase block disconnects
+    Pending --> Replaced : Direct competitor confirms
+    Published --> Replaced : Direct competitor confirms
+    Pending --> Failed : Branch or required ancestor invalidated
+    Published --> Failed : Branch or required ancestor invalidated
+    note right of Confirmed
+        tx_status = Published
+        block_height IS NOT NULL
+    end note
 ```
+
+Chain confirmation takes precedence over retained Replaced/Failed labels.
+Those two confirmation arrows are required target behavior. The current SQL
+`CreateTx` confirmation path only reuses Pending/Published ordinary rows;
+accepting retained Replaced/Failed rows remains an implementation gap.
+
+After a competing block disconnects, recovery of a still-unconfirmed
+Replaced/Failed transaction needs cause-aware reconciliation. Those statuses
+alone do not preserve the earlier Pending/Published distinction. Restoring
+that intent and Failed descendants according to their cause remains open in
+ADR0018; the graph does not prescribe those unconfirmed recovery transitions.
 
 ### 3.2 Status vs. Confirmation
 
@@ -131,78 +180,92 @@ We distinguish between a transaction's **Validity** (Status) and its **Confirmat
 | :--- | :--- | :--- |
 | `0` (`pending`) | Created locally, before publication tracking. | **Yes** (Factual) |
 | `1` (`published`) | Active wallet history recorded for publication or observed from the chain. | **Yes** (If valid) |
-| `2` (`replaced`) | Replaced by a higher-fee transaction (RBF). | **No** |
-| `3` (`failed`) | Invalidated by a conflicting transaction (Double-Spend). | **No** |
+| `2` (`replaced`) | Direct conflict invalidated by a confirmed competitor. | **No** |
+| `3` (`failed`) | Invalidated branch, including dependent descendants. | **No** |
 | `4` (`orphaned`) | Coinbase tx that was reorged out (Invalid). | **No** |
 
+Recording an unconfirmed competitor changes neither transaction's status.
+When that competitor confirms, direct conflict roots become `replaced` and
+invalidated descendants become `failed`. The graph distinguishes subsequent
+canonical confirmation from unresolved recovery while still unconfirmed.
+
 The wallet records `published` before notification registration or sending.
-Retained failed attempts keep this status even if no network send occurred; it
-does not prove mempool acceptance. Unconfirmed `published` rows participate in
-automatic rebroadcast, while `pending` rows do not. Preflight rejection records
-no new attempt. After recording, publication-policy failures and unknown
+Retained unsuccessful attempts keep this status even if no send occurred; it
+does not prove mempool acceptance. Preflight rejection records no new attempt.
+After recording, transport errors, publication-policy failures and unknown
 outcomes keep history and spend claims; recognized malformed or mandatory-script
 rejections retain cleanup. `ErrTxRetained` also covers a failed readback after
 recording. It identifies an attempt leaving active tracking in place, rather
 than promising indefinite retention after a later validation rejection,
 confirmed conflict or explicit deletion. General GC is deferred.
 
+Current rebroadcast selects unconfirmed Published rows and sorts parents before
+children. In the target input model, these must also have no confirmed
+competitor or invalid required ancestor. Rebroadcast itself changes no status;
+Pending, confirmed, Replaced, Failed and Orphaned rows are excluded.
+
 *Additional invariant: Coinbase transactions cannot exist in the mempool. A coinbase transaction is either confirmed (`BlockHeight IS NOT NULL` and `Status = 1`, `published`) or orphaned (`Status = 4`, `orphaned`, and `BlockHeight IS NULL`).*
 
-Factual-balance note: the SQL Store layer treats both `pending` and
-`published` parent transactions as part of the current live UTXO set. More
+Factual-balance note: this model includes eligible `pending` and `published`
+creators in the live credit set. More
 conservative spendability policy (for example, excluding `pending` parents) is
 applied by higher-level callers on top of that factual base.
 
-*Note: There is no "Abandoned" state. A broadcast transaction cannot be safely abandoned; it can only be invalidated by double-spending its inputs.*
+There is no stored Abandoned status. Existing explicit branch deletion removes
+records but cannot cancel a network broadcast attempt already in progress.
 
 ---
 
 ## 4. UTXO Lifecycle
 
-A UTXO represents **spendable potential**. Its state is derived entirely from its parent Transaction and its "Spent By" pointer.
+A UTXO represents an owned credit. Derive its availability from the creating
+transaction, matching input claims and their current transaction/block facts.
+The target stores no spender pointer or separate UTXO status.
 
 ### 4.1 State Machine
 
 ```mermaid
 stateDiagram-v2
+    %% Explain derived availability without storing another status or spender.
+    %% Release requires no remaining eligible or confirmed claimant.
     state "Spendable (Unspent)" as Unspent
     state "Immature (Coinbase)" as Immature
     state "Leased (Locked)" as Leased
-    state "Spent (Archive)" as Spent
-    state "Dead (Invalid)" as Dead
-    
-    [*] --> Unspent : Created by Valid Tx
-    [*] --> Immature : Coinbase Confirmed
-    
-    Unspent --> Leased : Application Lock
-    Leased --> Unspent : Lock Expire/Release
-    
-    Unspent --> Spent : Used in New Tx
-    Leased --> Spent : Forced Spend
-    
-    Spent --> Unspent : Reorg (Spending Tx Invalidated)
-
-    %% Coinbase maturity
-    Immature --> Unspent : Matures (100 blocks)
-
-    %% Parent validity changes (derived, not persisted)
-    Unspent --> Dead : Parent Invalidated
-    Immature --> Dead : Parent Orphaned
-    Dead --> Immature : Parent Reconfirmed (Coinbase)
+    state "Claimed (Unavailable)" as Claimed
+    state "Invalid Creator" as Dead
+    [*] --> Unspent : Created by eligible transaction
+    [*] --> Immature : Coinbase confirmed
+    Unspent --> Leased : Application lock
+    Leased --> Unspent : Lock expires or is released
+    Unspent --> Claimed : Eligible input claim
+    Leased --> Claimed : Confirmed spend
+    Claimed --> Unspent : No claims count and creator is eligible
+    Immature --> Unspent : Maturity policy satisfied
+    Unspent --> Dead : Creator invalidated
+    Immature --> Dead : Coinbase orphaned
+    Dead --> Immature : Coinbase reconfirmed
 ```
 
 ### 4.2 Derivation Logic
 
-A UTXO does not store its own status field. Its status is calculated dynamically to ensure consistency.
+These are derived query outcomes, not additional stored status values.
+An unconfirmed Pending/Published claimant reserves its inputs while no
+confirmed competitor or invalid required ancestor blocks it. A confirmed
+claimant establishes a spend. Removing one does not release another's claim.
 
-| UTXO State | Parent Tx Status | `BlockHeight` | `SpentBy` Pointer | Meaning |
-| :--- | :--- | :--- | :--- | :--- |
-| **Confirmed** | `1` (`published`) | `NOT NULL` | `NULL` | Available, mature funds. |
-| **Unconfirmed** | `1` (`published`) | `NULL` | `NULL` | Incoming funds, risk of RBF. |
-| **Immature** | `1` (`published`) coinbase | `NOT NULL` | `NULL` | Mined coins, must wait 100 blocks. |
-| **Spent** | `1` (`published`) | `NOT NULL` | `NOT NULL` | History. We used this money. |
-| **Dead (Permanent)** | `3` / `2` (`failed` / `replaced`) | *Any* | *Any* | Permanently invalid output from a failed attempt. |
-| **Dead (Recoverable)** | `4` (`orphaned`) coinbase | `NULL` | *Any* | Orphaned coinbase output. Can become `Immature` if parent is reconfirmed. |
+| Credit view | Creating transaction | Effective input claims | Meaning |
+|---|---|---|---|
+| Confirmed | Published with a current block | None | Subject to maturity, lease and caller policies. |
+| Unconfirmed | Eligible Pending/Published without a block | None | Candidate credit; caller confirmation policy applies. |
+| Immature | Confirmed coinbase | None | Excluded until maturity requirements are met. |
+| Reserved | Eligible creator | At least one eligible unconfirmed claimant | Not available for ordinary selection. |
+| Spent | Eligible creator | A current confirmed claimant | Retained spent-credit history. |
+| Contingent change | Unconfirmed competing creator or its descendant | None | Discoverable with conflict metadata; excluded from safe sums and automatic selection. |
+| Invalid creator | Failed, Replaced or Orphaned | Any | Excluded; legitimate recovery depends on cause and chain facts. |
+
+Input rows remain even when their claimant stops reserving funds. Status and
+chain facts determine whether the claim counts. Explicit coin control can
+choose a compatible contingent branch after ancestry validation.
 
 ---
 
@@ -212,91 +275,105 @@ A UTXO does not store its own status field. Its status is calculated dynamically
 
 ```mermaid
 graph TD
-    Block[Block N - Orphaned] -.->|Invalidates| Tx[Transaction]
-    
-    Tx -->|State becomes Unconfirmed| Output[Created UTXO]
-    Output -.->|State becomes Unconfirmed| Balance[Wallet Balance]
-    
-    Tx -->|Releases| Input[Spent UTXO]
-    Input -.->|State becomes Unspent| Balance
+    %% A disconnect changes eligibility without deleting recorded inputs.
+    %% Recheck all surviving claims before releasing a funding credit.
+    Block[Disconnected block] --> Tx[Transaction loses block association]
+    Tx --> Output[Recheck created credit eligibility]
+    Tx --> Inputs[Retain input facts]
+    Inputs --> Funding[Re-evaluate funding credit claims]
+    Funding -->|No eligible or confirmed claimant remains| Available[Available]
 ```
 
 When the blockchain reorganizes (disconnects blocks):
+
 1.  **Block** record is disconnected from the best chain (deleted/replaced).
 2.  **Transactions** in that block have their `BlockHeight` set to `NULL`.
 3.  **Effect (non-coinbase):** Regular transactions revert to `Unconfirmed` state (but remain `published`).
     *   **Coinbase special case:** Coinbase transactions from the disconnected block are marked `orphaned` (as per ADR 0006) instead of reverting to `Unconfirmed`, since they cannot exist outside of the block that created them.
 4.  **Cascading Effect:**
     *   Outputs created by these txs become `Unconfirmed` (except for outputs of `orphaned` coinbase txs, which are no longer considered part of the spendable UTXO set).
-    *   Inputs spent by these txs revert to `Unspent` (if the spending tx is completely invalidated).
+    *   Input rows remain. A disconnected Published transaction can still
+        reserve its funding outputs. A credit becomes unclaimed only if no
+        eligible unconfirmed or confirmed transaction still claims it.
 
 Implementation note: The SQL `blocks` table models the current best chain. During a disconnect, the best-chain association is removed (for example by deleting the `blocks` row at that height and inserting the new one). The coinbase status update MUST be atomic with clearing `BlockHeight` to avoid an invalid "unconfirmed coinbase" state.
 
 Coinbase reconfirmation note: If an orphaned coinbase transaction re-enters the best chain, restoring it requires updating `BlockHeight` and `Status = 1` (`published`) atomically (one SQL statement within a transaction) to satisfy coinbase invariants.
 
 Reconfirmation semantics:
-*   The transaction keeps the same `tx_hash` and is associated with a new `block_height`.
-*   Outputs created by the transaction transition from `Dead (Recoverable)` back to `Immature` (and later become spendable after maturity).
 
-Deep reorg note: A deep reorg is handled as a batch of block disconnects. Implementations should treat this as a bounded, transactional operation (potentially chunked) rather than assuming a single-block example.
+*   The transaction keeps the same `tx_hash` and is associated with a new `block_height`.
+*   Credits of the reconfirmed coinbase move from excluded to immature, and
+    become eligible after maturity if no effective input claim blocks them.
+
+Deep reorg note: A deep reorg disconnects a range of blocks. Keep status,
+block and eligibility updates atomic under the existing backend boundaries.
+Exact restoration of previously Replaced/Failed branches remains unresolved
+in ADR0018; clearing a block association alone does not solve it.
 
 ### 5.2 RBF (Replace-By-Fee)
 
 ```mermaid
 graph TD
-    Input[Input UTXO]
-    
-    Input -->|Spent By| TxB[Tx B - New]
-    TxB -->|Status: Published| Network
-    
-    Input -.->|Was Spent By| TxA[Tx A - Old]
-    TxA -->|Status: Replaced| Archive
+    %% Both unconfirmed candidates retain claims on the same funding output.
+    %% Only confirmation establishes the spender and invalidates its competitor.
+    Input[Funding outpoint] -->|Claim| A[Tx A unconfirmed]
+    Input -->|Claim| B[Tx B unconfirmed]
+    B -->|Confirms| Winner[Confirmed spender B]
+    Winner -->|Direct conflict| Replaced[Tx A becomes Replaced]
 ```
 
-When the wallet detects a replacement transaction (Tx B) for an existing unconfirmed transaction (Tx A):
-1.  **Detection:** Tx B spends the same inputs as Tx A.
-2.  **Update:** The input UTXOs are updated to point to Tx B (`SpentBy = TxB`).
-3.  **Archive:** Tx A is marked as `status = 2` (`replaced`). It remains in the DB for history but is ignored by balance queries.
+When the wallet records replacement candidate B spending A's input:
+
+1. Retain both transactions and their input rows. Observing unconfirmed B
+   changes neither status and does not choose a higher-fee winner.
+2. Both eligible candidates reserve the funding output. Neither claim overwrites
+   the other; their change remains contingent rather than independent safe
+   funds.
+3. If B confirms, its current block association establishes the spend. A becomes
+   `replaced`, and A's invalidated descendants become `failed`.
+
 
 ### 5.3 Upstream Double-Spend (Invalidation)
 
 ```mermaid
 graph TD
-    Input[Input UTXO]
-    
-    Input -->|Spent By| TxD[Tx D - Competitor]
-    TxD -->|Status: Confirmed| Blockchain
-    
-    Input -.->|Was Spent By| TxC[Tx C - Ours]
-    TxC -->|Status: Failed| Archive
-    
-    TxC -->|Creates| Output[Output UTXO]
-    Output -.->|Status: Dead| Archive
+    %% Distinguish the direct losing root from its invalidated descendants.
+    %% D's confirmation establishes the spend; retain C's input facts.
+    Input[Funding outpoint] -->|Claim| D[Tx D confirmed]
+    Input -->|Retained claim| C[Tx C becomes Replaced]
+    C -->|Invalidates dependencies| Children[Descendants become Failed]
 ```
 
-When a transaction (Tx C) becomes invalid because *its input* was spent by a conflicting transaction (Tx D) that confirmed:
-1.  **Detection:** We see Tx D confirmed in a block. It spends UTXO X.
-2.  **Conflict:** We have Tx C (unconfirmed) which also spends UTXO X.
-3.  **Resolution:**
-    *   Update UTXO X: `SpentBy = TxD`.
-    *   Mark Tx C: `Status = 3` (`failed`).
-    *   **Cascade:** Any UTXOs created by Tx C are now effectively "Dead" (because their parent is `failed`).
-    *   Any transactions spending those dead UTXOs must also be marked `failed` (recursive invalidation).
+Suppose unconfirmed C and competing D spend the same funding output:
+
+1. Recording unconfirmed D changes neither transaction's status.
+2. When D confirms, retain its block association and input facts. Indexed
+   input lookup identifies C as a direct conflict, even for an external parent.
+3. Mark C `replaced`, not `failed`. Its credits become unavailable, and its
+   invalidated descendants become `failed`.
+4. Keep the input rows of C and its descendants for history and later lookup.
+   Their ineligibility releases only claims not held by another live candidate.
 
 Architectural consequence: Recursive invalidation can require graph traversal across transaction chains. Typical wallet histories are shallow, but the design should acknowledge worst-case depth and define an execution strategy (batch processing, recursion limits, and/or iterative traversal) to avoid pathological performance.
 
 Suggested implementation strategy:
+
 1.  Start with a queue of newly-invalid transactions (double-spent, replaced, or orphaned).
-2.  Mark those transactions `failed`/`replaced`/`orphaned`.
-3.  Find UTXOs created by those transactions.
-4.  For each such UTXO, find transactions that spend it and enqueue them.
+2.  Apply the event-specific root status; confirmed-conflict roots become
+    `replaced`, while their invalidated descendants become `failed`.
+3.  Find recorded inputs referencing the affected transaction hashes.
+4.  Follow those input relationships to discover dependent transactions.
 5.  Repeat until the queue is empty.
 
 This can be implemented with an application-side loop (portable across databases) or a database-side recursive CTE (PostgreSQL).
 
 ### 5.4 Coin Selection
-Coin selection queries focus purely on the UTXO set:
-1.  Filter by `SpentBy IS NULL`.
+Coin selection starts from owned credits and the input index:
+
+1.  Exclude outputs with a confirmed spend or an eligible unconfirmed input
+    claimant. Match wallet, creating transaction hash and output index; a
+    missing credit pointer is not an availability test.
 2.  Join the parent transaction and choose a caller-specific live-status
     filter.
     *   Conservative callers can require `Status = 1` (`published`).
@@ -305,7 +382,9 @@ Coin selection queries focus purely on the UTXO set:
         broadcast before the child.
     *   If confirmation is required (e.g., for safety), add
         `AND BlockHeight IS NOT NULL`.
-3.  Filter out active `Leases`.
+3.  Exclude contingent change from safe sums and automatic selection. Explicit
+    coin control validates one compatible ancestry branch.
+4.  Filter out active `Leases` and apply existing maturity requirements.
 
 Important: There is no dedicated `spendable_utxos` view in the current branch.
 Coin selection should build directly on factual UTXO queries and then apply its
