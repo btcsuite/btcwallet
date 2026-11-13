@@ -1028,6 +1028,10 @@ func (w *Wallet) createManualInputSource(ctx context.Context,
 		[]db.UtxoInfo, 0, len(inputs.UTXOs),
 	)
 
+	// Ordinary explicit inputs avoid a graph read; contingent choices must
+	// additionally establish that their selected ancestors can coexist.
+	checkAncestry := false
+
 	// Iterate through the manually specified UTXOs and ensure that each
 	// one is eligible for spending.
 	for _, outpoint := range inputs.UTXOs {
@@ -1058,7 +1062,45 @@ func (w *Wallet) createManualInputSource(ctx context.Context,
 				outpoint)
 		}
 
+		checkAncestry = checkAncestry || credit.IsConflicted
 		eligibleSelectedUtxo = append(eligibleSelectedUtxo, *credit)
+	}
+
+	if checkAncestry {
+		// History retains terminal rows too; only active unconfirmed facts
+		// can be required ancestors of an explicitly selected live branch.
+		rows, err := w.store.ListTxns(
+			ctx, db.ListTxnsQuery{
+				WalletID: w.id, UnminedOnly: true,
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("load selected input ancestry: %w", err)
+		}
+
+		live := rows[:0]
+		for _, row := range rows {
+			if db.IsUnminedStatus(row.Status) {
+				live = append(live, row)
+			}
+		}
+
+		// The pure walk uses hashes rather than SQL IDs, so reuse the raw
+		// decoder with an unused ID instead of adding another graph type.
+		records, err := db.BuildUnminedTxRecords(
+			live,
+			func(row db.TxInfo) (int64, []byte, []byte) {
+				return 0, row.Hash[:], row.SerializedTx
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("decode selected input ancestry: %w", err)
+		}
+
+		err = db.ValidateInputAncestry(inputs.UTXOs, records)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrUtxoNotEligible, err)
+		}
 	}
 
 	// Return a constant input source that will only provide the selected
@@ -1264,6 +1306,12 @@ func (w *Wallet) getEligibleUTXOsFromList(ctx context.Context,
 		if credit.IsLocked {
 			return nil, fmt.Errorf("%w: %v",
 				ErrUtxoNotEligible, outpoint)
+		}
+
+		// A supplied policy pool remains automatic selection. Naming an
+		// outpoint does not make its contingent change safe to use.
+		if credit.IsConflicted {
+			continue
 		}
 
 		// A UTXO is only eligible if it has reached the required
@@ -1525,8 +1573,9 @@ func (w *Wallet) outputEligibleForSelection(rawImported bool,
 		return false
 	}
 
-	// Locked unspent outputs are skipped.
-	if output.IsLocked {
+	// Automatic selection excludes leases and change that has competing
+	// ancestry; explicit compatible branch selection has its own path.
+	if output.IsLocked || output.IsConflicted {
 		return false
 	}
 

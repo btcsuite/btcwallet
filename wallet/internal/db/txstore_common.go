@@ -1767,6 +1767,59 @@ func CollectConflictedTxIDs(candidates []UnminedTxRecord) []int64 {
 	return conflicted
 }
 
+// ValidateInputAncestry rejects selected outputs whose known unmined ancestors
+// spend the same prevout incompatibly. One contingent branch is permitted;
+// unknown or confirmed parents end the walk without requiring a mempool view.
+func ValidateInputAncestry(inputs []wire.OutPoint,
+	candidates []UnminedTxRecord) error {
+
+	parents := make(map[chainhash.Hash]*wire.MsgTx, len(candidates))
+	for _, candidate := range candidates {
+		parents[candidate.Hash] = candidate.Tx
+	}
+
+	// Walk only ancestors of the selected outputs. Conflicts elsewhere in the
+	// wallet cannot prevent explicit coin control of a single branch.
+	pending := make([]chainhash.Hash, 0, len(inputs))
+	for _, input := range inputs {
+		pending = append(pending, input.Hash)
+	}
+
+	visited := make(map[chainhash.Hash]struct{})
+
+	spenders := make(map[wire.OutPoint]chainhash.Hash)
+	for len(pending) != 0 {
+		hash := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+
+		if _, ok := visited[hash]; ok {
+			continue
+		}
+
+		visited[hash] = struct{}{}
+
+		tx, ok := parents[hash]
+		if !ok {
+			continue
+		}
+
+		// Shared ancestry is valid, but two distinct ancestors consuming one
+		// output cannot coexist in the transaction being constructed.
+		for _, input := range tx.TxIn {
+			prevout := input.PreviousOutPoint
+			if other, ok := spenders[prevout]; ok && other != hash {
+				return fmt.Errorf("incompatible input ancestry: %w",
+					ErrTxInputConflict)
+			}
+
+			spenders[prevout] = hash
+			pending = append(pending, prevout.Hash)
+		}
+	}
+
+	return nil
+}
+
 // CollectDirectChildTxIDs returns the IDs of unmined transactions that directly
 // spend any output created by the provided parent hash.
 func CollectDirectChildTxIDs(parentHash chainhash.Hash,

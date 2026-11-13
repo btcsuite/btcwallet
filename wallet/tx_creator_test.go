@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -2585,6 +2586,7 @@ func TestCreateTransactionManualConfirmationHeight(t *testing.T) {
 // excludes an immature coinbase output even when the requested confirmation
 // target is met, while a mature coinbase survives. This keeps explicit UTXO
 // selection consistent with account-based selection's coinbase-maturity gate.
+// Supplied pools also exclude contingent change at zero confirmations.
 func TestGetEligibleUTXOsFromList(t *testing.T) {
 	t.Parallel()
 
@@ -2595,23 +2597,33 @@ func TestGetEligibleUTXOsFromList(t *testing.T) {
 	// output.
 	const tipHeight = 100
 
-	matureCoinbase := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
-	immatureCoinbase := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
-
 	tests := []struct {
 		name        string
 		height      uint32
+		minConfs    uint32
+		coinbase    bool
+		conflicted  bool
 		wantInclude bool
 	}{
 		{
 			name:        "immature coinbase excluded",
 			height:      tipHeight,
+			minConfs:    1,
+			coinbase:    true,
 			wantInclude: false,
 		},
 		{
 			name:        "mature coinbase included",
 			height:      1,
+			minConfs:    1,
+			coinbase:    true,
 			wantInclude: true,
+		},
+		{
+			name:       "contingent change excluded",
+			height:     db.UnminedHeight,
+			minConfs:   0,
+			conflicted: true,
 		},
 	}
 
@@ -2619,13 +2631,11 @@ func TestGetEligibleUTXOsFromList(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange.
+			// Arrange: Supply one factual credit through the strict Store mock,
+			// varying eligibility data without branching its call expectations.
 			w, mocks := createTestWalletWithMocks(t)
 
-			outPoint := matureCoinbase
-			if !tc.wantInclude {
-				outPoint = immatureCoinbase
-			}
+			outPoint := wire.OutPoint{Hash: [32]byte{1}}
 
 			source := &CoinSourceUTXOs{
 				UTXOs: []wire.OutPoint{outPoint},
@@ -2637,19 +2647,22 @@ func TestGetEligibleUTXOsFromList(t *testing.T) {
 				Amount:       btcutil.Amount(10000),
 				PkScript:     singleAddrPkScript(t),
 				Height:       tc.height,
-				FromCoinBase: true,
+				FromCoinBase: tc.coinbase,
+				IsConflicted: tc.conflicted,
 			}
 			mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 				WalletID: w.id,
 				OutPoint: outPoint,
 			}).Return(credit, nil).Once()
 
-			// Act: minconf of 1 is satisfied for both outputs.
+			// Act: Apply the supplied pool policy at its requested depth.
+			// Zero confirmations still exclude contingent change.
 			eligible, err := w.getEligibleUTXOsFromList(
-				t.Context(), source, 1, bs,
+				t.Context(), source, tc.minConfs, bs,
 			)
 
-			// Assert.
+			// Assert: The eligible credit survives unchanged; maturity or
+			// incompatible ancestry excludes its respective negative case.
 			require.NoError(t, err)
 
 			if tc.wantInclude {
@@ -3025,4 +3038,264 @@ func TestCreateTransactionManualSelectionAccepted(t *testing.T) {
 	require.Equal(t, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint)
 	require.Len(t, authored.Tx.TxOut, 1)
 	require.Equal(t, payment, *authored.Tx.TxOut[0])
+}
+
+// TestCreateTransactionExcludesConflictingChange verifies zero confirmations
+// permits ordinary funds but never automatic selection of incompatible change.
+func TestCreateTransactionExcludesConflictingChange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return an ordinary 100,000-sat credit beside larger contingent
+	// change. Largest-first selection would choose the unsafe credit unless
+	// Eligibility filters it before ordering without an ancestry read.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	scope := db.KeyScopeBIP0086
+	number := uint32(0)
+	account := &db.AccountInfo{
+		AccountNumber: &number,
+		AccountName:   defaultAccountName,
+		AddrSchema:    db.ScopeAddrMap[scope],
+	}
+	mocks.store.On(
+		"GetAccount", mock.Anything, db.GetAccountQuery{
+			WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+		},
+	).Return(account, nil).Once()
+	mocks.store.On(
+		"GetAccount", mock.Anything, db.GetAccountQuery{
+			WalletID: w.id, Scope: scope, AccountNumber: &number,
+		},
+	).Return(account, nil).Once()
+	mocks.syncer.On("syncedTo", mock.Anything).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	credit := db.UtxoInfo{
+		OutPoint: validUTXO,
+		Amount:   100_000,
+		PkScript: corruptAmountPkScript(),
+		Height:   db.UnminedHeight,
+	}
+	mocks.store.On(
+		"ListUTXOs", mock.Anything, db.ListUtxosQuery{
+			WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
+		},
+	).Return(
+		[]db.UtxoInfo{
+			{
+				OutPoint:     wire.OutPoint{Hash: [32]byte{98}},
+				Amount:       200_000,
+				PkScript:     credit.PkScript,
+				Height:       db.UnminedHeight,
+				IsConflicted: true,
+			},
+			credit,
+		}, nil,
+	).Once()
+
+	// Act: Permit zero-confirmation inputs through the public policy path.
+	authored, err := w.CreateTransaction(
+		t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{
+				{
+					Value:    99_700,
+					PkScript: credit.PkScript,
+				},
+			},
+			Inputs:  &InputsPolicy{MinConfs: 0},
+			FeeRate: defaultFeeRate,
+		},
+	)
+
+	// Assert: Only the ordinary credit funds the payment, even with a zero
+	// confirmation target and a larger competing output in the candidate set.
+	require.NoError(t, err)
+	require.Equal(t, -1, authored.ChangeIndex)
+	require.Len(t, authored.Tx.TxIn, 1)
+	require.Equal(t, credit.OutPoint, authored.Tx.TxIn[0].PreviousOutPoint)
+}
+
+// TestCreateTransactionChoosesConflictingBranch verifies one contingent
+// branch can be chosen despite a retained alternative.
+func TestCreateTransactionChoosesConflictingBranch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A and B share a foreign input and create owned unconfirmed
+	// change.
+	// The strict mocks expose only the explicitly selected outpoints; fixture
+	// cleanup verifies every required dependency call exactly once.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	scope := db.KeyScopeBIP0086
+	number := uint32(0)
+	mocks.store.On(
+		"GetAccount", mock.Anything, db.GetAccountQuery{
+			WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+		},
+	).Return(
+		&db.AccountInfo{
+			AccountNumber: &number,
+			AccountName:   defaultAccountName,
+			AddrSchema:    db.ScopeAddrMap[scope],
+		}, nil,
+	).Once()
+	mocks.syncer.On("syncedTo", mock.Anything).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+
+	script := corruptAmountPkScript()
+	a := wire.NewMsgTx(wire.TxVersion)
+	a.AddTxIn(wire.NewTxIn(&wire.OutPoint{Hash: [32]byte{99}}, nil, nil))
+	a.AddTxOut(wire.NewTxOut(100_000, script))
+	b := a.Copy()
+	b.TxOut[0].Value = 90_000
+
+	history := make([]db.TxInfo, 0, 2)
+	for _, tx := range []*wire.MsgTx{a, b} {
+		var raw bytes.Buffer
+		require.NoError(t, tx.Serialize(&raw))
+		history = append(
+			history, db.TxInfo{
+				Hash:         tx.TxHash(),
+				SerializedTx: raw.Bytes(),
+				Status:       db.TxStatusPublished,
+			},
+		)
+	}
+
+	mocks.store.On(
+		"ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID: w.id, UnminedOnly: true,
+		},
+	).Return(history, nil).Once()
+
+	outpoints := []wire.OutPoint{{Hash: a.TxHash()}}
+	mocks.store.On(
+		"GetUtxo", mock.Anything, db.GetUtxoQuery{
+			WalletID: w.id, OutPoint: outpoints[0],
+		},
+	).Return(
+		&db.UtxoInfo{
+			OutPoint: outpoints[0], Amount: 100_000, PkScript: script,
+			Height: db.UnminedHeight, IsConflicted: true,
+		}, nil,
+	).Once()
+
+	// Act: Request explicit coin control through public transaction authoring.
+	authored, err := w.CreateTransaction(
+		t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{
+				{
+					Value:    99_700,
+					PkScript: script,
+				},
+			},
+			Inputs:  &InputsManual{UTXOs: outpoints},
+			FeeRate: defaultFeeRate,
+		},
+	)
+
+	// Assert: One contingent branch can be chosen despite a retained
+	// alternative.
+	require.NoError(t, err)
+	require.Equal(t, -1, authored.ChangeIndex)
+	require.Len(t, authored.Tx.TxIn, 1)
+	require.Equal(t, a.TxHash(), authored.Tx.TxIn[0].PreviousOutPoint.Hash)
+}
+
+// TestCreateTransactionRejectsIncompatibleBranches verifies mutually
+// exclusive selected ancestors cannot fund one transaction.
+func TestCreateTransactionRejectsIncompatibleBranches(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A and B share a foreign input and create owned unconfirmed
+	// change.
+	// The strict mocks expose only the explicitly selected outpoints; fixture
+	// cleanup verifies every required dependency call exactly once.
+	w, mocks := createStartedSQLWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	scope := db.KeyScopeBIP0086
+	number := uint32(0)
+	mocks.store.On(
+		"GetAccount", mock.Anything, db.GetAccountQuery{
+			WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+		},
+	).Return(
+		&db.AccountInfo{
+			AccountNumber: &number,
+			AccountName:   defaultAccountName,
+			AddrSchema:    db.ScopeAddrMap[scope],
+		}, nil,
+	).Once()
+	mocks.syncer.On("syncedTo", mock.Anything).Return(
+		waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+
+	script := corruptAmountPkScript()
+	a := wire.NewMsgTx(wire.TxVersion)
+	a.AddTxIn(wire.NewTxIn(&wire.OutPoint{Hash: [32]byte{99}}, nil, nil))
+	a.AddTxOut(wire.NewTxOut(100_000, script))
+	b := a.Copy()
+	b.TxOut[0].Value = 90_000
+
+	history := make([]db.TxInfo, 0, 2)
+	for _, tx := range []*wire.MsgTx{a, b} {
+		var raw bytes.Buffer
+		require.NoError(t, tx.Serialize(&raw))
+		history = append(
+			history, db.TxInfo{
+				Hash:         tx.TxHash(),
+				SerializedTx: raw.Bytes(),
+				Status:       db.TxStatusPublished,
+			},
+		)
+	}
+
+	mocks.store.On(
+		"ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID: w.id, UnminedOnly: true,
+		},
+	).Return(history, nil).Once()
+
+	outpoints := make([]wire.OutPoint, 0, len(history))
+	for _, tx := range []*wire.MsgTx{a, b} {
+		outpoint := wire.OutPoint{Hash: tx.TxHash()}
+		outpoints = append(outpoints, outpoint)
+		mocks.store.On(
+			"GetUtxo", mock.Anything, db.GetUtxoQuery{
+				WalletID: w.id, OutPoint: outpoint,
+			},
+		).Return(
+			&db.UtxoInfo{
+				OutPoint:     outpoint,
+				Amount:       btcutil.Amount(tx.TxOut[0].Value),
+				PkScript:     script,
+				Height:       db.UnminedHeight,
+				IsConflicted: true,
+			}, nil,
+		).Once()
+	}
+
+	// Act: Request explicit coin control through public transaction authoring.
+	authored, err := w.CreateTransaction(
+		t.Context(), &TxIntent{
+			Outputs: []wire.TxOut{
+				{
+					Value:    99_700,
+					PkScript: script,
+				},
+			},
+			Inputs:  &InputsManual{UTXOs: outpoints},
+			FeeRate: defaultFeeRate,
+		},
+	)
+
+	// Assert: Mutually exclusive selected ancestors cannot fund one
+	// transaction.
+	require.ErrorIs(t, err, ErrUtxoNotEligible)
+	require.ErrorIs(t, err, db.ErrTxInputConflict)
+	require.Nil(t, authored)
 }
