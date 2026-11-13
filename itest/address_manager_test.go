@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -108,6 +109,80 @@ func testAddressManagerRawImportPublicKey(h *bwtest.HarnessTest) {
 	require.Nil(h, received.Block)
 
 	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+}
+
+// testAddressManagerRejectPublicKeyImport verifies unsupported requests cannot
+// grant public ownership, even though the supplied key itself is valid.
+func testAddressManagerRejectPublicKeyImport(h *bwtest.HarnessTest) {
+	// ListAddresses selects one family at a time; snapshot every public
+	// family so a rejected request cannot hide an off-target import.
+	addrTypes := []waddrmgr.AddressType{
+		waddrmgr.PubKeyHash,
+		waddrmgr.Script,
+		waddrmgr.RawPubKey,
+		waddrmgr.NestedWitnessPubKey,
+		waddrmgr.WitnessPubKey,
+		waddrmgr.WitnessScript,
+		waddrmgr.TaprootPubKey,
+		waddrmgr.TaprootScript,
+	}
+
+	// These inputs fail at distinct public boundaries: the wallet type mapping
+	// and reconstruction of an address type that requires a script, not a key.
+	tests := []struct {
+		name     string
+		addrType waddrmgr.AddressType
+		wantErr  error
+	}{
+		{
+			name:     "unknown address type",
+			addrType: waddrmgr.AddressType(255),
+			wantErr:  wallet.ErrUnknownAddrType,
+		},
+		{
+			name:     "script address type",
+			addrType: waddrmgr.WitnessScript,
+			wantErr:  waddrmgr.ErrUnsupportedAddressType,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: capture the locked wallet's imported inventory before
+			// submitting the valid key with an unsupported representation.
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{})
+			pubKey := btcec.Generator()
+
+			before := make([][]wallet.AddressProperty, len(addrTypes))
+			for i, addrType := range addrTypes {
+				listed, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+
+				before[i] = listed
+			}
+
+			// Act: attempt to import a valid key using an unsupported
+			// address representation through the public Wallet boundary.
+			err := w.ImportPublicKey(ctx, pubKey, tc.addrType)
+
+			// Assert: preserve the error identity and compare complete
+			// inventories, including writes under an unexpected script.
+			require.ErrorIs(h, err, tc.wantErr)
+
+			for i, addrType := range addrTypes {
+				after, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+				require.ElementsMatch(h, before[i], after)
+			}
+		})
+	}
 }
 
 // testAddressManagerRawImportTaprootScript proves repeated imports retain the
@@ -214,6 +289,101 @@ func testAddressManagerRawImportTaprootScript(h *bwtest.HarnessTest) {
 	require.Nil(h, received.Block)
 
 	h.MineBlockWithTx(h.AssertTxInMempool(*payment))
+}
+
+// testAddressManagerRejectTaprootScriptImport verifies malformed import forms
+// return no metadata and leave imported-address inventories unchanged.
+func testAddressManagerRejectTaprootScriptImport(h *bwtest.HarnessTest) {
+	// Include every public family in the inventory so a malformed script
+	// cannot leave an import behind under another output or representation.
+	addrTypes := []waddrmgr.AddressType{
+		waddrmgr.PubKeyHash,
+		waddrmgr.Script,
+		waddrmgr.RawPubKey,
+		waddrmgr.NestedWitnessPubKey,
+		waddrmgr.WitnessPubKey,
+		waddrmgr.WitnessScript,
+		waddrmgr.TaprootPubKey,
+		waddrmgr.TaprootScript,
+	}
+
+	// Keep valid deterministic public material for each row's other fields,
+	// so only the selected missing component or unknown type causes rejection.
+	internalKey := btcec.Generator()
+	leafScript := []byte{txscript.OP_TRUE}
+	controlBlock := &txscript.ControlBlock{
+		InternalKey: internalKey,
+		LeafVersion: txscript.BaseLeafVersion,
+	}
+
+	// Each row isolates an uncovered guard while retaining the other public
+	// fixture material; no encoder or successful-import matrix is repeated.
+	tests := []struct {
+		name      string
+		tapscript waddrmgr.Tapscript
+	}{
+		{
+			name: "missing control block",
+			tapscript: waddrmgr.Tapscript{
+				Type:           waddrmgr.TapscriptTypePartialReveal,
+				RevealedScript: leafScript,
+			},
+		},
+		{
+			name: "missing revealed leaf",
+			tapscript: waddrmgr.Tapscript{
+				Type:         waddrmgr.TapscriptTypePartialReveal,
+				ControlBlock: controlBlock,
+			},
+		},
+		{
+			name: "unknown tapscript type",
+			tapscript: waddrmgr.Tapscript{
+				Type:           waddrmgr.TapscriptType(255),
+				ControlBlock:   controlBlock,
+				RevealedScript: leafScript,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: unlock uniformly so a SQL vault encryption failure
+			// cannot mask validation, and snapshot every imported family.
+			ctx := h.Context()
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+			before := make([][]wallet.AddressProperty, len(addrTypes))
+			for i, addrType := range addrTypes {
+				listed, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+
+				before[i] = listed
+			}
+
+			// Act: submit the incomplete or unknown representation through
+			// the real Wallet rather than invoking its validator directly.
+			info, err := w.ImportTaprootScript(ctx, tc.tapscript)
+
+			// Assert: malformed shapes have no public sentinel, but must
+			// return no metadata and preserve all imported inventories,
+			// including any unexpected output a partial import could create.
+			require.Error(h, err)
+			require.Zero(h, info)
+
+			for i, addrType := range addrTypes {
+				after, err := w.ListAddresses(
+					ctx, waddrmgr.ImportedAddrAccountName, addrType,
+				)
+				require.NoError(h, err)
+				require.ElementsMatch(h, before[i], after)
+			}
+		})
+	}
 }
 
 // createTestAddressInfo independently derives address metadata from the
@@ -1444,7 +1614,7 @@ func testAddressManagerLookupUnknownAddress(h *bwtest.HarnessTest) {
 }
 
 // testAddressManagerNewAddressFingerprint proves receiving results carry
-// the account's root fingerprint, the field the shared cases leave out.
+// the account's root fingerprint and expose the same public BIP32 origin.
 func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 	// Arrange: the oracle takes the fingerprint from the account read, so
 	// address metadata must agree with the account it was derived from.
@@ -1459,6 +1629,20 @@ func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 	require.NotZero(h, *account.MasterKeyFingerprint)
 	want := createTestAddressInfos(h, account, false, 1)[0]
 
+	// The existing XPub oracle supplies the expected key and origin without
+	// trusting either the receiving result or its public derivation query.
+	wantDerivation := &psbt.Bip32Derivation{
+		PubKey:               want.PubKey.SerializeCompressed(),
+		MasterKeyFingerprint: want.Derivation.MasterKeyFingerprint,
+		Bip32Path: []uint32{
+			scope.Purpose + hdkeychain.HardenedKeyStart,
+			scope.Coin + hdkeychain.HardenedKeyStart,
+			want.Derivation.Account + hdkeychain.HardenedKeyStart,
+			want.Derivation.Branch,
+			want.Derivation.Index,
+		},
+	}
+
 	// Act: request the account's first receiving address.
 	info, err := w.NewAddress(
 		ctx, wallet.NewAccountSelectorByName(scope, accountName), false,
@@ -1467,6 +1651,14 @@ func testAddressManagerNewAddressFingerprint(h *bwtest.HarnessTest) {
 	// Assert: full equality, fingerprint included.
 	require.NoError(h, err)
 	require.Equal(h, want, info)
+
+	// Act: resolve the same receiving identity through the public origin API.
+	derivation, err := w.GetDerivationInfo(ctx, info.Addr)
+
+	// Assert: a real derived address retains its complete origin, providing a
+	// positive control for the raw imports that must never acquire one.
+	require.NoError(h, err)
+	require.Equal(h, wantDerivation, derivation)
 }
 
 // withoutFingerprint returns a copy of info with the root fingerprint cleared.
@@ -1612,6 +1804,14 @@ func testAddressManagerRawImportTracking(h *bwtest.HarnessTest) {
 
 		// Store the full address result as the independent reopen snapshot.
 		tc.info = info
+
+		// Act: ask for an HD origin rather than inferring it from ownership.
+		derivation, err := w.GetDerivationInfo(ctx, tc.addr)
+
+		// Assert: raw imports cannot supply a BIP32 path even when their
+		// public metadata and confirmed output are known to this Wallet.
+		require.ErrorIs(h, err, wallet.ErrDerivationPathNotFound)
+		require.Nil(h, derivation)
 	}
 
 	// Act: cross the supported close/reopen boundary visibly. Readiness
@@ -1653,6 +1853,14 @@ func testAddressManagerRawImportTracking(h *bwtest.HarnessTest) {
 		utxo, err := w.GetUtxo(ctx, tc.outpoint)
 		require.NoError(h, err)
 		require.Contains(h, afterUtxos, utxo)
+
+		// Act: repeat the public origin query across the existing reopen.
+		derivation, err := w.GetDerivationInfo(ctx, tc.addr)
+
+		// Assert: durable raw ownership must not turn into a fabricated HD
+		// identity when the Manager reconstructs its runtime from storage.
+		require.ErrorIs(h, err, wallet.ErrDerivationPathNotFound)
+		require.Nil(h, derivation)
 	}
 
 	// Assert: the reopened Wallet retains script bytes but has no private key

@@ -31,8 +31,18 @@ var allTestCases = []*testCase{
 	},
 
 	{
+		Name:     "address manager reject public key import",
+		TestFunc: testAddressManagerRejectPublicKeyImport,
+	},
+
+	{
 		Name:     "address manager raw import taproot script",
 		TestFunc: testAddressManagerRawImportTaprootScript,
+	},
+
+	{
+		Name:     "address manager reject taproot script import",
+		TestFunc: testAddressManagerRejectTaprootScriptImport,
 	},
 
 	{
