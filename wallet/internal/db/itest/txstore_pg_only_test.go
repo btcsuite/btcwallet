@@ -717,3 +717,115 @@ func TestUpdateTxConcurrentConfirmationPostgres(t *testing.T) {
 	require.NotNil(t, winner.Block)
 	require.Equal(t, db.TxStatusPublished, winner.Status)
 }
+
+// TestLeaseAcquisitionConcurrentConfirmationPostgres verifies an acquisition
+// racing confirmation cannot resurrect a lease after the spend is disconnected.
+func TestLeaseAcquisitionConcurrentConfirmationPostgres(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		set  bool
+	}{
+		{
+			name: "single output",
+		},
+		{
+			name: "output set",
+			set:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				// Arrange: Hold a funded credit after eligibility is read.
+				// Both public routes use the same history and row barrier.
+				store := NewTestStore(t)
+				walletID, funding := newLeaseSetFixture(
+					t, store, "lease-race", 1,
+				)
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				t.Cleanup(cancel)
+
+				barrier, err := store.DB().BeginTx(ctx, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = barrier.Rollback() })
+
+				_, err = barrier.ExecContext(
+					ctx, `
+				SELECT u.id FROM utxos AS u
+				JOIN transactions AS t ON t.id = u.tx_id
+				WHERE t.wallet_id = $1 AND t.tx_hash = $2
+				AND u.output_index = $3 FOR UPDATE OF u
+			`, walletID, funding[0].Hash[:], funding[0].Index,
+				)
+				require.NoError(t, err)
+
+				spend := newRegularTx(
+					funding, []*wire.TxOut{
+						{Value: 5000, PkScript: []byte{0x51}},
+					},
+				)
+				block := CreateBlockFixture(t, store.Queries(), 600)
+
+				// Act: Start acquisition before confirmation. Release the
+				// credit once recording commits or waits behind acquisition.
+				leaseCall := startTxGraphCall(
+					t, cancel, func() error {
+						if test.set {
+							_, err := store.LeaseOutputs(
+								ctx, db.LeaseOutputsParams{
+									WalletID: walletID, OutPoints: funding,
+									ID: db.LockID{1}, NoExpiry: true,
+								},
+							)
+
+							return err
+						}
+
+						_, err := store.LeaseOutput(
+							ctx, db.LeaseOutputParams{
+								WalletID: walletID, OutPoint: funding[0],
+								ID: db.LockID{1}, NoExpiry: true,
+							},
+						)
+
+						return err
+					},
+				)
+				waitTxGraphCall(t, ctx, store.DB(), leaseCall, 1)
+				confirmation := startTxGraphCall(
+					t, cancel, func() error {
+						return store.CreateTx(
+							ctx, db.CreateTxParams{
+								WalletID: walletID,
+								Tx:       spend,
+								Received: time.Unix(1, 0),
+								Status:   db.TxStatusPublished, Block: &block,
+							},
+						)
+					},
+				)
+				waitTxGraphCall(t, ctx, store.DB(), confirmation, 2)
+				require.NoError(t, barrier.Rollback())
+				require.NoError(t, <-leaseCall)
+				require.NoError(t, <-confirmation)
+				require.NoError(t, store.RollbackToBlock(ctx, block.Height))
+				require.NoError(
+					t, store.DeleteTx(
+						ctx, db.DeleteTxParams{
+							WalletID: walletID, Txid: spend.TxHash(),
+						},
+					),
+				)
+
+				// Assert: Both routes leave available funding without the
+				// lease that confirmation already removed.
+				require.True(
+					t, walletUtxoExists(t, store, walletID, funding[0]),
+				)
+				require.Empty(t, leasedByID(t, store, walletID))
+			},
+		)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -427,4 +428,35 @@ func prepareLegacyInputHistory(t *testing.T, sqlDB *sql.DB) {
 	t.Helper()
 
 	rollbackInputHistoryMigrations(t, sqlDB, "../../sql/sqlite/migrations")
+}
+
+// downgradeInputClaims runs the checked-in down migration atomically with its
+// version marker so refusal leaves the live fixture ready for further use.
+func downgradeInputClaims(t *testing.T, sqlDB *sql.DB) error {
+	t.Helper()
+
+	migration, err := os.ReadFile(
+		"../../sql/sqlite/migrations/000013_drop_utxo_spenders.down.sql",
+	)
+	require.NoError(t, err)
+
+	// Reuse the real migration SQL without the migrator's dirty-version marker;
+	// the test must inspect an ambiguous refusal and then remove one candidate.
+	tx, err := sqlDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(t.Context(), string(migration))
+	if err != nil {
+		return fmt.Errorf("downgrade input claims: %w", err)
+	}
+
+	_, err = tx.ExecContext(
+		t.Context(),
+		"UPDATE schema_migrations SET version = 12, dirty = FALSE",
+	)
+	require.NoError(t, err)
+
+	return tx.Commit()
 }

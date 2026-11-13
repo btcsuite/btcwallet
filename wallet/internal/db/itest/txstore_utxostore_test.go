@@ -5641,3 +5641,76 @@ func TestCreateTxConfirmsRetainedFailed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, db.TxStatusReplaced, ancestor.Status)
 }
+
+// TestStorePreservesCreditsAndLeasesAcrossCutover verifies migration preserves
+// stable credit identity, application leases and retained spend claims.
+func TestStorePreservesCreditsAndLeasesAcrossCutover(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep one leased credit and another claimed by an unmined spend,
+	// then restore the pre-cutover schema without discarding input facts.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID, funding := newLeaseSetFixture(t, store, "physical-cutover", 2)
+	lockID := RandomHash()
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: walletID, OutPoint: funding[0], ID: lockID,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	child := newRegularTx(
+		funding[1:], []*wire.TxOut{
+			{Value: 4000, PkScript: []byte{0x51}},
+		},
+	)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: child, Received: time.Unix(1, 0),
+				Status: db.TxStatusPending,
+			},
+		),
+	)
+	leases, err := store.ListLeasedOutputs(t.Context(), walletID)
+	require.NoError(t, err)
+	require.Len(t, leases, 1)
+
+	var creditID int64
+
+	require.NoError(
+		t, store.DB().QueryRowContext(
+			t.Context(),
+			"SELECT utxo_id FROM utxo_leases",
+		).Scan(&creditID),
+	)
+	require.NoError(t, downgradeInputClaims(t, store.DB()))
+	require.NoError(t, store.Close())
+
+	// Act: Public reopening applies migration13 with foreign keys enabled,
+	// including the lease child table whose parent credit is rebuilt in SQLite.
+	restored := reopen()
+	current, err := restored.ListLeasedOutputs(t.Context(), walletID)
+
+	// Assert: Public lease identity/expiration and the underlying credit ID
+	// survive; the other credit remains reserved by the retained input claim.
+	require.NoError(t, err)
+	require.Equal(t, leases, current)
+
+	var currentID int64
+
+	require.NoError(
+		t, restored.DB().QueryRowContext(
+			t.Context(),
+			"SELECT utxo_id FROM utxo_leases",
+		).Scan(&currentID),
+	)
+	require.Equal(t, creditID, currentID)
+	require.True(t, walletUtxoExists(t, restored, walletID, funding[0]))
+	require.True(t, walletUtxoSpent(t, restored, walletID, funding[1]))
+	require.Equal(
+		t, map[int64]wire.OutPoint{0: funding[1]},
+		txInputOutPoints(t, restored, walletID, child.TxHash()),
+	)
+}
