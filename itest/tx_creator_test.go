@@ -1173,6 +1173,10 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 
+	// This case owns the completed shutdown; harness teardown must not
+	// attempt another Stop on the terminal Manager.
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+
 	_, err = w.CreateTransaction(h.Context(), intent)
 	require.ErrorIs(
 		h, err, wallet.ErrWalletStopped,
