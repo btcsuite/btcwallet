@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -1353,4 +1354,89 @@ func createImportedXpubAccount(t *testing.T, store *Store,
 	require.NotEqual(t, uint32(waddrmgr.ImportedAddrAccount), account)
 
 	return account
+}
+
+// TestUTXOConflictMetadata verifies native discovery retains contingent change
+// while wallet and account safe sums exclude incompatible branches.
+func TestUTXOConflictMetadata(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse a real owned address and independent confirmed control.
+	// Two attempts share a foreign input, and a child spends the first branch.
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+	funding := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, waddrmgr.KeyScopeBIP0084, 0,
+		btcutil.Amount(1000), 1, false,
+	)
+	credit, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			OutPoint: funding,
+		},
+	)
+	require.NoError(t, err)
+
+	a := wire.NewMsgTx(wire.TxVersion)
+	a.AddTxIn(wire.NewTxIn(&wire.OutPoint{Hash: [32]byte{99}}, nil, nil))
+	a.AddTxOut(wire.NewTxOut(6000, credit.PkScript))
+	params := db.CreateTxParams{
+		Tx:       a,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	}
+	require.NoError(t, store.CreateTx(t.Context(), params))
+
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+	params.Tx = b
+	require.NoError(t, store.CreateTx(t.Context(), params))
+
+	child := wire.NewMsgTx(wire.TxVersion)
+	child.AddTxIn(wire.NewTxIn(&wire.OutPoint{Hash: a.TxHash()}, nil, nil))
+	child.AddTxOut(wire.NewTxOut(4000, credit.PkScript))
+	params.Tx = child
+	require.NoError(t, store.CreateTx(t.Context(), params))
+
+	account := uint32(0)
+
+	// Act: Read public discovery and both safe-balance projections from the
+	// same unchanged history. The account walk formerly counted 9000 sats of
+	// incompatible change as funds.
+	outputs, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{})
+	require.NoError(t, err)
+	chosen, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			OutPoint: wire.OutPoint{Hash: child.TxHash()},
+		},
+	)
+	require.NoError(t, err)
+	balance, err := store.Balance(t.Context(), db.BalanceParams{})
+	require.NoError(t, err)
+	info, err := store.GetAccount(
+		t.Context(), db.GetAccountQuery{
+			Scope:         db.KeyScopeBIP0084,
+			AccountNumber: &account,
+		},
+	)
+	require.NoError(t, err)
+
+	// Assert: Both incompatible leaf credits remain discoverable, including
+	// inherited conflict metadata, but only the independent control is safe.
+	flags := make(map[wire.OutPoint]bool, len(outputs))
+	for i := range outputs {
+		flags[outputs[i].OutPoint] = outputs[i].IsConflicted
+	}
+
+	require.Equal(
+		t, map[wire.OutPoint]bool{
+			funding:                false,
+			{Hash: b.TxHash()}:     true,
+			{Hash: child.TxHash()}: true,
+		}, flags,
+	)
+	require.True(t, chosen.IsConflicted)
+	require.Equal(t, btcutil.Amount(1000), balance.Total)
+	require.Equal(t, btcutil.Amount(1000), info.ConfirmedBalance)
+	require.Zero(t, info.UnconfirmedBalance)
 }

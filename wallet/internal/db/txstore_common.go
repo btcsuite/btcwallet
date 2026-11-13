@@ -1720,6 +1720,53 @@ func BuildUnminedTxRecords[T any](rows []T,
 	return records, nil
 }
 
+// CollectConflictedTxIDs returns direct unmined alternatives and their
+// descendants in candidate order. The caller supplies only live unmined rows;
+// shared prevouts signal incompatible branches, not a preferred spender.
+func CollectConflictedTxIDs(candidates []UnminedTxRecord) []int64 {
+	spenders := make(map[wire.OutPoint]UnminedTxRecord)
+	roots := make(map[int64]chainhash.Hash)
+
+	// Inputs need no owned parent: alternatives may share an external output
+	// while both create wallet change. Keep both roots when a prevout repeats.
+	for _, candidate := range candidates {
+		for _, input := range candidate.Tx.TxIn {
+			prevout := input.PreviousOutPoint
+
+			other, ok := spenders[prevout]
+			if ok && other.ID != candidate.ID {
+				roots[other.ID] = other.Hash
+				roots[candidate.ID] = candidate.Hash
+			}
+
+			spenders[prevout] = candidate
+		}
+	}
+
+	// Reuse the existing descendant walk so conflict eligibility propagates
+	// through the same dependency relation as confirmation invalidation.
+	rootIDs := make([]int64, 0, len(roots))
+
+	rootHashes := make([]chainhash.Hash, 0, len(roots))
+	for id, hash := range roots {
+		rootIDs = append(rootIDs, id)
+		rootHashes = append(rootHashes, hash)
+	}
+
+	for _, id := range CollectDescendantTxIDs(rootHashes, rootIDs, candidates) {
+		roots[id] = chainhash.Hash{}
+	}
+
+	conflicted := make([]int64, 0, len(roots))
+	for _, candidate := range candidates {
+		if _, ok := roots[candidate.ID]; ok {
+			conflicted = append(conflicted, candidate.ID)
+		}
+	}
+
+	return conflicted
+}
+
 // CollectDirectChildTxIDs returns the IDs of unmined transactions that directly
 // spend any output created by the provided parent hash.
 func CollectDirectChildTxIDs(parentHash chainhash.Hash,

@@ -25,6 +25,8 @@ import (
 func TestListUnspent(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return ordinary funds and contingent change through the existing
+	// store mock, retaining independent custody, lease and sorting metadata.
 	w, mocks := createStartedWalletWithMocks(t)
 
 	privKeyDefault, err := btcec.NewPrivateKey()
@@ -55,13 +57,14 @@ func TestListUnspent(t *testing.T) {
 		AddrType:    db.WitnessPubKey,
 	}
 	utxoTest := db.UtxoInfo{
-		OutPoint:    wire.OutPoint{Hash: [32]byte{2}, Index: 0},
-		Amount:      100000,
-		PkScript:    pkScriptTest,
-		Height:      1,
-		AccountName: "test",
-		AddrType:    db.NestedWitnessPubKey,
-		IsLocked:    true,
+		OutPoint:     wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		Amount:       100000,
+		PkScript:     pkScriptTest,
+		Height:       db.UnminedHeight,
+		AccountName:  "test",
+		AddrType:     db.NestedWitnessPubKey,
+		IsLocked:     true,
+		IsConflicted: true,
 	}
 
 	query := UtxoQuery{MinConfs: 0, MaxConfs: 999999}
@@ -74,14 +77,20 @@ func TestListUnspent(t *testing.T) {
 		MaxConfs: &maxConfs,
 	}).Return([]db.UtxoInfo{utxoDefault, utxoTest}, nil).Once()
 
+	// Act: List both outputs through Wallet so its public conversion and
+	// amount ordering run inside the normal admitted request.
 	utxos, err := w.ListUnspent(t.Context(), query)
 	require.NoError(t, err)
+	// Assert: Discovery preserves contingent change and its conflict bit while
+	// keeping the ordinary output unflagged and both existing lease states.
 	require.Len(t, utxos, 2)
 	require.Equal(t, addrTest.String(), utxos[0].Address.String())
 	require.Equal(t, btcutil.Amount(100000), utxos[0].Amount)
 	require.True(t, utxos[0].Locked)
+	require.True(t, utxos[0].IsConflicted)
 	require.Equal(t, addrDefault.String(), utxos[1].Address.String())
 	require.False(t, utxos[1].Locked)
+	require.False(t, utxos[1].IsConflicted)
 }
 
 // TestListUnspentFiltersByAccount tests that ListUnspent applies the

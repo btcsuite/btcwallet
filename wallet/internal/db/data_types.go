@@ -1478,6 +1478,11 @@ type UtxoInfo struct {
 	// pre-computed flag lets the wallet skip a per-row lease lookup.
 	IsLocked bool
 
+	// IsConflicted reports change from an unresolved competing branch or its
+	// unconfirmed descendants. Discovery retains it for explicit compatible
+	// coin control; safe balances and automatic selection must exclude it.
+	IsConflicted bool
+
 	// KeyScope is the BIP-43 key scope (purpose + coin type) of the
 	// account that owns this UTXO, sourced from key_scopes. Callers use it
 	// instead of deriving a scope from AddrType, which is lossy (a P2WPKH

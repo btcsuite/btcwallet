@@ -1466,6 +1466,8 @@ func TestGetDerivationInfoImportedXpubNoAccountNumber(t *testing.T) {
 func TestListAddresses(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return one owned address with ordinary funds and flagged
+	// competing change paying the same script, using the existing Store mock.
 	w, deps := createStartedWalletWithMocks(t)
 
 	mockAddr, _ := address.NewAddressWitnessPubKeyHash(
@@ -1500,17 +1502,30 @@ func TestListAddresses(t *testing.T) {
 		"ListUTXOs", mock.Anything, db.ListUtxosQuery{
 			WalletID: w.id,
 		},
-	).Return([]db.UtxoInfo{{
-		Amount:   1000,
-		PkScript: pkScript,
-	}}, nil).Once()
+	).Return(
+		[]db.UtxoInfo{
+			{
+				Amount:   1000,
+				PkScript: pkScript,
+			},
+			{
+				Amount:       9000,
+				PkScript:     pkScript,
+				Height:       db.UnminedHeight,
+				IsConflicted: true,
+			},
+		}, nil,
+	).Once()
 
+	// Act: Request public account addresses so the balance aggregation runs
+	// against the returned UTXOs rather than an independently computed sum.
 	addrs, err := w.ListAddresses(
 		t.Context(), waddrmgr.DefaultAccountName, waddrmgr.WitnessPubKey,
 	)
 	require.NoError(t, err)
 
-	// We should have one address with a balance of 1000.
+	// Assert: The same-script contingent change contributes no safe funds;
+	// the address still reports its ordinary 1000-sat balance.
 	require.Len(t, addrs, 1)
 	require.Equal(t, addr.String(), addrs[0].Address.String())
 	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)

@@ -72,6 +72,10 @@ type Utxo struct {
 	// Spendable indicates whether the output is considered spendable.
 	Spendable bool
 
+	// IsConflicted identifies change on an unresolved competing branch. The
+	// caller may choose one compatible branch through explicit coin control.
+	IsConflicted bool
+
 	// Address is the address associated with the output.
 	Address address.Address
 
@@ -378,6 +382,7 @@ func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 		Account:       accountName,
 		AddressType:   walletAddrType,
 		Locked:        info.IsLocked,
+		IsConflicted:  info.IsConflicted,
 	}, nil
 }
 
