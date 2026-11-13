@@ -21,8 +21,9 @@
 -- lease without expiry. Callers should pass UTC values for both expires_at and
 -- now_utc.
 -- Performance:
--- - Locks the target utxo row during resolution so concurrent spend updates on
---   that row serialize with lease acquisition.
+-- - The caller holds the existing wallet graph lock before admission, ordering
+--   current input eligibility against recording and confirmed lease cleanup.
+-- - The target utxo row lock also coordinates concurrent lease writers.
 INSERT INTO utxo_leases (
     wallet_id,
     utxo_id,

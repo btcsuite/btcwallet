@@ -108,19 +108,19 @@ SELECT
         AND coalesce(length(asec.encrypted_priv_key), 0) = 0
         AS BOOLEAN
     ) AS raw_is_watch_only,
-    -- has_script: the credited address has a persisted encrypted script (e.g. a
-    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
-    -- FALSE instead of being dropped.
+    -- Expose contingent change for explicit coin control without safe summing.
     cast(EXISTS (
         SELECT 1 FROM contingent_transactions AS contingent
         WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
     ) AS BOOLEAN) AS is_conflicted,
+    -- has_script: the credited address has a persisted encrypted script (e.g. a
+    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
+    -- FALSE instead of being dropped.
+    asec.encrypted_script IS NOT NULL AS has_script,
     -- is_locked: TRUE when an active (non-expired) lease exists for this output.
     -- now_utc is a caller-supplied current UTC timestamp used for the lease
     -- expiry comparison; passed in rather than read from the DB clock so results
     -- are deterministic/testable and consistent with the Balance/lease queries.
-    asec.encrypted_script IS NOT NULL AS has_script,
-    -- Expose contingent change for explicit coin control without safe summing.
     CASE
         WHEN
             l.utxo_id IS NOT NULL
@@ -201,19 +201,19 @@ SELECT
         AND coalesce(length(asec.encrypted_priv_key), 0) = 0
         AS BOOLEAN
     ) AS raw_is_watch_only,
-    -- has_script: the credited address has a persisted encrypted script (e.g. a
-    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
-    -- FALSE instead of being dropped.
+    -- Expose contingent change for explicit coin control without safe summing.
     cast(EXISTS (
         SELECT 1 FROM contingent_transactions AS contingent
         WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
     ) AS BOOLEAN) AS is_conflicted,
+    -- has_script: the credited address has a persisted encrypted script (e.g. a
+    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
+    -- FALSE instead of being dropped.
+    asec.encrypted_script IS NOT NULL AS has_script,
     -- is_locked: TRUE when an active (non-expired) lease exists for this output.
     -- now_utc is a caller-supplied current UTC timestamp used for the lease
     -- expiry comparison; passed in rather than read from the DB clock so results
     -- are deterministic/testable and consistent with the Balance/lease queries.
-    asec.encrypted_script IS NOT NULL AS has_script,
-    -- Expose contingent change for explicit coin control without safe summing.
     CASE
         WHEN
             l.utxo_id IS NOT NULL
@@ -431,134 +431,6 @@ WHERE
                 ELSE s.synced_height - t.block_height + 1
             END
         ) >= cast(sqlc.narg('coinbase_maturity') AS INTEGER)
-    );
-
--- name: ListSpendingTxIDsByParentTxID :many
--- Lists direct child transaction IDs for one parent transaction ID.
---
--- How:
--- - Reads the spend edges already materialized on utxos through
---   `(tx_id, spent_by_tx_id)`.
--- - Returns only direct children; callers that need full descendant walks should
---   traverse this query iteratively in application code.
--- Performance:
--- - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
---   to one wallet-scoped parent.
-SELECT DISTINCT u.spent_by_tx_id
-FROM utxos AS u
-WHERE
-    u.tx_id = ?2
-    AND u.spent_by_tx_id IS NOT NULL
-    AND EXISTS (
-        SELECT 1
-        FROM transactions AS t
-        WHERE t.id = u.tx_id AND t.wallet_id = ?1
-    )
-ORDER BY u.spent_by_tx_id;
-
--- name: GetUtxoSpendByOutpoint :one
--- Returns the current spend edge for one wallet-owned outpoint.
---
--- How:
--- - Resolves the parent transaction row from `(wallet_id, tx_hash)` and only
---   considers outputs whose parent status is `pending` or `published`.
--- - Returns the nullable `spent_by_tx_id` column so callers can distinguish
---   between an external/unknown parent and a wallet-owned conflict.
--- - Returns the owner address script so duplicate credit replay can verify it
---   matches the already-recorded UTXO rather than only checking outpoint
---   existence.
--- Performance:
--- - Targets one wallet-scoped outpoint through the unique `(tx_id,
---   output_index)` key after the parent hash lookup.
-SELECT
-    utxos.spent_by_tx_id,
-    a.script_pub_key
-FROM transactions AS t
-INNER JOIN utxos ON t.id = utxos.tx_id
-INNER JOIN addresses AS a ON utxos.address_id = a.id
-WHERE
-    t.wallet_id = ?1
-    AND a.wallet_id = ?1
-    AND t.tx_hash = ?2
-    AND utxos.output_index = ?3
-    AND t.tx_status IN (0, 1);
-
--- name: HasInvalidWalletUtxoByOutpoint :one
--- Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
--- transaction is already invalid.
---
--- How:
--- - Resolves the parent transaction row from `(wallet_id, tx_hash)` and checks
---   for any status outside `pending`/`published`.
--- - Exists so CreateTx can reject children of wallet-owned outputs whose
---   parent transaction is already invalid.
--- Performance:
--- - Targets one wallet-scoped outpoint through the parent tx lookup plus the
---   unique `(tx_id, output_index)` key.
-SELECT cast(EXISTS (
-    SELECT 1
-    FROM utxos
-    INNER JOIN transactions AS t
-        ON utxos.tx_id = t.id
-    WHERE
-        t.wallet_id = ?1
-        AND t.tx_hash = ?2
-        AND utxos.output_index = ?3
-        AND t.tx_status NOT IN (0, 1)
-) AS BOOLEAN) AS has_invalid;
-
--- name: MarkUtxoSpent :execrows
--- Marks a wallet-owned UTXO as spent by a transaction.
---
--- How:
--- - Resolves the created-by transaction row from `(wallet_id, tx_hash)` inside
---   the statement so callers can update by network outpoint.
--- - Requires the parent transaction status to be `pending` or `published`
---   before a child spend edge can attach.
--- - Only changes rows that are currently unspent or already point at the same
---   `(spent_by_tx_id, spent_input_index)` pair, which keeps retries idempotent
---   without allowing a caller to silently rewrite which input spent the UTXO.
--- Performance:
--- - Targets one outpoint in one wallet; the subquery uses the unique
---   wallet-scoped tx hash lookup.
-UPDATE utxos
-SET
-    spent_by_tx_id = ?4,
-    spent_input_index = ?5
-WHERE
-    utxos.tx_id = (
-        SELECT t.id
-        FROM transactions AS t
-        WHERE
-            t.wallet_id = ?1
-            AND t.tx_hash = ?2
-            AND t.tx_status IN (0, 1)
-    )
-    AND utxos.output_index = ?3
-    AND (
-        (utxos.spent_by_tx_id IS NULL AND utxos.spent_input_index IS NULL)
-        OR (utxos.spent_by_tx_id = ?4 AND utxos.spent_input_index = ?5)
-    );
-
--- name: ClearUtxosSpentByTxID :execrows
--- Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
---
--- How:
--- - Resets both spent columns together so the logical spend pointer remains
---   internally consistent.
--- Performance:
--- - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
---   ownership through the creating transaction.
-UPDATE utxos
-SET
-    spent_by_tx_id = NULL,
-    spent_input_index = NULL
-WHERE
-    spent_by_tx_id = ?2
-    AND EXISTS (
-        SELECT 1
-        FROM transactions AS t
-        WHERE t.id = utxos.tx_id AND t.wallet_id = ?1
     );
 
 -- name: DeleteUtxosByTxID :execrows
