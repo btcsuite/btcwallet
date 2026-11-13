@@ -2,12 +2,25 @@ package waddrmgr
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/lightningnetwork/lnd/tlv"
+)
+
+var (
+	// errNilTapscript is returned when a caller attempts to encode a nil
+	// taproot script.
+	errNilTapscript = errors.New("cannot encode nil script")
+
+	// errMissingControlBlockInternalKey is returned when a taproot control
+	// block cannot be serialized because it has no internal key.
+	errMissingControlBlockInternalKey = errors.New(
+		"control block is missing internal key",
+	)
 )
 
 const (
@@ -22,11 +35,11 @@ const (
 	typeTapLeafScript  tlv.Type = 2
 )
 
-// tlvEncodeTaprootScript encodes the given internal key and full set of taproot
-// script leaves into a byte slice encoded as a TLV stream.
-func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
+// EncodeTaprootScript encodes the given taproot script data into a byte slice
+// encoded as a TLV stream.
+func EncodeTaprootScript(s *Tapscript) ([]byte, error) {
 	if s == nil {
-		return nil, fmt.Errorf("cannot encode nil script")
+		return nil, errNilTapscript
 	}
 
 	typ := uint8(s.Type)
@@ -34,20 +47,13 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 		tlv.MakePrimitiveRecord(typeTapscriptType, &typ),
 	}
 
-	if s.ControlBlock != nil {
-		if s.ControlBlock.InternalKey == nil {
-			return nil, fmt.Errorf("control block is missing " +
-				"internal key")
-		}
+	controlBlockRecord, ok, err := taprootControlBlockRecord(s.ControlBlock)
+	if err != nil {
+		return nil, err
+	}
 
-		blockBytes, err := s.ControlBlock.ToBytes()
-		if err != nil {
-			return nil, fmt.Errorf("error encoding control block: "+
-				"%w", err)
-		}
-		tlvRecords = append(tlvRecords, tlv.MakePrimitiveRecord(
-			typeTapscriptControlBlock, &blockBytes,
-		))
+	if ok {
+		tlvRecords = append(tlvRecords, controlBlockRecord)
 	}
 
 	if len(s.Leaves) > 0 {
@@ -91,17 +97,74 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// taprootControlBlockRecord encodes a taproot control block into its TLV
+// record, if the script includes one.
+func taprootControlBlockRecord(block *txscript.ControlBlock) (tlv.Record,
+	bool, error) {
+
+	if block == nil {
+		return tlv.Record{}, false, nil
+	}
+
+	if block.InternalKey == nil {
+		return tlv.Record{}, false, errMissingControlBlockInternalKey
+	}
+
+	blockBytes, err := block.ToBytes()
+	if err != nil {
+		return tlv.Record{}, false,
+			fmt.Errorf("error encoding control block: %w", err)
+	}
+
+	record := tlv.MakePrimitiveRecord(
+		typeTapscriptControlBlock, &blockBytes,
+	)
+
+	return record, true, nil
+}
+
+// DecodeTaprootScript decodes the given byte slice as a TLV stream and returns
+// the taproot script data it encodes.
+//
+// The caller owns the decoded buffers. On error or panic, the decoder clears
+// its partial buffers without modifying the input.
+func DecodeTaprootScript(tlvData []byte) (*Tapscript, error) {
+	return tlvDecodeTaprootTaprootScript(tlvData)
+}
+
+// tlvEncodeTaprootScript encodes the given internal key and full set of taproot
+// script leaves into a byte slice encoded as a TLV stream.
+func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
+	return EncodeTaprootScript(s)
+}
+
 // tlvDecodeTaprootTaprootScript decodes the given byte slice as a TLV stream
 // and attempts to parse the taproot internal key and full set of leaves from
 // it.
 func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
+	return decodeTaprootScript(bytes.NewReader(tlvData))
+}
 
+// decodeTaprootScript decodes a TLV stream, transferring its allocated buffers
+// to the caller only on success.
+func decodeTaprootScript(r io.Reader) (*Tapscript, error) {
 	var (
 		typ                uint8
 		controlBlockBytes  []byte
 		fullOutputKeyBytes []byte
 		s                  = &Tapscript{}
+		transferred        bool
 	)
+	defer func() {
+		if transferred {
+			return
+		}
+
+		// Failed decoding returns no object for the caller to clear.
+		clearTapscriptBuffers(s)
+		clear(controlBlockBytes)
+		clear(fullOutputKeyBytes)
+	}()
 
 	tlvStream, err := tlv.NewStream(
 		tlv.MakePrimitiveRecord(typeTapscriptType, &typ),
@@ -127,9 +190,7 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		return nil, err
 	}
 
-	parsedTypes, err := tlvStream.DecodeWithParsedTypes(bytes.NewReader(
-		tlvData,
-	))
+	parsedTypes, err := tlvStream.DecodeWithParsedTypes(r)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +214,23 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		}
 	}
 
+	transferred = true
 	return s, nil
+}
+
+// clearTapscriptBuffers erases the byte buffers reachable from a non-nil,
+// partially decoded Tapscript that will not be returned to the caller.
+func clearTapscriptBuffers(s *Tapscript) {
+	clear(s.RevealedScript)
+	clear(s.RootHash)
+
+	for _, leaf := range s.Leaves {
+		clear(leaf.Script)
+	}
+
+	if s.ControlBlock != nil {
+		clear(s.ControlBlock.InclusionProof)
+	}
 }
 
 // leavesEncoder is a custom TLV decoder for a slice of tap leaf records.
@@ -209,7 +286,25 @@ func leavesEncoder(w io.Writer, val interface{}, buf *[8]byte) error {
 // leavesDecoder is a custom TLV decoder for a slice of tap leaf records.
 func leavesDecoder(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
 	if v, ok := val.(*[]txscript.TapLeaf); ok {
-		var leaves []txscript.TapLeaf
+		var (
+			leaves      []txscript.TapLeaf
+			script      []byte
+			transferred bool
+		)
+		defer func() {
+			if transferred {
+				return
+			}
+
+			// The current read and completed leaves are still
+			// local until the whole leaves record has decoded
+			// successfully.
+			clear(script)
+
+			for _, leaf := range leaves {
+				clear(leaf.Script)
+			}
+		}()
 
 		// Using the length information given, we'll create a new
 		// limited reader that'll return an EOF once the end has been
@@ -234,10 +329,7 @@ func leavesDecoder(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
 				N: int64(blobSize),
 			}
 
-			var (
-				leafVersion uint8
-				script      []byte
-			)
+			var leafVersion uint8
 			tlvStream, err := tlv.NewStream(
 				tlv.MakePrimitiveRecord(
 					typeTapLeafVersion, &leafVersion,
@@ -272,9 +364,11 @@ func leavesDecoder(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
 			}
 
 			leaves = append(leaves, leaf)
+			script = nil
 		}
 
 		*v = leaves
+		transferred = true
 		return nil
 	}
 

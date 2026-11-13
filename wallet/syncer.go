@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,11 +11,16 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -80,6 +86,10 @@ const (
 	//    Funds" errors or extremely inaccurate fee estimates increases,
 	//    making the explicit "Syncing" state a necessary safeguard.
 	syncStateSwitchThreshold = 6
+
+	// scanAddressPageLimit is the store page size used when loading recovery
+	// scan addresses.
+	scanAddressPageLimit = 1000
 )
 
 // syncState represents the synchronization status of the wallet with the
@@ -91,17 +101,16 @@ const (
 	// chain backend to finish syncing.
 	syncStateBackendSyncing syncState = iota
 
-	// syncStateSyncing indicates the wallet is running but catching up to
-	// the chain tip (or rewinding).
+	// syncStateSyncing indicates live processing is not ready while the
+	// wallet catches up, rewinds, or waits to retry a failed sync worker.
 	syncStateSyncing
 
 	// syncStateSynced indicates the wallet is running and synced to the
 	// chain tip.
 	syncStateSynced
 
-	// syncStateRescanning indicates the wallet is running a historical
-	// scan for specific user-provided targets, such as accounts or
-	// addresses, without rewinding the global synchronization state.
+	// syncStateRescanning indicates a historical scan of user-provided
+	// targets without rewinding the Wallet's live synchronization tip.
 	syncStateRescanning
 )
 
@@ -152,6 +161,56 @@ type scanReq struct {
 	targets []waddrmgr.AccountScope
 }
 
+// scanTarget is the internal, identity-aware form of a targeted-rescan
+// account. The public Rescan API accepts waddrmgr.AccountScope, which only
+// carries (scope, number). That is ambiguous for numberless imports: Store
+// backends mask an unknown account number to 0, and GetAccount rejects a
+// number lookup that resolves to a numberless row, so such an imported target
+// cannot be loaded by number at all. scanTarget resolves the durable,
+// non-masked identity up front -- before any horizon load -- so the targeted
+// path can carry AccountName as the source of truth and never mis-resolve an
+// imported target by number.
+type scanTarget struct {
+	// Scope is the key scope of the targeted account.
+	Scope waddrmgr.KeyScope
+
+	// Account is the requested account number. For the keyless legacy
+	// imported-address bucket it is waddrmgr.ImportedAddrAccount; for every
+	// other target it is the non-masked number the caller supplied, which
+	// stays the recovery key for that account.
+	Account uint32
+
+	// AccountName is the durable, scope-unique account identity resolved
+	// from the account snapshot. It is empty only for the keyless
+	// imported-address bucket, which is never resolved. Store horizon
+	// loading prefers this name over Account so a masked imported number
+	// can never collide with the default derived account.
+	AccountName string
+}
+
+// storeScanAccount is one recovery account snapshot loaded through the Store.
+// It carries the two identities waddrmgr.AccountProperties cannot: the durable
+// store row ID stamped onto every horizon the scan emits, and the real BIP44
+// account number a store-native deriver records in its derivation params.
+type storeScanAccount struct {
+	// props is the horizon snapshot recovery state consumes. Its
+	// AccountNumber is the key recovery state indexes the account by: the
+	// caller's account number for a targeted scan, and the durable store row
+	// ID for an untargeted full scan, where an imported account would
+	// otherwise collide with a derived account owning the same BIP44 number.
+	props *waddrmgr.AccountProperties
+
+	// accountID is the durable store row identity of the account, or nil
+	// when the backend exposes none. It is stamped onto emitted horizons so
+	// a later account rename cannot break horizon extension.
+	accountID *uint32
+
+	// derivedAccountNumber is the known BIP44 component, nil only for a
+	// numberless import. A known imported number does not mean the wallet
+	// derived the account key; lookahead still uses the account's own xpub.
+	derivedAccountNumber *uint32
+}
+
 // scanResult holds the result of processing a single block during a batch
 // scan.
 type scanResult struct {
@@ -160,20 +219,49 @@ type scanResult struct {
 
 	// meta contains block metadata (hash, height, time).
 	meta *wtxmgr.BlockMeta
+
+	// parentHash preserves fetched ancestry until the live commit boundary.
+	parentHash chainhash.Hash
 }
 
-// chainSyncer is a private interface that abstracts the chain synchronization
-// logic, allowing it to be mocked for testing the wallet and controller.
-type chainSyncer interface {
+// prepareRollbackReq asks the worker to finish earlier chain writes before
+// Manager rewinds shared storage. The worker closes readyForRollback and waits
+// for rollbackDone, which Manager closes after success or terminal cleanup.
+type prepareRollbackReq struct {
+	readyForRollback chan struct{}
+	rollbackDone     <-chan struct{}
+}
+
+// chainProcessor abstracts Wallet event processing and recovery, allowing
+// Wallet and controller tests to replace the existing worker.
+type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
+
+	// processChainEventBeforeSync services ordered observations and rollback
+	// preparation without advancing a checkpoint before watches are ready.
+	processChainEventBeforeSync(ctx context.Context, event chainEvent) error
 
 	// requestScan submits a rescan job to the syncer.
 	requestScan(ctx context.Context, req *scanReq) error
 
 	// syncState returns the current synchronization state.
 	syncState() syncState
+
+	// syncedTo reads the processed wallet tip with the caller's context so
+	// eligibility decisions use committed wallet state.
+	syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error)
 }
+
+// txManager combines the Wallet capabilities used by the syncer for
+// publication and notification after successful commits.
+type txManager interface {
+	TxPublisher
+	txNotifier
+}
+
+// Wallet supplies both capabilities through the same private dependency.
+var _ txManager = (*Wallet)(nil)
 
 // syncer is a stateless blocking worker responsible for synchronizing the
 // wallet with the blockchain. It operates within the lifecycle provided by the
@@ -188,6 +276,12 @@ type syncer struct {
 	// txStore is the transaction manager.
 	txStore wtxmgr.TxStore
 
+	// store is the transitional database store used by migrated runtime paths.
+	store db.Store
+
+	// walletID is the database wallet identifier used by store-backed paths.
+	walletID uint32
+
 	// state tracks the chain synchronization status.
 	state atomic.Uint32
 
@@ -196,35 +290,78 @@ type syncer struct {
 	// request does not unnecessarily block the calling goroutine.
 	scanReqChan chan *scanReq
 
-	// publisher is the component responsible for broadcasting transactions
-	// to the network. It is primarily used during the maintenance phase to
-	// ensure unmined transactions remain in the mempool.
-	publisher TxPublisher
+	// txManager rebroadcasts unmined transactions and announces committed
+	// observations while Wallet retains subscriber state and lifecycle.
+	txManager txManager
+
+	// chainSyncer owns subscriptions and prepares live matches for this
+	// processor; every maintained Wallet receives its Manager's instance.
+	chainSyncer    chainRouter
+	chainEventChan <-chan chainEvent
 }
 
-// newSyncer creates a new syncer instance.
+// A compile-time assertion to ensure that syncer implements chainProcessor.
+var _ chainProcessor = (*syncer)(nil)
+
+// refreshLiveWatches registers stored addresses and outpoints for transaction
+// notifications. The Store selects the addresses and outputs to watch.
+func (s *syncer) refreshLiveWatches(ctx context.Context) error {
+	addrs, err := s.storeScanAddresses(ctx)
+	if err != nil {
+		return fmt.Errorf("read watch addresses: %w", err)
+	}
+
+	// Wallet shutdown must still cancel registration. A later sync
+	// initialization reads the persisted watch set again.
+	err = s.chainSyncer.watchAddresses(ctx, s.walletID, addrs)
+	if err != nil {
+		return fmt.Errorf("register addresses: %w", err)
+	}
+
+	credits, err := s.storeScanUnspent(ctx)
+	if err != nil {
+		return err
+	}
+
+	// ListOutputsToWatch already applies the Store's account policy.
+	outpoints := make([]*wire.OutPoint, 0, len(credits))
+	for _, credit := range credits {
+		outpoints = append(outpoints, &credit.OutPoint)
+	}
+
+	if len(outpoints) == 0 {
+		return nil
+	}
+
+	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
+}
+
+// newSyncer creates a new syncer instance. The Store and its wallet ID are
+// mandatory: every migrated runtime path reads and writes through the Store,
+// so there is no nil-store fallback. The notifier observes successful commits
+// without owning persistence or scan lifecycle. The Manager's required routing
+// owner and inbox supply prepared live events to this existing worker.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
-	txStore wtxmgr.TxStore, publisher TxPublisher) *syncer {
+	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
+	walletID uint32, chainSyncer chainRouter,
+	events <-chan chainEvent) *syncer {
 
 	return &syncer{
-		cfg:         cfg,
-		addrStore:   addrStore,
-		txStore:     txStore,
-		scanReqChan: make(chan *scanReq, 1),
-		publisher:   publisher,
+		cfg:            cfg,
+		addrStore:      addrStore,
+		txStore:        txStore,
+		scanReqChan:    make(chan *scanReq, 1),
+		txManager:      txManager,
+		store:          store,
+		walletID:       walletID,
+		chainSyncer:    chainSyncer,
+		chainEventChan: events,
 	}
 }
 
 // syncState returns the current synchronization state of the wallet.
 func (s *syncer) syncState() syncState {
 	return syncState(s.state.Load())
-}
-
-// isRecoveryMode returns true if the wallet is currently syncing or
-// rescanning.
-func (s *syncer) isRecoveryMode() bool {
-	status := s.syncState()
-	return status == syncStateSyncing || status == syncStateRescanning
 }
 
 // initChainSync performs the initial setup for the chain synchronization loop.
@@ -241,7 +378,12 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	// checkpoint, leading to unnecessary network I/O and delayed wallet
 	// readiness.
 	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
-		cc.SetStartTime(s.addrStore.Birthday())
+		birthday, err := s.walletBirthday(ctx)
+		if err != nil {
+			return err
+		}
+
+		cc.SetStartTime(birthday)
 	}
 
 	// Wait for the backend to be synced to the network. We require the
@@ -260,14 +402,40 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 		return fmt.Errorf("unable to check for rollback: %w", err)
 	}
 
-	// Enable block notifications from the chain backend.
-	err = s.cfg.Chain.NotifyBlocks()
+	// A retry may follow a committed scan whose registration failed.
+	// Register stored addresses and outpoints even if the tip is current.
+	//
+	// TODO(yy): Avoid rereading and registering the full set on each retry
+	// while preserving registration that failed after a committed scan.
+	err = s.refreshLiveWatches(ctx)
 	if err != nil {
-		return fmt.Errorf("unable to start block notifications: %w",
-			err)
+		return err
+	}
+
+	// Explicitly request connected/disconnected block notifications. Only
+	// the bitcoind and neutrino wrappers enable block notifications as a
+	// side effect of NotifyReceived; btcd's NotifyReceived (the embedded
+	// rpcclient method) registers only address notifications, so without
+	// this call a btcd-backed wallet would stop receiving live block
+	// connect/disconnect events. The call is idempotent on the wrappers
+	// that already enabled notifications, so it is safe for all backends.
+	err = s.chainSyncer.notifyBlocks(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to start block "+
+			"notifications: %w", err)
 	}
 
 	return nil
+}
+
+// walletBirthday reads durable birthday metadata through the Store boundary.
+func (s *syncer) walletBirthday(ctx context.Context) (time.Time, error) {
+	info, err := s.store.GetWallet(ctx, s.cfg.Name)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load wallet birthday: %w", err)
+	}
+
+	return info.Birthday, nil
 }
 
 // waitUntilBackendSynced blocks until the chain backend considers itself
@@ -285,6 +453,14 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 
 	for {
 		select {
+		case event := <-s.chainEventChan:
+			// Initialization cannot depend on a rollback that is itself
+			// waiting for this worker. Preserve mailbox order on this owner.
+			err := s.processChainEventBeforeSync(ctx, event)
+			if err != nil {
+				return err
+			}
+
 		case <-t.C:
 			if s.cfg.Chain.IsCurrent() {
 				return nil
@@ -299,95 +475,276 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 // checkRollback ensures the wallet is synchronized with the current chain tip.
 // It checks if the wallet's synced tip is still on the main chain, and if not,
 // rewinds the wallet state to the common ancestor.
+// If no recorded ancestor is found for a non-genesis tip, it returns
+// db.ErrBlockNotFound without rewinding.
 func (s *syncer) checkRollback(ctx context.Context) error {
-	var err error
+	// Keep traversal tied to the committed Wallet tip; individual batches
+	// retain their existing Store reads and atomic Store rewind boundary.
+	syncedTo, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
 
-	// batchSize is the number of blocks to fetch from the chain backend in
-	// a single batch when checking for a rollback. A value of 10 is chosen
-	// as a conservative default that covers the vast majority of reorg
-	// scenarios (typically 1-3 blocks) while keeping individual batch
-	// requests lightweight.
-	const batchSize = 10
-
-	syncedTo := s.addrStore.SyncedTo()
 	syncedHeight := syncedTo.Height
 
-	var (
-		localHashes  []*chainhash.Hash
-		remoteHashes []chainhash.Hash
-		header       *wire.BlockHeader
-	)
+	// A saved non-genesis tip must also search genesis for an ancestor.
+	for syncedTo.Height > 0 && syncedHeight >= 0 {
+		var done bool
 
-	for syncedHeight > 0 {
-		// Calculate the range for this batch. We scan backwards:
-		// [startHeight, endHeight] where endHeight is syncedHeight.
-		endHeight := syncedHeight
-		startHeight := max(0, endHeight-batchSize+1)
-
-		// Fetch Local Batch (from wallet's database).
-		localHashes, err = s.DBGetSyncedBlocks(
-			ctx, startHeight, endHeight,
+		syncedHeight, done, err = s.checkRollbackBatch(
+			ctx, syncedTo, syncedHeight,
 		)
-		if err != nil {
+		if done {
 			return err
 		}
+	}
 
-		// Fetch Remote Batch - Fetch corresponding hashes from the
-		// chain backend.
-		remoteHashes, err = s.cfg.Chain.GetBlockHashes(
-			int64(startHeight), int64(endHeight),
-		)
-		if err != nil {
-			return fmt.Errorf("remote get block hashes: %w", err)
-		}
-
-		// Compare Batches. Iterate backwards to find the last matching
-		// block (the fork point).
-		matchIndex := s.findForkPoint(localHashes, remoteHashes)
-
-		// Case A: Tip matches. No rollback needed (if we are at the
-		// tip). If syncedHeight == syncedTo.Height and matchIndex is
-		// the last element, then we are fully synced on the main
-		// chain.
-		if syncedHeight == syncedTo.Height &&
-			matchIndex == len(localHashes)-1 {
-
-			return nil
-		}
-
-		// Case B: Mismatch found within this batch. A fork point has
-		// been detected. This indicates a blockchain reorganization
-		// where the wallet's local chain history diverges from the
-		// chain backend's view within the current batch of blocks.
-		if matchIndex != -1 {
-			//nolint:gosec // matchIndex < batchSize (10).
-			forkHeight := startHeight + int32(matchIndex)
-			forkHash := localHashes[matchIndex]
-
-			log.Infof("Rollback detected! Rewinding to height %d "+
-				"(%v)", forkHeight, forkHash)
-
-			// Fetch the block header outside the DB transaction to
-			// avoid holding the lock during an RPC call.
-			header, err = s.cfg.Chain.GetBlockHeader(forkHash)
-			if err != nil {
-				return fmt.Errorf("get fork header: %w", err)
-			}
-
-			// Perform the rollback.
-			return s.DBPutRewind(ctx, waddrmgr.BlockStamp{
-				Height:    forkHeight,
-				Hash:      *forkHash,
-				Timestamp: header.Timestamp,
-			})
-		}
-
-		// Case C: No match in this batch. The fork point is deeper.
-		// Move syncedHeight back and continue loop.
-		syncedHeight = startHeight - 1
+	// A non-genesis tip needs a proven ancestor before Store can rewind.
+	// Fail an exhausted search instead of accepting an abandoned branch;
+	// a genesis tip has no earlier history to compare.
+	if syncedTo.Height > 0 {
+		return fmt.Errorf("no recorded common ancestor: %w",
+			db.ErrBlockNotFound)
 	}
 
 	return nil
+}
+
+// checkRollbackBatch compares one recorded range within the remote tip;
+// a common ancestor is rewound synchronously through the existing Store.
+// With done false, it returns the next end height and a nil error; -1 marks
+// exhausted history. With done true, the error is the final outcome: nil for
+// a confirmed tip or successful rewind, otherwise the read or rewind failure.
+func (s *syncer) checkRollbackBatch(ctx context.Context,
+	syncedTo waddrmgr.BlockStamp, endHeight int32) (int32, bool, error) {
+
+	// Bound backward RPC batches while searching for a recorded ancestor.
+	const batchSize = 10
+
+	startHeight := max(0, endHeight-batchSize+1)
+
+	localHashes, startHeight, err := s.syncedBlockHashes(
+		ctx, startHeight, endHeight,
+	)
+	if err != nil {
+		return 0, true, s.resolveMissingHistoricalBlock(err, syncedTo)
+	}
+
+	// A shorter current branch cannot serve hashes above its own tip.
+	// Preserve local-read order; a higher batch retries from that tip.
+	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return 0, true, fmt.Errorf("get rollback chain tip: %w", err)
+	}
+
+	if startHeight > bestHeight {
+		return bestHeight, false, nil
+	}
+
+	remoteHashes, err := s.cfg.Chain.GetBlockHashes(
+		int64(startHeight), int64(min(endHeight, bestHeight)),
+	)
+	if err != nil {
+		return 0, true, fmt.Errorf("remote get block hashes: %w", err)
+	}
+
+	matchIndex := s.findForkPoint(localHashes, remoteHashes)
+
+	// Only a match at the saved tip avoids rewind; a shorter current branch
+	// cannot confirm that tip.
+	if endHeight == syncedTo.Height && bestHeight >= syncedTo.Height &&
+		matchIndex == len(localHashes)-1 {
+
+		return 0, true, nil
+	}
+
+	// The common ancestor lies deeper, so continue below this entire batch.
+	if matchIndex == -1 {
+		return startHeight - 1, false, nil
+	}
+
+	// Resolve the matching ancestor before entering persistence or the
+	// Store rollback, so backend I/O never holds a storage transaction.
+	//nolint:gosec // matchIndex < batchSize (10).
+	forkHeight := startHeight + int32(matchIndex)
+	forkHash := localHashes[matchIndex]
+	log.Infof("Rollback detected! Rewinding to height %d (%v)",
+		forkHeight, forkHash)
+
+	header, err := s.cfg.Chain.GetBlockHeader(forkHash)
+	if err != nil {
+		return 0, true, fmt.Errorf("get fork header: %w", err)
+	}
+
+	return 0, true, s.rewindToBlock(ctx, waddrmgr.BlockStamp{
+		Height:    forkHeight,
+		Hash:      *forkHash,
+		Timestamp: header.Timestamp,
+	})
+}
+
+// resolveMissingHistoricalBlock accepts a missing historical block when the
+// persisted synced tip matches the chain backend.
+func (s *syncer) resolveMissingHistoricalBlock(listErr error,
+	syncedTo waddrmgr.BlockStamp) error {
+
+	if !errors.Is(listErr, db.ErrBlockNotFound) {
+		return listErr
+	}
+
+	remoteHash, err := s.cfg.Chain.GetBlockHash(int64(syncedTo.Height))
+	if err != nil {
+		return fmt.Errorf("get synced block hash: %w", err)
+	}
+
+	if syncedTo.Hash.IsEqual(remoteHash) {
+		return nil
+	}
+
+	return listErr
+}
+
+// rewindToBlock rewinds wallet sync and transaction state to the given fork
+// point.
+func (s *syncer) rewindToBlock(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	rollbackBoundary := int64(block.Height) + 1
+
+	rollbackHeight, err := db.Int64ToUint32(rollbackBoundary)
+	if err != nil {
+		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
+	}
+
+	// Roll transaction state back and rewind the wallet sync tip to the same
+	// fork point in one atomic store call so a failure cannot leave the sync
+	// tip rewound while transaction state still references the abandoned
+	// chain. RollbackToBlock derives the new sync tip from the stored
+	// fork-point block, so the caller only supplies the rollback boundary.
+	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	if err != nil {
+		return fmt.Errorf("rollback to block: %w", err)
+	}
+
+	return nil
+}
+
+// rewindWallet rewinds this wallet's sync and transaction state for a manual
+// rescan without requiring a DB-wide block rollback.
+func (s *syncer) rewindWallet(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	storeBlock, err := s.resolveRewindBlock(block)
+	if err != nil {
+		return fmt.Errorf("rewind wallet block: %w", err)
+	}
+
+	err = s.store.RewindWallet(ctx, db.RewindWalletParams{
+		WalletID: s.walletID,
+		Block:    *storeBlock,
+	})
+	if err != nil {
+		return fmt.Errorf("rewind wallet: %w", err)
+	}
+
+	return nil
+}
+
+// resolveRewindBlock resolves the requested manual-rewind height into the
+// canonical block metadata recorded as the wallet's new synced tip.
+func (s *syncer) resolveRewindBlock(
+	block waddrmgr.BlockStamp) (*db.Block, error) {
+
+	if block.Hash != (chainhash.Hash{}) && !block.Timestamp.IsZero() {
+		storeBlock, err := db.BlockFromBlockStamp(block)
+		if err != nil {
+			return nil, fmt.Errorf("convert rewind block: %w", err)
+		}
+
+		return storeBlock, nil
+	}
+
+	hash, err := s.cfg.Chain.GetBlockHash(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("get rewind block hash: %w", err)
+	}
+
+	header, err := s.cfg.Chain.GetBlockHeader(hash)
+	if err != nil {
+		return nil, fmt.Errorf("get rewind block header: %w", err)
+	}
+
+	storeBlock, err := db.BlockFromBlockStamp(waddrmgr.BlockStamp{
+		Height:    block.Height,
+		Hash:      *hash,
+		Timestamp: header.Timestamp,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("convert resolved rewind block: %w", err)
+	}
+
+	return storeBlock, nil
+}
+
+// syncedBlockHashes returns the wallet's synced block hashes for the inclusive
+// height range and its actual start. Retry only the end row when
+// pre-birthday history is absent, keeping remote comparison aligned with it.
+func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
+	endHeight int32) ([]*chainhash.Hash, int32, error) {
+
+	start, err := db.Int64ToUint32(int64(startHeight))
+	if err != nil {
+		return nil, startHeight, fmt.Errorf("start height %d: %w",
+			startHeight, err)
+	}
+
+	end, err := db.Int64ToUint32(int64(endHeight))
+	if err != nil {
+		return nil, startHeight, fmt.Errorf("end height %d: %w", endHeight,
+			err)
+	}
+
+	blocks, err := s.store.ListSyncedBlocks(
+		ctx, db.ListSyncedBlocksQuery{
+			StartHeight: start,
+			EndHeight:   end,
+		},
+	)
+	if startHeight < endHeight &&
+		errors.Is(err, db.ErrBlockNotFound) {
+
+		// One singleton retry preserves the stored endpoint without
+		// requiring missing pre-birthday rows; it cannot recurse again.
+		return s.syncedBlockHashes(ctx, endHeight, endHeight)
+	}
+
+	if err != nil {
+		return nil, startHeight, fmt.Errorf("list synced blocks: %w", err)
+	}
+
+	hashes := make([]*chainhash.Hash, len(blocks))
+	for i := range blocks {
+		hashes[i] = &blocks[i].Hash
+	}
+
+	return hashes, startHeight, nil
+}
+
+// syncedTo returns the wallet's current synced-to block from the Store.
+func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
+	walletInfo, err := s.store.GetWallet(ctx, s.cfg.Name)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("get wallet sync tip: %w",
+			err)
+	}
+
+	syncedTo, err := db.OptionalBlockStampFromBlock(walletInfo.SyncedTo)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("decode wallet sync tip: %w",
+			err)
+	}
+
+	return syncedTo, nil
 }
 
 // findForkPoint compares local and remote block hashes to find the last
@@ -432,6 +789,8 @@ func (s *syncer) run(ctx context.Context) error {
 
 				return nil
 			}
+
+			s.state.Store(uint32(syncStateSyncing))
 
 			return err
 		}
@@ -481,7 +840,7 @@ func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
 // broadcastUnminedTxns retrieves all unmined transactions from the wallet and
 // attempts to re-broadcast them to the network.
 func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
-	txs, err := s.DBGetUnminedTxns(ctx)
+	txs, err := s.unminedTxns(ctx)
 	if err != nil {
 		log.Errorf("Unable to retrieve unconfirmed transactions to "+
 			"resend: %v", err)
@@ -490,7 +849,7 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	}
 
 	for _, tx := range txs {
-		err := s.publisher.Broadcast(ctx, tx, "")
+		err := s.txManager.Broadcast(ctx, tx, "")
 		if err != nil {
 			log.Warnf("Unable to rebroadcast tx %v: %v",
 				tx.TxHash(), err)
@@ -498,6 +857,458 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// unminedTxns returns transactions that are still active in the wallet's
+// unmined set.
+func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
+	infos, err := s.store.ListTxns(
+		ctx, db.ListTxnsQuery{
+			WalletID:    s.walletID,
+			UnminedOnly: true,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list unmined txns: %w", err)
+	}
+
+	txSet := make(map[chainhash.Hash]*wire.MsgTx, len(infos))
+	for i := range infos {
+		info := infos[i]
+		if info.Status != db.TxStatusPublished {
+			continue
+		}
+
+		var tx wire.MsgTx
+
+		err := tx.Deserialize(bytes.NewReader(info.SerializedTx))
+		if err != nil {
+			return nil, fmt.Errorf("deserialize unmined tx %v: %w",
+				info.Hash, err)
+		}
+
+		txHash := tx.TxHash()
+		txSet[txHash] = &tx
+	}
+
+	return wtxmgr.DependencySort(txSet), nil
+}
+
+// putTxNotifications records relevant transaction notifications through the
+// store.
+func (s *syncer) putTxNotifications(ctx context.Context,
+	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
+
+	var block *db.Block
+	if blockMeta != nil {
+		var err error
+
+		block, err = storeBlockFromBlockMeta(*blockMeta)
+		if err != nil {
+			return err
+		}
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// putBlockNotifications records filtered block notifications through the store.
+func (s *syncer) putBlockNotifications(ctx context.Context,
+	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
+
+	if blockMeta == nil {
+		return fmt.Errorf("filtered block is missing metadata: %w",
+			db.ErrInvalidParam)
+	}
+
+	current, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Only the exact next block may advance the checkpoint. Catch-up handles
+	// gaps, while later representations may supplement committed payloads.
+	if blockMeta.Height > current.Height+1 {
+		return nil
+	}
+
+	block, err := storeBlockFromBlockMeta(*blockMeta)
+	if err != nil {
+		return err
+	}
+
+	if blockMeta.Height == current.Height+1 {
+		return s.applyStoreTxBatch(ctx, matches, block, block)
+	}
+
+	// Empty supplemental payloads cannot add effects, so they need no
+	// historical lookup after the checkpoint has already passed them.
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Supplemental payloads may add effects only on the committed branch.
+	onBranch, err := s.blockMatchesCheckpoint(ctx, *block, current)
+	if err != nil || !onBranch {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// blockMatchesCheckpoint validates a supplemental payload against the saved
+// tip or older shared history. Missing history contributes no new effects.
+func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
+	current waddrmgr.BlockStamp) (bool, error) {
+
+	committedHash := current.Hash
+	// The tip hash identifies only its own height; older payloads must match
+	// the recorded hash at their height before adding confirmed effects.
+	if int64(block.Height) < int64(current.Height) {
+		blocks, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				StartHeight: block.Height,
+				EndHeight:   block.Height,
+			},
+		)
+		// Missing history cannot authorize effects, whether the Store uses
+		// the SQL sentinel or wraps the legacy address manager's error.
+		var managerErr waddrmgr.ManagerError
+		if errors.Is(err, db.ErrBlockNotFound) ||
+			errors.As(err, &managerErr) &&
+				managerErr.ErrorCode == waddrmgr.ErrBlockNotFound {
+
+			return false, nil
+		}
+
+		if err != nil {
+			return false, fmt.Errorf("list committed block %d: %w",
+				block.Height, err)
+		}
+
+		// An empty successful read likewise supplies no committed identity.
+		if len(blocks) == 0 {
+			return false, nil
+		}
+
+		committedHash = blocks[0].Hash
+	}
+
+	return block.Hash == committedHash, nil
+}
+
+// applyStoreTxBatch writes transaction matches through the store batch API.
+func (s *syncer) applyStoreTxBatch(ctx context.Context,
+	matches TxEntries, block *db.Block, syncedTo *db.Block) error {
+
+	transactions := make([]db.CreateTxParams, 0, len(matches))
+	for i := range matches {
+		match := matches[i]
+		creditCandidates := make(
+			map[uint32][]address.Address, len(match.Entries),
+		)
+
+		for _, entry := range match.Entries {
+			index := entry.Credit.Index
+			if uint64(index) >= uint64(len(match.Rec.MsgTx.TxOut)) {
+				return fmt.Errorf("credit output %d: %w", index,
+					db.ErrInvalidParam)
+			}
+
+			creditCandidates[index] = append(
+				creditCandidates[index], entry.Address,
+			)
+		}
+
+		// Observation labels are omitted so the batch reconciles current
+		// user metadata atomically instead of validating a stale snapshot.
+
+		transactions = append(transactions, db.CreateTxParams{
+			WalletID:         s.walletID,
+			Tx:               &match.Rec.MsgTx,
+			Received:         match.Rec.Received,
+			Block:            block,
+			Status:           db.TxStatusPublished,
+			CreditCandidates: creditCandidates,
+		})
+	}
+
+	err := s.store.ApplyTxBatch(
+		ctx, db.TxBatchParams{
+			WalletID:     s.walletID,
+			Transactions: transactions,
+			SyncedTo:     syncedTo,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("apply tx batch: %w", err)
+	}
+
+	// Announce only successful commits; delivery cannot replace a write error
+	// or make this batch depend on subscribers consuming their queues.
+	for _, tx := range transactions {
+		s.txManager.notifyTx(ctx, tx.Tx.TxHash())
+	}
+
+	return nil
+}
+
+// putSyncBatch records recovery scan results and synced blocks through the
+// store.
+func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
+	results []scanResult) (resultErr error) {
+
+	// Rollback invalidates fetched facts before persistence. Ordinary work
+	// stays behind this attempt, including conversion or Store failures.
+	pending, err := s.checkForRollbackBeforeCommit(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Retained observations must not checkpoint an unfetched next block:
+	// live matches can omit recovery addresses until historical scanning.
+	// An empty mailbox returns a zero event and needs no deferred handler.
+	if pending.notification != nil {
+		defer func() {
+			resultErr = errors.Join(
+				resultErr, s.processChainEventBeforeSync(ctx, pending),
+			)
+		}()
+	}
+
+	params, err := s.storeScanBatchParams(scanState, results, true)
+	if err != nil {
+		return err
+	}
+
+	refreshWatches := len(params.Horizons) > 0 || len(params.Transactions) > 0
+	if refreshWatches {
+		// Clear readiness before publishing the tip. Normal catch-up
+		// restores it only after watch registration succeeds.
+		s.state.Store(uint32(syncStateSyncing))
+	}
+
+	// ApplyScanBatch persists the batch's synced blocks and advances the
+	// wallet's synced tip. advanceChainSync reads the next batch's start
+	// height back through s.syncedTo, which is Store-backed here, so the
+	// loop makes forward progress regardless of whether a given backend
+	// also mirrors the tip into the legacy addrStore.
+	err = s.store.ApplyScanBatch(ctx, params)
+	if err != nil {
+		return fmt.Errorf("apply sync scan batch: %w", err)
+	}
+
+	// The existing Store commit owns persistence and tip advancement. The
+	// Wallet notifier only reads the result and offers best-effort delivery.
+	for _, tx := range params.Transactions {
+		s.txManager.notifyTx(ctx, tx.Tx.TxHash())
+	}
+
+	// A committed horizon or credit can introduce watches after startup;
+	// finish registration before catch-up reports this batch complete.
+	if refreshWatches {
+		return s.refreshLiveWatches(ctx)
+	}
+
+	return nil
+}
+
+// putTargetedBatch records targeted recovery scan results through the store.
+func (s *syncer) putTargetedBatch(ctx context.Context,
+	scanState *RecoveryState, results []scanResult) error {
+
+	params, err := s.storeScanBatchParams(scanState, results, false)
+	if err != nil {
+		return err
+	}
+
+	// Cover the commit boundary as well as registration: Info treats an
+	// ordinary rescan as live-ready even when both tips match.
+	s.state.Store(uint32(syncStateSyncing))
+
+	err = s.store.ApplyScanBatch(ctx, params)
+	if err != nil {
+		// An unknown commit outcome may have persisted new watches. Keep
+		// readiness revoked so initialization rereads them; only definite
+		// write failures can restore readiness without registration.
+		if !errors.Is(err, dbruntime.ErrAmbiguousTxCommit) {
+			s.state.Store(uint32(syncStateRescanning))
+		}
+
+		return fmt.Errorf("apply targeted scan batch: %w", err)
+	}
+
+	// Historical observations use the same Wallet payload and queue policy,
+	// without adding notification state to scan readiness or rollback.
+	for _, tx := range params.Transactions {
+		s.txManager.notifyTx(ctx, tx.Tx.TxHash())
+	}
+
+	// Targeted scans can also store new addresses and outputs. Register
+	// them after the commit using the scan worker's lifetime context.
+	if len(params.Horizons) > 0 || len(params.Transactions) > 0 {
+		return s.refreshLiveWatches(ctx)
+	}
+
+	return nil
+}
+
+// mergeScanHorizons records the highest discovered child index per branch scope
+// into the running horizon map.
+func mergeScanHorizons(horizons map[waddrmgr.BranchScope]uint32,
+	found map[waddrmgr.BranchScope]uint32) {
+
+	for bs, index := range found {
+		if current, ok := horizons[bs]; !ok || index > current {
+			horizons[bs] = index
+		}
+	}
+}
+
+// scanHorizonParams flattens the merged horizon map into store scan horizon
+// params, stamping every horizon with the account identity resolved into the
+// recovery state.
+//
+// AccountID is the stable Store row identity that SQL backends use to resolve
+// the horizon's owning account. AccountName is retained as metadata and as a
+// compatibility fallback for backends that do not expose AccountID.
+//
+// Fail-safe: if the recovery state has no name for a branch's account, we
+// leave AccountName empty and let the backend fall back to its number-based
+// behavior. The recovery state derives the horizon map from the same account
+// properties that seed accountNames, so a miss is not expected in practice;
+// emitting a wrong name would be worse than the number fallback.
+func scanHorizonParams(scanState *RecoveryState,
+	horizons map[waddrmgr.BranchScope]uint32) []db.ScanHorizon {
+
+	params := make([]db.ScanHorizon, 0, len(horizons))
+	for bs, index := range horizons {
+		name, _ := scanState.AccountName(bs.Scope, bs.Account)
+		accountID, _ := scanState.AccountID(bs.Scope, bs.Account)
+
+		params = append(params, db.ScanHorizon{
+			Scope:       db.KeyScope(bs.Scope),
+			AccountID:   accountID,
+			Account:     bs.Account,
+			AccountName: name,
+			Branch:      bs.Branch,
+			Index:       index,
+		})
+	}
+
+	return params
+}
+
+// appendScanTxParams appends store transaction params for every relevant output
+// in the scan result, attaching the resolved store block. It validates that
+// each credit index is within the transaction's output range. Candidates let
+// the Store apply receiving policy after persisting the scan horizons.
+func (s *syncer) appendScanTxParams(params *db.ScanBatchParams,
+	result scanResult, block *db.Block) error {
+
+	for _, match := range result.RelevantOutputs {
+		candidates := make(
+			map[uint32][]address.Address, len(match.Entries),
+		)
+		for _, entry := range match.Entries {
+			index := entry.Credit.Index
+			if uint64(index) >= uint64(len(match.Rec.MsgTx.TxOut)) {
+				return fmt.Errorf("credit output %d: %w", index,
+					db.ErrInvalidParam)
+			}
+
+			candidates[index] = append(candidates[index], entry.Address)
+		}
+
+		params.Transactions = append(
+			params.Transactions, db.CreateTxParams{
+				WalletID:         s.walletID,
+				Tx:               &match.Rec.MsgTx,
+				Received:         result.meta.Time,
+				Block:            block,
+				Status:           db.TxStatusPublished,
+				CreditCandidates: candidates,
+			},
+		)
+	}
+
+	return nil
+}
+
+// storeScanBatchParams converts recovery scan results into store batch params.
+// scanState is the recovery state that produced the results; it carries the
+// account identity snapshot used to stamp every emitted horizon with the stable
+// AccountID SQL backends require for horizon extension.
+func (s *syncer) storeScanBatchParams(scanState *RecoveryState,
+	results []scanResult, includeSyncedBlocks bool) (db.ScanBatchParams,
+	error) {
+
+	params := db.ScanBatchParams{WalletID: s.walletID}
+	horizons := make(map[waddrmgr.BranchScope]uint32)
+
+	for _, result := range results {
+		blockNeeded := includeSyncedBlocks
+		if result.BlockProcessResult != nil &&
+			len(result.RelevantOutputs) > 0 {
+
+			blockNeeded = true
+		}
+
+		var block *db.Block
+		if blockNeeded {
+			var err error
+
+			block, err = storeBlockFromScanResult(result)
+			if err != nil {
+				return db.ScanBatchParams{}, err
+			}
+		}
+
+		if includeSyncedBlocks {
+			params.SyncedBlocks = append(params.SyncedBlocks, *block)
+		}
+
+		if result.BlockProcessResult == nil {
+			continue
+		}
+
+		mergeScanHorizons(horizons, result.FoundHorizons)
+
+		err := s.appendScanTxParams(&params, result, block)
+		if err != nil {
+			return db.ScanBatchParams{}, err
+		}
+	}
+
+	params.Horizons = scanHorizonParams(scanState, horizons)
+
+	return params, nil
+}
+
+// storeBlockFromBlockMeta converts chain notification block metadata into the
+// store block shape.
+func storeBlockFromBlockMeta(block wtxmgr.BlockMeta) (*db.Block, error) {
+	height, err := db.Int64ToUint32(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("block height %d: %w", block.Height, err)
+	}
+
+	return &db.Block{
+		Hash:      block.Hash,
+		Height:    height,
+		Timestamp: block.Time,
+	}, nil
+}
+
+// storeBlockFromScanResult converts scan result block metadata into the store
+// block shape.
+func storeBlockFromScanResult(result scanResult) (*db.Block, error) {
+	if result.meta == nil {
+		return nil, fmt.Errorf("scan result is missing block metadata: %w",
+			db.ErrInvalidParam)
+	}
+
+	return storeBlockFromBlockMeta(*result.meta)
 }
 
 // scanBatchHeadersOnly performs a lightweight scan by only fetching block
@@ -535,7 +1346,8 @@ func (s *syncer) scanBatchHeadersOnly(_ context.Context,
 		}
 
 		results = append(results, scanResult{
-			meta: meta,
+			meta:       meta,
+			parentHash: header.PrevBlock,
 			// We provide an empty BlockProcessResult to avoid nil
 			// pointer dereferences when accessing embedded fields
 			// (like RelevantTxs) in commitSyncBatch. This
@@ -553,21 +1365,49 @@ func (s *syncer) scanBatchHeadersOnly(_ context.Context,
 func (s *syncer) loadFullScanState(
 	ctx context.Context) (*RecoveryState, error) {
 
-	horizonData, initialAddrs, initialUnspent, err := s.loadWalletScanData(
-		ctx,
-	)
+	accounts, initialAddrs, initialUnspent, err := s.loadWalletScanData(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Initialize a fresh recovery state for this batch to ensure no stale
-	// state leaks between batches.
+	return s.newStoreScanState(accounts, initialAddrs, initialUnspent)
+}
+
+// newStoreScanState builds a fresh recovery state for accounts loaded through
+// the Store. Each account's store identities are registered before the batch
+// snapshot is initialized, because initialization derives the lookahead window
+// and therefore needs the store-native deriver already in place.
+func (s *syncer) newStoreScanState(accounts []storeScanAccount,
+	initialAddrs []address.Address,
+	initialUnspent []wtxmgr.Credit) (*RecoveryState, error) {
+
+	// Use a fresh recovery state for this batch to ensure no stale state
+	// leaks between batches.
 	scanState := NewRecoveryState(
 		s.cfg.RecoveryWindow, s.cfg.ChainParams, s.addrStore,
 	)
 
-	// Initialize Batch State (History + Lookahead)
-	err = scanState.Initialize(horizonData, initialAddrs, initialUnspent)
+	// Existing child counts also cause horizon initialization to derive.
+	// Omit horizons entirely at zero; persisted targets need no deriver.
+	if s.cfg.RecoveryWindow == 0 {
+		accounts = nil
+	}
+
+	props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
+	for _, account := range accounts {
+		err := scanState.setStoreAccount(
+			account.props, account.accountID,
+			account.derivedAccountNumber,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		props = append(props, account.props)
+	}
+
+	// Initialize Batch State (History + Lookahead).
+	err := scanState.Initialize(props, initialAddrs, initialUnspent)
 	if err != nil {
 		return nil, fmt.Errorf("init scan state: %w", err)
 	}
@@ -603,6 +1443,7 @@ func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
 
 		meta := &wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{Hash: hash, Height: height},
+			Time:  block.Header.Timestamp,
 		}
 
 		// Process the block using the recovery state. This involves:
@@ -619,6 +1460,7 @@ func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
 
 		results = append(results, scanResult{
 			meta:               meta,
+			parentHash:         block.Header.PrevBlock,
 			BlockProcessResult: res,
 		})
 	}
@@ -640,6 +1482,7 @@ func (s *syncer) initResultsForCFilterScan(_ context.Context,
 	results := make([]scanResult, len(hashes))
 	for i := range hashes {
 		results[i] = scanResult{
+			parentHash: headers[i].PrevBlock,
 			meta: &wtxmgr.BlockMeta{
 				Block: wtxmgr.Block{
 					Hash: hashes[i],
@@ -865,8 +1708,8 @@ func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
 	// "header-only" scan to advance the wallet's sync state without
 	// downloading full blocks or filters.
 	//
-	// NOTE: For targeted rescans, the state will never be empty as it is
-	// initialized with specific targets.
+	// NOTE: A targeted rescan can also be empty when neither eligible
+	// horizons nor persisted addresses or outputs remain.
 	if scanState.Empty() {
 		log.Debugf("Performing header-only scan for %d blocks",
 			endHeight-startHeight+1)
@@ -905,7 +1748,7 @@ func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
 // bypassing filters and streaming full blocks (especially from a local node)
 // is often more performant and uses less CPU time overall. This threshold is
 // conservative to favor CFilters for typical wallet sizes (<10k items).
-const defaultMaxCFilterItems = 100000
+const defaultMaxCFilterItems uint32 = 100000
 
 // dispatchScanStrategy chooses and executes the appropriate scanning strategy
 // based on the wallet's configuration and heuristics.
@@ -936,10 +1779,11 @@ func (s *syncer) dispatchScanStrategy(ctx context.Context,
 			threshold = defaultMaxCFilterItems
 		}
 
-		if scanState.WatchListSize() > threshold {
+		watchListSize := scanState.WatchListSize()
+		if int64(watchListSize) > int64(threshold) {
 			log.Infof("Auto sync: Watchlist size %d > %d, "+
 				"switching to full blocks for performance",
-				scanState.WatchListSize(), threshold)
+				watchListSize, threshold)
 
 			return s.scanBatchWithFullBlocks(
 				ctx, scanState, startHeight, hashes,
@@ -991,8 +1835,14 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 			err)
 	}
 
-	// Determine our current sync state.
-	syncedTo := s.addrStore.SyncedTo()
+	// Determine our current sync state. This reads the synced tip from the
+	// Store rather than the legacy addrStore, so the next batch's start
+	// height no longer depends on ApplyScanBatch having mirrored the tip
+	// back into the legacy addrStore.
+	syncedTo, err := s.syncedTo(ctx)
+	if err != nil {
+		return false, err
+	}
 
 	// If the wallet is caught up to the best known tip, log this and
 	// return.
@@ -1008,8 +1858,8 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	gap := bestHeight - syncedTo.Height
 
 	// If the gap is large (> 6 blocks), we treat it as a major event
-	// requiring Syncing state protection. Smaller gaps are handled
-	// silently to avoid disrupting user operations like CreateTx.
+	// requiring Syncing state protection. Smaller gaps keep requests available
+	// until putSyncBatch clears readiness for watch registration at commit.
 	isLargeGap := gap > syncStateSwitchThreshold
 
 	if isLargeGap {
@@ -1068,19 +1918,26 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	if len(results) == 0 {
 		return fmt.Errorf("%w: scan batch empty", ErrScanBatchEmpty)
 	}
-	// Process Batch (Update). We do this in a single DB transaction.
-	return s.DBPutSyncBatch(ctx, results)
-}
 
-// handleChainUpdate processes a notification immediately.
-// It returns an error if processing fails or if the wallet is shutting down.
-func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
-	// For a single update, we process it and commit immediately.
-	err := s.processChainUpdate(ctx, n)
-	if err != nil {
-		return fmt.Errorf("failed to process chain update: %w", err)
+	// A reorg can overtake a disconnect or occur between hash lookups. Commit
+	// only a batch that extends the wallet tip block by block; otherwise let
+	// rollback find any fork and retry with freshly fetched hashes.
+	parent := syncedTo.Hash
+	for i := range results {
+		if results[i].parentHash != parent {
+			return s.checkRollback(ctx)
+		}
+
+		parent = results[i].meta.Hash
 	}
 
+	// Process Batch (Update). We do this in a single DB transaction.
+	return s.putSyncBatch(ctx, scanState, results)
+}
+
+// handleChainUpdate logs legacy rescan progress notifications. Manager owns
+// disconnects, while prepared transaction events use their Store handlers.
+func (s *syncer) handleChainUpdate(n any) {
 	switch msg := n.(type) {
 	case *chain.RescanProgress:
 		log.Debugf("Rescanned through block %v (height %d)",
@@ -1094,90 +1951,66 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 			"block %v (height %d). No wallet state updates "+
 			"performed.", msg.Hash, msg.Height)
 	}
-
-	return nil
 }
 
-// processChainUpdate writes a single chain update to the database.
-func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
-	switch n := update.(type) {
-	case chain.BlockConnected:
-		return s.DBPutSyncTip(ctx, wtxmgr.BlockMeta(n))
+// processChainEventBeforeSync handles initialization, retry and scan-time
+// observations without checkpointing past payments omitted by live watches.
+func (s *syncer) processChainEventBeforeSync(ctx context.Context,
+	event chainEvent) error {
 
-	// A block was disconnected. We use checkRollback to safely verify our
-	// chain state against the backend and rewind if necessary. This
-	// handles both single block disconnects and deeper reorgs robustly.
-	case chain.BlockDisconnected:
-		return s.checkRollback(ctx)
+	// Known matches are safe to record, but historical scanning must still
+	// visit this height after recovery and watch registration finish. Leave
+	// malformed metadata to the ordinary handler's existing validation.
+	if block, ok := event.notification.(chain.FilteredBlockConnected); ok &&
+		block.Block != nil {
 
-	// We only expect individual transaction notifications for unconfirmed
-	// transactions as they enter the mempool. Confirmed transactions are
-	// handled atomically via FilteredBlockConnected.
+		return s.putTxNotifications(ctx, event.matches, block.Block)
+	}
+
+	return s.processChainEvent(ctx, event)
+}
+
+// processChainEvent applies Manager-prepared matches without parsing them
+// again. Rollback preparation waits for Manager to settle shared persistence.
+func (s *syncer) processChainEvent(ctx context.Context,
+	event chainEvent) error {
+
+	switch n := event.notification.(type) {
+	case prepareRollbackReq:
+		// Acknowledge only from the worker so historical and live writes
+		// are both quiescent until Manager releases this operation.
+		close(n.readyForRollback)
+
+		select {
+		case <-n.rollbackDone:
+			return nil
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
 	case chain.RelevantTx:
-		matches := s.prepareTxMatches([]*wtxmgr.TxRecord{n.TxRecord})
-		return s.DBPutTxns(ctx, matches, n.Block)
+		return s.putTxNotifications(ctx, event.matches, n.Block)
 
 	case chain.FilteredBlockConnected:
-		matches := s.prepareTxMatches(n.RelevantTxs)
-		return s.DBPutBlocks(ctx, matches, n.Block)
+		return s.putBlockNotifications(ctx, event.matches, n.Block)
+
+	default:
+		s.handleChainUpdate(event.notification)
+
+		return nil
 	}
-
-	return nil
-}
-
-// prepareTxMatches extracts address entries from a batch of transactions and
-// groups them by transaction hash.
-func (s *syncer) prepareTxMatches(recs []*wtxmgr.TxRecord) TxEntries {
-	matches := make(TxEntries, 0, len(recs))
-	for _, rec := range recs {
-		entries := s.extractAddrEntries(rec.MsgTx.TxOut)
-		matches = append(matches, TxEntry{
-			Rec:     rec,
-			Entries: entries,
-		})
-	}
-
-	return matches
-}
-
-// extractAddrEntries collects all addresses from transaction outputs and
-// creates initial AddrEntry objects with output indices.
-func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
-	var entries []AddrEntry
-	for i, output := range txOuts {
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, s.cfg.ChainParams,
-		)
-		if err != nil {
-			log.Warnf("Cannot extract non-std pkScript=%x",
-				output.PkScript)
-
-			continue
-		}
-
-		for _, addr := range addrs {
-			entries = append(entries, AddrEntry{
-				Address: addr,
-				Credit: wtxmgr.CreditEntry{
-					//nolint:gosec // bounded.
-					Index: uint32(i),
-				},
-			})
-		}
-	}
-
-	return entries
 }
 
 // handleScanReq processes a user-initiated rescan request.
 func (s *syncer) handleScanReq(ctx context.Context,
 	req *scanReq) error {
 
-	// If the wallet is already syncing or rescanning, we can't accept a
-	// full resync request. This prevents conflicting rescan operations.
-	if s.isRecoveryMode() {
+	// Existing sync or scan work must finish before another scan can run.
+	state := s.syncState()
+	if state == syncStateSyncing || state == syncStateRescanning {
 		return fmt.Errorf("%w: wallet is currently %s",
-			ErrStateForbidden, s.syncState())
+			ErrStateForbidden, state)
 	}
 
 	if req.typ == scanTypeTargeted {
@@ -1187,23 +2020,45 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	return s.scanWithRewind(ctx, req)
 }
 
+// checkForRollbackBeforeCommit handles pending rollback preparation before a
+// scan commits. It returns ordinary queued events unprocessed; callers apply
+// them after the batch attempt, preserving prepared matches and result order.
+func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
+	chainEvent, error) {
+
+	select {
+	case event := <-s.chainEventChan:
+		if _, ok := event.notification.(prepareRollbackReq); !ok {
+			return event, nil
+		}
+
+		err := s.processChainEvent(ctx, event)
+		if err != nil {
+			return chainEvent{}, err
+		}
+
+		// Rollback has completed, invalidating this batch's fetched history.
+		// ErrStateChanged makes targeted scans reload and refetch their range;
+		// normal catch-up restarts through its existing retry/backoff loop.
+		return chainEvent{}, ErrStateChanged
+
+	default:
+		// No live event was queued, so there is no ordinary work to retain.
+		return chainEvent{}, nil
+	}
+}
+
 // waitForEvent blocks until a notification, rescan job, or context
 // cancellation occurs, processing the event accordingly.
 func (s *syncer) waitForEvent(ctx context.Context) error {
 	select {
-	// Process asynchronous notifications from the chain backend, such as
-	// new blocks or transactions.
-	case n, ok := <-s.cfg.Chain.Notifications():
-		if !ok {
-			return ErrWalletShuttingDown
-		}
-
-		return s.handleChainUpdate(ctx, n)
+	case event := <-s.chainEventChan:
+		return s.processChainEvent(ctx, event)
 
 	// Handle synchronous rescan or resync requests submitted via the
 	// controller.
 	case job := <-s.scanReqChan:
-		return s.handleScanReq(ctx, job)
+		return s.handleScanEvent(ctx, job)
 
 	// Exit gracefully if the context is canceled or the wallet is shutting
 	// down.
@@ -1212,10 +2067,50 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 	}
 }
 
+// handleScanEvent preserves asynchronous scan error policy: a failed watch
+// refresh restarts initialization, while ordinary targeted failures remain
+// local because submission already returned before worker execution.
+func (s *syncer) handleScanEvent(ctx context.Context, job *scanReq) error {
+	err := s.handleScanReq(ctx, job)
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, ErrWalletShuttingDown) {
+
+		return err
+	}
+
+	// A committed scan can leave live watches unregistered. Let that
+	// failure restart initialization instead of bypassing its retry.
+	if job.typ == scanTypeTargeted &&
+		s.syncState() != syncStateSyncing {
+
+		// Rescan returns once the request is queued, so this
+		// execution failure cannot reach its caller. For now,
+		// it is visible only in the logs; swallow it here to
+		// keep live notification processing running.
+		log.Errorf("Targeted rescan failed: %v", err)
+
+		return nil
+	}
+
+	return err
+}
+
 // scanWithRewind rewinds the wallet's sync status to the requested start
 // block.
 func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
-	current := s.addrStore.SyncedTo()
+	// Read the synced tip through syncedTo so a Store-backed backend uses
+	// the Store's tip rather than the legacy addrStore tip. A backend that
+	// does not mirror ApplyScanBatch/RewindWallet into the legacy manager
+	// would otherwise compare against a stale legacy height and could
+	// wrongly conclude there is nothing to rewind for a full rescan.
+	current, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
 
 	if req.startBlock.Height >= current.Height {
 		// Requested start is ahead of or equal to current sync.
@@ -1226,8 +2121,7 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	log.Infof("Rewinding sync status from %d to %d for rescan",
 		current.Height, req.startBlock.Height)
 
-	// Rewind the database status.
-	err := s.DBPutRewind(ctx, req.startBlock)
+	err = s.rewindWallet(ctx, req.startBlock)
 	if err != nil {
 		log.Errorf("Failed to rewind sync status: %v", err)
 
@@ -1237,23 +2131,53 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	return nil
 }
 
+// loadTargetedScanTip rebuilds the requested horizons and reads their scan
+// bound on initial entry and after rollback, using the same readiness policy.
+func (s *syncer) loadTargetedScanTip(ctx context.Context,
+	targets []waddrmgr.AccountScope) (*RecoveryState, int32, error) {
+
+	state, err := s.loadTargetedScanState(ctx, targets)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	s.state.Store(uint32(syncStateRescanning))
+
+	_, height, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return nil, 0, fmt.Errorf("get best block: %w", err)
+	}
+
+	return state, height, nil
+}
+
 // scanWithTargets performs a targeted rescan for specific accounts without
 // rewinding the global sync state.
-func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
-	scanState, err := s.loadTargetedScanState(ctx, req.targets)
+func (s *syncer) scanWithTargets(ctx context.Context,
+	req *scanReq) (resultErr error) {
+
+	// A retained live-event failure must reach the ordinary worker retry
+	// policy, but only after this accepted account range has finished.
+	var eventErr error
+	defer func() {
+		if eventErr != nil {
+			s.state.Store(uint32(syncStateSyncing))
+
+			resultErr = errors.Join(resultErr, eventErr)
+		}
+	}()
+
+	// Failed registration keeps readiness revoked until initialization retries.
+	defer s.state.CompareAndSwap(
+		uint32(syncStateRescanning), uint32(syncStateSynced),
+	)
+
+	scanState, bestHeight, err := s.loadTargetedScanTip(ctx, req.targets)
 	if err != nil {
 		return err
 	}
 
-	s.state.Store(uint32(syncStateRescanning))
-	defer s.state.Store(uint32(syncStateSynced))
-
 	startHeight := req.startBlock.Height
-
-	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
-	if err != nil {
-		return fmt.Errorf("get best block: %w", err)
-	}
 
 	log.Infof("Starting targeted rescan from height %d to %d for %d "+
 		"accounts", startHeight, bestHeight, len(req.targets))
@@ -1282,11 +2206,37 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 				"0 results", ErrScanBatchEmpty)
 		}
 
-		// Process results (update DB).
-		err = s.DBPutTargetedBatch(ctx, results)
+		// Keep the range's own result separate from retained live work:
+		// a failed observation must not discard the remaining account scan.
+		pending, err := s.checkForRollbackBeforeCommit(ctx)
+		if err == nil {
+			err = s.putTargetedBatch(ctx, scanState, results)
+		}
+
+		// The selected accounts cannot prove full-wallet historical coverage.
+		// Replay known matches without a checkpoint; preserve any error until
+		// this accepted range finishes. An empty event remains a no-op.
+		pendingErr := s.processChainEventBeforeSync(ctx, pending)
+		eventErr = errors.Join(eventErr, pendingErr)
+
+		if errors.Is(err, ErrStateChanged) {
+			// A rollback discards this attempt, not the accepted request.
+			// Reload horizons and refetch its original range on the new tip.
+			scanState, bestHeight, err = s.loadTargetedScanTip(ctx, req.targets)
+			if err != nil {
+				return err
+			}
+
+			startHeight = req.startBlock.Height
+
+			continue
+		}
+
 		if err != nil {
 			return err
 		}
+
+		s.state.Store(uint32(syncStateRescanning))
 
 		// Advance startHeight.
 		//nolint:gosec // batch size is bounded.
@@ -1298,54 +2248,602 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	return nil
 }
 
+// storeScanHorizons loads account horizon data through the store. Targets are
+// the identity-aware scanTargets produced by resolveScanTargets, so each one
+// already carries the durable AccountName that lets the Store resolve an
+// imported account without colliding with the default derived account at the
+// masked number 0.
+func (s *syncer) storeScanHorizons(ctx context.Context,
+	targets []scanTarget) ([]storeScanAccount, error) {
+
+	if len(targets) == 0 {
+		return s.storeFullScanHorizons(ctx)
+	}
+
+	return s.storeTargetedScanHorizons(ctx, targets)
+}
+
+// storeFullScanHorizons loads eligible recovery accounts from the Store,
+// skipping the keyless raw-import bucket. The scan selects no account by
+// number here, so each one is keyed on its durable store row ID and an imported
+// account cannot overwrite a derived account owning the same BIP44 number in
+// the same scope.
+func (s *syncer) storeFullScanHorizons(
+	ctx context.Context) ([]storeScanAccount, error) {
+
+	// Select eligible accounts in SQL before building recovery horizons;
+	// key-only accounts must never seed lookahead derivation.
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:      s.walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	scanAccounts := make([]storeScanAccount, 0, len(accounts))
+	for i := range accounts {
+		// The keyless imported-address bucket has no xpub to derive
+		// lookahead addresses from. Its materialized addresses are still
+		// watched by storeScanAddresses.
+		if keylessImportedAccount(accounts[i]) {
+			continue
+		}
+
+		if accounts[i].AccountID == nil {
+			return nil, fmt.Errorf("scan account %q has no store "+
+				"account id", accounts[i].AccountName)
+		}
+
+		scanAccount, err := s.storeScanAccount(
+			accounts[i], *accounts[i].AccountID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		scanAccounts = append(scanAccounts, scanAccount)
+	}
+
+	return scanAccounts, nil
+}
+
+// storeTargetedScanHorizons loads recovery horizon accounts for already
+// resolved scan targets. Each target keeps the account number the caller named
+// as its recovery key, while the Store lookup itself prefers the durable name.
+func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
+	targets []scanTarget) ([]storeScanAccount, error) {
+
+	scanAccounts := make([]storeScanAccount, 0, len(targets))
+	for _, target := range targets {
+		// The legacy imported-address bucket is a keyless
+		// pseudo-account, not a numeric HD account, and
+		// resolveScanTargets leaves its AccountName empty. Skip it
+		// before any Store lookup: its addresses are already watched
+		// through storeScanAddresses, and the backend has no row keyed
+		// by its reserved number.
+		if target.Account == waddrmgr.ImportedAddrAccount {
+			continue
+		}
+
+		info, err := s.storeScanHorizonAccount(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+
+		// The keyless imported-address bucket has no xpub to derive
+		// lookahead addresses from. Its materialized addresses are still
+		// watched by storeScanAddresses.
+		if keylessImportedAccount(*info) {
+			continue
+		}
+
+		scanAccount, err := s.storeScanAccount(*info, target.Account)
+		if err != nil {
+			return nil, err
+		}
+
+		scanAccounts = append(scanAccounts, scanAccount)
+	}
+
+	return scanAccounts, nil
+}
+
+// storeScanHorizonAccount resolves one targeted scanTarget into its Store
+// account row. The lookup prefers the durable AccountName when set, mirroring
+// the ScanHorizon contract: backends mask an unknown imported number to 0
+// and GetAccount rejects a number lookup that resolves to a numberless row, so
+// resolving a numberless target by number could fail or select the default
+// account. A number lookup is therefore issued only for a derived target whose
+// name resolution is unavailable.
+func (s *syncer) storeScanHorizonAccount(ctx context.Context,
+	target scanTarget) (*db.AccountInfo, error) {
+
+	query := db.GetAccountQuery{
+		WalletID:    s.walletID,
+		Scope:       db.KeyScope(target.Scope),
+		SkipBalance: true,
+	}
+
+	// Prefer the scope-unique name so a masked unknown imported number can
+	// never resolve to the default derived account; fall back to the number
+	// only when no name was resolved.
+	if target.AccountName != "" {
+		query.Name = &target.AccountName
+	} else {
+		account := target.Account
+		query.AccountNumber = &account
+	}
+
+	info, err := s.store.GetAccount(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get scan account: %w", err)
+	}
+
+	return info, nil
+}
+
+// storeScanAccount converts store account metadata into the recovery state
+// horizon shape. recoveryKey is the identity recovery state indexes the account
+// by; the account's own store row ID and BIP44 number are carried alongside,
+// because a horizon must be persisted against the durable row and a
+// store-native deriver must record the real account number.
+func (s *syncer) storeScanAccount(info db.AccountInfo,
+	recoveryKey uint32) (storeScanAccount, error) {
+
+	accountPubKey, err := storeAccountPubKey(info)
+	if err != nil {
+		return storeScanAccount{}, err
+	}
+
+	addrSchema, err := storeAccountAddrSchema(info.AddrSchema)
+	if err != nil {
+		return storeScanAccount{}, err
+	}
+
+	var masterFingerprint uint32
+	if info.MasterKeyFingerprint != nil {
+		masterFingerprint = *info.MasterKeyFingerprint
+	}
+
+	return storeScanAccount{
+		props: &waddrmgr.AccountProperties{
+			AccountNumber:        recoveryKey,
+			AccountName:          info.AccountName,
+			ExternalKeyCount:     info.ExternalKeyCount,
+			InternalKeyCount:     info.InternalKeyCount,
+			ImportedKeyCount:     info.ImportedKeyCount,
+			MasterKeyFingerprint: masterFingerprint,
+			KeyScope:             waddrmgr.KeyScope(info.KeyScope),
+			IsWatchOnly:          info.IsWatchOnly,
+			AccountPubKey:        accountPubKey,
+			AddrSchema:           addrSchema,
+		},
+		accountID:            info.AccountID,
+		derivedAccountNumber: info.AccountNumber,
+	}, nil
+}
+
+// storeAccountPubKey parses the account public key loaded from the store into
+// the legacy AccountProperties shape recovery still uses as its snapshot type.
+func storeAccountPubKey(
+	info db.AccountInfo) (*hdkeychain.ExtendedKey, error) {
+
+	if len(info.PublicKey) == 0 {
+		return nil, nil //nolint:nilnil
+	}
+
+	key, err := hdkeychain.NewKeyFromString(string(info.PublicKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse account public key: %w", err)
+	}
+
+	return key, nil
+}
+
+// storeAccountAddrSchema converts the db-native account address schema into the
+// AccountProperties schema recovery consumes.
+func storeAccountAddrSchema(
+	schema db.ScopeAddrSchema) (*waddrmgr.ScopeAddrSchema, error) {
+
+	external, err := addresstype.ToWallet(schema.ExternalAddrType, false)
+	if err != nil {
+		return nil, fmt.Errorf("external address type: %w", err)
+	}
+
+	internal, err := addresstype.ToWallet(schema.InternalAddrType, false)
+	if err != nil {
+		return nil, fmt.Errorf("internal address type: %w", err)
+	}
+
+	return &waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: external,
+		InternalAddrType: internal,
+	}, nil
+}
+
+// keylessImportedAccount reports whether an account is the reserved raw-import
+// alias. The bucket has no account xpub, so it cannot seed recovery horizons;
+// its materialized addresses are loaded separately by storeScanAddresses.
+func keylessImportedAccount(info db.AccountInfo) bool {
+	return info.IsImported && len(info.PublicKey) == 0
+}
+
+// storeScanAddresses loads active scan addresses through the store, paging per
+// (key scope, account) pair because ListAddresses is scoped to a single pair.
+//
+// For KVDB, this reproduces the legacy ForEachRelevantActiveAddress filtering
+// used by the old scan-data reader: for default scopes every active address is
+// watched, while for non-default key scopes only internal-branch (change)
+// addresses are watched. The non-default external branches are intentionally
+// skipped because they only ever existed due to a since-fixed bug, and
+// watching them would diverge from the legacy recovery set.
+// SQL watches persisted addresses from both branches in every eligible scope.
+func (s *syncer) storeScanAddresses(
+	ctx context.Context) ([]address.Address, error) {
+
+	// Apply the account policy before paging addresses so key-only scripts
+	// never become scan watches, even when the recovery window is zero.
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:      s.walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	var addrs []address.Address
+	for i := range accounts {
+		if keylessImportedAccount(accounts[i]) {
+			continue
+		}
+
+		accountAddrs, err := s.storeAccountScanAddresses(
+			ctx, accounts[i],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		addrs = append(addrs, accountAddrs...)
+	}
+
+	importedAddrs, err := s.storeImportedScanAddresses(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs = append(addrs, importedAddrs...)
+
+	return addrs, nil
+}
+
+// storeImportedScanAddresses loads raw imported addresses through the
+// accountless query shape that ListAccounts intentionally omits.
+func (s *syncer) storeImportedScanAddresses(
+	ctx context.Context) ([]address.Address, error) {
+
+	return s.storeAccountScanAddresses(ctx, db.AccountInfo{
+		AccountName: db.DefaultImportedAccountName,
+		IsImported:  true,
+	})
+}
+
+// storeScanAddressRelevant reports whether a stored address row belongs in the
+// recovery scan set for its account shape and key scope.
+func (s *syncer) storeScanAddressRelevant(isRawImported, isDefaultScope bool,
+	info db.AddressInfo) bool {
+
+	// SQL has no legacy branch restriction on persisted account addresses.
+	if s.addrStore == nil || isRawImported || isDefaultScope {
+		return true
+	}
+
+	return info.Branch == waddrmgr.InternalBranch
+}
+
+// storeAccountScanAddresses pages through a single account's addresses,
+// converting each stored script into its wallet address. KVDB mirrors legacy
+// ForEachRelevantActiveAddress filtering: addresses in default key scopes are
+// all relevant, while non-default key scopes only contribute their
+// internal-branch (change) addresses.
+func (s *syncer) storeAccountScanAddresses(ctx context.Context,
+	account db.AccountInfo) ([]address.Address, error) {
+
+	pageReq, err := page.NewRequest[uint32](scanAddressPageLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	// In KVDB, outside the default key scopes only the internal (change)
+	// branch is relevant, matching ForEachRelevantActiveAddress's handling of
+	// change addresses that a since-fixed bug created in non-default scopes.
+	isDefaultScope := waddrmgr.IsDefaultScope(
+		waddrmgr.KeyScope(account.KeyScope),
+	)
+	isRawImported := keylessImportedAccount(account)
+
+	query := db.ListAddressesQuery{
+		WalletID: s.walletID,
+		Page:     pageReq,
+	}
+	if !isRawImported {
+		scope := account.KeyScope
+		accountName := account.AccountName
+
+		query.Scope = &scope
+		query.AccountName = &accountName
+	}
+
+	var addrs []address.Address
+	for {
+		result, err := s.store.ListAddresses(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("list scan addresses: %w", err)
+		}
+
+		for _, info := range result.Items {
+			// Retain legacy branch relevance only for KVDB. SQL must
+			// watch persisted external children in custom scopes too.
+			if !s.storeScanAddressRelevant(
+				isRawImported, isDefaultScope, info,
+			) {
+
+				continue
+			}
+
+			_, scriptAddrs, _, err := txscript.ExtractPkScriptAddrs(
+				info.ScriptPubKey, s.cfg.ChainParams,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("scan address script: %w", err)
+			}
+
+			if len(scriptAddrs) == 0 {
+				return nil, fmt.Errorf("scan address script: %w",
+					db.ErrAddressNotFound)
+			}
+
+			addrs = append(addrs, scriptAddrs[0])
+		}
+
+		if result.Next == nil {
+			return addrs, nil
+		}
+
+		query.Page.After = result.Next
+	}
+}
+
+// storeScanUnspent loads UTXOs that recovery scans should watch through the
+// store.
+func (s *syncer) storeScanUnspent(ctx context.Context) (
+	[]wtxmgr.Credit, error) {
+
+	utxos, err := s.store.ListOutputsToWatch(ctx, s.walletID)
+	if err != nil {
+		return nil, fmt.Errorf("list outputs to watch: %w", err)
+	}
+
+	credits := make([]wtxmgr.Credit, 0, len(utxos))
+	for i := range utxos {
+		credit, err := storeScanCredit(utxos[i])
+		if err != nil {
+			return nil, err
+		}
+
+		credits = append(credits, credit)
+	}
+
+	return credits, nil
+}
+
+// storeScanCredit converts one store UTXO row into the recovery scan credit
+// shape.
+func storeScanCredit(utxo db.UtxoInfo) (wtxmgr.Credit, error) {
+	height := int32(-1)
+	if utxo.Height != db.UnminedHeight {
+		var err error
+
+		height, err = db.Uint32ToInt32(utxo.Height)
+		if err != nil {
+			return wtxmgr.Credit{}, fmt.Errorf("utxo height: %w", err)
+		}
+	}
+
+	return wtxmgr.Credit{
+		OutPoint: utxo.OutPoint,
+		BlockMeta: wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: height},
+		},
+		Amount:       utxo.Amount,
+		PkScript:     utxo.PkScript,
+		Received:     utxo.Received,
+		FromCoinBase: utxo.FromCoinBase,
+	}, nil
+}
+
+// loadStoreScanData retrieves recovery scan initialization data through the
+// store. Targets are the identity-aware scanTargets resolved up front; an
+// empty slice loads horizons for every account (the untargeted path).
+func (s *syncer) loadStoreScanData(ctx context.Context,
+	targets []scanTarget) ([]storeScanAccount, []address.Address,
+	[]wtxmgr.Credit, error) {
+
+	horizons, err := s.storeScanHorizons(ctx, targets)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	addrs, err := s.storeScanAddresses(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	unspent, err := s.storeScanUnspent(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return horizons, addrs, unspent, nil
+}
+
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
 // specific accounts.
 func (s *syncer) loadTargetedScanState(ctx context.Context,
 	targets []waddrmgr.AccountScope) (*RecoveryState, error) {
 
-	horizonData, initialAddrs, initialUnspent, err :=
-		s.loadTargetedScanData(ctx, targets)
+	accounts, initialAddrs, initialUnspent, err := s.loadTargetedScanData(
+		ctx, targets,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	state := NewRecoveryState(
-		s.cfg.RecoveryWindow, s.cfg.ChainParams, s.addrStore,
-	)
-
-	err = state.Initialize(horizonData, initialAddrs, initialUnspent)
-	if err != nil {
-		return nil, fmt.Errorf("init scan state: %w", err)
-	}
-
-	return state, nil
+	return s.newStoreScanState(accounts, initialAddrs, initialUnspent)
 }
 
 // loadTargetedScanData retrieves all necessary data from the database to
 // initialize the recovery state for a targeted rescan.
+//
+// It first resolves the public AccountScope targets into identity-aware
+// scanTargets so it never resolves an imported account by its masked number,
+// then loads the scan data through the Store.
 func (s *syncer) loadTargetedScanData(ctx context.Context,
-	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties,
+	targets []waddrmgr.AccountScope) ([]storeScanAccount,
 	[]address.Address, []wtxmgr.Credit, error) {
 
-	return s.DBGetScanData(ctx, targets)
+	resolved, err := s.resolveScanTargets(ctx, targets)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return s.loadStoreScanData(ctx, resolved)
+}
+
+// resolveScanTargets converts the public AccountScope rescan targets into the
+// internal, identity-aware scanTargets used by the Store path. It reads one
+// account snapshot and indexes it by the identity the caller actually names,
+// then carries the durable AccountName forward so Store horizon loading can key
+// on the name instead of the maskable number.
+//
+// The keyless legacy imported-address bucket is carried through with an empty
+// AccountName so storeScanHorizons skips it before any lookup; every other
+// target must match a row in the snapshot.
+func (s *syncer) resolveScanTargets(ctx context.Context,
+	targets []waddrmgr.AccountScope) ([]scanTarget, error) {
+
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	names, err := s.scanTargetNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	resolved := make([]scanTarget, 0, len(targets))
+	for _, target := range targets {
+		// The keyless imported-address bucket has no resolvable name;
+		// carry it verbatim so the Store path skips it before any
+		// lookup.
+		if target.Account == waddrmgr.ImportedAddrAccount {
+			resolved = append(resolved, scanTarget{
+				Scope:   target.Scope,
+				Account: target.Account,
+			})
+
+			continue
+		}
+
+		name, ok := names[target]
+		if !ok {
+			return nil, fmt.Errorf("resolve scan target account "+
+				"%d: %w", target.Account, db.ErrAccountNotFound)
+		}
+
+		resolved = append(resolved, scanTarget{
+			Scope:       target.Scope,
+			Account:     target.Account,
+			AccountName: name,
+		})
+	}
+
+	return resolved, nil
+}
+
+// scanTargetNames indexes one account snapshot by the (scope, number) identity
+// a rescan caller names, mapping each to the account's durable name.
+//
+// An account with a known path is indexed by its public AccountNumber,
+// including imported accounts. A numberless import uses its store
+// AccountID -- but only for kvdb, recognized by the legacy address manager
+// being present. There AccountID is waddrmgr's own internal, non-masked account
+// number, which is exactly the selector the caller supplies, so this is a
+// format-boundary adaptation rather than a store-identity selector. SQL sets
+// AccountID from a relational row ID unrelated to any BIP44 number, so matching
+// it would let a request for a nonexistent account select an unrelated imported
+// row; there an unmatched numeric target is simply not found, and targeting a
+// numberless import by number stays unsupported. A numbered row wins if a
+// malformed snapshot ever presents both.
+func (s *syncer) scanTargetNames(
+	ctx context.Context) (map[waddrmgr.AccountScope]string, error) {
+
+	// Resolve targets only from eligible SQL rows. An excluded explicit
+	// target then follows the existing missing-account error path.
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:      s.walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	legacyNumbering := s.addrStore != nil
+
+	names := make(map[waddrmgr.AccountScope]string, len(accounts))
+	for i := range accounts {
+		info := accounts[i]
+
+		scope := waddrmgr.KeyScope(info.KeyScope)
+
+		if info.AccountNumber != nil {
+			names[waddrmgr.AccountScope{
+				Scope:   scope,
+				Account: *info.AccountNumber,
+			}] = info.AccountName
+
+			continue
+		}
+
+		if !info.IsImported || !legacyNumbering ||
+			info.AccountID == nil {
+
+			continue
+		}
+
+		key := waddrmgr.AccountScope{
+			Scope:   scope,
+			Account: *info.AccountID,
+		}
+		if _, ok := names[key]; ok {
+			continue
+		}
+
+		names[key] = info.AccountName
+	}
+
+	return names, nil
 }
 
 // loadWalletScanData retrieves all necessary data from the database to
 // initialize the recovery state. This includes account horizons, active
 // addresses, and unspent outputs to watch.
-func (s *syncer) loadWalletScanData(ctx context.Context) (
-	[]*waddrmgr.AccountProperties, []address.Address,
-	[]wtxmgr.Credit, error) {
+func (s *syncer) loadWalletScanData(ctx context.Context) ([]storeScanAccount,
+	[]address.Address, []wtxmgr.Credit, error) {
 
-	var targets []waddrmgr.AccountScope
-	for _, scopedMgr := range s.addrStore.ActiveScopedKeyManagers() {
-		for _, accNum := range scopedMgr.ActiveAccounts() {
-			targets = append(targets, waddrmgr.AccountScope{
-				Scope:   scopedMgr.Scope(),
-				Account: accNum,
-			})
-		}
-	}
-
-	return s.DBGetScanData(ctx, targets)
+	return s.loadStoreScanData(ctx, nil)
 }

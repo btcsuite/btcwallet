@@ -7,7 +7,6 @@ require (
 	github.com/btcsuite/btcd/chainhash/v2 v2.0.0
 	github.com/btcsuite/btcd/wire/v2 v2.0.0
 	github.com/btcsuite/btclog v1.0.0
-	github.com/btcsuite/btcwallet v0.16.18
 	github.com/btcsuite/btcwallet/walletdb v1.6.0
 	github.com/lightningnetwork/lnd/clock v1.0.1
 	github.com/stretchr/testify v1.10.0
@@ -24,6 +23,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

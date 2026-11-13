@@ -28,6 +28,23 @@ Best practices for writing clear, effective, and maintainable unit tests.
 
 ---
 
+## 📊 Benchmarks
+
+Wallet benchmark methodology, setup, suite comparisons and measured results.
+
+**[➡️ Read the Benchmark Guide](./benchmark/README.md)**
+
+---
+
+## 🧾 Transaction Invalidation Flows
+
+A focused guide to the wallet tx-store event model for transaction invalidation,
+publisher cleanup, and rollback handling.
+
+**[➡️ Read the Transaction Invalidation Flows Guide](./tx_invalidation_flows.md)**
+
+---
+
 ## 🏛️ Engineering Guide
 
 A deep dive into the core design philosophy, architectural patterns, and Go implementation details that guide the development of `btcwallet`.

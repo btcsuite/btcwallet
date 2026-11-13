@@ -43,6 +43,13 @@ const (
 	// ImportedAddrAccountName is the name of the imported account.
 	ImportedAddrAccountName = "imported"
 
+	// BirthdaySafetyMargin is the duration subtracted from a wallet's
+	// requested birthday before it is persisted. Backing the birthday
+	// off by this margin guards against clock skew and deposits made in
+	// the window just before the stated birthday, so a rescan does not
+	// miss them.
+	BirthdaySafetyMargin = 48 * time.Hour
+
 	// DefaultAccountNum is the number of the default account.
 	DefaultAccountNum = 0
 
@@ -135,6 +142,10 @@ var FastScryptOptions = ScryptOptions{
 	R: 8,
 	P: 1,
 }
+
+// NamespaceKey is the top-level walletdb bucket key the wallet allocates for
+// the address manager's storage.
+var NamespaceKey = []byte("waddrmgr")
 
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for
@@ -430,24 +441,31 @@ func (m *Manager) IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
 // TODO(yy): Rename this to wipe memory for priv keys.
 func (m *Manager) lock() {
 	for _, manager := range m.scopedManagers {
+		manager.mtx.Lock()
+
 		// Clear all of the account private keys.
-		for _, acctInfo := range manager.accountInfo() {
+		for _, acctInfo := range manager.acctInfo {
 			if acctInfo.acctKeyPriv != nil {
 				acctInfo.acctKeyPriv.Zero()
 			}
 			acctInfo.acctKeyPriv = nil
+
+			// loadAccountInfo warms the last external/internal addresses while
+			// unlocked, so those managed-address instances may also hold
+			// cleartext private key bytes outside the LRU cache.
+			wipeAddressSecret(acctInfo.lastExternalAddr)
+			wipeAddressSecret(acctInfo.lastInternalAddr)
 		}
 
 		// Remove clear text private keys and scripts from all address
 		// entries.
-		for _, ma := range manager.addresses() {
-			switch addr := ma.(type) {
-			case *managedAddress:
-				addr.lock()
-			case *scriptAddress:
-				addr.lock()
-			}
-		}
+		manager.addrs.Range(func(_ addrKey, cachedAddr *cachedAddr) bool {
+			wipeAddressSecret(cachedAddr.addr)
+
+			return true
+		})
+
+		manager.mtx.Unlock()
 	}
 
 	// Remove clear text private master and crypto keys from memory.
@@ -498,9 +516,11 @@ func (m *Manager) Close() {
 // scoped key manager is a sub-manager that only has the coin type key of a
 // particular coin type and BIP0043 purpose. This is useful as it enables
 // callers to create an arbitrary BIP0043 like schema with a stand alone
-// manager. Note that a new scoped manager cannot be created if: the wallet is
-// watch only, the manager hasn't been unlocked, or the root key has been.
-// neutered from the database.
+// manager. Spendable wallets must be unlocked and retain the master HD private
+// key; watch-only wallets create the scope without a derived default account.
+// The returned manager is usable inside ns's transaction. Root lookups and
+// address-type indexes include the new scope only after the transaction
+// commits.
 //
 // TODO(roasbeef): addrtype of raw key means it'll look in scripts to possibly
 // mark as gucci?
@@ -602,26 +622,34 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		}
 	}
 
-	// Finally, we'll register this new scoped manager with the root
-	// manager.
-	m.scopedManagers[scope] = &ScopedKeyManager{
+	// Keep the manager usable in this transaction without publishing rows
+	// that a preview or failed import may still roll back.
+	scoped := &ScopedKeyManager{
 		scope:       scope,
 		addrSchema:  addrSchema,
 		rootManager: m,
-		addrs:       make(map[addrKey]ManagedAddress),
+		addrs:       newAddrCache(defaultAddrCacheSize),
 		acctInfo:    make(map[uint32]*accountInfo),
 		privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
 			defaultPrivKeyCacheSize,
 		),
 	}
-	m.externalAddrSchemas[addrSchema.ExternalAddrType] = append(
-		m.externalAddrSchemas[addrSchema.ExternalAddrType], scope,
-	)
-	m.internalAddrSchemas[addrSchema.InternalAddrType] = append(
-		m.internalAddrSchemas[addrSchema.InternalAddrType], scope,
-	)
+	// Commit runs after this method releases the root lock, so reacquire it
+	// before publishing the manager and its address-type indexes together.
+	ns.Tx().OnCommit(func() {
+		m.mtx.Lock()
+		defer m.mtx.Unlock()
 
-	return m.scopedManagers[scope], nil
+		m.scopedManagers[scope] = scoped
+		m.externalAddrSchemas[addrSchema.ExternalAddrType] = append(
+			m.externalAddrSchemas[addrSchema.ExternalAddrType], scope,
+		)
+		m.internalAddrSchemas[addrSchema.InternalAddrType] = append(
+			m.internalAddrSchemas[addrSchema.InternalAddrType], scope,
+		)
+	})
+
+	return scoped, nil
 }
 
 // FetchScopedKeyManager attempts to fetch an active scoped manager according to
@@ -931,6 +959,52 @@ func (m *Manager) ChainParams() *chaincfg.Params {
 	return m.chainParams
 }
 
+// EncryptedMasterHDPriv returns the encrypted master HD private key bytes
+// from the manager's main bucket. Returns ErrWatchingOnly when no encrypted
+// master HD private key is persisted.
+func (m *Manager) EncryptedMasterHDPriv(
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	priv, _ := fetchMasterHDKeys(ns)
+	if priv == nil {
+		return nil, managerError(
+			ErrWatchingOnly,
+			"encrypted master HD private key not found", nil,
+		)
+	}
+
+	return priv, nil
+}
+
+// MasterHDPubKey returns the decrypted master HD public key bytes from the
+// manager's main bucket. Returns ErrNoExist when not persisted.
+func (m *Manager) MasterHDPubKey(
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	_, pubEnc := fetchMasterHDKeys(ns)
+	if pubEnc == nil {
+		return nil, managerError(
+			ErrNoExist, "master HD public key not found", nil,
+		)
+	}
+
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	// The new SQL backends persist the master HD public key in plaintext,
+	// but the legacy kvdb (waddrmgr) bucket layout still stores it
+	// encrypted under cryptoKeyPub, so the decrypt step is required here
+	// for kvdb-backed wallets.
+	plain, err := m.cryptoKeyPub.Decrypt(pubEnc)
+	if err != nil {
+		return nil, managerError(
+			ErrCrypto, "decrypt master HD public key", err,
+		)
+	}
+
+	return plain, nil
+}
+
 // ChangePassphrase changes either the public or private passphrase to the
 // provided value depending on the private flag.  In order to change the
 // private password, the address manager must not be watching-only.  The new
@@ -1136,17 +1210,17 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 
 	// Clear and remove all of the encrypted acount private keys.
 	for _, manager := range m.scopedManagers {
+		manager.mtx.Lock()
+
 		for _, acctInfo := range manager.acctInfo {
 			zero.Bytes(acctInfo.acctKeyEncrypted)
 			acctInfo.acctKeyEncrypted = nil
 		}
-	}
 
-	// Clear and remove encrypted private keys and encrypted scripts from
-	// all address entries.
-	for _, manager := range m.scopedManagers {
-		for _, ma := range manager.addrs {
-			switch addr := ma.(type) {
+		// Clear and remove encrypted private keys and encrypted scripts from
+		// all address entries.
+		manager.addrs.Range(func(_ addrKey, cachedAddr *cachedAddr) bool {
+			switch addr := cachedAddr.addr.(type) {
 			case *managedAddress:
 				zero.Bytes(addr.privKeyEncrypted)
 				addr.privKeyEncrypted = nil
@@ -1154,7 +1228,10 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 				zero.Bytes(addr.scriptEncrypted)
 				addr.scriptEncrypted = nil
 			}
-		}
+
+			return true
+		})
+		manager.mtx.Unlock()
 	}
 
 	// Clear and remove encrypted private and script crypto keys.
@@ -1213,7 +1290,8 @@ func (m *Manager) Lock() error {
 // even if it was already unlocked prior to calling this function.
 //
 // This function will return an error if invoked on a watching-only address
-// manager.
+// manager. Imported watch-only accounts remain public-only when a signing
+// manager unlocks its local accounts.
 func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// A watching-only address manager can't be unlocked.
 	if m.WatchOnly() {
@@ -1264,6 +1342,12 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// extended keys.
 	for _, manager := range m.scopedManagers {
 		for account, acctInfo := range manager.acctInfo {
+			// Imported accounts have no local private ciphertext to restore.
+			// Keep local-account decryption and its corruption checks intact.
+			if acctInfo.acctType == accountWatchOnly {
+				continue
+			}
+
 			decrypted, err := m.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
 			if err != nil {
 				m.lock()
@@ -1671,7 +1755,7 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 		scopedManagers[scope] = &ScopedKeyManager{
 			scope:      scope,
 			addrSchema: *scopeSchema,
-			addrs:      make(map[addrKey]ManagedAddress),
+			addrs:      newAddrCache(defaultAddrCacheSize),
 			acctInfo:   make(map[uint32]*accountInfo),
 			privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
 				defaultPrivKeyCacheSize,
@@ -2044,6 +2128,6 @@ func Create(ns walletdb.ReadWriteBucket, rootKey *hdkeychain.ExtendedKey,
 		return maybeConvertDbError(err)
 	}
 
-	// Use 48 hours as margin of safety for wallet birthday.
-	return putBirthday(ns, birthday.Add(-48*time.Hour))
+	// Apply the safety margin before persisting the wallet birthday.
+	return putBirthday(ns, birthday.Add(-BirthdaySafetyMargin))
 }

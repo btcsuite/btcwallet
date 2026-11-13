@@ -1,15 +1,36 @@
 name: "Rebase on to the PR target base branch"
 description: "A reusable workflow that's used to rebase the PR code on to the target base branch."
 
+outputs:
+  base-ref:
+    description: "The current pull request base branch."
+    value: ${{ steps.pr-base.outputs.ref }}
+
 runs:
   using: "composite"
 
   steps:
-    - name: fetch and rebase on ${{ github.base_ref }}
+    - name: resolve the current pull request base
+      id: pr-base
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        base_ref=$(gh api \
+          "repos/${GH_REPO}/pulls/${PR_NUMBER}" \
+          --jq '.base.ref')
+        echo "ref=${base_ref}" >> "${GITHUB_OUTPUT}"
+
+    - name: fetch and rebase on the pull request base
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.pr-base.outputs.ref }}
       run: |
         git remote add upstream https://github.com/${{ github.repository }}
-        git fetch upstream ${{ github.base_ref }}:refs/remotes/upstream/${{ github.base_ref }}
+        git fetch upstream \
+          "${BASE_REF}:refs/remotes/upstream/${BASE_REF}"
         export GIT_COMMITTER_EMAIL="btcwallet-ci@example.com"
         export GIT_COMMITTER_NAME="btcwallet CI"
-        git rebase upstream/${{ github.base_ref }}
+        git rebase "upstream/${BASE_REF}"

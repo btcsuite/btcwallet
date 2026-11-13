@@ -1,22 +1,30 @@
 package wallet
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -237,6 +245,9 @@ func decimalWidth(value int) int {
 
 // benchmarkWalletConfig holds configuration for benchmark wallet setup.
 type benchmarkWalletConfig struct {
+	// chainSource selects publication and registration before owner assembly.
+	chainSource chain.Interface
+
 	// scopes is the key scopes to create accounts in.
 	scopes []waddrmgr.KeyScope
 
@@ -307,9 +318,23 @@ func setupBenchmarkWallet(tb testing.TB,
 		}
 	}
 
-	if w.sync == nil {
-		w.sync = newSyncer(w.cfg, w.addrStore, w.txStore, w)
+	// Select the backend before the owner captures it, so subscription and
+	// publication cannot silently use different sources.
+	if cfg.chainSource != nil {
+		w.cfg.Chain = cfg.chainSource
 	}
+
+	w.chainSyncer = newChainSyncer(w.cfg.Chain, w.cfg.ChainParams)
+	w.chainEventChan = make(chan chainEvent, 1)
+
+	if w.sync == nil {
+		w.sync = newSyncer(
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+			w.chainSyncer, w.chainEventChan,
+		)
+	}
+
+	require.NotNil(tb, w.store)
 
 	// Initialize controller channels and timer.
 	if w.requestChan == nil {
@@ -323,12 +348,31 @@ func setupBenchmarkWallet(tb testing.TB,
 		}
 	}
 
+	// Legacy benchmark setup lacks the maintained lifetime. Initialize it so
+	// routed calls and mainLoop share production shutdown semantics.
+	if w.lifetimeCtx == nil {
+		w.lifetimeCtx, w.cancel = context.WithCancel(context.Background())
+	}
+
 	// Force state to Started to satisfy validateStarted() in new APIs.
 	err := w.state.toStarting()
 	if err == nil {
 		err = w.state.toStarted()
 		require.NoError(tb, err)
 	}
+
+	// Start mainLoop for routed calls. Cleanup also stops legacy goroutines
+	// whose synthetic testing.T hooks never run because all share w.wg.
+	w.wg.Add(1)
+
+	go w.mainLoop()
+
+	tb.Cleanup(func() {
+		w.cancel()
+		w.StopDeprecated()
+		w.WaitForShutdown()
+	})
+
 	// Transition to Unlocked so signing operations are permitted.
 	w.state.toUnlocked()
 
@@ -894,25 +938,6 @@ func signMultipleInputs(tb testing.TB, w *Wallet, tx *wire.MsgTx,
 
 	tb.Helper()
 
-	signMultipleInputsWithTweaker(
-		tb, w, tx, prevOuts, sigHashes, hashType, nil,
-	)
-}
-
-// signMultipleInputsWithTweaker is a helper function that signs multiple
-// transaction inputs using ComputeUnlockingScript with an optional tweaker
-// function. This is useful for benchmarks that test multi-input transaction
-// signing performance with custom key tweaking.
-//
-// IMPORTANT: sigHashes should be pre-computed outside the benchmark loop to
-// avoid measuring setup time. The caller should create a single sigHashes
-// instance using all prevOuts before the benchmark loop, then pass it here.
-func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
-	prevOuts []*wire.TxOut, sigHashes *txscript.TxSigHashes,
-	hashType txscript.SigHashType, tweaker PrivKeyTweaker) {
-
-	tb.Helper()
-
 	for j := range prevOuts {
 		params := &UnlockingScriptParams{
 			Tx:         tx,
@@ -920,7 +945,6 @@ func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
 			Output:     prevOuts[j],
 			SigHashes:  sigHashes,
 			HashType:   hashType,
-			Tweaker:    tweaker,
 		}
 
 		unlockingScript, err := w.ComputeUnlockingScript(
@@ -932,14 +956,12 @@ func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
 }
 
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
-// contract as ListAccounts by calling Accounts API across all active key scopes
+// contract as ListAccounts by calling Accounts across all active key scopes
 // and aggregating the results.
-func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
+func listAccountsDeprecated(w *Wallet) ([]db.AccountInfo, error) {
 	var (
-		allAccounts      []AccountResult
-		finalBlockHash   chainhash.Hash
-		finalBlockHeight int32
-		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
+		allAccounts   []db.AccountInfo
+		scopeManagers = w.addrStore.ActiveScopedKeyManagers()
 	)
 
 	for _, scopeMgr := range scopeManagers {
@@ -950,29 +972,24 @@ func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
 			return nil, err
 		}
 
-		allAccounts = append(allAccounts, result.Accounts...)
-
-		finalBlockHash = result.CurrentBlockHash
-		finalBlockHeight = result.CurrentBlockHeight
+		for _, account := range result.Accounts {
+			allAccounts = append(
+				allAccounts, accountResultToInfo(w, account),
+			)
+		}
 	}
 
-	return &AccountsResult{
-		Accounts:           allAccounts,
-		CurrentBlockHash:   finalBlockHash,
-		CurrentBlockHeight: finalBlockHeight,
-	}, nil
+	return allAccounts, nil
 }
 
 // listAccountsByNameDeprecated wraps the deprecated Accounts API to satisfy the
 // same contract as ListAccountsByName by calling Accounts API across all active
 // key scopes, filtering by account name, and aggregating the results.
 func listAccountsByNameDeprecated(w *Wallet,
-	name string) (*AccountsResult, error) {
+	name string) ([]db.AccountInfo, error) {
 
 	var (
-		matchingAccounts []AccountResult
-		finalBlockHash   chainhash.Hash
-		finalBlockHeight int32
+		matchingAccounts []db.AccountInfo
 		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
 	)
 
@@ -988,27 +1005,21 @@ func listAccountsByNameDeprecated(w *Wallet,
 		for _, account := range result.Accounts {
 			if account.AccountName == name {
 				matchingAccounts = append(
-					matchingAccounts, account,
+					matchingAccounts,
+					accountResultToInfo(w, account),
 				)
 			}
 		}
-
-		finalBlockHash = result.CurrentBlockHash
-		finalBlockHeight = result.CurrentBlockHeight
 	}
 
-	return &AccountsResult{
-		Accounts:           matchingAccounts,
-		CurrentBlockHash:   finalBlockHash,
-		CurrentBlockHeight: finalBlockHeight,
-	}, nil
+	return matchingAccounts, nil
 }
 
 // getAccountDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as GetAccount by calling Accounts API across all active key scopes
 // and filtering by account name.
 func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string) (*AccountResult, error) {
+	accountName string) (*db.AccountInfo, error) {
 
 	result, err := w.Accounts(scope)
 	if err != nil {
@@ -1017,34 +1028,24 @@ func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 
 	for _, account := range result.Accounts {
 		if account.AccountName == accountName {
-			return &account, nil
+			info := accountResultToInfo(w, account)
+
+			return &info, nil
 		}
 	}
 
 	return nil, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
 }
 
-// getBalanceDeprecated wraps the deprecated Accounts API to satisfy the same
-// contract as GetBalance by calling Accounts API across all active key scopes
-// and filtering by account name.
-func getBalanceDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string, _ int32) (btcutil.Amount, error) {
+// accountResultToInfo converts the deprecated account result shape into the
+// account-info shape used by the replacement read APIs.
+func accountResultToInfo(w *Wallet, account AccountResult) db.AccountInfo {
+	isImported := account.AccountNumber == waddrmgr.ImportedAddrAccount
 
-	result, err := w.Accounts(scope)
-	if err != nil {
-		return 0, err
-	}
-
-	for _, account := range result.Accounts {
-		if account.AccountName == accountName {
-			// The deprecated Accounts API doesn't support
-			// confirmation filtering. It always returns total
-			// balance.
-			return account.TotalBalance, nil
-		}
-	}
-
-	return 0, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
+	return propertiesToAccountInfo(
+		&account.AccountProperties, account.TotalBalance, isImported,
+		w.addrStore.WatchOnly(), w.masterFingerprint,
+	)
 }
 
 // listAddressesDeprecated wraps the deprecated AccountAddresses and
@@ -1126,4 +1127,311 @@ func getUtxoDeprecated(w *Wallet, prevOut wire.OutPoint) (*Utxo, error) {
 		AddressType:   addrType,
 		Locked:        locked,
 	}, nil
+}
+
+// nodeBenchmarkKVDBPath returns a private closed database for either runtime.
+// Docker supplies a versioned fixture directory; direct Go invocations use a
+// temporary one. The cached original is never opened for writes.
+func nodeBenchmarkKVDBPath(tb testing.TB,
+	workload bwtest.NodeBenchmarkWorkload) string {
+
+	tb.Helper()
+
+	path := testKVDBPath(tb)
+
+	fixtureDir := os.Getenv("BTCWALLET_BENCH_FIXTURE_DIR")
+	if fixtureDir == "" {
+		// Match SQL's isolated cache for direct runs without a shared volume.
+		fixtureDir = tb.TempDir()
+	}
+
+	fixture := filepath.Join(fixtureDir, "kvdb", workload.ID+".db")
+
+	// Each invocation owns a new file, so startup and cleanup cannot mutate
+	// the persisted snapshot used by later legacy or maintained processes.
+	restoreStarted := time.Now()
+
+	data, err := os.ReadFile(filepath.Clean(fixture))
+	if err == nil {
+		require.NoError(tb, os.WriteFile(path, data, 0o600))
+		tb.Logf("fixture restoration: %s", time.Since(restoreStarted))
+
+		return path
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		tb.Fatalf("read node fixture: %v", err)
+	}
+
+	// Reuse normal creation and Store seeding only on a miss. Stop joins
+	// workers and closes the database before any file bytes are copied.
+	preparationStarted := time.Now()
+	params := CreateWalletParams{
+		Name:              "list-unspent-benchmark",
+		Mode:              ModeImportSeed,
+		Seed:              workload.Seed,
+		Birthday:          workload.Birthday,
+		PubPassphrase:     []byte(InsecurePubPassphrase),
+		PrivatePassphrase: []byte("private"),
+	}
+	manager := testKVDBManagerAt(tb, path)
+	w := createNodeBenchmarkWallet(tb, manager, params)
+
+	// Borrow the backend-owned handle for legacy bulk address allocation;
+	// Manager still owns its shutdown before the snapshot is saved.
+	backend, ok := manager.backend.(*kvdbManagerBackend)
+	require.True(tb, ok)
+
+	seedNodeBenchmarkKVDB(tb, w, backend.db, workload)
+	require.NoError(tb, manager.Stop())
+
+	data, err = os.ReadFile(filepath.Clean(path))
+	require.NoError(tb, err)
+	require.NoError(tb, os.MkdirAll(filepath.Dir(fixture), 0o700))
+
+	// Serial runs publish only complete snapshots. An interrupted write
+	// leaves a disposable sibling, never a cache entry for the next run.
+	pending := fixture + ".partial"
+	defer func() { _ = os.Remove(pending) }()
+
+	require.NoError(tb, os.WriteFile(pending, data, 0o600))
+	require.NoError(tb, os.Rename(pending, fixture))
+
+	tb.Logf("fixture preparation: %s", time.Since(preparationStarted))
+
+	return path
+}
+
+// createNodeBenchmarkWallet uses normal Manager publication and an
+// indefinite unlock so cryptographic setup and automatic relocking cannot
+// enter the read-only measurement.
+func createNodeBenchmarkWallet(tb testing.TB, manager *Manager,
+	params CreateWalletParams) *Wallet {
+
+	tb.Helper()
+
+	w, err := manager.Create(params)
+	require.NoError(tb, err)
+	err = w.Unlock(tb.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	})
+	require.NoError(tb, err)
+
+	return w
+}
+
+// seedNodeBenchmarkKVDB uses native scoped bulk derivation and Store history
+// writes. The borrowed DB remains Manager-owned; shared batch order gives SQL
+// and kvdb identical ordinary scripts and internal key-family indexes.
+func seedNodeBenchmarkKVDB(tb testing.TB, w *Wallet,
+	dbConn walletdb.DB, workload bwtest.NodeBenchmarkWorkload) {
+
+	tb.Helper()
+
+	phaseStarted := time.Now()
+	keyScope := bwtest.NodeBenchmarkChannelScope()
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	families := workload.NumAccounts - uint32(len(waddrmgr.DefaultKeyScopes))
+
+	// Kvdb already owns ordinary defaults. The scoped manager creates its
+	// internal default/imported accounts; subsequent account numbers match lnd.
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		internal, err := w.addrStore.NewScopedKeyManager(ns, keyScope, schema)
+		if err != nil {
+			return err
+		}
+
+		// Explicit family numbers preserve default0 even when the new scope
+		// has no last-account metadata for sequential account creation.
+		for account := uint32(1); account < families; account++ {
+			err := internal.NewRawAccount(ns, account)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	require.NoError(tb, err)
+	tb.Logf("fixture accounts: %s", time.Since(phaseStarted))
+	phaseStarted = time.Now()
+
+	// Bulk native derivation avoids rebuilding all existing account address
+	// metadata for each key. Internal keys stay unused because history only
+	// credits the ordinary receiving/change/closing branches.
+	var scripts [][]byte
+	for _, batch := range workload.AddressBatches() {
+		manager, err := w.addrStore.FetchScopedKeyManager(batch.Scope)
+		require.NoError(tb, err)
+
+		var addresses []waddrmgr.ManagedAddress
+
+		err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			if batch.Internal {
+				addresses, err = manager.NextInternalAddresses(
+					ns, batch.Account, batch.Count,
+				)
+			} else {
+				addresses, err = manager.NextExternalAddresses(
+					ns, batch.Account, batch.Count,
+				)
+			}
+
+			return err
+		})
+		require.NoError(tb, err)
+
+		if batch.Scope == keyScope {
+			// Channel keys fill internal families, not payment addresses.
+			// Keep them out of Batch's receiving/change/closing script order.
+			continue
+		}
+
+		for _, addr := range addresses {
+			script, err := txscript.PayToAddrScript(addr.Address())
+			require.NoError(tb, err)
+
+			scripts = append(scripts, script)
+		}
+	}
+
+	tb.Logf("fixture allocation: %s", time.Since(phaseStarted))
+	phaseStarted = time.Now()
+
+	// Legacy sync metadata needs each confirmed predecessor tip. The shared
+	// builder leaves force-close records unconfirmed without adding credits;
+	// later confirmed sweep credits preserve the observed resolved endpoint.
+	batch := workload.Batch(w.id, scripts)
+	for _, transaction := range batch.Transactions {
+		require.NoError(tb, w.store.ApplyTxBatch(
+			tb.Context(), db.TxBatchParams{
+				WalletID:     w.id,
+				Transactions: []db.CreateTxParams{transaction},
+				SyncedTo:     transaction.Block,
+			},
+		))
+	}
+
+	tb.Logf("fixture history: %s", time.Since(phaseStarted))
+
+	// Both runtimes reuse this snapshot, so check its committed totals once.
+	bwtest.AssertNodeBenchmarkWallet(tb, w.store, w.id, workload)
+}
+
+// RunKVDBBenchmark reopens each shared snapshot through its native runtime and
+// prepares a read before common measurement. A nil legacy factory marks a
+// semantically unmatched baseline unavailable before any Wallet startup.
+func RunKVDBBenchmark(b *testing.B,
+	before, after func(*testing.B, *Wallet,
+		bwtest.NodeBenchmarkWorkload) func() error) {
+
+	b.Helper()
+
+	for _, workload := range bwtest.NodeBenchmarkCases() {
+		b.Run(workload.ID+"/0-Before", func(b *testing.B) {
+			if before == nil {
+				b.Skip("legacy baseline unavailable for this request")
+			}
+
+			// Loader owns the old runtime and its database shutdown. It
+			// reads a private copy of the same saved file as Manager.
+			path := nodeBenchmarkKVDBPath(b, workload)
+			loader := NewLoader(
+				&chainParams, filepath.Dir(path), false,
+				defaultDBTimeout, 0,
+			)
+			w, err := loader.OpenExistingWallet(
+				[]byte(InsecurePubPassphrase), false,
+			)
+			require.NoError(b, err)
+			b.Cleanup(func() {
+				require.NoError(b, loader.UnloadWallet())
+			})
+			require.NoError(b, w.UnlockDeprecated([]byte("private"), nil))
+
+			bwtest.BenchmarkRead(b, before(b, w, workload))
+		})
+		b.Run(workload.ID+"/1-After", func(b *testing.B) {
+			// Manager starts only after a private closed file is ready;
+			// its existing fixture owns cleanup and worker shutdown.
+			path := nodeBenchmarkKVDBPath(b, workload)
+			manager := testKVDBManagerAt(b, path)
+			manager.RLock()
+			w := manager.wallets[""]
+			manager.RUnlock()
+			require.NoError(b, w.Unlock(b.Context(), UnlockRequest{
+				Passphrase: []byte("private"),
+				Timeout:    -1,
+			}))
+
+			bwtest.BenchmarkRead(b, after(b, w, workload))
+		})
+	}
+}
+
+// KVDBBenchmarkTarget selects the same cooperative return as SQL, outside
+// measurement. Legacy and maintained list order differs, so choose canonical
+// txid/index order. Legacy supplies only JSON outpoint/address request fields.
+func KVDBBenchmarkTarget(tb testing.TB, w *Wallet, legacy bool) *Utxo {
+	tb.Helper()
+
+	if legacy {
+		utxos, err := w.ListUnspentDeprecated(0, math.MaxInt32, "")
+		require.NoError(tb, err)
+
+		// JSON amounts need native BTC-to-satoshi conversion; eligibility and
+		// ordering belong to the same rule used by maintained Wallet reads.
+		utxo, found := bwtest.SelectNodeBenchmarkTarget(
+			utxos,
+			func(utxo *btcjson.ListUnspentResult) (btcutil.Amount,
+				string, uint32) {
+
+				amount, err := btcutil.NewAmount(utxo.Amount)
+				require.NoError(tb, err)
+
+				return amount, utxo.TxID, utxo.Vout
+			},
+		)
+		if !found {
+			tb.Fatal("prepare point read: no cooperative return")
+		}
+
+		hash, err := chainhash.NewHashFromStr(utxo.TxID)
+		require.NoError(tb, err)
+
+		addr, err := address.DecodeAddress(utxo.Address, w.cfg.ChainParams)
+		require.NoError(tb, err)
+
+		// Legacy consumers need only the chosen JSON outpoint and address.
+		// Decode those fields after selection, outside the measured read.
+		return &Utxo{
+			OutPoint: wire.OutPoint{
+				Hash:  *hash,
+				Index: utxo.Vout,
+			},
+			Address: addr,
+		}
+	}
+
+	utxos, err := w.ListUnspent(tb.Context(), UtxoQuery{
+		MaxConfs: math.MaxInt32,
+	})
+	require.NoError(tb, err)
+
+	// Preserve the native result while sharing the SQL point-read policy.
+	target, found := bwtest.SelectNodeBenchmarkTarget(
+		utxos, func(utxo *Utxo) (btcutil.Amount, string, uint32) {
+			return utxo.Amount, utxo.OutPoint.Hash.String(),
+				utxo.OutPoint.Index
+		},
+	)
+	if !found {
+		tb.Fatal("prepare point read: no cooperative return")
+	}
+
+	return target
 }
