@@ -273,28 +273,46 @@ func signInputInVault(ctx context.Context, signingVault keyvault.SigningVault,
 // computeRawSigInVault signs a raw input signature through the vault. The
 // signature hash is computed before any key lookup, so a malformed request
 // fails without touching a secret.
+//
+// With signer set, as for PSBT records, the wallet derives the expected key
+// from the account XPub under the tweak and checks the record names it. The
+// vault then checks that its tweaked private key has that public key before it
+// signs. Both checks fail with ErrSigningKeyMismatch.
 func (w *Wallet) computeRawSigInVault(ctx context.Context,
-	signingVault keyvault.SigningVault,
-	params *RawSigParams) (RawSignature, error) {
+	signingVault keyvault.SigningVault, params *RawSigParams,
+	signer []byte) (RawSignature, error) {
 
 	sigHash, err := params.Details.inputSigHash(params)
 	if err != nil {
 		return nil, fmt.Errorf("cannot sign transaction: %w", err)
 	}
 
-	// The output tweak needs the parity of the tweaked key, which the
-	// account XPub gives without the private key.
-	var base *btcec.PublicKey
-	if sigHash.keyPath {
+	// The output tweak needs the parity of the tweaked key, and a signer
+	// record needs the full tweaked key. The account XPub gives both
+	// without the private key.
+	var base, effective *btcec.PublicKey
+	if sigHash.keyPath || signer != nil {
 		base, err = w.derivePathPubKey(ctx, params.Path)
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	if signer != nil {
+		effective, err = params.Tweak.pubKey(base)
+		if err != nil {
+			return nil, err
+		}
+
+		if !recordKeyIs(signer, effective) {
+			return nil, fmt.Errorf("%w: derived key differs",
+				ErrSigningKeyMismatch)
+		}
+	}
+
 	rawSig, err := signInputInVault(
 		ctx, signingVault, pathKeySelector(params.Path), base,
-		params.Tweak, sigHash, nil,
+		params.Tweak, sigHash, effective,
 	)
 	if err != nil {
 		return nil, mapDerivedKeyErr(err)

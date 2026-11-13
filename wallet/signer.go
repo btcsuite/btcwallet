@@ -1784,11 +1784,11 @@ func (w *Wallet) handleComputeRawSig(r rawSigReq) {
 func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
 	signer []byte) (RawSignature, error) {
 
-	// A SQL vault signs without giving the key to Wallet code. PSBT
-	// signing, which names the signer, keeps the legacy path for now.
+	// A SQL vault signs without giving the key to Wallet code, and checks
+	// the signer key before it signs.
 	signingVault, ok := w.keyVault.(keyvault.SigningVault)
-	if ok && signer == nil {
-		return w.computeRawSigInVault(ctx, signingVault, params)
+	if ok {
+		return w.computeRawSigInVault(ctx, signingVault, params, signer)
 	}
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
