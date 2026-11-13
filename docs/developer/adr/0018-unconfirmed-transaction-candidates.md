@@ -91,9 +91,10 @@ establishes the spend. Removing one claimant does not release another's claim.
 
 Unconfirmed competition does not mark a transaction Replaced. When a competitor
 confirms, direct conflicts become Replaced and invalidated descendants become
-Failed. Rollback must re-evaluate affected claims against the remaining chain,
-including descendants of orphaned coinbases. Exact status restoration remains
-open below; this ADR does not redefine the existing publication lifecycle.
+Failed. Confirmation of a retained Replaced/Failed transaction records Published
+with the current block association. Rollback must re-evaluate affected claims,
+including descendants of orphaned coinbases. Recovery while still unconfirmed
+remains open below; the existing publication lifecycle is retained.
 
 The A/B/C example shows why the relation retains all claimants. Two other cases
 explain its coverage:
@@ -155,10 +156,11 @@ cost. No benchmark establishes a universal performance winner.
   relevant ancestors and competitors; their full workload is not benchmarked.
 - Point reads, listings and balances need consistent graph facts and status
   transitions. Large fanout and unbounded history listings remain costly.
-- **Open restoration detail:** conflict/rollback handling must still restore
-  Pending versus Published and Failed descendants according to their cause.
-  Replaced/Failed alone do not preserve the earlier rebroadcast decision;
-  the precise restoration rule remains unresolved.
+- **Open restoration detail:** while a transaction remains unconfirmed,
+  conflict/rollback handling must restore Pending versus Published and Failed
+  descendants according to their cause. Replaced/Failed alone do not preserve
+  the earlier rebroadcast decision; the precise restoration rule remains
+  unresolved.
 
 ## 7. Implementation Overview
 
@@ -175,6 +177,9 @@ claim interpretation above. The open restoration detail is not resolved here.
 
 - [ADR 0006: Wallet Transaction Manager SQL Schema](0006-wtxmgr-sql-schema.md).
 - [ADR 0011](0011-no-addresses-used-column.md).
+- [Wallet data model](../utxo_data_model.md) explains this target model.
+- [Invalidation flows](../tx_invalidation_flows.md) describes the current
+  pointer-based implementation, not deletion of retained input relationships.
 - Bitcoin Core v32.1: [spender lookup][core-spends] and [state][core-state].
 
 [core-spends]: https://github.com/bitcoin/bitcoin/blob/v32.1/src/wallet/wallet.cpp#L789-L853
