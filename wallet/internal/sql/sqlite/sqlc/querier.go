@@ -76,15 +76,6 @@ type Querier interface {
 	// - Uses the address/account/scope joins to keep ownership validation and
 	//   account filtering in one pass.
 	Balance(ctx context.Context, arg BalanceParams) (BalanceRow, error)
-	// Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
-	//
-	// How:
-	// - Resets both spent columns together so the logical spend pointer remains
-	//   internally consistent.
-	// Performance:
-	// - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
-	//   ownership through the creating transaction.
-	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
 	// CountDatabaseIdentities verifies the singleton invariant before any stored
 	// values are trusted by startup.
 	CountDatabaseIdentities(ctx context.Context) (int64, error)
@@ -290,38 +281,12 @@ type Querier interface {
 	// - Uses the wallet-scoped transaction hash lookup first, then narrows to the
 	//   unique `(tx_id, output_index)` outpoint.
 	GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpointParams) (int64, error)
-	// Returns the current spend edge for one wallet-owned outpoint.
-	//
-	// How:
-	// - Resolves the parent transaction row from `(wallet_id, tx_hash)` and only
-	//   considers outputs whose parent status is `pending` or `published`.
-	// - Returns the nullable `spent_by_tx_id` column so callers can distinguish
-	//   between an external/unknown parent and a wallet-owned conflict.
-	// - Returns the owner address script so duplicate credit replay can verify it
-	//   matches the already-recorded UTXO rather than only checking outpoint
-	//   existence.
-	// Performance:
-	// - Targets one wallet-scoped outpoint through the unique `(tx_id,
-	//   output_index)` key after the parent hash lookup.
-	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	// Credit replay checks immutable ownership even after a credit has been spent.
 	// Availability belongs to the input relation, not this ownership lookup.
 	GetWalletCreditByOutpoint(ctx context.Context, arg GetWalletCreditByOutpointParams) ([]byte, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
-	// Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
-	// transaction is already invalid.
-	//
-	// How:
-	// - Resolves the parent transaction row from `(wallet_id, tx_hash)` and checks
-	//   for any status outside `pending`/`published`.
-	// - Exists so CreateTx can reject children of wallet-owned outputs whose
-	//   parent transaction is already invalid.
-	// Performance:
-	// - Targets one wallet-scoped outpoint through the parent tx lookup plus the
-	//   unique `(tx_id, output_index)` key.
-	HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error)
 	// Row-local state patches cannot revive terminal history or settle peer claims.
 	// Check before label mutation; the existing PG graph lock serializes admission.
 	HasTxGraphStateChange(ctx context.Context, arg HasTxGraphStateChangeParams) (bool, error)
@@ -397,17 +362,6 @@ type Querier interface {
 	// Lists all accounts for a wallet and scope tuple.
 	// Scan callers opt in so ordinary account listing keeps key-only accounts.
 	ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error)
-	// Lists active wallet transaction rows and their raw transaction bytes.
-	//
-	// How:
-	// - Reads from transactions only and filters to rows that may currently spend
-	//   wallet-owned outputs (`pending` and `published`).
-	// - Returns the primary key, transaction hash, block assignment, and raw
-	//   transaction bytes so callers can rebuild input outpoints not normalized in
-	//   the SQL schema.
-	// Performance:
-	// - Matches the wallet/status index used by active wallet history paths.
-	ListActiveTransactionRaws(ctx context.Context, walletID int64) ([]ListActiveTransactionRawsRow, error)
 	// Lists all currently active leases for a wallet.
 	//
 	// How:
@@ -544,17 +498,6 @@ type Querier interface {
 	// Performance:
 	// - Uses the block-height index to bound the scan to the rollback range.
 	ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int64) ([]ListRollbackCoinbaseRootsRow, error)
-	// Lists direct child transaction IDs for one parent transaction ID.
-	//
-	// How:
-	// - Reads the spend edges already materialized on utxos through
-	//   `(tx_id, spent_by_tx_id)`.
-	// - Returns only direct children; callers that need full descendant walks should
-	//   traverse this query iteratively in application code.
-	// Performance:
-	// - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
-	//   to one wallet-scoped parent.
-	ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]sql.NullInt64, error)
 	// Lists all confirmed transactions for a wallet in the provided height range.
 	//
 	// How:
@@ -620,20 +563,6 @@ type Querier interface {
 	// from the beginning; otherwise returns wallets with id > cursor_id. Returns up
 	// to page_limit rows.
 	ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error)
-	// Marks a wallet-owned UTXO as spent by a transaction.
-	//
-	// How:
-	// - Resolves the created-by transaction row from `(wallet_id, tx_hash)` inside
-	//   the statement so callers can update by network outpoint.
-	// - Requires the parent transaction status to be `pending` or `published`
-	//   before a child spend edge can attach.
-	// - Only changes rows that are currently unspent or already point at the same
-	//   `(spent_by_tx_id, spent_input_index)` pair, which keeps retries idempotent
-	//   without allowing a caller to silently rewrite which input spent the UTXO.
-	// Performance:
-	// - Targets one outpoint in one wallet; the subquery uses the unique
-	//   wallet-scoped tx hash lookup.
-	MarkUtxoSpent(ctx context.Context, arg MarkUtxoSpentParams) (int64, error)
 	// Releases a lease for a UTXO ID if the lock_id matches.
 	//
 	// How:
