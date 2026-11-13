@@ -1,0 +1,116 @@
+name: Release checks
+# Identify the exact tested commit for the maintainer's later signed tag.
+run-name: Release checks ${{ github.ref_name }} @ ${{ github.sha }}
+
+on:
+  # Check each release candidate and subsequent fix before publishing its tag.
+  push:
+    branches:
+      - 'v0.*-branch'
+  # Allow intentional retries on a selected ref once enabled on master.
+  workflow_dispatch:
+
+# Discovery reads upstream releases; these checks never create tags or releases.
+permissions:
+  contents: read
+
+# Keep normal CI on the same push from cancelling release compatibility checks.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# Reuse ordinary CI's toolchain and paths for the same maintained suite.
+env:
+  GOCACHE: /home/runner/work/go/pkg/build
+  GOPATH: /home/runner/work/go
+  GOBIN: /home/runner/work/go/bin
+  GO111MODULE: 'on'
+  GO_VERSION: 1.25.11
+
+  # Core uses the current miner; the btcd rows test these two exact releases.
+  BTCD_VERSION_LATEST: v0.27.0
+  BTCD_VERSION_PREVIOUS: v0.26.2
+
+# Require the full ordinary suite plus the rolling five-version SQLite matrix.
+jobs:
+  # Reuse the caller commit's CI so release checks cannot omit normal coverage.
+  normal-ci:
+    name: Full CI
+    uses: ./.github/workflows/main.yml
+
+  fetch-chain-backend-versions:
+    name: Resolve release test versions
+    runs-on: ubuntu-latest
+    # Resolve once so every lane receives the same release/checksum snapshot.
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      # The hosted runner supplies gh/jq/curl; use its token for release reads.
+      - name: resolve supported Core releases
+        id: matrix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/chain-test-matrix.sh "$BTCD_VERSION_LATEST" "$BTCD_VERSION_PREVIOUS"
+
+  itest-chain-backend-versions:
+    # Failed discovery must prevent expansion into an incomplete test matrix.
+    needs: fetch-chain-backend-versions
+    name: Release itest (${{ matrix.chain }} ${{ matrix.version }}, sqlite)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Expand the complete validated output, including its exact archive hashes.
+      matrix: ${{ fromJSON(needs.fetch-chain-backend-versions.outputs.matrix) }}
+    steps:
+      # Default checkout selects the event commit recorded in the workflow run.
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      # Reuse ordinary CI cleanup to make room for daemon archives and builds.
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      # Wallet tests keep the repository compiler despite daemon requirements.
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v7
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      # Both daemon discovery and the suite use these installed executables.
+      - name: add go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # Core keeps the current miner; btcd rows install their tested release.
+      # The script scopes compiler selection to its authenticated install.
+      - name: install and check btcd
+        env:
+          BTCD_VERSION: ${{ matrix.chain == 'btcd' && matrix.version || env.BTCD_VERSION_LATEST }}
+        run: scripts/install-btcd.sh "$BTCD_VERSION"
+
+      # Share the same archive/checksum and exact-version guard as ordinary CI.
+      - name: install bitcoind ${{ matrix.version }}
+        if: matrix.chain == 'bitcoind'
+        env:
+          CORE_VERSION: ${{ matrix.version }}
+          CORE_SHA256: ${{ matrix.sha256 }}
+        run: scripts/install-bitcoind.sh "$CORE_VERSION" "$CORE_SHA256"
+
+      # Every selected version executes the complete maintained SQLite suite.
+      - name: run itest (${{ matrix.chain }}, sqlite)
+        run: make itest chain=${{ matrix.chain }} db=sqlite
+
+      # Preserve unambiguous evidence for the exact failing release lane.
+      - name: upload itest logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: itest-logs-release-${{ matrix.chain }}-${{ matrix.version }}-sqlite
+          path: itest/test-logs
+          retention-days: 5
