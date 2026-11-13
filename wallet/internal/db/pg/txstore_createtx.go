@@ -282,6 +282,32 @@ func (o *createTxOps) Insert(ctx context.Context,
 	return txID, nil
 }
 
+// InsertInputs indexes actual prevouts without requiring parent credit rows.
+// The input-position key makes recording and replay share one immutable fact.
+func (o *createTxOps) InsertInputs(ctx context.Context,
+	req db.CreateTxRequest, txID int64) error {
+
+	// A coinbase's null prevout is not a spend or an input reservation.
+	if req.IsCoinbase {
+		return nil
+	}
+
+	for index, input := range req.Params.Tx.TxIn {
+		err := o.qtx.InsertTxInput(ctx, sqlc.InsertTxInputParams{
+			WalletID:        int64(req.Params.WalletID),
+			TxID:            txID,
+			InputIndex:      int64(index),
+			PrevTxHash:      input.PreviousOutPoint.Hash[:],
+			PrevOutputIndex: int64(input.PreviousOutPoint.Index),
+		})
+		if err != nil {
+			return fmt.Errorf("index input %d: %w", index, err)
+		}
+	}
+
+	return nil
+}
+
 // InsertCredits stores any wallet-owned outputs created by the transaction.
 func (o *createTxOps) InsertCredits(ctx context.Context,
 	req db.CreateTxRequest, txID int64) error {
