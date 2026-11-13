@@ -347,6 +347,9 @@ type Querier interface {
 	// - Single-row insert. The cost is dominated by the wallet/hash uniqueness
 	//   checks and any optional block foreign-key validation.
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
+	// Retain immutable prevout facts independently of wallet credit discovery.
+	// Replaying the same input position preserves the existing indexed fact.
+	InsertTxInput(ctx context.Context, arg InsertTxInputParams) error
 	// Records a replacement edge between two wallet-scoped transactions.
 	//
 	// How:
@@ -557,6 +560,9 @@ type Querier interface {
 	//   preserves wallet-observed order within each block before the single-row
 	//   block join.
 	ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error)
+	// Startup reconstructs missing input facts from every retained transaction.
+	// Atomic input writes make absence sufficient; coinbase has no ordinary input.
+	ListTransactionsMissingInputs(ctx context.Context, walletID int64) ([]ListTransactionsMissingInputsRow, error)
 	// Lists every wallet transaction row that currently has no confirming block.
 	//
 	// How:

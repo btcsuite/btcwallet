@@ -30,7 +30,7 @@ type Store struct {
 // NewStore creates a new SQLite-based WalletStore. It handles the full
 // connection setup including DSN construction with pragmas, connection
 // opening, health checks, connection pool configuration, and migration
-// application.
+// application. It indexes retained inputs before exposing the Store.
 func NewStore(ctx context.Context, cfg Config) (*Store,
 	error) {
 
@@ -99,11 +99,22 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 
 	queries := sqlc.New(dbConn)
 
-	return &Store{
+	store := &Store{
 		db:            dbConn,
 		queries:       queries,
 		deriveAddress: cfg.DeriveAddress,
-	}, nil
+	}
+
+	// Expose the Store only after retained raw history has its input index.
+	// Failure leaves no partially backfilled data or open connection pool.
+	err = store.backfillTxInputs(ctx)
+	if err != nil {
+		_ = dbConn.Close()
+
+		return nil, fmt.Errorf("backfill transaction inputs: %w", err)
+	}
+
+	return store, nil
 }
 
 // Close closes the database connection.

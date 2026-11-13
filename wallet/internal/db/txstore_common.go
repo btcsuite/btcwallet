@@ -818,6 +818,7 @@ var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
 //   - if direct conflicts were found, rewrite those roots to replaced state,
 //     fail their descendants, and record replacement history before the new
 //     row claims their wallet-owned inputs
+//   - index immutable inputs even when their parent credits are not known
 //   - Insert every wallet-owned credited output as a UTXO
 //   - attach any wallet-owned spent inputs to that final transaction row
 //   - delete the leases on those inputs if the transaction is confirmed
@@ -863,6 +864,10 @@ type CreateTxOps interface {
 
 	// Insert writes the base transaction row and returns its new primary key.
 	Insert(ctx context.Context, req CreateTxRequest) (int64, error)
+
+	// InsertInputs retains prevout facts independently of credit discovery.
+	// Replaying the same input position preserves its immutable identity.
+	InsertInputs(ctx context.Context, req CreateTxRequest, txID int64) error
 
 	// InsertCredits records every wallet-owned output that the caller
 	// marked as a credit for this transaction.
@@ -1236,15 +1241,22 @@ func insertCreateTx(ctx context.Context, req CreateTxRequest,
 	return nil
 }
 
-// recordCreateTxEdges records wallet-owned credits and spent-input edges for a
-// transaction row that already exists in the backend.
+// recordCreateTxEdges records immutable inputs, wallet-owned credits and spend
+// edges using the same transaction identity during creation and replay.
 func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 	ops CreateTxOps) error {
+
+	// Facts belong to the spending transaction even when its parent outputs
+	// are external or not yet known. Keep them inside the existing write.
+	err := ops.InsertInputs(ctx, req, txID)
+	if err != nil {
+		return fmt.Errorf("create tx inputs: %w", err)
+	}
 
 	// Credits only describe outputs created by the tx itself, so they do not
 	// interfere with conflict discovery. Keep them after replacement handling
 	// so the branch rewrite stays grouped with the shared-input reconciliation.
-	err := ops.InsertCredits(ctx, req, txID)
+	err = ops.InsertCredits(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx credits: %w", err)
 	}

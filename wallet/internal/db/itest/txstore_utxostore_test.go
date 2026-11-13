@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -38,6 +39,8 @@ import (
 func TestCreateTxStoresWalletCredit(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Resolve one owned output and two distinct external prevouts.
+	// Input indexing must not depend on having wallet credit rows for them.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-create-tx-credit")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -46,11 +49,14 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 
+	first, second := randomOutPoint(), randomOutPoint()
 	tx := newRegularTx(
-		[]wire.OutPoint{randomOutPoint()},
+		[]wire.OutPoint{first, second},
 		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
 	)
 
+	// Act: Record the transaction through the public Store write boundary.
+	// Its input facts and requested credit must commit with the same row.
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       tx,
@@ -58,6 +64,9 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 		Status:   db.TxStatusPending,
 		Credits:  map[uint32]address.Address{0: nil},
 	})
+
+	// Assert: The history and credit exist, and each stored input position
+	// points to its original external outpoint without reversal or shifting.
 	require.NoError(t, err)
 
 	_, ok := txIDByHash(t, store, walletID, tx.TxHash())
@@ -65,6 +74,10 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
 		Hash: tx.TxHash(), Index: 0,
 	}))
+	require.Equal(t, map[int64]wire.OutPoint{
+		0: first,
+		1: second,
+	}, txInputOutPoints(t, store, walletID, tx.TxHash()))
 }
 
 // TestCreateTxCreditBareMultisigMember verifies that CreateTx records a
@@ -341,6 +354,8 @@ func TestCreateTxCreditAddrMismatch(t *testing.T) {
 func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Build an actual coinbase credit anchored to a stored block.
+	// Its wire null prevout identifies coinbase rather than an ordinary spend.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-create-confirmed-coinbase")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -351,6 +366,8 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	block := CreateBlockFixture(t, store.Queries(), 210)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 
+	// Act: Record the confirmed coinbase through the same public Store API.
+	// Credit creation must succeed while input indexing skips the null prevout.
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       coinbaseTx,
@@ -359,6 +376,9 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 		Status:   db.TxStatusPublished,
 		Credits:  map[uint32]address.Address{0: nil},
 	})
+
+	// Assert: Coinbase history and its credit are retained without inventing
+	// an input claim for the null outpoint.
 	require.NoError(t, err)
 
 	_, ok := txIDByHash(t, store, walletID, coinbaseTx.TxHash())
@@ -366,6 +386,7 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
 		Hash: coinbaseTx.TxHash(), Index: 0,
 	}))
+	require.Empty(t, txInputOutPoints(t, store, walletID, coinbaseTx.TxHash()))
 }
 
 // TestCreateTxRejectsInvalidParentWalletOutput verifies that CreateTx rejects a
@@ -5177,4 +5198,128 @@ func TestApplyTxBatchExcludesNoChainSync(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, detail.OwnedOutputs, 1)
 	require.Zero(t, detail.OwnedOutputs[0].Index)
+}
+
+// TestStoreBackfillsTransactionInputs verifies complete legacy input history
+// without changing transaction metadata or existing spent-credit availability.
+//
+// Scenario:
+//   - Pending funding, a retained Replaced spender and its confirmed winner
+//     exist in the actual version10 schema without an input relation.
+//
+// Action:
+//   - Open that database through NewStore twice.
+//
+// Assertions:
+//   - Every stored input position matches its original prevout after each open.
+//   - Status, label, raw bytes and block metadata remain unchanged, and the
+//     confirmed-spent funding output never becomes available.
+func TestStoreBackfillsTransactionInputs(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use the existing recording contract to construct one linear
+	// conflict history with live, terminal and confirmed rows.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID, inputs := newLeaseSetFixture(t, store, "input-upgrade", 1)
+	fundingInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     inputs[0].Hash,
+	})
+	require.NoError(t, err)
+
+	var funding wire.MsgTx
+
+	require.NoError(t, funding.Deserialize(
+		bytes.NewReader(fundingInfo.SerializedTx),
+	))
+
+	loser := newRegularTx(inputs, []*wire.TxOut{
+		{
+			Value:    1000,
+			PkScript: []byte{0x51},
+		},
+	})
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       loser,
+		Received: time.Unix(1710002000, 0),
+		Status:   db.TxStatusPending,
+		Label:    "legacy pending attempt",
+	})
+	require.NoError(t, err)
+
+	block := CreateBlockFixture(t, store.Queries(), 260)
+	external := randomOutPoint()
+	winner := newRegularTx([]wire.OutPoint{inputs[0], external}, []*wire.TxOut{
+		{
+			Value:    1500,
+			PkScript: []byte{0x52},
+		},
+	})
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       winner,
+		Received: time.Unix(1710002010, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+		Label:    "legacy confirmed attempt",
+	})
+	require.NoError(t, err)
+
+	txs := []*wire.MsgTx{&funding, loser, winner}
+
+	before := make([]*db.TxInfo, len(txs))
+	for i, tx := range txs {
+		before[i], err = store.GetTx(t.Context(), db.GetTxQuery{
+			WalletID: walletID,
+			Txid:     tx.TxHash(),
+		})
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, db.TxStatusPending, before[0].Status)
+	require.Equal(t, db.TxStatusReplaced, before[1].Status)
+	require.NotNil(t, before[2].Block)
+
+	expected := []map[int64]wire.OutPoint{
+		{
+			0: funding.TxIn[0].PreviousOutPoint,
+		},
+		{
+			0: inputs[0],
+		},
+		{
+			0: inputs[0],
+			1: external,
+		},
+	}
+
+	prepareLegacyInputHistory(t, store.DB())
+	require.NoError(t, store.Close())
+
+	// Act: Public reopening upgrades and indexes the retained history. A
+	// second open exercises completion without replaying transaction behavior.
+	for range 2 {
+		restored := reopen()
+
+		// Assert: Every history class retains its precise input facts and
+		// metadata; no live-only or unconfirmed-only backfill can pass here.
+		for i, tx := range txs {
+			require.Equal(t, expected[i],
+				txInputOutPoints(t, restored, walletID, tx.TxHash()))
+			info, err := restored.GetTx(t.Context(), db.GetTxQuery{
+				WalletID: walletID,
+				Txid:     tx.TxHash(),
+			})
+			require.NoError(t, err)
+			require.Equal(t, before[i], info)
+		}
+
+		_, err = restored.GetUtxo(t.Context(), db.GetUtxoQuery{
+			WalletID: walletID,
+			OutPoint: inputs[0],
+		})
+		require.ErrorIs(t, err, db.ErrUtxoNotFound)
+		require.NoError(t, restored.Close())
+	}
 }

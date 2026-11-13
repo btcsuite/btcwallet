@@ -210,6 +210,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertTransactionStmt, err = db.PrepareContext(ctx, InsertTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTransaction: %w", err)
 	}
+	if q.insertTxInputStmt, err = db.PrepareContext(ctx, InsertTxInput); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertTxInput: %w", err)
+	}
 	if q.insertTxReplacementEdgeStmt, err = db.PrepareContext(ctx, InsertTxReplacementEdge); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTxReplacementEdge: %w", err)
 	}
@@ -287,6 +290,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listTransactionsByHeightRangeStmt, err = db.PrepareContext(ctx, ListTransactionsByHeightRange); err != nil {
 		return nil, fmt.Errorf("error preparing query ListTransactionsByHeightRange: %w", err)
+	}
+	if q.listTransactionsMissingInputsStmt, err = db.PrepareContext(ctx, ListTransactionsMissingInputs); err != nil {
+		return nil, fmt.Errorf("error preparing query ListTransactionsMissingInputs: %w", err)
 	}
 	if q.listTransactionsWithoutBlockStmt, err = db.PrepareContext(ctx, ListTransactionsWithoutBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query ListTransactionsWithoutBlock: %w", err)
@@ -645,6 +651,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertTransactionStmt: %w", cerr)
 		}
 	}
+	if q.insertTxInputStmt != nil {
+		if cerr := q.insertTxInputStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertTxInputStmt: %w", cerr)
+		}
+	}
 	if q.insertTxReplacementEdgeStmt != nil {
 		if cerr := q.insertTxReplacementEdgeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertTxReplacementEdgeStmt: %w", cerr)
@@ -773,6 +784,11 @@ func (q *Queries) Close() error {
 	if q.listTransactionsByHeightRangeStmt != nil {
 		if cerr := q.listTransactionsByHeightRangeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listTransactionsByHeightRangeStmt: %w", cerr)
+		}
+	}
+	if q.listTransactionsMissingInputsStmt != nil {
+		if cerr := q.listTransactionsMissingInputsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listTransactionsMissingInputsStmt: %w", cerr)
 		}
 	}
 	if q.listTransactionsWithoutBlockStmt != nil {
@@ -946,6 +962,7 @@ type Queries struct {
 	insertDatabaseIdentityStmt                    *sql.Stmt
 	insertKeyScopeSecretsStmt                     *sql.Stmt
 	insertTransactionStmt                         *sql.Stmt
+	insertTxInputStmt                             *sql.Stmt
 	insertTxReplacementEdgeStmt                   *sql.Stmt
 	insertTxReplacementEdgeByHashStmt             *sql.Stmt
 	insertUtxoStmt                                *sql.Stmt
@@ -972,6 +989,7 @@ type Queries struct {
 	listRollbackCoinbaseRootsStmt                 *sql.Stmt
 	listSpendingTxIDsByParentTxIDStmt             *sql.Stmt
 	listTransactionsByHeightRangeStmt             *sql.Stmt
+	listTransactionsMissingInputsStmt             *sql.Stmt
 	listTransactionsWithoutBlockStmt              *sql.Stmt
 	listUnminedTransactionsStmt                   *sql.Stmt
 	listUtxosStmt                                 *sql.Stmt
@@ -1054,6 +1072,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertDatabaseIdentityStmt:                    q.insertDatabaseIdentityStmt,
 		insertKeyScopeSecretsStmt:                     q.insertKeyScopeSecretsStmt,
 		insertTransactionStmt:                         q.insertTransactionStmt,
+		insertTxInputStmt:                             q.insertTxInputStmt,
 		insertTxReplacementEdgeStmt:                   q.insertTxReplacementEdgeStmt,
 		insertTxReplacementEdgeByHashStmt:             q.insertTxReplacementEdgeByHashStmt,
 		insertUtxoStmt:                                q.insertUtxoStmt,
@@ -1080,6 +1099,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listRollbackCoinbaseRootsStmt:                 q.listRollbackCoinbaseRootsStmt,
 		listSpendingTxIDsByParentTxIDStmt:             q.listSpendingTxIDsByParentTxIDStmt,
 		listTransactionsByHeightRangeStmt:             q.listTransactionsByHeightRangeStmt,
+		listTransactionsMissingInputsStmt:             q.listTransactionsMissingInputsStmt,
 		listTransactionsWithoutBlockStmt:              q.listTransactionsWithoutBlockStmt,
 		listUnminedTransactionsStmt:                   q.listUnminedTransactionsStmt,
 		listUtxosStmt:                                 q.listUtxosStmt,

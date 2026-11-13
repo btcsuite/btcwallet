@@ -17,7 +17,7 @@ import (
 )
 
 // CreateTx atomically records a wallet-scoped transaction row, its wallet-owned
-// credits, and any spend edges created by its inputs.
+// credits, immutable input facts, and any current spend edges.
 //
 // The full write runs inside the shared write helper so the transaction row,
 // created UTXOs, spent-parent markers, and any required invalidation are
@@ -271,6 +271,32 @@ func (o *createTxOps) Insert(ctx context.Context,
 	}
 
 	return txID, nil
+}
+
+// InsertInputs indexes actual prevouts without requiring parent credit rows.
+// The input-position key makes recording and replay share one immutable fact.
+func (o *createTxOps) InsertInputs(ctx context.Context,
+	req db.CreateTxRequest, txID int64) error {
+
+	// A coinbase's null prevout is not a spend or an input reservation.
+	if req.IsCoinbase {
+		return nil
+	}
+
+	for index, input := range req.Params.Tx.TxIn {
+		err := o.qtx.InsertTxInput(ctx, sqlc.InsertTxInputParams{
+			WalletID:        int64(req.Params.WalletID),
+			TxID:            txID,
+			InputIndex:      int64(index),
+			PrevTxHash:      input.PreviousOutPoint.Hash[:],
+			PrevOutputIndex: int64(input.PreviousOutPoint.Index),
+		})
+		if err != nil {
+			return fmt.Errorf("index input %d: %w", index, err)
+		}
+	}
+
+	return nil
 }
 
 // InsertCredits stores any wallet-owned outputs created by the transaction.
@@ -955,6 +981,78 @@ func ensureWalletParentValid(ctx context.Context,
 
 	if hasInvalid {
 		return db.ErrTxInputInvalidParent
+	}
+
+	return nil
+}
+
+// backfillTxInputs indexes retained history atomically before Store readiness.
+// Wallet cursor pages bound discovery without replaying transaction behavior.
+func (s *Store) backfillTxInputs(ctx context.Context) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		const walletPageSize = 100
+
+		cursor := sql.NullInt64{}
+		for {
+			wallets, err := qtx.ListWallets(ctx, sqlc.ListWalletsParams{
+				CursorID: cursor, PageLimit: walletPageSize,
+			})
+			if err != nil {
+				return fmt.Errorf("list input history wallets: %w", err)
+			}
+
+			for _, wallet := range wallets {
+				err = backfillWalletTxInputs(ctx, qtx, wallet.ID)
+				if err != nil {
+					return err
+				}
+
+				cursor = sql.NullInt64{Int64: wallet.ID, Valid: true}
+			}
+
+			if len(wallets) < walletPageSize {
+				return nil
+			}
+		}
+	})
+}
+
+// backfillWalletTxInputs decodes only rows without indexed input facts.
+// Stable stored IDs and the existing writer preserve history and replay safety.
+func backfillWalletTxInputs(ctx context.Context, qtx *sqlc.Queries,
+	walletID int64) error {
+
+	rows, err := qtx.ListTransactionsMissingInputs(ctx, walletID)
+	if err != nil {
+		return fmt.Errorf("list missing transaction inputs: %w", err)
+	}
+
+	id, err := db.Int64ToUint32(walletID)
+	if err != nil {
+		return err
+	}
+
+	ops := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
+	}
+
+	req := db.CreateTxRequest{
+		Params: db.CreateTxParams{WalletID: id},
+	}
+	for _, row := range rows {
+		var tx wire.MsgTx
+
+		err = tx.Deserialize(bytes.NewReader(row.RawTx))
+		if err != nil {
+			return fmt.Errorf("decode retained tx %d: %w", row.ID, err)
+		}
+
+		req.Params.Tx = &tx
+
+		err = ops.InsertInputs(ctx, req, row.ID)
+		if err != nil {
+			return fmt.Errorf("backfill retained tx %d: %w", row.ID, err)
+		}
 	}
 
 	return nil

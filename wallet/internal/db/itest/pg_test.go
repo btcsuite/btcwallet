@@ -843,3 +843,67 @@ func TestPostgresStoreReusesSingleConnection(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Empty(t, wallets.Items)
 }
+
+// txInputOutPoints reads the documented input facts through the existing DB
+// fixture, preserving stored positions so mapping errors cannot hide in order.
+func txInputOutPoints(t *testing.T, store *pgTestStore, walletID uint32,
+	txHash chainhash.Hash) map[int64]wire.OutPoint {
+
+	t.Helper()
+
+	txID, ok := txIDByHash(t, store, walletID, txHash)
+	require.True(t, ok)
+
+	rows, err := store.DB().QueryContext(t.Context(), `
+		SELECT input_index, prev_tx_hash, prev_output_index FROM tx_inputs
+		WHERE wallet_id = $1 AND tx_id = $2 ORDER BY input_index
+	`, walletID, txID)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, rows.Close()) }()
+
+	inputs := make(map[int64]wire.OutPoint)
+	for rows.Next() {
+		var (
+			index       int64
+			prevHash    []byte
+			outputIndex int64
+		)
+
+		require.NoError(t, rows.Scan(&index, &prevHash, &outputIndex))
+
+		hash, err := chainhash.NewHash(prevHash)
+		require.NoError(t, err)
+
+		output, err := db.Int64ToUint32(outputIndex)
+		require.NoError(t, err)
+
+		inputs[index] = wire.OutPoint{
+			Hash:  *hash,
+			Index: output,
+		}
+	}
+
+	require.NoError(t, rows.Err())
+
+	return inputs
+}
+
+// prepareLegacyInputHistory restores the actual version10 schema around the
+// fixture history so public reopening runs the migration and input backfill.
+func prepareLegacyInputHistory(t *testing.T, sqlDB *sql.DB) {
+	t.Helper()
+
+	// Reuse the checked-in downgrade instead of fabricating an empty current
+	// table; the version marker makes NewStore execute the actual upgrade.
+	down, err := os.ReadFile(
+		"../../sql/pg/migrations/000011_tx_inputs.down.sql",
+	)
+	require.NoError(t, err)
+	_, err = sqlDB.ExecContext(t.Context(), string(down))
+	require.NoError(t, err)
+	_, err = sqlDB.ExecContext(t.Context(),
+		"UPDATE schema_migrations SET version = 10, dirty = FALSE",
+	)
+	require.NoError(t, err)
+}
