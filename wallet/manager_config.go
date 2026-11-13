@@ -79,7 +79,8 @@ type ManagerConfig struct {
 	// ChainSource is caller-owned. Manager consumes its notifications once
 	// and routes events by registered Wallet interests for every backend.
 	// Callers must start the source before NewManager and keep it available
-	// until Manager.Stop completes. Manager neither starts nor stops it;
+	// until the one valid Manager.Stop completes. A rejected Stop does not
+	// join shutdown. Manager neither starts nor stops it;
 	// nil or typed-nil values may panic when it is used.
 	ChainSource chain.Interface
 
