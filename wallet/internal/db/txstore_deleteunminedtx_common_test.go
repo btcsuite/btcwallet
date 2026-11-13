@@ -55,10 +55,13 @@ func recordDeleteStep(steps *[]string, step string) func(mock.Arguments) {
 }
 
 // TestDeleteUnminedTxWithOps verifies that the shared deletion workflow removes
-// the descendants before the root, and that every member clears the spend edges
-// it claimed before its own row is removed.
+// descendants before the root and removes each member's credits before its row.
+// Input claims disappear through the existing cascading transaction deletion.
 func TestDeleteUnminedTxWithOps(t *testing.T) {
 	t.Parallel()
+
+	// Arrange: Supply the retained branch snapshot and exact adapter outcomes
+	// so cleanup checks every required status or deletion call once.
 
 	rootHash := chainhash.Hash{1}
 	childHash := chainhash.Hash{2}
@@ -97,17 +100,21 @@ func TestDeleteUnminedTxWithOps(t *testing.T) {
 		id   int64
 		hash chainhash.Hash
 	}{
-		{id: 3, hash: grandchildHash},
-		{id: 2, hash: childHash},
-		{id: 1, hash: rootHash},
+		{
+			id:   3,
+			hash: grandchildHash,
+		},
+		{
+			id:   2,
+			hash: childHash,
+		},
+		{
+			id:   1,
+			hash: rootHash,
+		},
 	}
 
 	for _, member := range members {
-		ops.On("ClearSpentUtxos", mock.Anything, int64(7), member.id).
-			Return(nil).
-			Run(recordDeleteStep(
-				&steps, fmt.Sprintf("clear:%d", member.id),
-			)).Once()
 
 		ops.On("DeleteCreatedUtxos", mock.Anything, uint32(7), member.id).
 			Return(nil).
@@ -123,17 +130,20 @@ func TestDeleteUnminedTxWithOps(t *testing.T) {
 			)).Once()
 	}
 
+	// Act: Apply the branch operation to the prepared root and descendants.
 	err := DeleteUnminedTxWithOps(
 		t.Context(),
 		DeleteUnminedTxParams{WalletID: 7, Txid: rootHash},
 		ops,
 	)
+	// Assert: Removal respects descendant-first order and credit-before-row
+	// ordering, so cascading input deletion cannot orphan dependencies.
 	require.NoError(t, err)
 
 	require.Equal(t, []string{
-		"clear:3", "outputs:3", "row:3",
-		"clear:2", "outputs:2", "row:2",
-		"clear:1", "outputs:1", "row:1",
+		"outputs:3", "row:3",
+		"outputs:2", "row:2",
+		"outputs:1", "row:1",
 	}, steps)
 }
 
@@ -172,6 +182,9 @@ func TestDeleteUnminedTxWithOpsRejectsConfirmed(t *testing.T) {
 func TestDeleteUnminedTxWithOpsMissingRow(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Supply the retained branch snapshot and exact adapter outcomes
+	// so cleanup checks every required status or deletion call once.
+
 	rootHash := chainhash.Hash{6}
 
 	ops := &mockDeleteUnminedTxOps{}
@@ -187,20 +200,20 @@ func TestDeleteUnminedTxWithOpsMissingRow(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(3)).Return(
 		[]UnminedTxRecord(nil), nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(3), int64(8)).
-		Return(nil).Once()
-
 	ops.On("DeleteCreatedUtxos", mock.Anything, uint32(3), int64(8)).
 		Return(nil).Once()
 
 	ops.On("DeleteUnminedTransaction", mock.Anything, uint32(3), rootHash).
 		Return(int64(0), nil).Once()
 
+	// Act: Apply the branch operation to the prepared root and descendants.
 	err := DeleteUnminedTxWithOps(
 		t.Context(),
 		DeleteUnminedTxParams{WalletID: 3, Txid: rootHash},
 		ops,
 	)
 
+	// Assert: A vanished row retains the public missing-transaction sentinel
+	// and stops the workflow at the configured failure.
 	require.ErrorIs(t, err, ErrTxNotFound)
 }

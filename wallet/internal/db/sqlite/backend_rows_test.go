@@ -17,6 +17,7 @@ import (
 func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Fail metadata loading before a recording target can be built.
 	req := testCreateTxRequest(t)
 	ctx := context.Background()
 	loadOps := &createTxOps{
@@ -27,9 +28,12 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 		},
 	}
 
+	// Act: Load the normalized request through the generated metadata query.
 	_, err := loadOps.LoadExisting(ctx, req)
+	// Assert: Loading retains its metadata-specific error context.
 	require.ErrorContains(t, err, "get tx metadata")
 
+	// Arrange: Supply matching block metadata but no transaction row to update.
 	block := testBlock(8)
 	confirmOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
@@ -45,12 +49,15 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
+	// Act: Attempt confirmation against the matching stored block.
 	err = confirmOps.ConfirmExisting(ctx, db.CreateTxRequest{
 		Params: db.CreateTxParams{WalletID: 1, Block: block},
 		TxHash: chainhash.Hash{9},
 	}, db.CreateTxExistingTarget{})
+	// Assert: A successful statement affecting no row reports the missing tx.
 	require.ErrorIs(t, err, db.ErrTxNotFound)
 
+	// Arrange: Fail the stored-block lookup before any recording writes.
 	prepareOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlc.New(rowDBTX{
@@ -58,11 +65,14 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
+	// Act: Prepare the confirming block through the generated lookup.
 	err = prepareOps.PrepareBlock(ctx, db.CreateTxRequest{
 		Params: db.CreateTxParams{WalletID: 1, Block: block},
 	})
+	// Assert: The preparation failure identifies the block lookup.
 	require.ErrorContains(t, err, "get block by height")
 
+	// Arrange: Fail the indexed peer query before conflict settlement starts.
 	conflictOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlc.New(rowDBTX{
@@ -71,8 +81,10 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
+	// Act: Discover conflicts through retained input facts.
 	_, _, err = conflictOps.ListConflictTxns(ctx, req)
-	require.ErrorContains(t, err, "list unmined txns")
+	// Assert: The adapter identifies the failed input-conflict query.
+	require.ErrorContains(t, err, "list input conflicts")
 }
 
 // TestReleaseOutputOpsAdditionalBranches covers remaining sqlite Release paths.

@@ -150,14 +150,14 @@ var (
 	// ErrUtxoNotFound is returned when a UTXO is not found in the database.
 	ErrUtxoNotFound = errors.New("utxo not found")
 
-	// ErrTxInputConflict is returned when CreateTx references a wallet-owned
-	// input that is already claimed by another recorded wallet spend.
+	// ErrTxInputConflict is returned when a recorded confirmed transaction
+	// already spends an input, or selected input ancestry is incompatible.
 	ErrTxInputConflict = errors.New(
 		"transaction input conflicts with another wallet spend",
 	)
 
-	// ErrTxInputInvalidParent is returned when CreateTx references a wallet-
-	// owned input whose parent transaction is already invalid.
+	// ErrTxInputInvalidParent is returned when an unconfirmed CreateTx
+	// references a known invalid parent transaction.
 	ErrTxInputInvalidParent = errors.New(
 		"transaction input spends wallet output with invalid parent",
 	)
@@ -449,10 +449,12 @@ type TxStore interface {
 	// wallet history; it does not build or publish transactions on the
 	// caller's behalf.
 	//
-	// The same write also updates the corresponding UTXO state: it marks any
-	// wallet-owned outputs referenced by the new transaction's inputs as spent
-	// and creates new UTXOs for any outputs that are spendable by the wallet.
-	// This keeps the transaction record and UTXO set consistent.
+	// SQL stores retain all ordinary inputs, including unknown parents, and
+	// derive credit availability from eligible claims. Unconfirmed competitors
+	// coexist; a confirming block replaces direct peers and fails descendants.
+	// Unmined echoes of confirmed or terminal rows succeed without recording
+	// new credits or reviving history. A real block can confirm retained
+	// Replaced/Failed history. Native stores keep their own conflict policy.
 	//
 	// CreateTx is also responsible for recording transaction metadata
 	// required by higher-level wallet policy:
@@ -486,6 +488,8 @@ type TxStore interface {
 	//
 	// Replayed transactions with an empty Label preserve their stored label,
 	// whether confirmed or unmined. Use UpdateTx to change or clear a label.
+	// In SQL stores, unmined echoes of confirmed or terminal rows return
+	// success without adding credits or reviving the stored transaction.
 	ApplyTxBatch(ctx context.Context, params TxBatchParams) error
 
 	// ApplyScanBatch atomically records recovery scan writes for one wallet.
@@ -574,7 +578,8 @@ type TxStore interface {
 type UTXOStore interface {
 	// GetUtxo retrieves a single unspent transaction output (UTXO) by its
 	// outpoint. It returns a UtxoInfo struct containing the UTXO's details
-	// or an error if the UTXO is not found or has been spent.
+	// or an error if the UTXO is not found or has an eligible spending claim.
+	// Contingent change remains discoverable through IsConflicted metadata.
 	//
 	// GetUtxo treats outputs created by unmined `pending` and `published`
 	// transactions as present in the wallet's UTXO set.

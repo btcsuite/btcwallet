@@ -806,12 +806,19 @@ var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
 // backend.
 //
 // The shared CreateTx algorithm is intentionally linear:
-//   - load the existing row and resolve one stable transaction identity
-//   - validate optional confirming block metadata before recording
-//   - index immutable inputs and validate known claim authority
-//   - settle confirmed conflicts before credit and parent-claim writes
-//   - record wallet-owned credits and claims under that same row identity
-//   - delete input leases only when confirmation ends them
+//   - load any existing wallet-scoped row for the same tx hash first
+//   - if the same tx is being reconfirmed, update that existing row instead of
+//     inserting a duplicate
+//   - validate and cache any confirming block metadata before later writes use
+//     it
+//   - Insert the base transaction row exactly once when no existing row can be
+//     reused
+//   - index immutable inputs even when their parent credits are not known
+//   - validate known parent ancestry and reject a second confirmed claimant
+//   - only for a confirming block, mark direct peers Replaced and descendants
+//     Failed while retaining input facts and recording replacement history
+//   - insert wallet-owned credited outputs independently of spending claims
+//   - delete the leases on those inputs if the transaction is confirmed
 //
 // Each backend implements those steps with its own sqlc-generated query types
 // while CreateTxWithOps keeps the high-level sequencing in one place.
@@ -838,8 +845,8 @@ type CreateTxOps interface {
 	// the later Insert step needs.
 	PrepareBlock(ctx context.Context, req CreateTxRequest) error
 
-	// ListConflictTxns returns the direct wallet-owned conflict tx IDs plus the
-	// corresponding hashes used for descendant discovery.
+	// ListConflictTxns returns direct unmined peers sharing retained inputs,
+	// including unknown parents, and their hashes for descendant discovery.
 	ListConflictTxns(ctx context.Context, req CreateTxRequest) ([]int64,
 		[]chainhash.Hash, error)
 
@@ -866,10 +873,6 @@ type CreateTxOps interface {
 	// InsertCredits records every wallet-owned output that the caller
 	// marked as a credit for this transaction.
 	InsertCredits(ctx context.Context, req CreateTxRequest, txID int64) error
-
-	// MarkInputsSpent attaches wallet-owned parent outpoints to this
-	// transaction row and rejects conflicts or invalid wallet parents.
-	MarkInputsSpent(ctx context.Context, req CreateTxRequest, txID int64) error
 }
 
 // SpentLeaseOps deletes the leases that a confirmed spend ends.
@@ -913,14 +916,10 @@ func checkReuseCreateTx(req CreateTxRequest,
 		return req.IsCoinbase && existing.Status == TxStatusOrphaned
 	}
 
-	// Non-coinbase rows only reuse the current unmined states.
-	// Once a row is invalidated, UpdateTx/DeleteTx no longer
-	// treat it as a live unmined target.
-	if !IsUnminedStatus(existing.Status) {
-		return false
-	}
-
-	return true
+	// Current-chain confirmation can recover retained invalid history; a
+	// plain unconfirmed observation still has no authority to revive it.
+	return IsUnminedStatus(existing.Status) ||
+		existing.Status == TxStatusReplaced || existing.Status == TxStatusFailed
 }
 
 // createTxBlockMatches reports whether a stored row carries the same block
@@ -981,14 +980,6 @@ func validateCreateTxCreditRequests(req CreateTxRequest) error {
 	return nil
 }
 
-// canIgnoreUnminedConfirmedDuplicate reports whether an unmined observation may
-// be ignored because the same transaction is already recorded as confirmed.
-func canIgnoreUnminedConfirmedDuplicate(req CreateTxRequest,
-	existing CreateTxExistingTarget) bool {
-
-	return req.Params.Block == nil && existing.HasBlock
-}
-
 // CanPromoteUnminedCreateTxDuplicate reports whether an unmined duplicate
 // observation may promote an existing pending row to published. The caller must
 // preserve the existing row label while applying this transition.
@@ -1047,17 +1038,10 @@ func collectConflictDescendants(ctx context.Context, walletID int64,
 	return descendantIDs, nil
 }
 
-// handleRootTxns clears the direct root spends, marks those rows replaced, and
-// records replacement edges to the winning confirmed tx.
+// handleRootTxns marks direct roots replaced and retains their input facts.
+// Replacement edges record the authority of the current confirmed winner.
 func handleRootTxns(ctx context.Context, walletID int64, rootIDs []int64,
 	replacementTxID int64, ops CreateTxOps) error {
-
-	for _, rootID := range rootIDs {
-		err := ops.ClearSpentUtxos(ctx, walletID, rootID)
-		if err != nil {
-			return fmt.Errorf("clear replaced root spent utxos: %w", err)
-		}
-	}
 
 	err := ops.MarkTxnsReplaced(ctx, walletID, rootIDs)
 	if err != nil {
@@ -1072,20 +1056,13 @@ func handleRootTxns(ctx context.Context, walletID int64, rootIDs []int64,
 	return nil
 }
 
-// handleTxDescendants clears the discovered descendant spends and then marks
-// that dependent branch failed.
+// handleTxDescendants invalidates dependent branches without deleting inputs.
+// Eligibility changes with status while immutable history remains available.
 func handleTxDescendants(ctx context.Context, walletID int64,
 	descendantIDs []int64, ops CreateTxOps) error {
 
 	if len(descendantIDs) == 0 {
 		return nil
-	}
-
-	for _, descendantID := range descendantIDs {
-		err := ops.ClearSpentUtxos(ctx, walletID, descendantID)
-		if err != nil {
-			return fmt.Errorf("clear failed descendant spent utxos: %w", err)
-		}
 	}
 
 	err := ops.MarkTxnsFailed(ctx, walletID, descendantIDs)
@@ -1096,8 +1073,8 @@ func handleTxDescendants(ctx context.Context, walletID int64,
 	return nil
 }
 
-// handleTxConflicts delegates chain authority to one settlement owner.
-// Existing pointer discovery remains unchanged during this sequencing refactor.
+// handleTxConflicts grants replacement authority only to a current block.
+// Both fresh recording and replay reach this gate after indexing their inputs.
 func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 	replacementTxID int64, ops CreateTxOps) error {
 
@@ -1111,20 +1088,18 @@ func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 	}
 
 	return ReplaceUnminedTxConflicts(
-		ctx, int64(req.Params.WalletID), rootIDs, rootHashes,
-		replacementTxID, ops,
+		ctx, int64(req.Params.WalletID),
+		rootIDs, rootHashes, replacementTxID, ops,
 	)
 }
 
 // ReplaceUnminedTxConflicts rewrites direct unmined conflict roots displaced by
 // the provided replacement transaction.
 //
-// Callers use this when the direct conflict roots were discovered outside the
-// normal spend-edge lookup path, such as when a parent credit is learned after
-// its children have already been stored as external-input spends. The function
-// preserves the standard replacement ordering: discover descendants from a
-// stable graph snapshot, mark direct roots replaced, then mark dependent
-// descendants failed.
+// The caller must establish that replacementTxID has a current confirming block
+// inside this same SQL transaction, including when settling legacy history.
+// Discover descendants before marking roots Replaced and descendants Failed;
+// input facts remain unchanged throughout settlement.
 func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
 	rootIDs []int64, rootHashes []chainhash.Hash, replacementTxID int64,
 	ops CreateTxOps) error {
@@ -1158,8 +1133,8 @@ func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
 	return nil
 }
 
-// insertCreateTx assigns stable identity before the shared edge recorder.
-// Fresh insertion and replay then share ordering without changing claim policy.
+// insertCreateTx assigns the stable row identity before the shared recorder.
+// Creation and replay then use one owner for input facts and graph authority.
 func insertCreateTx(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
 
@@ -1171,8 +1146,8 @@ func insertCreateTx(ctx context.Context, req CreateTxRequest,
 	return recordCreateTxEdges(ctx, req, txID, ops)
 }
 
-// recordCreateTxEdges records immutable inputs, wallet-owned credits and spend
-// edges using the same transaction identity during creation and replay.
+// recordCreateTxEdges owns facts, confirmation authority and credited outputs.
+// Index before conflict lookup so unknown parents and replay share one flow.
 func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 	ops CreateTxOps) error {
 
@@ -1190,27 +1165,18 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 		return fmt.Errorf("validate tx inputs: %w", err)
 	}
 
-	// Shared inputs have been indexed and admitted. Settle confirmed conflicts
-	// before credit insertion and the existing parent-pointer claim writes.
+	// Only a current confirming block can invalidate competing branches.
+	// Unconfirmed recording leaves every eligible claimant's history intact.
 	err = handleTxConflicts(ctx, req, txID, ops)
 	if err != nil {
 		return err
 	}
 
-	// Credits only describe outputs created by the tx itself, so they do not
-	// interfere with conflict discovery. Keep them after replacement handling
-	// so the branch rewrite stays grouped with the shared-input reconciliation.
+	// Keep credit identity independent of whether its outputs are already
+	// claimed; indexed child inputs make late discovery immediately accurate.
 	err = ops.InsertCredits(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx credits: %w", err)
-	}
-
-	// Claim wallet-owned parent inputs last. This is the write that makes this
-	// tx the recorded spender of the shared parents, so doing it earlier would
-	// hide a displaced unmined branch from the replacement walk.
-	err = ops.MarkInputsSpent(ctx, req, txID)
-	if err != nil {
-		return fmt.Errorf("create tx spends: %w", err)
 	}
 
 	// A confirmed spend ends the leases on its inputs.
@@ -1227,7 +1193,11 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
 	existing CreateTxExistingTarget, ops CreateTxOps) error {
 
-	if canIgnoreUnminedConfirmedDuplicate(req, existing) {
+	// Delayed unmined echoes cannot undo chain facts or revive terminal
+	// history, including by adding newly discovered credits to those rows.
+	if req.Params.Block == nil &&
+		(existing.HasBlock || !IsUnminedStatus(existing.Status)) {
+
 		return nil
 	}
 
@@ -1494,7 +1464,6 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 // The shared delete sequence is:
 //   - load and validate the target unmined row
 //   - reject deletes that would orphan direct child spenders
-//   - restore any wallet-owned parents the tx had marked spent
 //   - delete wallet-owned outputs created by the tx itself
 //   - delete the transaction row last
 //
@@ -1511,10 +1480,6 @@ type DeleteTxOps interface {
 	// unmined child spenders.
 	EnsureLeaf(ctx context.Context, walletID uint32, txHash chainhash.Hash,
 		txID int64) error
-
-	// ClearSpentUtxos restores any wallet-owned parent outputs the
-	// transaction had marked spent.
-	ClearSpentUtxos(ctx context.Context, walletID uint32, txID int64) error
 
 	// DeleteCreatedUtxos removes any wallet-owned outputs created by the
 	// transaction being deleted.
@@ -1543,11 +1508,6 @@ func DeleteTxWithOps(ctx context.Context, params DeleteTxParams,
 	err = ops.EnsureLeaf(ctx, params.WalletID, params.Txid, txID)
 	if err != nil {
 		return fmt.Errorf("check delete tx leaf: %w", err)
-	}
-
-	err = ops.ClearSpentUtxos(ctx, params.WalletID, txID)
-	if err != nil {
-		return fmt.Errorf("clear spent utxos: %w", err)
 	}
 
 	err = ops.DeleteCreatedUtxos(ctx, params.WalletID, txID)
@@ -1622,13 +1582,8 @@ type RollbackToBlockOps interface {
 	ListUnminedTxRecords(ctx context.Context,
 		walletID int64) ([]UnminedTxRecord, error)
 
-	// ClearDescendantSpends removes any wallet-owned spend edges claimed by one
-	// invalid descendant before its status is rewritten.
-	ClearDescendantSpends(ctx context.Context, walletID int64,
-		descendantID int64) error
-
 	// MarkDescendantsFailed batch-marks the discovered descendants as
-	// failed once every dependent spend edge has been cleared.
+	// failed while retaining their input facts for history.
 	MarkDescendantsFailed(ctx context.Context, walletID int64,
 		descendantIDs []int64) error
 }
@@ -1840,8 +1795,8 @@ func CollectDescendantTxIDs(rootHashes []chainhash.Hash,
 	return orderedIDs
 }
 
-// invalidateRollbackDescendants clears spend edges and marks failed every
-// unmined descendant discovered from the provided wallet-scoped rollback roots.
+// invalidateRollbackDescendants fails unmined descendants of rollback roots.
+// Their retained inputs stop reserving credits once their status is invalid.
 func invalidateRollbackDescendants(ctx context.Context,
 	rootHashesByWallet map[uint32][]chainhash.Hash,
 	ops RollbackToBlockOps) error {
@@ -1860,14 +1815,6 @@ func invalidateRollbackDescendants(ctx context.Context,
 			continue
 		}
 
-		for _, descendantID := range descendantIDs {
-			err = ops.ClearDescendantSpends(ctx, walletID64, descendantID)
-			if err != nil {
-				return fmt.Errorf("clear rollback descendant spends for "+
-					"wallet %d: %w", walletID, err)
-			}
-		}
-
 		err = ops.MarkDescendantsFailed(ctx, walletID64, descendantIDs)
 		if err != nil {
 			return fmt.Errorf("mark rollback descendants failed for "+
@@ -1878,8 +1825,9 @@ func invalidateRollbackDescendants(ctx context.Context,
 	return nil
 }
 
-// InvalidateRollbackDescendants clears spend edges and fails unmined
-// descendants rooted in disconnected coinbase transactions. Wallet-scoped
+// InvalidateRollbackDescendants fails unmined descendants rooted in
+// disconnected coinbase transactions, retaining their input facts.
+// Wallet-scoped
 // rewind paths use this without deleting shared block rows.
 func InvalidateRollbackDescendants(ctx context.Context,
 	rootHashesByWallet map[uint32][]chainhash.Hash,

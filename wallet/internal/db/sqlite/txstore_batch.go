@@ -247,17 +247,11 @@ func promoteBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
 			db.ErrTxNotFound)
 	}
 
-	err = ops.InsertCredits(ctx, req, txID)
-	if err != nil {
-		return fmt.Errorf("record promoted duplicate tx credits: %w", err)
-	}
+	// Promotion preserves the user's stored label even when the echo supplies
+	// another one. Select the shared omitted-label replay rule, not comparison.
+	req.Params.Label = ""
 
-	err = ops.MarkInputsSpent(ctx, req, txID)
-	if err != nil {
-		return fmt.Errorf("record promoted duplicate tx spends: %w", err)
-	}
-
-	return nil
+	return db.ApplyBatchTxWithOps(ctx, req, ops)
 }
 
 // promotableBatchDuplicate returns the existing tx id when createErr is a

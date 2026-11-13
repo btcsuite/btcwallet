@@ -283,29 +283,8 @@ func (o rollbackToBlockOps) ListUnminedTxRecords(
 	)
 }
 
-// ClearDescendantSpends removes any wallet-owned spend edges claimed by one
-// invalid descendant transaction before its status is rewritten.
-func (o rollbackToBlockOps) ClearDescendantSpends(
-	ctx context.Context, walletID int64, descendantID int64) error {
-
-	_, err := o.qtx.ClearUtxosSpentByTxID(
-		ctx, sqlc.ClearUtxosSpentByTxIDParams{
-			WalletID: walletID,
-			SpentByTxID: sql.NullInt64{
-				Int64: descendantID,
-				Valid: true,
-			},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("clear descendant spends: %w", err)
-	}
-
-	return nil
-}
-
 // MarkDescendantsFailed batch-marks the collected rollback descendants as
-// failed once every dependent spend edge has been cleared.
+// failed while retaining their input facts for history.
 func (o rollbackToBlockOps) MarkDescendantsFailed(
 	ctx context.Context, walletID int64, descendantIDs []int64) error {
 
