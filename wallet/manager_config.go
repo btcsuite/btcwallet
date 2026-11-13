@@ -78,9 +78,9 @@ type ManagerConfig struct {
 
 	// ChainSource is caller-owned. Manager consumes its notifications once
 	// and routes events by registered Wallet interests for every backend.
-	// Callers must supply a usable implementation and keep
-	// it available until Manager.Stop returns. Manager neither starts nor
-	// stops it, so nil or typed-nil values may panic when it is used.
+	// Callers must start the source before NewManager and keep it available
+	// until Manager.Stop completes. Manager neither starts nor stops it;
+	// nil or typed-nil values may panic when it is used.
 	ChainSource chain.Interface
 
 	// SyncMethod selects the synchronization strategy shared by all Wallets.

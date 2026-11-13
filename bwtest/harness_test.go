@@ -132,9 +132,10 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: give the harness the strict chain mock required by the
-	// Manager's shared runtime policy. This lifecycle-only test does not
-	// expect any chain calls.
+	// Manager's shared runtime policy. Each construction borrows its stream
+	// once; the mock never permits teardown to stop that borrowed source.
 	chainSource := &bwmock.Chain{}
+	chainSource.On("Notifications").Return((<-chan any)(nil)).Twice()
 	h := &HarnessTest{
 		T:              t,
 		dbType:         "kvdb",
@@ -208,9 +209,9 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	t.Helper()
 
 	// Arrange: provide the complete Manager policy, including a strict chain
-	// mock whose one stream is read even before a Wallet exists.
+	// mock whose stream is borrowed when each Manager is constructed.
 	chainSource := &bwmock.Chain{}
-	chainSource.On("Notifications").Return((<-chan any)(nil)).Once()
+	chainSource.On("Notifications").Return((<-chan any)(nil)).Twice()
 	h := &HarnessTest{
 		T:              t,
 		dbType:         dbType,
@@ -249,8 +250,8 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	}
 
 	// Assert: a fresh Manager proves teardown released the database, while
-	// the strict chain mock verifies that the shared reader was acquired only
-	// once and teardown did not take ownership of the borrowed backend.
+	// the strict chain mock verifies one stream acquisition per Manager
+	// and teardown did not take ownership of the borrowed backend.
 	reopenCfg := wallet.ManagerConfig{
 		Backend:     backend,
 		DataSource:  h.WalletDBSource,

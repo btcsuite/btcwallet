@@ -187,6 +187,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 	}
 
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.chainEvents = m.config.ChainSource.Notifications()
 	m.started.Store(true)
 
 	// The fixture owns required-call verification. Stop joins workers before
