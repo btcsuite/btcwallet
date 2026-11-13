@@ -985,3 +985,75 @@ func ensureWalletParentValid(ctx context.Context,
 
 	return nil
 }
+
+// backfillTxInputs indexes retained history atomically before Store readiness.
+// Wallet cursor pages bound discovery without replaying transaction behavior.
+func (s *Store) backfillTxInputs(ctx context.Context) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		const walletPageSize = 100
+
+		cursor := sql.NullInt64{}
+		for {
+			wallets, err := qtx.ListWallets(ctx, sqlc.ListWalletsParams{
+				CursorID: cursor, PageLimit: walletPageSize,
+			})
+			if err != nil {
+				return fmt.Errorf("list input history wallets: %w", err)
+			}
+
+			for _, wallet := range wallets {
+				err = backfillWalletTxInputs(ctx, qtx, wallet.ID)
+				if err != nil {
+					return err
+				}
+
+				cursor = sql.NullInt64{Int64: wallet.ID, Valid: true}
+			}
+
+			if len(wallets) < walletPageSize {
+				return nil
+			}
+		}
+	})
+}
+
+// backfillWalletTxInputs decodes only rows without indexed input facts.
+// Stable stored IDs and the existing writer preserve history and replay safety.
+func backfillWalletTxInputs(ctx context.Context, qtx *sqlc.Queries,
+	walletID int64) error {
+
+	rows, err := qtx.ListTransactionsMissingInputs(ctx, walletID)
+	if err != nil {
+		return fmt.Errorf("list missing transaction inputs: %w", err)
+	}
+
+	id, err := db.Int64ToUint32(walletID)
+	if err != nil {
+		return err
+	}
+
+	ops := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
+	}
+
+	req := db.CreateTxRequest{
+		Params: db.CreateTxParams{WalletID: id},
+	}
+	for _, row := range rows {
+		var tx wire.MsgTx
+
+		err = tx.Deserialize(bytes.NewReader(row.RawTx))
+		if err != nil {
+			return fmt.Errorf("decode retained tx %d: %w", row.ID, err)
+		}
+
+		req.Params.Tx = &tx
+
+		err = ops.InsertInputs(ctx, req, row.ID)
+		if err != nil {
+			return fmt.Errorf("backfill retained tx %d: %w", row.ID, err)
+		}
+	}
+
+	return nil
+}

@@ -1021,3 +1021,59 @@ func ensureWalletParentValid(ctx context.Context, qtx *sqlc.Queries,
 
 	return nil
 }
+
+// backfillTxInputs indexes retained history atomically before Store readiness.
+// Reusing rollback's lock owner prevents competing graph writes during upgrade.
+func (s *Store) backfillTxInputs(ctx context.Context) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		walletIDs, err := lockWalletTxGraphs(ctx, qtx)
+		if err != nil {
+			return err
+		}
+
+		for _, walletID := range walletIDs {
+			err = backfillWalletTxInputs(ctx, qtx, walletID)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+// backfillWalletTxInputs decodes only rows without indexed input facts.
+// Stable stored IDs and the existing writer preserve history and replay safety.
+func backfillWalletTxInputs(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32) error {
+
+	rows, err := qtx.ListTransactionsMissingInputs(ctx, int64(walletID))
+	if err != nil {
+		return fmt.Errorf("list missing transaction inputs: %w", err)
+	}
+
+	ops := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
+	}
+
+	req := db.CreateTxRequest{
+		Params: db.CreateTxParams{WalletID: walletID},
+	}
+	for _, row := range rows {
+		var tx wire.MsgTx
+
+		err = tx.Deserialize(bytes.NewReader(row.RawTx))
+		if err != nil {
+			return fmt.Errorf("decode retained tx %d: %w", row.ID, err)
+		}
+
+		req.Params.Tx = &tx
+
+		err = ops.InsertInputs(ctx, req, row.ID)
+		if err != nil {
+			return fmt.Errorf("backfill retained tx %d: %w", row.ID, err)
+		}
+	}
+
+	return nil
+}

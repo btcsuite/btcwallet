@@ -45,6 +45,7 @@ type Store struct {
 // NewStore creates a new PostgreSQL-based WalletStore. It handles
 // the full connection setup including config validation, connection opening,
 // health checks, connection pool configuration, and migration application.
+// Retained inputs are indexed before the Store is exposed.
 func NewStore(ctx context.Context, cfg Config) (*Store,
 	error) {
 
@@ -114,11 +115,22 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		return nil, fmt.Errorf("close migration database: %w", err)
 	}
 
-	return &Store{
+	store := &Store{
 		pool:          pool,
 		queries:       sqlc.New(pool),
 		deriveAddress: cfg.DeriveAddress,
-	}, nil
+	}
+
+	// The migration adapter has returned its borrowed connection. Backfill
+	// now uses the same write runtime and must finish before public reads.
+	err = store.backfillTxInputs(ctx)
+	if err != nil {
+		pool.Close()
+
+		return nil, fmt.Errorf("backfill transaction inputs: %w", err)
+	}
+
+	return store, nil
 }
 
 // Close closes the database connection.
