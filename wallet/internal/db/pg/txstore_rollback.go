@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -114,27 +113,55 @@ func (s *Store) RollbackToBlock(ctx context.Context,
 	height uint32) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		// Rollback changes all Wallets. Read their IDs in ascending order
-		// so concurrent rollbacks take the graph locks in the same order.
-		wallets, err := qtx.ListWallets(
-			ctx, sqlc.ListWalletsParams{
-				PageLimit: math.MaxInt64,
-			},
-		)
+		// Shared-chain rollback and startup must acquire wallet locks in
+		// the same order so neither can observe a partially changed graph.
+		_, err := lockWalletTxGraphs(ctx, qtx)
 		if err != nil {
-			return fmt.Errorf("list rollback wallets: %w", err)
-		}
-
-		for _, wallet := range wallets {
-			err := lockTxGraph(ctx, qtx, wallet.ID)
-			if err != nil {
-				return err
-			}
+			return err
 		}
 
 		return db.RollbackToBlockWithOps(ctx, height,
 			rollbackToBlockOps{qtx: qtx})
 	})
+}
+
+// lockWalletTxGraphs shares ascending graph-lock acquisition between rollback
+// and startup backfill. Cursor pages bound each wallet query's allocation.
+func lockWalletTxGraphs(ctx context.Context,
+	qtx *sqlc.Queries) ([]uint32, error) {
+
+	const walletPageSize = 100
+
+	var walletIDs []uint32
+
+	cursor := sql.NullInt64{}
+	for {
+		wallets, err := qtx.ListWallets(ctx, sqlc.ListWalletsParams{
+			CursorID: cursor, PageLimit: walletPageSize,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list wallet graphs: %w", err)
+		}
+
+		for _, wallet := range wallets {
+			err = lockTxGraph(ctx, qtx, wallet.ID)
+			if err != nil {
+				return nil, err
+			}
+
+			walletID, err := db.Int64ToUint32(wallet.ID)
+			if err != nil {
+				return nil, err
+			}
+
+			walletIDs = append(walletIDs, walletID)
+			cursor = sql.NullInt64{Int64: wallet.ID, Valid: true}
+		}
+
+		if len(wallets) < walletPageSize {
+			return walletIDs, nil
+		}
+	}
 }
 
 // rollbackToBlockOps adapts postgres sqlc queries to the shared rollback
