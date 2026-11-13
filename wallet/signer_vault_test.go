@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/require"
@@ -24,6 +26,19 @@ type privateDecryptSpy struct {
 	*keyvault.WalletVault
 
 	privateDecrypts atomic.Int32
+
+	// signDigests counts vault signing requests, so a test can show that
+	// a malformed request never reached the vault.
+	signDigests atomic.Int32
+}
+
+// SignDigest counts vault signing requests and forwards to the real vault.
+func (s *privateDecryptSpy) SignDigest(ctx context.Context,
+	req keyvault.SignDigestRequest) (keyvault.DigestSignature, error) {
+
+	s.signDigests.Add(1)
+
+	return s.WalletVault.SignDigest(ctx, req) //nolint:wrapcheck
 }
 
 // Decrypt counts private-key decrypts and forwards to the real vault.
@@ -408,6 +423,61 @@ func BenchmarkSQLSignerPaths(b *testing.B) {
 				return err
 			},
 		},
+		{
+			name: "RawSigTaprootKeyPath",
+			run: func(b *testing.B, w *Wallet) error {
+				b.Helper()
+
+				prevOut := wire.NewTxOut(10_000, []byte{0x51})
+				tx, sigHashes := rawSigTx(prevOut)
+
+				_, err := w.ComputeRawSig(b.Context(), &RawSigParams{
+					Tx:        tx,
+					Output:    prevOut,
+					SigHashes: sigHashes,
+					Path:      path,
+					Details: TaprootSpendDetails{
+						SpendPath: KeyPathSpend,
+					},
+				})
+
+				return err
+			},
+		},
+		{
+			name: "UnlockingScriptP2WKH",
+			run: func(b *testing.B, w *Wallet) error {
+				b.Helper()
+
+				info, err := w.NewAddress(
+					b.Context(), NewAccountSelectorByNumber(
+						waddrmgr.KeyScopeBIP0084, 0,
+					), false,
+				)
+				if err != nil {
+					return err
+				}
+
+				pkScript, err := txscript.PayToAddrScript(info.Addr)
+				if err != nil {
+					return err
+				}
+
+				prevOut := wire.NewTxOut(10_000, pkScript)
+				tx, sigHashes := rawSigTx(prevOut)
+
+				_, err = w.ComputeUnlockingScript(
+					b.Context(), &UnlockingScriptParams{
+						Tx:        tx,
+						Output:    prevOut,
+						SigHashes: sigHashes,
+						HashType:  txscript.SigHashAll,
+					},
+				)
+
+				return err
+			},
+		},
 	}
 
 	for _, mode := range []string{"vault", "legacy"} {
@@ -452,8 +522,8 @@ func TestTaprootOutputTweakMatchesTxscript(t *testing.T) {
 	for _, key := range []*btcec.PrivateKey{even, odd} {
 		for _, scriptRoot := range [][]byte{{}, root[:]} {
 			// Arrange: Fold the tweak from the public key only.
-			tweak, outputKey, err := taprootOutputTweak(
-				key.PubKey(), scriptRoot,
+			tweak, outputKey, err := foldKeyTweak(
+				key.PubKey(), KeyTweak{}, true, scriptRoot,
 			)
 			require.NoError(t, err)
 
