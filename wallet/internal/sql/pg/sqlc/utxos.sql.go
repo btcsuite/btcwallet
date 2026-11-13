@@ -40,8 +40,23 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = $2
     AND a.wallet_id = $2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    )
     AND (
         (a.is_derived = FALSE AND da.address_id IS NULL)
         OR (
@@ -273,7 +288,12 @@ SELECT
             l.expires_at IS NULL
             OR l.expires_at > $1::TIMESTAMP
         ), FALSE
-    )::BOOLEAN AS is_locked
+    )::BOOLEAN AS is_locked,
+    -- Expose contingent change for explicit coin control without safe summing.
+    (EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    ))::BOOLEAN AS is_conflicted
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -287,8 +307,19 @@ WHERE
     AND a.wallet_id = $2
     AND t.tx_hash = $3
     AND u.output_index = $4
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 `
 
 type GetUtxoByOutpointParams struct {
@@ -318,6 +349,7 @@ type GetUtxoByOutpointRow struct {
 	HasScript        bool
 	RawIsWatchOnly   bool
 	IsLocked         bool
+	IsConflicted     bool
 }
 
 // Retrieves a single unspent UTXO by its outpoint.
@@ -363,6 +395,7 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.HasScript,
 		&i.RawIsWatchOnly,
 		&i.IsLocked,
+		&i.IsConflicted,
 	)
 	return i, err
 }
@@ -377,8 +410,19 @@ WHERE
     AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 `
 
 type GetUtxoIDByOutpointParams struct {
@@ -411,7 +455,9 @@ func (q *Queries) GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpoi
 }
 
 const GetUtxoSpendByOutpoint = `-- name: GetUtxoSpendByOutpoint :one
-SELECT u.spent_by_tx_id, a.script_pub_key
+SELECT
+    u.spent_by_tx_id,
+    a.script_pub_key
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -556,19 +602,22 @@ SELECT
     t.raw_tx
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
-LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
 LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
 LEFT JOIN accounts AS acc ON da.account_id = acc.id
 WHERE
     t.wallet_id = $1
     AND (acc.id IS NULL OR NOT acc.no_chain_sync)
-    AND t.tx_status IN (0, 1)
-    AND (
-        u.spent_by_tx_id IS NULL
-        OR (
-            spend.block_height IS NULL
-            AND spend.tx_status IN (0, 1)
-        )
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- Recovery still watches unconfirmed-spent credits; a current block ends it.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS spender ON claim.wallet_id = spender.wallet_id AND claim.tx_id = spender.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index AND spender.block_height IS NOT NULL
     )
 ORDER BY t.tx_hash, u.output_index
 `
@@ -709,7 +758,12 @@ SELECT
             l.expires_at IS NULL
             OR l.expires_at > $1::TIMESTAMP
         ), FALSE
-    )::BOOLEAN AS is_locked
+    )::BOOLEAN AS is_locked,
+    -- Expose contingent change for explicit coin control without safe summing.
+    (EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    ))::BOOLEAN AS is_conflicted
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -722,8 +776,19 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = $2
     AND a.wallet_id = $2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
     AND (
         $3::BIGINT IS NULL
         OR ks.purpose = $3::BIGINT
@@ -800,6 +865,7 @@ type ListUtxosRow struct {
 	HasScript        bool
 	RawIsWatchOnly   bool
 	IsLocked         bool
+	IsConflicted     bool
 }
 
 // Lists unspent UTXOs that match the provided filters.
@@ -860,6 +926,7 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.HasScript,
 			&i.RawIsWatchOnly,
 			&i.IsLocked,
+			&i.IsConflicted,
 		); err != nil {
 			return nil, err
 		}

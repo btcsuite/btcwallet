@@ -164,7 +164,7 @@ type Querier interface {
 	// - Applies to timed leases and leases without expiry alike.
 	// Performance:
 	// - Resolves the spender through its unique hash and reaches its inputs
-	//   through the spent_by index.
+	//   through the input-position and prevout indexes.
 	DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error)
 	// Deletes all UTXO rows created by the provided transaction ID.
 	//
@@ -256,6 +256,9 @@ type Querier interface {
 	// Performance:
 	// - Uses the wallet-scoped unique `(wallet_id, tx_hash)` lookup path.
 	GetTransactionMetaByHash(ctx context.Context, arg GetTransactionMetaByHashParams) (GetTransactionMetaByHashRow, error)
+	// Request admission is separate from immutable backfill. Unknown parents are
+	// admissible; known invalid ancestry and a second confirmed claim are not.
+	GetTxInputValidity(ctx context.Context, arg GetTxInputValidityParams) (GetTxInputValidityRow, error)
 	// Retrieves a single unspent UTXO by its outpoint.
 	//
 	// How:
@@ -303,6 +306,9 @@ type Querier interface {
 	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
+	// Credit replay checks immutable ownership even after a credit has been spent.
+	// Availability belongs to the input relation, not this ownership lookup.
+	GetWalletCreditByOutpoint(ctx context.Context, arg GetWalletCreditByOutpointParams) ([]byte, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
 	// Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
 	// transaction is already invalid.
@@ -316,6 +322,9 @@ type Querier interface {
 	// - Targets one wallet-scoped outpoint through the parent tx lookup plus the
 	//   unique `(tx_id, output_index)` key.
 	HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error)
+	// Row-local state patches cannot revive terminal history or settle peer claims.
+	// Check before label mutation; the existing PG graph lock serializes admission.
+	HasTxGraphStateChange(ctx context.Context, arg HasTxGraphStateChangeParams) (bool, error)
 	// Inserts address secret information (private key and/or script) for imported
 	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
@@ -422,6 +431,15 @@ type Querier interface {
 	// address are simply absent from the result. The Go caller is responsible for
 	// short-circuiting an empty script set before issuing this query.
 	ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddressesByScriptPubKeysParams) ([]ListAddressesByScriptPubKeysRow, error)
+	// Upgrade starts with active unconfirmed claims, not a confirmed-history scan.
+	// Existing confirmation handling can then settle each distinct retained winner.
+	ListConfirmedInputConflicts(ctx context.Context, walletID int64) ([]ListConfirmedInputConflictsRow, error)
+	// A confirming row settles every direct unmined peer, including external inputs.
+	// Index facts before this lookup so insertion and replay use the same owner.
+	ListConflictingTransactions(ctx context.Context, arg ListConflictingTransactionsParams) ([]ListConflictingTransactionsRow, error)
+	// Legacy children may predate validation of non-owned parents. The view walks
+	// their ancestry so one status update covers all currently blocked descendants.
+	ListIneligibleUnminedTxIDs(ctx context.Context, walletID int64) ([]int64, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	// Lists every output a recovery rescan must keep watching for one wallet.
@@ -549,7 +567,7 @@ type Querier interface {
 	//   block join.
 	ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error)
 	// Startup reconstructs missing input facts from every retained transaction.
-	// Atomic input writes make absence sufficient; coinbase has no ordinary input.
+	// Atomic input writes make absence sufficient; coinbase has no ordinary claim.
 	ListTransactionsMissingInputs(ctx context.Context, walletID int64) ([]ListTransactionsMissingInputsRow, error)
 	// Lists every wallet transaction row that currently has no confirming block.
 	//

@@ -7,7 +7,115 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 )
+
+const GetTxInputValidity = `-- name: GetTxInputValidity :one
+SELECT
+    cast(EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS parent
+            ON claim.wallet_id = parent.wallet_id AND claim.prev_tx_hash = parent.tx_hash
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.tx_id = t.id
+            AND NOT EXISTS (
+                SELECT 1 FROM eligible_transactions AS eligible
+                WHERE eligible.wallet_id = parent.wallet_id AND eligible.id = parent.id
+            )
+    ) AS BOOLEAN) AS has_invalid_parent,
+    cast(EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN tx_inputs AS other
+            ON
+                claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+                AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+        INNER JOIN transactions AS peer ON other.wallet_id = peer.wallet_id AND other.tx_id = peer.id
+        WHERE claim.wallet_id = t.wallet_id AND claim.tx_id = t.id AND peer.block_height IS NOT NULL
+    ) AS BOOLEAN) AS has_confirmed_conflict
+FROM transactions AS t
+WHERE t.wallet_id = $1 AND t.tx_hash = $2
+`
+
+type GetTxInputValidityParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+type GetTxInputValidityRow struct {
+	HasInvalidParent     bool
+	HasConfirmedConflict bool
+}
+
+// Request admission is separate from immutable backfill. Unknown parents are
+// admissible; known invalid ancestry and a second confirmed claim are not.
+func (q *Queries) GetTxInputValidity(ctx context.Context, arg GetTxInputValidityParams) (GetTxInputValidityRow, error) {
+	row := q.db.QueryRow(ctx, GetTxInputValidity, arg.WalletID, arg.TxHash)
+	var i GetTxInputValidityRow
+	err := row.Scan(&i.HasInvalidParent, &i.HasConfirmedConflict)
+	return i, err
+}
+
+const GetWalletCreditByOutpoint = `-- name: GetWalletCreditByOutpoint :one
+SELECT a.script_pub_key
+FROM transactions AS t
+INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id AND t.wallet_id = a.wallet_id
+WHERE
+    t.wallet_id = $1 AND t.tx_hash = $2
+    AND u.output_index = $3
+`
+
+type GetWalletCreditByOutpointParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int32
+}
+
+// Credit replay checks immutable ownership even after a credit has been spent.
+// Availability belongs to the input relation, not this ownership lookup.
+func (q *Queries) GetWalletCreditByOutpoint(ctx context.Context, arg GetWalletCreditByOutpointParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, GetWalletCreditByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var script_pub_key []byte
+	err := row.Scan(&script_pub_key)
+	return script_pub_key, err
+}
+
+const HasTxGraphStateChange = `-- name: HasTxGraphStateChange :one
+SELECT cast(EXISTS (
+    SELECT 1 FROM transactions AS t
+    WHERE
+        t.wallet_id = $1 AND t.tx_hash = $2
+        AND (
+            t.tx_status NOT IN (0, 1)
+            OR (
+                (t.block_height IS NULL) != (cast($3 AS INTEGER) IS NULL)
+                AND EXISTS (
+                    SELECT 1 FROM tx_inputs AS claim
+                    INNER JOIN tx_inputs AS other
+                        ON
+                            claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+                            AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+                    WHERE claim.wallet_id = t.wallet_id AND claim.tx_id = t.id
+                )
+            )
+        )
+) AS BOOLEAN) AS requires_reconciliation
+`
+
+type HasTxGraphStateChangeParams struct {
+	WalletID    int64
+	TxHash      []byte
+	BlockHeight sql.NullInt32
+}
+
+// Row-local state patches cannot revive terminal history or settle peer claims.
+// Check before label mutation; the existing PG graph lock serializes admission.
+func (q *Queries) HasTxGraphStateChange(ctx context.Context, arg HasTxGraphStateChangeParams) (bool, error) {
+	row := q.db.QueryRow(ctx, HasTxGraphStateChange, arg.WalletID, arg.TxHash, arg.BlockHeight)
+	var requires_reconciliation bool
+	err := row.Scan(&requires_reconciliation)
+	return requires_reconciliation, err
+}
 
 const InsertTxInput = `-- name: InsertTxInput :exec
 INSERT INTO tx_inputs (
@@ -40,6 +148,132 @@ func (q *Queries) InsertTxInput(ctx context.Context, arg InsertTxInputParams) er
 	return err
 }
 
+const ListConfirmedInputConflicts = `-- name: ListConfirmedInputConflicts :many
+SELECT DISTINCT
+    winner.id,
+    winner.tx_hash
+FROM transactions AS candidate
+INNER JOIN tx_inputs AS claim ON candidate.wallet_id = claim.wallet_id AND candidate.id = claim.tx_id
+INNER JOIN tx_inputs AS other
+    ON
+        claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+        AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+INNER JOIN transactions AS winner ON other.wallet_id = winner.wallet_id AND other.tx_id = winner.id
+WHERE
+    candidate.wallet_id = $1 AND candidate.block_height IS NULL
+    AND candidate.tx_status IN (0, 1) AND winner.block_height IS NOT NULL
+ORDER BY winner.id
+`
+
+type ListConfirmedInputConflictsRow struct {
+	ID     int64
+	TxHash []byte
+}
+
+// Upgrade starts with active unconfirmed claims, not a confirmed-history scan.
+// Existing confirmation handling can then settle each distinct retained winner.
+func (q *Queries) ListConfirmedInputConflicts(ctx context.Context, walletID int64) ([]ListConfirmedInputConflictsRow, error) {
+	rows, err := q.db.Query(ctx, ListConfirmedInputConflicts, walletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListConfirmedInputConflictsRow
+	for rows.Next() {
+		var i ListConfirmedInputConflictsRow
+		if err := rows.Scan(&i.ID, &i.TxHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListConflictingTransactions = `-- name: ListConflictingTransactions :many
+SELECT DISTINCT
+    peer.id,
+    peer.tx_hash
+FROM transactions AS t
+INNER JOIN tx_inputs AS claim ON t.wallet_id = claim.wallet_id AND t.id = claim.tx_id
+INNER JOIN tx_inputs AS other
+    ON
+        claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+        AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+INNER JOIN transactions AS peer ON other.wallet_id = peer.wallet_id AND other.tx_id = peer.id
+WHERE
+    t.wallet_id = $1 AND t.tx_hash = $2
+    AND peer.block_height IS NULL AND peer.tx_status IN (0, 1)
+ORDER BY peer.id
+`
+
+type ListConflictingTransactionsParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+type ListConflictingTransactionsRow struct {
+	ID     int64
+	TxHash []byte
+}
+
+// A confirming row settles every direct unmined peer, including external inputs.
+// Index facts before this lookup so insertion and replay use the same owner.
+func (q *Queries) ListConflictingTransactions(ctx context.Context, arg ListConflictingTransactionsParams) ([]ListConflictingTransactionsRow, error) {
+	rows, err := q.db.Query(ctx, ListConflictingTransactions, arg.WalletID, arg.TxHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListConflictingTransactionsRow
+	for rows.Next() {
+		var i ListConflictingTransactionsRow
+		if err := rows.Scan(&i.ID, &i.TxHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListIneligibleUnminedTxIDs = `-- name: ListIneligibleUnminedTxIDs :many
+SELECT t.id FROM transactions AS t
+WHERE
+    t.wallet_id = $1 AND t.block_height IS NULL AND t.tx_status IN (0, 1)
+    AND NOT EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+ORDER BY t.id
+`
+
+// Legacy children may predate validation of non-owned parents. The view walks
+// their ancestry so one status update covers all currently blocked descendants.
+func (q *Queries) ListIneligibleUnminedTxIDs(ctx context.Context, walletID int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, ListIneligibleUnminedTxIDs, walletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ListTransactionsMissingInputs = `-- name: ListTransactionsMissingInputs :many
 SELECT
     t.id,
@@ -61,7 +295,7 @@ type ListTransactionsMissingInputsRow struct {
 }
 
 // Startup reconstructs missing input facts from every retained transaction.
-// Atomic input writes make absence sufficient; coinbase has no ordinary input.
+// Atomic input writes make absence sufficient; coinbase has no ordinary claim.
 func (q *Queries) ListTransactionsMissingInputs(ctx context.Context, walletID int64) ([]ListTransactionsMissingInputsRow, error) {
 	rows, err := q.db.Query(ctx, ListTransactionsMissingInputs, walletID)
 	if err != nil {

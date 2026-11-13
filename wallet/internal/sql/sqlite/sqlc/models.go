@@ -65,12 +65,22 @@ type BtcwalletDatabaseIdentity struct {
 	SignetChallengeDigest []byte
 }
 
+type ContingentTransaction struct {
+	WalletID int64
+	ID       int64
+}
+
 type DerivedAddress struct {
 	AddressID     int64
 	WalletID      int64
 	AccountID     int64
 	AddressBranch int64
 	AddressIndex  int64
+}
+
+type EligibleTransaction struct {
+	WalletID int64
+	ID       int64
 }
 
 type KeyScope struct {
