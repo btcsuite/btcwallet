@@ -806,22 +806,12 @@ var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
 // backend.
 //
 // The shared CreateTx algorithm is intentionally linear:
-//   - load any existing wallet-scoped row for the same tx hash first
-//   - if the same tx is being reconfirmed, update that existing row instead of
-//     inserting a duplicate
-//   - validate and cache any confirming block metadata before later writes use
-//     it
-//   - Insert the base transaction row exactly once when no existing row can be
-//     reused
-//   - when the incoming tx is confirmed, discover any direct conflict roots
-//     before later writes claim shared inputs or rewrite that branch
-//   - if direct conflicts were found, rewrite those roots to replaced state,
-//     fail their descendants, and record replacement history before the new
-//     row claims their wallet-owned inputs
-//   - index immutable inputs even when their parent credits are not known
-//   - Insert every wallet-owned credited output as a UTXO
-//   - attach any wallet-owned spent inputs to that final transaction row
-//   - delete the leases on those inputs if the transaction is confirmed
+//   - load the existing row and resolve one stable transaction identity
+//   - validate optional confirming block metadata before recording
+//   - index immutable inputs and validate known claim authority
+//   - settle confirmed conflicts before credit and parent-claim writes
+//   - record wallet-owned credits and claims under that same row identity
+//   - delete input leases only when confirmation ends them
 //
 // Each backend implements those steps with its own sqlc-generated query types
 // while CreateTxWithOps keeps the high-level sequencing in one place.
@@ -1106,65 +1096,24 @@ func handleTxDescendants(ctx context.Context, walletID int64,
 	return nil
 }
 
-// handleTxConflicts discovers the direct conflicting roots of a new confirmed
-// tx, rewrites them to replaced state, and marks their descendants failed.
-//
-// The replacement algorithm is intentionally ordered:
-//   - load the direct conflicting roots first
-//   - load the live unmined graph snapshot used for descendant discovery
-//   - discover every descendant that depends on those roots before any mutation
-//     starts
-//   - handle the direct root txns first
-//   - handle the descendant txns second
-//
-// That sequencing preserves replacement history for the direct conflicts while
-// still invalidating the dependent branch atomically inside one SQL
-// transaction.
+// handleTxConflicts delegates chain authority to one settlement owner.
+// Existing pointer discovery remains unchanged during this sequencing refactor.
 func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 	replacementTxID int64, ops CreateTxOps) error {
 
-	// Only confirmed inserts can replace an active unmined branch.
 	if req.Params.Block == nil {
 		return nil
 	}
 
-	// Load the direct roots first so every later step works from the currently
-	// visible spend edges on the shared parent inputs.
 	rootIDs, rootHashes, err := ops.ListConflictTxns(ctx, req)
 	if err != nil {
 		return fmt.Errorf("list conflict txns: %w", err)
 	}
 
-	// Exit early if there are no conflicts.
-	if len(rootIDs) == 0 {
-		return nil
-	}
-
-	walletID := int64(req.Params.WalletID)
-
-	// Discover descendants before any mutation starts.
-	// Later rewrites can otherwise hide part of the displaced
-	// branch from the graph walk.
-	descendantIDs, err := collectConflictDescendants(
-		ctx, walletID, rootHashes, rootIDs, ops,
+	return ReplaceUnminedTxConflicts(
+		ctx, int64(req.Params.WalletID), rootIDs, rootHashes,
+		replacementTxID, ops,
 	)
-	if err != nil {
-		return err
-	}
-
-	// Direct roots keep the replacement state and replacement history.
-	err = handleRootTxns(ctx, walletID, rootIDs, replacementTxID, ops)
-	if err != nil {
-		return err
-	}
-
-	// Descendants clear their spend edges and then fall to the failed state.
-	err = handleTxDescendants(ctx, walletID, descendantIDs, ops)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // ReplaceUnminedTxConflicts rewrites direct unmined conflict roots displaced by
@@ -1209,40 +1158,17 @@ func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
 	return nil
 }
 
-// insertCreateTx completes the fresh-Insert CreateTx path.
-//
-// The order is important:
-//   - Insert first so the new winner row has a stable tx ID
-//   - reconcile conflicts next while the displaced unmined branch is still
-//     discoverable through the current spend edges
-//   - create wallet-owned credits after replacement handling
-//   - claim wallet-owned parent inputs last, because that rewires the shared
-//     spend edges to the new winner row
+// insertCreateTx assigns stable identity before the shared edge recorder.
+// Fresh insertion and replay then share ordering without changing claim policy.
 func insertCreateTx(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
 
-	// Insert the winner row first so every later write can point at its stable
-	// primary key. In particular, replacement-history edges need the new tx ID.
 	txID, err := ops.Insert(ctx, req)
 	if err != nil {
 		return fmt.Errorf("insert tx: %w", err)
 	}
 
-	// Reconcile any conflicting unmined branch before this tx claims the shared
-	// parent inputs. Conflict discovery looks at the current spend edges on
-	// those parents; once MarkInputsSpent rewires them to this new row, the old
-	// branch is no longer discoverable as the direct conflict root.
-	err = handleTxConflicts(ctx, req, txID, ops)
-	if err != nil {
-		return err
-	}
-
-	err = recordCreateTxEdges(ctx, req, txID, ops)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return recordCreateTxEdges(ctx, req, txID, ops)
 }
 
 // recordCreateTxEdges records immutable inputs, wallet-owned credits and spend
@@ -1262,6 +1188,13 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 	err = ops.ValidateInputs(ctx, req)
 	if err != nil {
 		return fmt.Errorf("validate tx inputs: %w", err)
+	}
+
+	// Shared inputs have been indexed and admitted. Settle confirmed conflicts
+	// before credit insertion and the existing parent-pointer claim writes.
+	err = handleTxConflicts(ctx, req, txID, ops)
+	if err != nil {
+		return err
 	}
 
 	// Credits only describe outputs created by the tx itself, so they do not
@@ -1309,11 +1242,6 @@ func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
 	err := ops.ConfirmExisting(ctx, req, existing)
 	if err != nil {
 		return fmt.Errorf("confirm existing tx: %w", err)
-	}
-
-	err = handleTxConflicts(ctx, req, existing.ID, ops)
-	if err != nil {
-		return err
 	}
 
 	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
