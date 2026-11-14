@@ -427,11 +427,13 @@ func TestCreateTxReturnsQueryErrorWhenTransactionsTableMissing(t *testing.T) {
 	require.ErrorContains(t, err, "get tx metadata")
 }
 
-// TestCreateTxReturnsQueryErrorWhenUtxosTableMissing verifies that conflict
-// discovery surfaces backend query errors from the UTXO table.
+// TestCreateTxReturnsQueryErrorWhenUtxosTableMissing verifies that confirmed
+// lease cleanup surfaces a missing credit table after indexed conflict lookup.
 func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Record the competing history, then remove the credit table so
+	// the existing confirmed lease-cleanup operation cannot finish recording.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-create-missing-utxos-table")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -473,6 +475,7 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	confirmedBlock := CreateBlockFixture(t, store.Queries(), 292)
 	dropTableForCorruption(t, store, "utxos")
 
+	// Act: Confirm a fresh competitor whose input facts remain readable.
 	err = store.CreateTx(
 		t.Context(),
 		db.CreateTxParams{
@@ -486,7 +489,9 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 			Status:   db.TxStatusPublished,
 		},
 	)
-	require.ErrorContains(t, err, "lookup input conflict")
+	// Assert: The atomic recording failure retains the surviving operation
+	// context rather than depending on the removed pointer lookup.
+	require.ErrorContains(t, err, "delete spent utxo leases")
 }
 
 // TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing checks that a

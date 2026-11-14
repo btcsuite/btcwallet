@@ -122,6 +122,8 @@ func applyListRowEnrichment(utxo *db.UtxoInfo,
 	utxo.AddrType = addrType
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked != 0
+	// Conflict metadata describes branch compatibility, not custody or leasing.
+	utxo.IsConflicted = row.IsConflicted
 
 	if hasScope {
 		utxo.KeyScope = keyScope

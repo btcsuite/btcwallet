@@ -29,8 +29,19 @@ WHERE
     t.wallet_id = $1
     AND t.tx_hash = $4
     AND u.output_index = $5
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 FOR UPDATE OF u
 ON CONFLICT (utxo_id) DO UPDATE
     SET
@@ -82,8 +93,9 @@ type AcquireUtxoLeaseParams struct {
 // lease without expiry. Callers should pass UTC values for both expires_at and
 // now_utc.
 // Performance:
-//   - Locks the target utxo row during resolution so concurrent spend updates on
-//     that row serialize with lease acquisition.
+//   - The caller holds the existing wallet graph lock before admission, ordering
+//     current input eligibility against recording and confirmed lease cleanup.
+//   - The target utxo row lock also coordinates concurrent lease writers.
 func (q *Queries) AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (sql.NullTime, error) {
 	row := q.db.QueryRow(ctx, AcquireUtxoLease,
 		arg.WalletID,
@@ -136,7 +148,10 @@ WHERE
     AND utxo_leases.utxo_id IN (
         SELECT u.id
         FROM transactions AS t
-        INNER JOIN utxos AS u ON t.id = u.spent_by_tx_id
+        INNER JOIN tx_inputs AS claim ON t.wallet_id = claim.wallet_id AND t.id = claim.tx_id
+        INNER JOIN transactions AS parent
+            ON claim.wallet_id = parent.wallet_id AND claim.prev_tx_hash = parent.tx_hash
+        INNER JOIN utxos AS u ON parent.id = u.tx_id AND claim.prev_output_index = u.output_index
         WHERE
             t.wallet_id = $1
             AND t.tx_hash = $2
@@ -158,7 +173,7 @@ type DeleteUtxoLeasesSpentByConfirmedTxParams struct {
 //
 // Performance:
 //   - Resolves the spender through its unique hash and reaches its inputs
-//     through the spent_by index.
+//     through the input-position and prevout indexes.
 func (q *Queries) DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error) {
 	result, err := q.db.Exec(ctx, DeleteUtxoLeasesSpentByConfirmedTx, arg.WalletID, arg.TxHash)
 	if err != nil {
@@ -209,8 +224,19 @@ INNER JOIN transactions AS t ON u.tx_id = t.id
 WHERE
     l.wallet_id = $1
     AND (l.expires_at IS NULL OR l.expires_at > $2::TIMESTAMP)
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 ORDER BY l.expires_at IS NULL, l.expires_at
 `
 

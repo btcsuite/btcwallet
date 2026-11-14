@@ -65,15 +65,6 @@ func (m *mockInvalidateUnminedTxOps) ListUnminedTxRecords(ctx context.Context,
 	return records, args.Error(1)
 }
 
-// ClearSpentUtxos implements InvalidateUnminedTxOps.
-func (m *mockInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
-	walletID int64, txID int64) error {
-
-	args := m.Called(ctx, walletID, txID)
-
-	return args.Error(0)
-}
-
 // MarkTxnsFailed implements InvalidateUnminedTxOps.
 func (m *mockInvalidateUnminedTxOps) MarkTxnsFailed(ctx context.Context,
 	walletID int64, txIDs []int64) error {
@@ -162,6 +153,9 @@ func TestValidateInvalidateUnminedTxTarget(t *testing.T) {
 func TestInvalidateUnminedTxWithOps(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Supply the retained branch snapshot and exact adapter outcomes
+	// so cleanup checks every required status or deletion call once.
+
 	rootHash := chainhash.Hash{1}
 	childHash := chainhash.Hash{2}
 	grandchildHash := chainhash.Hash{3}
@@ -180,10 +174,7 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 		}}},
 	}}
 
-	var (
-		cleared   []int64
-		failedIDs []int64
-	)
+	var failedIDs []int64
 
 	ops := &mockInvalidateUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
@@ -198,30 +189,6 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		candidates, nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
-		nil).Run(func(args mock.Arguments) {
-		txID, ok := args.Get(2).(int64)
-		require.True(t, ok)
-
-		cleared = append(cleared, txID)
-	}).Once()
-
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(
-		nil).Run(func(args mock.Arguments) {
-		txID, ok := args.Get(2).(int64)
-		require.True(t, ok)
-
-		cleared = append(cleared, txID)
-	}).Once()
-
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(
-		nil).Run(func(args mock.Arguments) {
-		txID, ok := args.Get(2).(int64)
-		require.True(t, ok)
-
-		cleared = append(cleared, txID)
-	}).Once()
-
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{1, 2, 3}).Return(
 		nil).Run(func(args mock.Arguments) {
 		txIDs, ok := args.Get(2).([]int64)
@@ -230,6 +197,7 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 		failedIDs = append([]int64(nil), txIDs...)
 	}).Once()
 
+	// Act: Apply the branch operation to the prepared root and descendants.
 	err := InvalidateUnminedTxWithOps(
 		t.Context(),
 		InvalidateUnminedTxParams{WalletID: 7, Txid: rootHash},
@@ -237,21 +205,20 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// The root spend is cleared first, then each discovered descendant spend is
-	// cleared before the whole branch is marked failed in one batch update.
-	require.Equal(t, []int64{1, 2, 3}, cleared)
+	// Assert: One status update invalidates the complete branch; input facts
+	// remain retained instead of being cleared as a spend projection.
 	require.Equal(t, []int64{1, 2, 3}, failedIDs)
 }
 
 // TestInvalidateUnminedTxWithOpsNoDescendants verifies that the shared helper
-// still clears and fails the root when no dependent branch exists.
+// still fails the root when no dependent branch exists.
 func TestInvalidateUnminedTxWithOpsNoDescendants(t *testing.T) {
 	t.Parallel()
 
-	var (
-		cleared   []int64
-		failedIDs []int64
-	)
+	// Arrange: Supply the retained branch snapshot and exact adapter outcomes
+	// so cleanup checks every required status or deletion call once.
+
+	var failedIDs []int64
 
 	ops := &mockInvalidateUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
@@ -268,14 +235,6 @@ func TestInvalidateUnminedTxWithOpsNoDescendants(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(8)).Return(
 		[]UnminedTxRecord(nil), nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(8), int64(4)).Return(
-		nil).Run(func(args mock.Arguments) {
-		txID, ok := args.Get(2).(int64)
-		require.True(t, ok)
-
-		cleared = append(cleared, txID)
-	}).Once()
-
 	ops.On("MarkTxnsFailed", mock.Anything, int64(8), []int64{4}).Return(
 		nil).Run(func(args mock.Arguments) {
 		txIDs, ok := args.Get(2).([]int64)
@@ -284,13 +243,15 @@ func TestInvalidateUnminedTxWithOpsNoDescendants(t *testing.T) {
 		failedIDs = append([]int64(nil), txIDs...)
 	}).Once()
 
+	// Act: Apply the branch operation to the prepared root and descendants.
 	err := InvalidateUnminedTxWithOps(
 		t.Context(),
 		InvalidateUnminedTxParams{WalletID: 8, Txid: chainhash.Hash{9}},
 		ops,
 	)
+	// Assert: Only the root becomes Failed; no nonexistent descendant adds a
+	// status write, and fixture cleanup verifies the required calls once.
 	require.NoError(t, err)
-	require.Equal(t, []int64{4}, cleared)
 	require.Equal(t, []int64{4}, failedIDs)
 }
 

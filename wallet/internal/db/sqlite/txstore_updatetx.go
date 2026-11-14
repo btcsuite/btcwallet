@@ -117,6 +117,31 @@ func (o *updateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	return nil
 }
 
+// CheckGraphState keeps row-local patches from bypassing graph settlement.
+// PrepareState has validated the block; the existing transaction owns the
+// guard, metadata mutation and any confirmed-spend lease cleanup together.
+func (o *updateTxOps) CheckGraphState(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) error {
+
+	needsGraph, err := o.qtx.HasTxGraphStateChange(
+		ctx, sqlc.HasTxGraphStateChangeParams{
+			WalletID:    int64(walletID),
+			TxHash:      txHash[:],
+			BlockHeight: o.blockHeight,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("check state patch input claims: %w", err)
+	}
+
+	if needsGraph {
+		return fmt.Errorf("%w: state patch requires graph reconciliation",
+			db.ErrInvalidParam)
+	}
+
+	return nil
+}
+
 // UpdateState writes one block/status patch after PrepareState has validated
 // any referenced block metadata.
 func (o *updateTxOps) UpdateState(ctx context.Context, walletID uint32,

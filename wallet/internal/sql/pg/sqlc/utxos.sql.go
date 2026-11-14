@@ -40,8 +40,23 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = $2
     AND a.wallet_id = $2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    )
     AND (
         (a.is_derived = FALSE AND da.address_id IS NULL)
         OR (
@@ -166,42 +181,6 @@ func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, e
 	return i, err
 }
 
-const ClearUtxosSpentByTxID = `-- name: ClearUtxosSpentByTxID :execrows
-UPDATE utxos AS u
-SET
-    spent_by_tx_id = NULL,
-    spent_input_index = NULL
-WHERE
-    u.spent_by_tx_id = $2
-    AND EXISTS (
-        SELECT 1
-        FROM transactions AS t
-        WHERE t.id = u.tx_id AND t.wallet_id = $1
-    )
-`
-
-type ClearUtxosSpentByTxIDParams struct {
-	WalletID    int64
-	SpentByTxID sql.NullInt64
-}
-
-// Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
-//
-// How:
-//   - Resets both spent columns together so the logical spend pointer remains
-//     internally consistent.
-//
-// Performance:
-//   - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
-//     ownership through the creating transaction.
-func (q *Queries) ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error) {
-	result, err := q.db.Exec(ctx, ClearUtxosSpentByTxID, arg.WalletID, arg.SpentByTxID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const DeleteUtxosByTxID = `-- name: DeleteUtxosByTxID :execrows
 DELETE FROM utxos AS u
 WHERE
@@ -273,7 +252,12 @@ SELECT
             l.expires_at IS NULL
             OR l.expires_at > $1::TIMESTAMP
         ), FALSE
-    )::BOOLEAN AS is_locked
+    )::BOOLEAN AS is_locked,
+    -- Expose contingent change for explicit coin control without safe summing.
+    (EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    ))::BOOLEAN AS is_conflicted
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -287,8 +271,19 @@ WHERE
     AND a.wallet_id = $2
     AND t.tx_hash = $3
     AND u.output_index = $4
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 `
 
 type GetUtxoByOutpointParams struct {
@@ -318,6 +313,7 @@ type GetUtxoByOutpointRow struct {
 	HasScript        bool
 	RawIsWatchOnly   bool
 	IsLocked         bool
+	IsConflicted     bool
 }
 
 // Retrieves a single unspent UTXO by its outpoint.
@@ -363,6 +359,7 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.HasScript,
 		&i.RawIsWatchOnly,
 		&i.IsLocked,
+		&i.IsConflicted,
 	)
 	return i, err
 }
@@ -377,8 +374,19 @@ WHERE
     AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 `
 
 type GetUtxoIDByOutpointParams struct {
@@ -408,90 +416,6 @@ func (q *Queries) GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpoi
 	var id int64
 	err := row.Scan(&id)
 	return id, err
-}
-
-const GetUtxoSpendByOutpoint = `-- name: GetUtxoSpendByOutpoint :one
-SELECT u.spent_by_tx_id, a.script_pub_key
-FROM transactions AS t
-INNER JOIN utxos AS u ON t.id = u.tx_id
-INNER JOIN addresses AS a ON u.address_id = a.id
-WHERE
-    t.wallet_id = $1
-    AND a.wallet_id = $1
-    AND t.tx_hash = $2
-    AND u.output_index = $3
-    AND t.tx_status IN (0, 1)
-`
-
-type GetUtxoSpendByOutpointParams struct {
-	WalletID    int64
-	TxHash      []byte
-	OutputIndex int32
-}
-
-type GetUtxoSpendByOutpointRow struct {
-	SpentByTxID  sql.NullInt64
-	ScriptPubKey []byte
-}
-
-// Returns the current spend edge for one wallet-owned outpoint.
-//
-// How:
-//   - Resolves the parent transaction row from `(wallet_id, tx_hash)` and only
-//     considers outputs whose parent status is `pending` or `published`.
-//   - Returns the nullable `spent_by_tx_id` column so callers can distinguish
-//     between an external/unknown parent and a wallet-owned conflict.
-//   - Returns the owner address script so duplicate credit replay can verify it
-//     matches the already-recorded UTXO rather than only checking outpoint
-//     existence.
-//
-// Performance:
-//   - Targets one wallet-scoped outpoint through the unique `(tx_id,
-//     output_index)` key after the parent hash lookup.
-func (q *Queries) GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error) {
-	row := q.db.QueryRow(ctx, GetUtxoSpendByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
-	var i GetUtxoSpendByOutpointRow
-	err := row.Scan(&i.SpentByTxID, &i.ScriptPubKey)
-	return i, err
-}
-
-const HasInvalidWalletUtxoByOutpoint = `-- name: HasInvalidWalletUtxoByOutpoint :one
-SELECT exists(
-    SELECT 1
-    FROM utxos AS u
-    INNER JOIN transactions AS t
-        ON u.tx_id = t.id
-    WHERE
-        t.wallet_id = $1
-        AND t.tx_hash = $2
-        AND u.output_index = $3
-        AND t.tx_status NOT IN (0, 1)
-) AS has_invalid
-`
-
-type HasInvalidWalletUtxoByOutpointParams struct {
-	WalletID    int64
-	TxHash      []byte
-	OutputIndex int32
-}
-
-// Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
-// transaction is already invalid.
-//
-// How:
-//   - Resolves the parent transaction row from `(wallet_id, tx_hash)` and checks
-//     for any status outside `pending`/`published`.
-//   - Exists so CreateTx can reject children of wallet-owned outputs whose
-//     parent transaction is already invalid.
-//
-// Performance:
-//   - Targets one wallet-scoped outpoint through the parent tx lookup plus the
-//     unique `(tx_id, output_index)` key.
-func (q *Queries) HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error) {
-	row := q.db.QueryRow(ctx, HasInvalidWalletUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
-	var has_invalid bool
-	err := row.Scan(&has_invalid)
-	return has_invalid, err
 }
 
 const InsertUtxo = `-- name: InsertUtxo :one
@@ -556,19 +480,22 @@ SELECT
     t.raw_tx
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
-LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
 LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
 LEFT JOIN accounts AS acc ON da.account_id = acc.id
 WHERE
     t.wallet_id = $1
     AND (acc.id IS NULL OR NOT acc.no_chain_sync)
-    AND t.tx_status IN (0, 1)
-    AND (
-        u.spent_by_tx_id IS NULL
-        OR (
-            spend.block_height IS NULL
-            AND spend.tx_status IN (0, 1)
-        )
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- Recovery still watches unconfirmed-spent credits; a current block ends it.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS spender ON claim.wallet_id = spender.wallet_id AND claim.tx_id = spender.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index AND spender.block_height IS NOT NULL
     )
 ORDER BY t.tx_hash, u.output_index
 `
@@ -621,56 +548,6 @@ func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]Lis
 	return items, nil
 }
 
-const ListSpendingTxIDsByParentTxID = `-- name: ListSpendingTxIDsByParentTxID :many
-SELECT DISTINCT u.spent_by_tx_id
-FROM utxos AS u
-WHERE
-    u.tx_id = $2
-    AND u.spent_by_tx_id IS NOT NULL
-    AND EXISTS (
-        SELECT 1
-        FROM transactions AS t
-        WHERE t.id = u.tx_id AND t.wallet_id = $1
-    )
-ORDER BY u.spent_by_tx_id
-`
-
-type ListSpendingTxIDsByParentTxIDParams struct {
-	WalletID int64
-	TxID     int64
-}
-
-// Lists direct child transaction IDs for one parent transaction ID.
-//
-// How:
-//   - Reads the spend edges already materialized on utxos through
-//     `(tx_id, spent_by_tx_id)`.
-//   - Returns only direct children; callers that need full descendant walks should
-//     traverse this query iteratively in application code.
-//
-// Performance:
-//   - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
-//     to one wallet-scoped parent.
-func (q *Queries) ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]sql.NullInt64, error) {
-	rows, err := q.db.Query(ctx, ListSpendingTxIDsByParentTxID, arg.WalletID, arg.TxID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []sql.NullInt64
-	for rows.Next() {
-		var spent_by_tx_id sql.NullInt64
-		if err := rows.Scan(&spent_by_tx_id); err != nil {
-			return nil, err
-		}
-		items = append(items, spent_by_tx_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const ListUtxos = `-- name: ListUtxos :many
 SELECT
     t.tx_hash,
@@ -709,7 +586,12 @@ SELECT
             l.expires_at IS NULL
             OR l.expires_at > $1::TIMESTAMP
         ), FALSE
-    )::BOOLEAN AS is_locked
+    )::BOOLEAN AS is_locked,
+    -- Expose contingent change for explicit coin control without safe summing.
+    (EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    ))::BOOLEAN AS is_conflicted
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -722,8 +604,19 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = $2
     AND a.wallet_id = $2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
     AND (
         $3::BIGINT IS NULL
         OR ks.purpose = $3::BIGINT
@@ -800,6 +693,7 @@ type ListUtxosRow struct {
 	HasScript        bool
 	RawIsWatchOnly   bool
 	IsLocked         bool
+	IsConflicted     bool
 }
 
 // Lists unspent UTXOs that match the provided filters.
@@ -860,6 +754,7 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.HasScript,
 			&i.RawIsWatchOnly,
 			&i.IsLocked,
+			&i.IsConflicted,
 		); err != nil {
 			return nil, err
 		}
@@ -869,61 +764,4 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 		return nil, err
 	}
 	return items, nil
-}
-
-const MarkUtxoSpent = `-- name: MarkUtxoSpent :execrows
-UPDATE utxos AS u
-SET
-    spent_by_tx_id = $4,
-    spent_input_index = $5
-WHERE
-    u.tx_id = (
-        SELECT t.id
-        FROM transactions AS t
-        WHERE
-            t.wallet_id = $1
-            AND t.tx_hash = $2
-            AND t.tx_status IN (0, 1)
-    )
-    AND u.output_index = $3
-    AND (
-        (u.spent_by_tx_id IS NULL AND u.spent_input_index IS NULL)
-        OR (u.spent_by_tx_id = $4 AND u.spent_input_index = $5)
-    )
-`
-
-type MarkUtxoSpentParams struct {
-	WalletID        int64
-	TxHash          []byte
-	OutputIndex     int32
-	SpentByTxID     sql.NullInt64
-	SpentInputIndex sql.NullInt32
-}
-
-// Marks a wallet-owned UTXO as spent by a transaction.
-//
-// How:
-//   - Resolves the created-by transaction row from `(wallet_id, tx_hash)` inside
-//     the statement so callers can update by network outpoint.
-//   - Requires the parent transaction status to be `pending` or `published`
-//     before a child spend edge can attach.
-//   - Only changes rows that are currently unspent or already point at the same
-//     `(spent_by_tx_id, spent_input_index)` pair, which keeps retries idempotent
-//     without allowing a caller to silently rewrite which input spent the UTXO.
-//
-// Performance:
-//   - Targets one outpoint in one wallet; the subquery uses the unique
-//     wallet-scoped tx hash lookup.
-func (q *Queries) MarkUtxoSpent(ctx context.Context, arg MarkUtxoSpentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, MarkUtxoSpent,
-		arg.WalletID,
-		arg.TxHash,
-		arg.OutputIndex,
-		arg.SpentByTxID,
-		arg.SpentInputIndex,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }

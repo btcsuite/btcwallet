@@ -89,7 +89,7 @@ type AddressProperty struct {
 	Address address.Address
 
 	// Balance is the total unspent balance of the address, including both
-	// confirmed and unconfirmed funds.
+	// confirmed and unconfirmed funds, excluding contingent competing change.
 	Balance btcutil.Amount
 }
 
@@ -513,6 +513,12 @@ func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	}
 
 	for i := range utxos {
+		// Address totals follow account safe sums; two competing change
+		// outputs cannot both become funds even when they pay one script.
+		if utxos[i].IsConflicted {
+			continue
+		}
+
 		addr := extractAddrFromPKScript(
 			utxos[i].PkScript, w.cfg.ChainParams,
 		)

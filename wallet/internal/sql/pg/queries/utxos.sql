@@ -55,8 +55,19 @@ WHERE
     AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1);
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    );
 
 -- name: GetUtxoByOutpoint :one
 -- Retrieves a single unspent UTXO by its outpoint.
@@ -110,7 +121,12 @@ SELECT
             l.expires_at IS NULL
             OR l.expires_at > sqlc.arg('now_utc')::TIMESTAMP
         ), FALSE
-    )::BOOLEAN AS is_locked
+    )::BOOLEAN AS is_locked,
+    -- Expose contingent change for explicit coin control without safe summing.
+    (EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    ))::BOOLEAN AS is_conflicted
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -124,8 +140,19 @@ WHERE
     AND a.wallet_id = sqlc.arg('wallet_id')
     AND t.tx_hash = sqlc.arg('tx_hash')
     AND u.output_index = sqlc.arg('output_index')
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1);
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    );
 
 -- name: ListUtxos :many
 -- Lists unspent UTXOs that match the provided filters.
@@ -184,7 +211,12 @@ SELECT
             l.expires_at IS NULL
             OR l.expires_at > sqlc.arg('now_utc')::TIMESTAMP
         ), FALSE
-    )::BOOLEAN AS is_locked
+    )::BOOLEAN AS is_locked,
+    -- Expose contingent change for explicit coin control without safe summing.
+    (EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    ))::BOOLEAN AS is_conflicted
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
@@ -197,8 +229,19 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
     AND a.wallet_id = sqlc.arg('wallet_id')
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
     AND (
         sqlc.narg('purpose')::BIGINT IS NULL
         OR ks.purpose = sqlc.narg('purpose')::BIGINT
@@ -292,8 +335,23 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
     AND a.wallet_id = sqlc.arg('wallet_id')
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    )
     AND (
         (a.is_derived = FALSE AND da.address_id IS NULL)
         OR (
@@ -362,132 +420,6 @@ WHERE
         ) >= sqlc.narg('coinbase_maturity')::INTEGER
     );
 
--- name: ListSpendingTxIDsByParentTxID :many
--- Lists direct child transaction IDs for one parent transaction ID.
---
--- How:
--- - Reads the spend edges already materialized on utxos through
---   `(tx_id, spent_by_tx_id)`.
--- - Returns only direct children; callers that need full descendant walks should
---   traverse this query iteratively in application code.
--- Performance:
--- - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
---   to one wallet-scoped parent.
-SELECT DISTINCT u.spent_by_tx_id
-FROM utxos AS u
-WHERE
-    u.tx_id = $2
-    AND u.spent_by_tx_id IS NOT NULL
-    AND EXISTS (
-        SELECT 1
-        FROM transactions AS t
-        WHERE t.id = u.tx_id AND t.wallet_id = $1
-    )
-ORDER BY u.spent_by_tx_id;
-
--- name: GetUtxoSpendByOutpoint :one
--- Returns the current spend edge for one wallet-owned outpoint.
---
--- How:
--- - Resolves the parent transaction row from `(wallet_id, tx_hash)` and only
---   considers outputs whose parent status is `pending` or `published`.
--- - Returns the nullable `spent_by_tx_id` column so callers can distinguish
---   between an external/unknown parent and a wallet-owned conflict.
--- - Returns the owner address script so duplicate credit replay can verify it
---   matches the already-recorded UTXO rather than only checking outpoint
---   existence.
--- Performance:
--- - Targets one wallet-scoped outpoint through the unique `(tx_id,
---   output_index)` key after the parent hash lookup.
-SELECT u.spent_by_tx_id, a.script_pub_key
-FROM transactions AS t
-INNER JOIN utxos AS u ON t.id = u.tx_id
-INNER JOIN addresses AS a ON u.address_id = a.id
-WHERE
-    t.wallet_id = $1
-    AND a.wallet_id = $1
-    AND t.tx_hash = $2
-    AND u.output_index = $3
-    AND t.tx_status IN (0, 1);
-
--- name: HasInvalidWalletUtxoByOutpoint :one
--- Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
--- transaction is already invalid.
---
--- How:
--- - Resolves the parent transaction row from `(wallet_id, tx_hash)` and checks
---   for any status outside `pending`/`published`.
--- - Exists so CreateTx can reject children of wallet-owned outputs whose
---   parent transaction is already invalid.
--- Performance:
--- - Targets one wallet-scoped outpoint through the parent tx lookup plus the
---   unique `(tx_id, output_index)` key.
-SELECT exists(
-    SELECT 1
-    FROM utxos AS u
-    INNER JOIN transactions AS t
-        ON u.tx_id = t.id
-    WHERE
-        t.wallet_id = $1
-        AND t.tx_hash = $2
-        AND u.output_index = $3
-        AND t.tx_status NOT IN (0, 1)
-) AS has_invalid;
-
--- name: MarkUtxoSpent :execrows
--- Marks a wallet-owned UTXO as spent by a transaction.
---
--- How:
--- - Resolves the created-by transaction row from `(wallet_id, tx_hash)` inside
---   the statement so callers can update by network outpoint.
--- - Requires the parent transaction status to be `pending` or `published`
---   before a child spend edge can attach.
--- - Only changes rows that are currently unspent or already point at the same
---   `(spent_by_tx_id, spent_input_index)` pair, which keeps retries idempotent
---   without allowing a caller to silently rewrite which input spent the UTXO.
--- Performance:
--- - Targets one outpoint in one wallet; the subquery uses the unique
---   wallet-scoped tx hash lookup.
-UPDATE utxos AS u
-SET
-    spent_by_tx_id = $4,
-    spent_input_index = $5
-WHERE
-    u.tx_id = (
-        SELECT t.id
-        FROM transactions AS t
-        WHERE
-            t.wallet_id = $1
-            AND t.tx_hash = $2
-            AND t.tx_status IN (0, 1)
-    )
-    AND u.output_index = $3
-    AND (
-        (u.spent_by_tx_id IS NULL AND u.spent_input_index IS NULL)
-        OR (u.spent_by_tx_id = $4 AND u.spent_input_index = $5)
-    );
-
--- name: ClearUtxosSpentByTxID :execrows
--- Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
---
--- How:
--- - Resets both spent columns together so the logical spend pointer remains
---   internally consistent.
--- Performance:
--- - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
---   ownership through the creating transaction.
-UPDATE utxos AS u
-SET
-    spent_by_tx_id = NULL,
-    spent_input_index = NULL
-WHERE
-    u.spent_by_tx_id = $2
-    AND EXISTS (
-        SELECT 1
-        FROM transactions AS t
-        WHERE t.id = u.tx_id AND t.wallet_id = $1
-    );
-
 -- name: DeleteUtxosByTxID :execrows
 -- Deletes all UTXO rows created by the provided transaction ID.
 --
@@ -535,18 +467,21 @@ SELECT
     t.raw_tx
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
-LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
 LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
 LEFT JOIN accounts AS acc ON da.account_id = acc.id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
     AND (acc.id IS NULL OR NOT acc.no_chain_sync)
-    AND t.tx_status IN (0, 1)
-    AND (
-        u.spent_by_tx_id IS NULL
-        OR (
-            spend.block_height IS NULL
-            AND spend.tx_status IN (0, 1)
-        )
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- Recovery still watches unconfirmed-spent credits; a current block ends it.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS spender ON claim.wallet_id = spender.wallet_id AND claim.tx_id = spender.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index AND spender.block_height IS NOT NULL
     )
 ORDER BY t.tx_hash, u.output_index;

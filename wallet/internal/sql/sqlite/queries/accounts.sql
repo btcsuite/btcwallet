@@ -455,8 +455,23 @@ WHERE
     AND da.wallet_id = sqlc.arg('wallet_id')
     AND acc.wallet_id = sqlc.arg('wallet_id')
     AND da.account_id = sqlc.arg('account_id')
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    )
     AND a.is_derived
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL
@@ -503,8 +518,23 @@ WHERE
     AND da.wallet_id = sqlc.arg('wallet_id')
     AND acc.wallet_id = sqlc.arg('wallet_id')
     AND da.account_id IN (sqlc.slice('account_ids'))
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM contingent_transactions AS contingent
+        WHERE contingent.wallet_id = t.wallet_id AND contingent.id = t.id
+    )
     AND a.is_derived
     AND da.address_id IS NOT NULL
     AND acc.id IS NOT NULL

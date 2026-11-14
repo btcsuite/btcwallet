@@ -454,27 +454,12 @@ func TestCreateTxRejectsInvalidParentWalletOutput(t *testing.T) {
 	require.True(t, ok)
 }
 
-// TestCreateTxRejectsSecondPendingSpend verifies that CreateTx rejects a second
-// pending transaction that spends the same wallet-owned output.
-//
-// Scenario:
-//   - One wallet-owned output already has one pending child spender.
-//
-// Setup:
-//   - Create one wallet-owned parent credit.
-//   - Insert one first child transaction that spends it.
-//   - Build one second child that spends the same outpoint.
-//
-// Action:
-//   - Insert the second child through CreateTx.
-//
-// Assertions:
-//   - CreateTx returns ErrTxInputConflict.
-//   - Only the first child remains recorded as the spender.
-//   - The second child row is not inserted.
-func TestCreateTxRejectsSecondPendingSpend(t *testing.T) {
+// TestCreateTxRetainsSecondPendingSpend verifies competing unconfirmed
+// attempts retain their history and claims without choosing a preferred owner.
+func TestCreateTxRetainsSecondPendingSpend(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Record owned funding and its first unconfirmed claimant.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-second-spend-conflict")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -516,21 +501,25 @@ func TestCreateTxRejectsSecondPendingSpend(t *testing.T) {
 		[]*wire.TxOut{{Value: 3000, PkScript: []byte{0x52}}},
 	)
 
+	// Act: Record a fresh competing attempt against the same input.
 	err = store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       secondChild,
 		Received: time.Unix(1710000520, 0),
 		Status:   db.TxStatusPending,
 	})
-	require.ErrorIs(t, err, db.ErrTxInputConflict)
+	require.NoError(t, err)
 
+	// Assert: Both attempts remain recorded and both reserve the known funding
+	// credit. Recording another unconfirmed claimant does not pick a winner.
+	require.True(t, walletUtxoSpent(t, store, walletID, spentOutPoint))
 	childIDs := childSpendingTxIDs(t, store, walletID, parentTx.TxHash())
-	require.Len(t, childIDs, 1)
+	require.Len(t, childIDs, 2)
 
 	_, ok := txIDByHash(t, store, walletID, firstChild.TxHash())
 	require.True(t, ok)
 	_, ok = txIDByHash(t, store, walletID, secondChild.TxHash())
-	require.False(t, ok)
+	require.True(t, ok)
 }
 
 // TestCreateTxSkipsDuplicateTx verifies that CreateTx inserts one wallet-
@@ -760,189 +749,6 @@ func TestCreateTxReplayedCreditConfirmedChildReplacesUnmined(t *testing.T) {
 	require.Equal(t, db.TxStatusPublished, confirmedInfo.Status)
 	require.NotNil(t, confirmedInfo.Block)
 	require.Equal(t, confirmedBlock.Height, confirmedInfo.Block.Height)
-}
-
-// TestCreateTxReplayedCreditSkipsReplacedChildSnapshot verifies that replaying
-// a parent credit does not reattach a child spend from a stale active-child
-// snapshot after that child has already been replaced.
-func TestCreateTxReplayedCreditSkipsReplacedChildSnapshot(t *testing.T) {
-	t.Parallel()
-
-	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-create-tx-replay-stale-child")
-	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
-
-	parentAddr := newDerivedAddress(
-		t, store, walletID, db.KeyScopeBIP0084, "default", false,
-	)
-	unminedAddr := newDerivedAddress(
-		t, store, walletID, db.KeyScopeBIP0084, "default", false,
-	)
-	confirmedAddr := newDerivedAddress(
-		t, store, walletID, db.KeyScopeBIP0084, "default", false,
-	)
-
-	parentTx := newRegularTx(
-		[]wire.OutPoint{randomOutPoint()},
-		[]*wire.TxOut{
-			{Value: 5000, PkScript: parentAddr.ScriptPubKey},
-			{Value: 6000, PkScript: parentAddr.ScriptPubKey},
-		},
-	)
-	parentParams := db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       parentTx,
-		Received: time.Unix(1710000630, 0),
-		Status:   db.TxStatusPending,
-	}
-
-	err := store.CreateTx(t.Context(), parentParams)
-	require.NoError(t, err)
-
-	firstOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
-	secondOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 1}
-	unminedChild := newRegularTx(
-		[]wire.OutPoint{firstOutPoint, secondOutPoint},
-		[]*wire.TxOut{{Value: 4000, PkScript: unminedAddr.ScriptPubKey}},
-	)
-	err = store.CreateTx(t.Context(), db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       unminedChild,
-		Received: time.Unix(1710000640, 0),
-		Status:   db.TxStatusPending,
-		Credits:  map[uint32]address.Address{0: nil},
-	})
-	require.NoError(t, err)
-
-	confirmedChild := newRegularTx(
-		[]wire.OutPoint{firstOutPoint},
-		[]*wire.TxOut{{Value: 3000, PkScript: confirmedAddr.ScriptPubKey}},
-	)
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 263)
-	err = store.CreateTx(t.Context(), db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       confirmedChild,
-		Received: time.Unix(1710000650, 0),
-		Block:    &confirmedBlock,
-		Status:   db.TxStatusPublished,
-		Credits:  map[uint32]address.Address{0: nil},
-	})
-	require.NoError(t, err)
-
-	parentParams.Credits = map[uint32]address.Address{0: nil, 1: nil}
-	err = store.CreateTx(t.Context(), parentParams)
-	require.NoError(t, err)
-
-	confirmedID, ok := txIDByHash(
-		t, store, walletID, confirmedChild.TxHash(),
-	)
-	require.True(t, ok)
-	require.Equal(
-		t, []int64{confirmedID},
-		childSpendingTxIDs(t, store, walletID, parentTx.TxHash()),
-	)
-	require.True(t, walletUtxoSpent(t, store, walletID, firstOutPoint))
-	require.False(t, walletUtxoSpent(t, store, walletID, secondOutPoint))
-
-	unminedInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
-		WalletID: walletID,
-		Txid:     unminedChild.TxHash(),
-	})
-	require.NoError(t, err)
-	require.Equal(t, db.TxStatusReplaced, unminedInfo.Status)
-}
-
-// TestCreateTxReplayedCreditPreplansConfirmedReplacements verifies that late
-// parent-credit replay computes confirmed child replacements across all newly
-// discovered credits before enforcing the single-unmined-spender rule.
-func TestCreateTxReplayedCreditPreplansConfirmedReplacements(t *testing.T) {
-	t.Parallel()
-
-	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-create-tx-replay-preplan")
-	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
-
-	parentAddr := newDerivedAddress(
-		t, store, walletID, db.KeyScopeBIP0084, "default", false,
-	)
-	parentTx := newRegularTx(
-		[]wire.OutPoint{randomOutPoint()},
-		[]*wire.TxOut{
-			{Value: 5000, PkScript: parentAddr.ScriptPubKey},
-			{Value: 6000, PkScript: parentAddr.ScriptPubKey},
-		},
-	)
-	parentParams := db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       parentTx,
-		Received: time.Unix(1710000660, 0),
-		Status:   db.TxStatusPending,
-	}
-
-	err := store.CreateTx(t.Context(), parentParams)
-	require.NoError(t, err)
-
-	firstOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
-	secondOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 1}
-	staleChild := newRegularTx(
-		[]wire.OutPoint{firstOutPoint, secondOutPoint},
-		[]*wire.TxOut{{Value: 4000, PkScript: []byte{0x51}}},
-	)
-	err = store.CreateTx(t.Context(), db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       staleChild,
-		Received: time.Unix(1710000670, 0),
-		Status:   db.TxStatusPending,
-	})
-	require.NoError(t, err)
-
-	activeChild := newRegularTx(
-		[]wire.OutPoint{firstOutPoint},
-		[]*wire.TxOut{{Value: 3000, PkScript: []byte{0x52}}},
-	)
-	err = store.CreateTx(t.Context(), db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       activeChild,
-		Received: time.Unix(1710000680, 0),
-		Status:   db.TxStatusPending,
-	})
-	require.NoError(t, err)
-
-	confirmedChild := newRegularTx(
-		[]wire.OutPoint{secondOutPoint},
-		[]*wire.TxOut{{Value: 2000, PkScript: []byte{0x53}}},
-	)
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 264)
-	err = store.CreateTx(t.Context(), db.CreateTxParams{
-		WalletID: walletID,
-		Tx:       confirmedChild,
-		Received: time.Unix(1710000690, 0),
-		Block:    &confirmedBlock,
-		Status:   db.TxStatusPublished,
-	})
-	require.NoError(t, err)
-
-	parentParams.Credits = map[uint32]address.Address{0: nil, 1: nil}
-	err = store.CreateTx(t.Context(), parentParams)
-	require.NoError(t, err)
-
-	activeID, ok := txIDByHash(t, store, walletID, activeChild.TxHash())
-	require.True(t, ok)
-	confirmedID, ok := txIDByHash(t, store, walletID, confirmedChild.TxHash())
-	require.True(t, ok)
-	require.ElementsMatch(
-		t, []int64{activeID, confirmedID},
-		childSpendingTxIDs(t, store, walletID, parentTx.TxHash()),
-	)
-	require.True(t, walletUtxoSpent(t, store, walletID, firstOutPoint))
-	require.True(t, walletUtxoSpent(t, store, walletID, secondOutPoint))
-
-	staleInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
-		WalletID: walletID,
-		Txid:     staleChild.TxHash(),
-	})
-	require.NoError(t, err)
-	require.Equal(t, db.TxStatusReplaced, staleInfo.Status)
 }
 
 // TestCreateTxConfirmsExistingUnminedRow verifies that CreateTx reuses one live
@@ -1794,13 +1600,12 @@ func TestListTxnsUsesConfirmationOrder(t *testing.T) {
 	require.Equal(t, wantOrder, txDetailHashes(details))
 }
 
-// TestGetTxDetailFindsOwnedInputAfterSpendEdgeCleared verifies that detail
-// reads reconstruct historical debits after invalidation clears spent_by_tx_id.
+// TestGetTxDetailFindsOwnedInputAfterInvalidation verifies that detail
+// reads retain historical debits after input eligibility is invalidated.
 //
 // Scenario:
 //   - One wallet-owned parent output is spent by an unmined child transaction.
-//   - The child is invalidated, clearing the mutable spend edge while retaining
-//     the child transaction row as failed history.
+//   - The child becomes Failed while its input facts and row remain retained.
 //
 // Setup:
 //   - Insert one wallet-owned parent credit and one child that spends it.
@@ -1812,7 +1617,7 @@ func TestListTxnsUsesConfirmationOrder(t *testing.T) {
 // Assertions:
 //   - The parent output is spendable again, proving the spend edge was cleared.
 //   - The child detail still reports the wallet-owned input from its raw tx.
-func TestGetTxDetailFindsOwnedInputAfterSpendEdgeCleared(t *testing.T) {
+func TestGetTxDetailFindsOwnedInputAfterInvalidation(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a wallet-owned parent credit and a child that spends it.
@@ -3322,6 +3127,8 @@ func TestListLeasedOutputsExcludesReleasedLease(t *testing.T) {
 func TestBalanceReturnsTotalAndLocked(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Keep ordinary unconfirmed funds and a lease, then add two
+	// incompatible change branches and a child whose values cannot be summed.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-balance")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -3357,6 +3164,31 @@ func TestBalanceReturnsTotalAndLocked(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	shared := randomOutPoint()
+	a := newRegularTx(
+		[]wire.OutPoint{shared}, []*wire.TxOut{
+			{Value: 6000, PkScript: addr.ScriptPubKey},
+		},
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: a.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: addr.ScriptPubKey}},
+	)
+	for _, tx := range []*wire.MsgTx{a, b, child} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status:  db.TxStatusPending,
+					Credits: map[uint32]address.Address{0: nil},
+				},
+			),
+		)
+	}
+
 	leaseID := RandomHash()
 	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
 		WalletID: walletID,
@@ -3366,13 +3198,33 @@ func TestBalanceReturnsTotalAndLocked(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Act: Read wallet and both account aggregate paths over the same history.
 	balance, err := store.Balance(t.Context(), db.BalanceParams{
 		WalletID: walletID,
 	})
 
 	require.NoError(t, err)
+	// Assert: Ordinary funds and their locked subset survive, while the
+	// incompatible 9,000 sats of child/sibling change never enter safe sums.
 	require.Equal(t, btcutil.Amount(50000), balance.Total)
 	require.Equal(t, btcutil.Amount(24000), balance.Locked)
+
+	account, err := store.GetAccount(
+		t.Context(), db.GetAccountQuery{
+			WalletID: walletID, Scope: db.KeyScopeBIP0084,
+			AccountNumber: addr.AccountNumber,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(50000), account.UnconfirmedBalance)
+	accounts, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+	require.Equal(t, btcutil.Amount(50000), accounts[0].UnconfirmedBalance)
 }
 
 // TestBalanceNameFilterDisambiguatesImportedXpub verifies that the account-name
@@ -3926,19 +3778,23 @@ func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
 		walletInfo.SyncedTo.Timestamp.Unix())
 }
 
-// TestApplyTxBatchRejectsStaleDuplicateTx verifies that a duplicate batch
-// observation is not skipped when the existing row is terminal history. A blind
-// ErrTxAlreadyExists skip would leave the failed row in place while reporting a
-// successful batch application.
-func TestApplyTxBatchRejectsStaleDuplicateTx(t *testing.T) {
+// TestApplyTxBatchIgnoresTerminalEcho verifies that a delayed unmined echo
+// succeeds without reviving terminal transaction history.
+func TestApplyTxBatchIgnoresTerminalEcho(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Keep an existing failed row and replay its former unmined
+	// observation, which carries no authority to revive the transaction.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-apply-tx-batch-stale")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
-		[]*wire.TxOut{{Value: 7000, PkScript: RandomBytes(22)}},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
 	)
 	params := db.CreateTxParams{
 		WalletID: walletID,
@@ -3951,11 +3807,43 @@ func TestApplyTxBatchRejectsStaleDuplicateTx(t *testing.T) {
 	require.NoError(t, err)
 	setTxStatus(t, store, walletID, tx.TxHash(), db.TxStatusFailed)
 
+	params.Credits = map[uint32]address.Address{0: nil}
+
+	// Act: Apply the delayed observation through the normal batch API.
 	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
 		WalletID:     walletID,
 		Transactions: []db.CreateTxParams{params},
 	})
-	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+	// Assert: A successful no-op preserves the terminal state and block view.
+	require.NoError(t, err)
+	stored, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID,
+			Txid:     tx.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusFailed, stored.Status)
+	require.Nil(t, stored.Block)
+	require.False(
+		t, walletUtxoExists(
+			t, store, walletID,
+			wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		),
+	)
+
+	// A fresh final competitor proves terminal facts do not reserve the input;
+	// it is independent of the replayed request and its ignored new credit.
+	competitor := tx.Copy()
+	competitor.TxOut[0].Value = 6000
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: competitor, Received: time.Unix(2, 0),
+				Status: db.TxStatusPending,
+			},
+		),
+	)
 }
 
 // TestApplyTxBatchConfirmsTxInSameBlock verifies that a batch can record a
@@ -5001,8 +4889,8 @@ func TestApplyTxBatchDuplicate(t *testing.T) {
 	t.Run("later wallet-input spend is recorded", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: Record the child tx first while the parent output it
-		// spends is not yet wallet-owned, so no spend edge is created.
+		// Arrange: Record the child's input before discovering wallet ownership
+		// of its parent, so later credits must use the existing retained claim.
 		store := NewTestStore(t)
 		walletID := newWallet(t, store, "wallet-dup-later-spend")
 		createDerivedAccount(
@@ -5015,8 +4903,7 @@ func TestApplyTxBatchDuplicate(t *testing.T) {
 
 		// Build the parent funding tx first so its hash is known, then have
 		// the child spend the parent's output 0. The parent is not recorded
-		// yet, so when the child is created its input is not wallet-owned and
-		// no spend edge is written.
+		// yet; the retained input must already reserve any later parent credit.
 		parentTx := newRegularTx(
 			[]wire.OutPoint{randomOutPoint()},
 			[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
@@ -5046,25 +4933,16 @@ func TestApplyTxBatchDuplicate(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, walletUtxoSpent(t, store, walletID, parentOutPoint))
 
-		// Creating the parent credit reconciles the already-stored child. Clear
-		// the edge directly to model a partially replayed duplicate where the
-		// child row exists but its spend edge is still missing.
-		clearUtxosSpentByTxID(t, store, walletID, childTx.TxHash())
-		require.False(t, walletUtxoSpent(t, store, walletID, parentOutPoint))
-
-		// Act: Re-observe the child through a batch. The stored row matches,
-		// so the old skip path would leave the now-wallet-owned parent
-		// unspent.
+		// Act: Re-observe the matching child through a batch after ownership
+		// discovery; idempotent replay must preserve its existing claim.
 		err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
 			WalletID:     walletID,
 			Transactions: []db.CreateTxParams{childParams},
 		})
 		require.NoError(t, err)
 
-		// Assert: The parent output is now spent by the child. A competing
-		// transaction spending the same parent output must therefore be
-		// rejected as a conflict, which only holds once the spend edge from
-		// the replayed child exists.
+		// Assert: Replay keeps the funding reserved. A fresh competing attempt
+		// can also be retained without releasing the child's original claim.
 		conflictTx := newRegularTx(
 			[]wire.OutPoint{parentOutPoint},
 			[]*wire.TxOut{{Value: 3000, PkScript: RandomBytes(22)}},
@@ -5075,7 +4953,8 @@ func TestApplyTxBatchDuplicate(t *testing.T) {
 			Received: time.Unix(1710000192, 0),
 			Status:   db.TxStatusPending,
 		})
-		require.ErrorIs(t, err, db.ErrTxInputConflict)
+		require.NoError(t, err)
+		require.True(t, walletUtxoSpent(t, store, walletID, parentOutPoint))
 	})
 
 	t.Run("exact duplicate may skip", func(t *testing.T) {
@@ -5322,4 +5201,516 @@ func TestStoreBackfillsTransactionInputs(t *testing.T) {
 		require.ErrorIs(t, err, db.ErrUtxoNotFound)
 		require.NoError(t, restored.Close())
 	}
+}
+
+// TestUpdateTxRejectsCompetingConfirmation verifies row-local patches cannot
+// settle competing inputs or change the label while refusing that transition.
+func TestUpdateTxRejectsCompetingConfirmation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two pending transactions share an external input. Their facts
+	// precede credit discovery, so input facts identify the conflict.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "state-claim-guard")
+	input := randomOutPoint()
+	a := newRegularTx(
+		[]wire.OutPoint{input}, []*wire.TxOut{
+			{Value: 6000, PkScript: []byte{0x51}},
+		},
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+
+	for _, tx := range []*wire.MsgTx{a, b} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending, Label: "original",
+				},
+			),
+		)
+	}
+
+	block := CreateBlockFixture(t, store.Queries(), 220)
+	label := "changed"
+
+	// Act: Try to attach B to a block and edit its label through row-local
+	// metadata mutation instead of the graph-owning CreateTx event.
+	err := store.UpdateTx(
+		t.Context(), db.UpdateTxParams{
+			WalletID: walletID, Txid: b.TxHash(), Label: &label,
+			State: &db.UpdateTxState{
+				Block:  &block,
+				Status: db.TxStatusPublished,
+			},
+		},
+	)
+
+	// Assert: Neither label nor state changed; the error directs the caller to
+	// graph lifecycle API; isolated confirmation remains supported.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	info, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: b.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "original", info.Label)
+	require.Equal(t, db.TxStatusPending, info.Status)
+	require.Nil(t, info.Block)
+}
+
+// TestStoreSettlesLegacyInputConflicts verifies startup repairs an old missed
+// external-input conflict while preserving immutable history across reopening.
+func TestStoreSettlesLegacyInputConflicts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The current recorder settles a confirmed peer, then the real
+	// version10 fixture restores the stale statuses produced by the old store.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID := newWallet(t, store, "legacy-input-conflict")
+	shared := randomOutPoint()
+	loser := newRegularTx(
+		[]wire.OutPoint{shared}, []*wire.TxOut{
+			{
+				Value: 6000, PkScript: []byte{0x51},
+			},
+		},
+	)
+	childInput := wire.OutPoint{Hash: loser.TxHash(), Index: 0}
+
+	child := newRegularTx(
+		[]wire.OutPoint{childInput}, []*wire.TxOut{
+			{
+				Value: 5000, PkScript: []byte{0x51},
+			},
+		},
+	)
+	for _, tx := range []*wire.MsgTx{loser, child} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending, Label: "retained attempt",
+				},
+			),
+		)
+	}
+
+	winner := loser.Copy()
+	winner.TxOut[0].Value = 4000
+	block := CreateBlockFixture(t, store.Queries(), 320)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: winner, Received: time.Unix(2, 0),
+				Status: db.TxStatusPublished, Block: &block,
+			},
+		),
+	)
+	prepareLegacyInputHistory(t, store.DB())
+	setTxStatus(t, store, walletID, loser.TxHash(), db.TxStatusPending)
+	setTxStatus(t, store, walletID, child.TxHash(), db.TxStatusPublished)
+	require.NoError(t, store.Close())
+
+	// Act: Public reopening indexes all facts before resolving the confirmed
+	// winner. A second open must preserve the same settled result and inputs.
+	for range 2 {
+		restored := reopen()
+
+		// Assert: The direct root is Replaced and its child Failed, while raw
+		// inputs, labels and current winning block keep their separate facts.
+		loserInfo, err := restored.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: loser.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusReplaced, loserInfo.Status)
+		require.Nil(t, loserInfo.Block)
+		require.Equal(t, "retained attempt", loserInfo.Label)
+		childInfo, err := restored.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: child.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusFailed, childInfo.Status)
+		require.Nil(t, childInfo.Block)
+		winnerInfo, err := restored.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: winner.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, winnerInfo.Block)
+		require.Equal(t, block.Hash, winnerInfo.Block.Hash)
+		require.Equal(t, block.Height, winnerInfo.Block.Height)
+		require.Equal(
+			t, block.Timestamp.Unix(),
+			winnerInfo.Block.Timestamp.Unix(),
+		)
+		require.Equal(
+			t, map[int64]wire.OutPoint{0: shared},
+			txInputOutPoints(t, restored, walletID, loser.TxHash()),
+		)
+		require.Equal(
+			t, map[int64]wire.OutPoint{0: childInput},
+			txInputOutPoints(t, restored, walletID, child.TxHash()),
+		)
+		require.Equal(
+			t, map[int64]wire.OutPoint{0: shared},
+			txInputOutPoints(t, restored, walletID, winner.TxHash()),
+		)
+		require.NoError(t, restored.Close())
+	}
+}
+
+// TestUtxosExposeContingentChange verifies alternative change and descendants
+// remain discoverable with derived conflict metadata on point and list reads.
+func TestUtxosExposeContingentChange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse owned funding, then retain competing spends and a child
+	// paying the same owned script so both available branches are discoverable.
+	store := NewTestStore(t)
+	walletID, funding := newLeaseSetFixture(t, store, "contingent-utxos", 1)
+	credit, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: walletID, OutPoint: funding[0],
+		},
+	)
+	require.NoError(t, err)
+
+	a := newRegularTx(
+		funding, []*wire.TxOut{
+			{Value: 6000, PkScript: credit.PkScript},
+		},
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: a.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: credit.PkScript}},
+	)
+	for _, tx := range []*wire.MsgTx{a, b, child} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status:  db.TxStatusPending,
+					Credits: map[uint32]address.Address{0: nil},
+				},
+			),
+		)
+	}
+
+	// Act: Discover the two available credits without imposing coin selection.
+	outputs, err := store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID: walletID,
+		},
+	)
+	require.NoError(t, err)
+
+	// Assert: Both discovery paths carry the derived flag through ancestry.
+	require.Len(t, outputs, 2)
+
+	for _, tx := range []*wire.MsgTx{b, child} {
+		outpoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+		output, err := store.GetUtxo(
+			t.Context(), db.GetUtxoQuery{
+				WalletID: walletID, OutPoint: outpoint,
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, output.IsConflicted)
+	}
+
+	for _, output := range outputs {
+		require.True(t, output.IsConflicted)
+	}
+}
+
+// TestDeleteTxPreservesCompetingClaim verifies deleting one attempt cannot
+// release funding still reserved by another retained unconfirmed transaction.
+func TestDeleteTxPreservesCompetingClaim(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two independent candidate rows reserve the same owned funding.
+	store := NewTestStore(t)
+	walletID, funding := newLeaseSetFixture(t, store, "delete-one-claim", 1)
+	a := newRegularTx(
+		funding, []*wire.TxOut{
+			{Value: 6000, PkScript: []byte{0x51}},
+		},
+	)
+	b := a.Copy()
+
+	b.TxOut[0].Value = 5000
+	for _, tx := range []*wire.MsgTx{a, b} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending,
+				},
+			),
+		)
+	}
+
+	// Act: Physically delete only the first leaf and its cascading input facts.
+	err := store.DeleteTx(
+		t.Context(), db.DeleteTxParams{
+			WalletID: walletID, Txid: a.TxHash(),
+		},
+	)
+
+	// Assert: The surviving row keeps funding unavailable through its input.
+	require.NoError(t, err)
+	require.True(t, walletUtxoSpent(t, store, walletID, funding[0]))
+	require.Equal(
+		t, map[int64]wire.OutPoint{0: funding[0]},
+		txInputOutPoints(t, store, walletID, b.TxHash()),
+	)
+	_, ok := txIDByHash(t, store, walletID, a.TxHash())
+	require.False(t, ok)
+}
+
+// TestCreateTxConfirmsRetainedReplaced verifies a real new block can confirm a
+// retained loser after its former winner disconnects, preserving input history.
+func TestCreateTxConfirmsRetainedReplaced(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Confirm a competing spend, then disconnect its block. The prior
+	// loser stays Replaced until the chain supplies new confirmation authority.
+	store := NewTestStore(t)
+	walletID, funding := newLeaseSetFixture(t, store, "confirm-replaced", 1)
+	a := newRegularTx(
+		funding, []*wire.TxOut{
+			{Value: 6000, PkScript: []byte{0x51}},
+		},
+	)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: a, Received: time.Unix(1, 0),
+				Status: db.TxStatusPending,
+			},
+		),
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+	oldBlock := CreateBlockFixture(t, store.Queries(), 330)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: b, Received: time.Unix(2, 0),
+				Status: db.TxStatusPublished, Block: &oldBlock,
+			},
+		),
+	)
+	require.NoError(t, store.RollbackToBlock(t.Context(), oldBlock.Height))
+	old, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: a.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, old.Status)
+	block := CreateBlockFixture(t, store.Queries(), 330)
+
+	// Act: Record an actual current-chain confirmation of the retained loser.
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID, Tx: a, Received: time.Unix(3, 0),
+			Status: db.TxStatusPublished, Block: &block,
+		},
+	)
+
+	// Assert: The retained history confirms and displaces the former winner.
+	require.NoError(t, err)
+	current, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: a.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, current.Status)
+	require.NotNil(t, current.Block)
+	require.Equal(t, block.Hash, current.Block.Hash)
+	require.Equal(t, old.SerializedTx, current.SerializedTx)
+	require.Equal(
+		t, map[int64]wire.OutPoint{0: funding[0]},
+		txInputOutPoints(t, store, walletID, a.TxHash()),
+	)
+	former, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: b.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, former.Status)
+	require.True(t, walletUtxoSpent(t, store, walletID, funding[0]))
+}
+
+// TestCreateTxConfirmsRetainedFailed verifies a failed descendant's actual
+// confirmation does not infer restoration of its still-terminal ancestor.
+func TestCreateTxConfirmsRetainedFailed(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A confirmed competitor invalidates a root and its descendant;
+	// disconnecting the winner leaves both terminal statuses unchanged.
+	store := NewTestStore(t)
+	walletID, funding := newLeaseSetFixture(t, store, "confirm-failed", 1)
+	a := newRegularTx(
+		funding, []*wire.TxOut{
+			{Value: 6000, PkScript: []byte{0x51}},
+		},
+	)
+	childInput := wire.OutPoint{Hash: a.TxHash(), Index: 0}
+
+	child := newRegularTx(
+		[]wire.OutPoint{childInput}, []*wire.TxOut{
+			{Value: 4000, PkScript: []byte{0x51}},
+		},
+	)
+	for _, tx := range []*wire.MsgTx{a, child} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending,
+				},
+			),
+		)
+	}
+
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+	oldBlock := CreateBlockFixture(t, store.Queries(), 340)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: b, Received: time.Unix(2, 0),
+				Status: db.TxStatusPublished, Block: &oldBlock,
+			},
+		),
+	)
+	require.NoError(t, store.RollbackToBlock(t.Context(), oldBlock.Height))
+	old, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: child.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusFailed, old.Status)
+	block := CreateBlockFixture(t, store.Queries(), 340)
+
+	// Act: Confirm only the descendant using new current-chain block metadata.
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID, Tx: child, Received: time.Unix(3, 0),
+			Status: db.TxStatusPublished, Block: &block,
+		},
+	)
+
+	// Assert: Confirmation recovers this target's history and original inputs.
+	require.NoError(t, err)
+	current, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: child.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, current.Status)
+	require.NotNil(t, current.Block)
+	require.Equal(t, block.Hash, current.Block.Hash)
+	require.Equal(t, old.SerializedTx, current.SerializedTx)
+	require.Equal(
+		t, map[int64]wire.OutPoint{0: childInput},
+		txInputOutPoints(t, store, walletID, child.TxHash()),
+	)
+	ancestor, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: a.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, ancestor.Status)
+}
+
+// TestStorePreservesCreditsAndLeasesAcrossCutover verifies migration preserves
+// stable credit identity, application leases and retained spend claims.
+func TestStorePreservesCreditsAndLeasesAcrossCutover(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep one leased credit and another claimed by an unmined spend,
+	// then restore the pre-cutover schema without discarding input facts.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID, funding := newLeaseSetFixture(t, store, "physical-cutover", 2)
+	lockID := RandomHash()
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: walletID, OutPoint: funding[0], ID: lockID,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	child := newRegularTx(
+		funding[1:], []*wire.TxOut{
+			{Value: 4000, PkScript: []byte{0x51}},
+		},
+	)
+	require.NoError(
+		t, store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: child, Received: time.Unix(1, 0),
+				Status: db.TxStatusPending,
+			},
+		),
+	)
+	leases, err := store.ListLeasedOutputs(t.Context(), walletID)
+	require.NoError(t, err)
+	require.Len(t, leases, 1)
+
+	var creditID int64
+
+	require.NoError(
+		t, store.DB().QueryRowContext(
+			t.Context(),
+			"SELECT utxo_id FROM utxo_leases",
+		).Scan(&creditID),
+	)
+	require.NoError(t, downgradeInputClaims(t, store.DB()))
+	require.NoError(t, store.Close())
+
+	// Act: Public reopening applies migration13 with foreign keys enabled,
+	// including the lease child table whose parent credit is rebuilt in SQLite.
+	restored := reopen()
+	current, err := restored.ListLeasedOutputs(t.Context(), walletID)
+
+	// Assert: Public lease identity/expiration and the underlying credit ID
+	// survive; the other credit remains reserved by the retained input claim.
+	require.NoError(t, err)
+	require.Equal(t, leases, current)
+
+	var currentID int64
+
+	require.NoError(
+		t, restored.DB().QueryRowContext(
+			t.Context(),
+			"SELECT utxo_id FROM utxo_leases",
+		).Scan(&currentID),
+	)
+	require.Equal(t, creditID, currentID)
+	require.True(t, walletUtxoExists(t, restored, walletID, funding[0]))
+	require.True(t, walletUtxoSpent(t, restored, walletID, funding[1]))
+	require.Equal(
+		t, map[int64]wire.OutPoint{0: funding[1]},
+		txInputOutPoints(t, restored, walletID, child.TxHash()),
+	)
 }

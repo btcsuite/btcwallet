@@ -182,35 +182,37 @@ func TestSQLiteDatabaseIdentityRejectsPopulatedFile(t *testing.T) {
 	require.Equal(t, "delete", journalMode)
 }
 
-// childSpendingTxIDs returns the direct child transaction IDs recorded for the
-// provided parent transaction hash.
-func childSpendingTxIDs(t *testing.T, store *sqlite.Store,
-	walletID uint32,
+// childSpendingTxIDs reads active direct children from retained input facts.
+// Include confirmed children because lifecycle tests assert both states.
+func childSpendingTxIDs(t *testing.T, store *sqlite.Store, walletID uint32,
 	txHash chainhash.Hash) []int64 {
 
 	t.Helper()
 
-	meta, err := store.Queries().GetTransactionMetaByHash(
-		t.Context(), sqlc.GetTransactionMetaByHashParams{
-			WalletID: int64(walletID),
-			TxHash:   txHash[:],
-		},
+	// Read the normalized relation directly rather than keep a production
+	// raw-history query or decode inputs solely for fixture assertions.
+	rows, err := store.DB().QueryContext(
+		t.Context(), `
+		SELECT DISTINCT i.tx_id FROM tx_inputs AS i
+		JOIN transactions AS t ON t.wallet_id = i.wallet_id AND t.id = i.tx_id
+		WHERE i.wallet_id = ? AND i.prev_tx_hash = ?
+		AND t.tx_status IN (0, 1) ORDER BY i.tx_id
+	`, walletID, txHash[:],
 	)
 	require.NoError(t, err)
 
-	childIDs, err := store.Queries().ListSpendingTxIDsByParentTxID(
-		t.Context(), sqlc.ListSpendingTxIDsByParentTxIDParams{
-			WalletID: int64(walletID),
-			TxID:     meta.ID,
-		},
-	)
-	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
 
-	ids := make([]int64, 0, len(childIDs))
-	for _, childID := range childIDs {
-		require.True(t, childID.Valid)
-		ids = append(ids, childID.Int64)
+	var ids []int64
+	for rows.Next() {
+		var id int64
+
+		require.NoError(t, rows.Scan(&id))
+
+		ids = append(ids, id)
 	}
+
+	require.NoError(t, rows.Err())
 
 	return ids
 }
@@ -286,52 +288,26 @@ func walletUtxoExists(t *testing.T, store *sqlite.Store,
 	return true
 }
 
-// walletUtxoSpent reports whether one wallet-scoped outpoint exists and is
-// recorded as spent, i.e. its spend edge points at a spending transaction.
-func walletUtxoSpent(t *testing.T, store *sqlite.Store,
-	walletID uint32,
+// walletUtxoSpent distinguishes an eligible claim from a missing credit.
+// Ownership must survive before unavailable funding can count as spent.
+func walletUtxoSpent(t *testing.T, store *sqlite.Store, walletID uint32,
 	outPoint wire.OutPoint) bool {
 
 	t.Helper()
 
-	spentBy, err := store.Queries().GetUtxoSpendByOutpoint(
-		t.Context(), sqlc.GetUtxoSpendByOutpointParams{
-			WalletID:    int64(walletID),
-			TxHash:      outPoint.Hash[:],
+	_, err := store.Queries().GetWalletCreditByOutpoint(
+		t.Context(), sqlc.GetWalletCreditByOutpointParams{
+			WalletID: int64(walletID), TxHash: outPoint.Hash[:],
 			OutputIndex: int64(outPoint.Index),
 		},
 	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false
-		}
-
-		require.NoError(t, err)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
 	}
 
-	return spentBy.SpentByTxID.Valid
-}
-
-// clearUtxosSpentByTxID clears all UTXO spend edges claimed by one transaction.
-func clearUtxosSpentByTxID(t *testing.T, store *sqlite.Store,
-	walletID uint32, txHash chainhash.Hash) {
-
-	t.Helper()
-
-	txID, ok := txIDByHash(t, store, walletID, txHash)
-	require.True(t, ok)
-
-	rows, err := store.Queries().ClearUtxosSpentByTxID(
-		t.Context(), sqlc.ClearUtxosSpentByTxIDParams{
-			WalletID: int64(walletID),
-			SpentByTxID: sql.NullInt64{
-				Int64: txID,
-				Valid: true,
-			},
-		},
-	)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, rows)
+
+	return !walletUtxoExists(t, store, walletID, outPoint)
 }
 
 // insertReplacementEdge records one replacement edge between two wallet-scoped
@@ -451,16 +427,36 @@ func txInputOutPoints(t *testing.T, store *sqlite.Store, walletID uint32,
 func prepareLegacyInputHistory(t *testing.T, sqlDB *sql.DB) {
 	t.Helper()
 
-	// Reuse the checked-in downgrade instead of fabricating an empty current
-	// table; the version marker makes NewStore execute the actual upgrade.
-	down, err := os.ReadFile(
-		"../../sql/sqlite/migrations/000011_tx_inputs.down.sql",
+	rollbackInputHistoryMigrations(t, sqlDB, "../../sql/sqlite/migrations")
+}
+
+// downgradeInputClaims runs the checked-in down migration atomically with its
+// version marker so refusal leaves the live fixture ready for further use.
+func downgradeInputClaims(t *testing.T, sqlDB *sql.DB) error {
+	t.Helper()
+
+	migration, err := os.ReadFile(
+		"../../sql/sqlite/migrations/000013_drop_utxo_spenders.down.sql",
 	)
 	require.NoError(t, err)
-	_, err = sqlDB.ExecContext(t.Context(), string(down))
+
+	// Reuse the real migration SQL without the migrator's dirty-version marker;
+	// the test must inspect an ambiguous refusal and then remove one candidate.
+	tx, err := sqlDB.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	_, err = sqlDB.ExecContext(t.Context(),
-		"UPDATE schema_migrations SET version = 10, dirty = FALSE",
+
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(t.Context(), string(migration))
+	if err != nil {
+		return fmt.Errorf("downgrade input claims: %w", err)
+	}
+
+	_, err = tx.ExecContext(
+		t.Context(),
+		"UPDATE schema_migrations SET version = 12, dirty = FALSE",
 	)
 	require.NoError(t, err)
+
+	return tx.Commit()
 }
