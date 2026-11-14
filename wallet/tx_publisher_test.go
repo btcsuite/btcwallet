@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -1351,25 +1353,61 @@ func TestBroadcastAlreadyBroadcastedAtPublish(t *testing.T) {
 	}
 }
 
-// TestBroadcastAlreadyBroadcasted tests the Broadcast method when the
-// transaction has already been broadcasted.
+// TestBroadcastAlreadyBroadcasted repairs relevant missing history even when
+// the backend already knows the transaction, without submitting it again.
 func TestBroadcastAlreadyBroadcasted(t *testing.T) {
 	t.Parallel()
 
-	label := testTxLabel
-	w, m := createStartedWalletWithMocks(t)
+	// Arrange: A is tracked, B shares its owned input, and the node already
+	// knows B although the wallet has no B row (the reported write-failure
+	// retry).
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	a := wire.NewMsgTx(wire.TxVersion)
+	a.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	a.AddTxOut(wire.NewTxOut(19_000, script))
+	require.NoError(
+		t, w.store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: w.id,
+				Tx:       a,
+				Received: time.Now(),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		),
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 18_000
 
-	tx := &wire.MsgTx{
-		TxIn:  []*wire.TxIn{{}},
-		TxOut: []*wire.TxOut{{Value: 10000}},
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrTxAlreadyInMempool).Once()
+
+	// Act: A known preflight result must still cross ordinary recording.
+	require.NoError(t, w.Broadcast(t.Context(), b, testTxLabel))
+
+	// Assert: Both candidates survive, B's label is durable, and strict chain
+	// expectations forbid any SendRawTransaction or redundant registration
+	// call.
+	for _, tx := range []*wire.MsgTx{a, b} {
+		info, err := w.store.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: w.id, Txid: tx.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusPublished, info.Status)
+		require.Nil(t, info.Block)
 	}
 
-	// Mock checkMempool to return already broadcasted.
-	m.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
-		Return(nil, chain.ErrTxAlreadyInMempool)
-
-	err := w.Broadcast(t.Context(), tx, label)
+	info, err := w.store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: w.id, Txid: b.TxHash(),
+		},
+	)
 	require.NoError(t, err)
+	require.Equal(t, testTxLabel, info.Label)
 }
 
 // TestBroadcastPublishFailsRetainsTx verifies an uncertain send outcome keeps
@@ -2133,5 +2171,256 @@ func TestBroadcastReorgPublishFailureRetainsSpend(t *testing.T) {
 			require.Len(t, utxos, 1)
 			require.Equal(t, untouched, utxos[0].OutPoint)
 		})
+	}
+}
+
+// TestBroadcastRecordingFailureStopsSubmission verifies a failed pre-send write
+// cannot submit a wallet-relevant transaction without its durable input facts.
+func TestBroadcastRecordingFailureStopsSubmission(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Ownership resolves normally, but the ordinary Store write fails.
+	// Strict mocks contain no watch or send expectation after that failure.
+	w, mocks := createStartedWalletWithMocks(t)
+	addr := mustNewStandalonePubKeyAddr(t)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Hash: chainhash.Hash{1}}, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(10_000, script))
+	mocks.chain.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(
+			[]*btcjson.TestMempoolAcceptResult{
+				{
+					Allowed: true,
+				},
+			}, nil,
+		).Once()
+	mocks.store.On(
+		"ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, script),
+	).Return(ownedAddrsResult(script), nil).Once()
+	mocks.store.On(
+		"CreateTx", mock.Anything,
+		matchCreateTxParams(
+			w.id, tx, testTxLabel,
+			map[uint32]address.Address{0: addr},
+		),
+	).Return(errDummy).Once()
+
+	// Act: Publish through the public admitted request path.
+	err = w.Broadcast(t.Context(), tx, testTxLabel)
+
+	// Assert: The database cause reaches the caller before backend submission;
+	// fixture cleanup verifies every required mock call exactly once.
+	require.ErrorIs(t, err, errDummy)
+}
+
+// TestBroadcastDelayedReplyKeepsSyncerCandidate verifies a held send reply
+// cannot overwrite a later syncer-observed alternative to the same input.
+func TestBroadcastDelayedReplyKeepsSyncerCandidate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Track A, then hold B inside the backend send while the real
+	// SQLite Store remains available to the independent syncer write path.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	a := wire.NewMsgTx(wire.TxVersion)
+	a.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	a.AddTxOut(wire.NewTxOut(19_000, script))
+	require.NoError(
+		t, w.store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: w.id,
+				Tx:       a,
+				Received: time.Now(),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		),
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 18_000
+	c := a.Copy()
+	c.TxOut[0].Value = 17_000
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	result := make(chan error, 1)
+
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(
+			[]*btcjson.TestMempoolAcceptResult{
+				{
+					Allowed: true,
+				},
+			}, nil,
+		).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("SendRawTransaction", b, false).
+		Return((*chainhash.Hash)(nil), nil).Once().
+		Run(
+			func(mock.Arguments) {
+				close(entered)
+				<-release
+			},
+		)
+
+	// Cleanup unblocks and joins the sole test goroutine on every assertion
+	// failure before the older wallet fixture cleanup stops its components.
+	t.Cleanup(
+		func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("broadcast did not finish after releasing backend")
+			}
+		},
+	)
+
+	go func() {
+		defer close(done)
+
+		result <- w.Broadcast(t.Context(), b, testTxLabel)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("broadcast did not reach backend send")
+	}
+
+	before, err := w.store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: w.id, Txid: b.TxHash(),
+		},
+	)
+	require.NoError(t, err, "B must be durable before its send reply")
+	require.Equal(t, db.TxStatusPublished, before.Status)
+
+	record, err := wtxmgr.NewTxRecordFromMsgTx(c, time.Now())
+	require.NoError(t, err)
+
+	s := newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		w.chainSyncer, w.chainEventChan,
+	)
+
+	// Act: Commit C through the actual notification path while B's reply is
+	// held, then release the reply and wait for the public Broadcast result.
+	require.NoError(
+		t, s.putTxNotifications(
+			t.Context(), liveMatches(record), nil,
+		),
+	)
+	close(release)
+
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("broadcast did not return after backend reply")
+	}
+
+	// Assert: Send completion grants no replacement authority. A/B/C remain
+	// tracked and contingent, and their shared funding input stays reserved.
+	for _, tx := range []*wire.MsgTx{a, b, c} {
+		info, err := w.store.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: w.id, Txid: tx.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusPublished, info.Status)
+		require.Nil(t, info.Block)
+		credit, err := w.store.GetUtxo(
+			t.Context(), db.GetUtxoQuery{
+				WalletID: w.id, OutPoint: wire.OutPoint{Hash: tx.TxHash()},
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, credit.IsConflicted)
+	}
+
+	_, err = w.store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: w.id, OutPoint: input,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestBroadcastNeutrinoCancellationRetainsCandidates verifies unsupported
+// preflight still permits a fee-replacement relay despite caller cancellation.
+func TestBroadcastNeutrinoCancellationRetainsCandidates(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Neutrino cannot preflight B, which competes with tracked A.
+	// Cancel only after the backend receives B, proving the call was admitted.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	a := wire.NewMsgTx(wire.TxVersion)
+	a.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	a.AddTxOut(wire.NewTxOut(19_000, script))
+	require.NoError(
+		t, w.store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: w.id,
+				Tx:       a,
+				Received: time.Now(),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		),
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 18_000
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client.On("BackEnd").Unset()
+	client.On("BackEnd").Return("neutrino").Maybe()
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Once()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	client.On("SendRawTransaction", b, false).
+		Return((*chainhash.Hash)(nil), nil).Once().
+		Run(
+			func(mock.Arguments) {
+				cancel()
+			},
+		)
+
+	// Act: Relay through the public request while the caller is canceled at
+	// send.
+	require.NoError(t, w.Broadcast(ctx, b, testTxLabel))
+
+	// Assert: Nil relay result is no mempool verdict. Both durable attempts
+	// remain live and contingent until a block chooses their input's spender.
+	for _, tx := range []*wire.MsgTx{a, b} {
+		info, err := w.store.GetTx(
+			t.Context(), db.GetTxQuery{
+				WalletID: w.id, Txid: tx.TxHash(),
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusPublished, info.Status)
+		credit, err := w.store.GetUtxo(
+			t.Context(), db.GetUtxoQuery{
+				WalletID: w.id, OutPoint: wire.OutPoint{Hash: tx.TxHash()},
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, credit.IsConflicted)
 	}
 }
