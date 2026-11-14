@@ -153,7 +153,7 @@ func testSQLiteManagerWithChain(tb testing.TB, chain *bwmock.Chain) *Manager {
 	// Register shutdown before startup can fail; mock assertions run after
 	// this cleanup has joined every real Wallet worker.
 	tb.Cleanup(func() {
-		_ = m.Stop()
+		_ = stopManagerForTest(tb, m)
 	})
 
 	_, err = m.Start(context.Background())
@@ -195,7 +195,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 		store.AssertExpectations(tb)
 	})
 	tb.Cleanup(func() {
-		_ = m.Stop()
+		_ = stopManagerForTest(tb, m)
 	})
 
 	return m
@@ -224,6 +224,24 @@ func startLoadedWalletForTest(t *testing.T, w *Wallet) {
 	})
 }
 
+// stopManagerForTest releases fixture-owned storage after runtime work joins.
+// Callers finish public Start/Stop calls before exclusive fixture disposal;
+// this also handles never-started Managers that public Stop cannot dispose.
+func stopManagerForTest(tb testing.TB, m *Manager) error {
+	tb.Helper()
+
+	// Joining canceled work gives this fixture exclusive resource ownership.
+	// A failed operation or explicit Stop may already have released storage.
+	m.cancel()
+	m.wg.Wait()
+
+	if m.backend == nil {
+		return nil
+	}
+
+	return m.stopWallets(nil)
+}
+
 // testKVDBManagerAt opens a Manager over an existing kvdb path, so a test can
 // simulate a restart by stopping one Manager and opening another over the same
 // database.
@@ -242,7 +260,7 @@ func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
 	// Register shutdown before startup can fail; mock assertions run after
 	// this cleanup has joined every real Wallet worker.
 	tb.Cleanup(func() {
-		_ = m.Stop()
+		_ = stopManagerForTest(tb, m)
 	})
 
 	_, err = m.Start(context.Background())
