@@ -202,53 +202,72 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	return <-r.respErrChan
 }
 
-// handleBroadcast records and publishes within the accepted outer request.
-// The admitted caller waits for this result before reusing its inputs.
+// handleBroadcast runs the explicit submission flow within one admission:
+//   - Check mempool policy before recording a new attempt.
+//   - Record relevant history and inputs before any network submission.
+//   - Register owned outputs and send the transaction.
+//   - Notify on success; on failure, remove only recognized invalid attempts
+//     and report any retained history to the caller.
+//
+// For example, B can be recorded alongside competing A before its send reply
+// arrives. The syncer may record competitor C while that reply is held. B's
+// eventual reply does not settle A/B/C; only confirmation chooses a winner.
+// Admission joins dependency access through Stop, not concurrent graph writes.
 func (w *Wallet) handleBroadcast(r broadcastReq) {
-	// We'll start by checking if the tx is acceptable to the mempool.
-	err := w.checkMempool(r.ctx, r.tx)
+	// The admitted caller retains its inputs until the entire flow completes.
+	r.respErrChan <- w.broadcastTx(r.ctx, r.tx, r.label)
+}
+
+// broadcastTx records an explicit submission before watches and relay, keeping
+// policy failures from silently abandoning the wallet's tracked input claims.
+func (w *Wallet) broadcastTx(ctx context.Context, tx *wire.MsgTx,
+	label string) error {
+
+	// Preflight refusal must not create new history. A known transaction
+	// already satisfies the existing publication contract.
+	err := w.checkMempool(ctx, tx)
 	if errors.Is(err, errAlreadyBroadcasted) {
-		r.respErrChan <- nil
-
-		return
+		return nil
 	}
 
 	if err != nil {
-		r.respErrChan <- err
-
-		return
+		return err
 	}
 
-	// First, we'll attempt to add the tx to our wallet's DB. This will
-	// allow us to track the tx's confirmation status, and also
-	// re-broadcast it upon startup.
-	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
+	// Record first so even an uncertain send result leaves enough durable
+	// information to track confirmation and retry publication.
+	ourAddrs, recorded, err := w.addTxToWallet(ctx, tx, label)
 	if err != nil {
-		r.respErrChan <- err
-
-		return
+		return err
 	}
+
+	// A send reply has no graph authority: competing attempts stay recorded.
+	err = w.publishTx(tx, ourAddrs)
+	if err != nil {
+		return w.handlePublicationFailure(ctx, tx, recorded, err)
+	}
+
+	// Only relevant, recorded transactions have a detail to announce.
+	// Best-effort delivery cannot undo a successful network submission.
+	if recorded {
+		w.notifyTx(ctx, tx.TxHash())
+	}
+
+	return nil
+}
+
+// handlePublicationFailure preserves uncertain attempts and cleans up only
+// recognized malformed/script rejections. A failed cleanup retains both causes.
+func (w *Wallet) handlePublicationFailure(ctx context.Context, tx *wire.MsgTx,
+	recorded bool, err error) error {
 
 	// Cleanup depends on the refusal reason, not which attempt inserted
 	// the row. Publication-policy errors must never abandon a tracked spend.
-	err = w.publishTx(r.tx, ourAddrs)
-	if err == nil {
-		// Only recorded Wallet transactions have a detail to announce.
-		// Best-effort notification cannot undo a successful publication.
-		if recorded {
-			w.notifyTx(r.ctx, r.tx.TxHash())
-		}
-
-		r.respErrChan <- nil
-
-		return
-	}
-
-	txid := r.tx.TxHash()
+	txid := tx.TxHash()
 	if recorded && shouldRemoveTx(err) {
 		// A recognized malformed/script rejection keeps the existing
 		// cleanup behavior; policy and uncertain outcomes never enter it.
-		cleanupErr := w.deleteUnminedTx(r.ctx, r.tx)
+		cleanupErr := w.deleteUnminedTx(ctx, tx)
 		// Absence means cleanup is complete; other failures retain the
 		// claims signal and remain inspectable beside the send error.
 		if errors.Is(cleanupErr, db.ErrTxNotFound) {
@@ -267,7 +286,7 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 
 	log.Warnf("%v: broadcast failed: %v", txid, err)
 
-	r.respErrChan <- err
+	return err
 }
 
 var (
