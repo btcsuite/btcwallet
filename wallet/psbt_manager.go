@@ -1726,24 +1726,33 @@ func (w *Wallet) planPsbtInput(ctx context.Context, packet *psbt.Packet, i int,
 // autoSignable decides, from SignPsbt's plan for an input, whether
 // FinalizePsbt signs it. Only a key the output pays directly is signed, with no
 // tweak. Any other input the wallet holds a derivation for must already carry
-// a signature, which authorizeSignRecords has verified.
+// a signature or final script; authorizeSignRecords verifies the signatures and
+// executeFinalScripts the final scripts.
 func autoSignable(pInput *psbt.PInput, plan *psbtSignPlan, sign bool,
 	err error) (bool, error) {
 
-	if err == nil && (!sign || plan.keyCommitted) {
-		return sign, nil
+	if err == nil && !sign {
+		return false, nil
 	}
 
 	if inputIsSigned(pInput) {
 		return false, nil
 	}
 
-	if err != nil {
-		return false, fmt.Errorf("%w: %w", ErrInputNeedsSignature, err)
-	}
+	switch {
+	case err == nil && plan.keyCommitted:
+		return true, nil
 
-	return false, fmt.Errorf("%w: output does not pay the key directly",
-		ErrInputNeedsSignature)
+	case err == nil:
+		return false, fmt.Errorf("%w: output does not pay the key "+
+			"directly", ErrInputNeedsSignature)
+
+	case errors.Is(err, ErrSigningKeyMismatch):
+		return false, fmt.Errorf("%w: %w", ErrInputNeedsSignature, err)
+
+	default:
+		return false, err
+	}
 }
 
 // parseBip32Path parses a raw derivation path (sequence of uint32s) and
@@ -2384,8 +2393,11 @@ func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 // directly: P2PKH, P2WKH, NP2WKH, or a Taproot key path. Any other input with a
 // derivation record, such as one that needs a tweak or spends a script, must
 // already be signed, or the call fails with ErrInputNeedsSignature before any
-// private key is looked up. Inputs without a derivation record are not signed,
-// so a caller decorates the packet first.
+// private key is looked up. Inputs without a derivation record are not signed.
+// DecorateInputs adds records for the wallet's derived keys but not for
+// imported keys, so inputs paying an imported key must be signed beforehand.
+// A segwit input that carries only its parent transaction is given the spent
+// output as its witness UTXO.
 //
 // Every input is then finalized and executed by the script engine with the
 // standard flags; an input that fails returns ErrInvalidFinalScript. The
@@ -2435,6 +2447,11 @@ func (w *Wallet) finalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 		return err
 	}
 
+	err = addParentWitnessUtxos(clone)
+	if err != nil {
+		return err
+	}
+
 	prevOuts, err := PsbtPrevOutputFetcher(clone)
 	if err != nil {
 		return fmt.Errorf("error creating prevOutFetcher: %w", err)
@@ -2451,6 +2468,33 @@ func (w *Wallet) finalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 	}
 
 	*packet = *clone
+
+	return nil
+}
+
+// addParentWitnessUtxos sets the witness UTXO of each segwit input that carries
+// only its parent transaction, which validatePacket has matched to the
+// outpoint. The finalizer builds a witness only for inputs with a witness UTXO.
+func addParentWitnessUtxos(packet *psbt.Packet) error {
+	for i := range packet.Inputs {
+		pInput := &packet.Inputs[i]
+		if pInput.WitnessUtxo != nil || pInput.NonWitnessUtxo == nil {
+			continue
+		}
+
+		utxo, err := fetchPsbtUtxo(packet, i)
+		if err != nil {
+			return err
+		}
+
+		nested := txscript.IsPayToScriptHash(utxo.PkScript) &&
+			txscript.IsWitnessProgram(pInput.RedeemScript)
+		if !nested && !txscript.IsWitnessProgram(utxo.PkScript) {
+			continue
+		}
+
+		pInput.WitnessUtxo = wire.NewTxOut(utxo.Value, utxo.PkScript)
+	}
 
 	return nil
 }

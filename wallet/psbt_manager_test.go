@@ -4262,13 +4262,125 @@ func testAddTaprootKeySig(t *testing.T, packet *psbt.Packet, idx int,
 	packet.Inputs[idx].TaprootKeySpendSig = sig
 }
 
+// testParentOnly replaces input 0's witness UTXO with a parent transaction
+// paying the same output, as BIP 174 allows for segwit inputs.
+func testParentOnly(packet *psbt.Packet) {
+	pInput := &packet.Inputs[0]
+	txIn := packet.UnsignedTx.TxIn[0]
+
+	parent := wire.NewMsgTx(2)
+	parent.AddTxIn(&wire.TxIn{})
+
+	for range txIn.PreviousOutPoint.Index + 1 {
+		parent.AddTxOut(wire.NewTxOut(
+			pInput.WitnessUtxo.Value, pInput.WitnessUtxo.PkScript,
+		))
+	}
+
+	txIn.PreviousOutPoint.Hash = parent.TxHash()
+	pInput.NonWitnessUtxo = parent
+	pInput.WitnessUtxo = nil
+}
+
+// TestAutoSignable tests how FinalizePsbt treats SignPsbt's plan for an
+// input. Only an unsigned input paying the key directly is signed; a signed
+// input is never signed again, and only a key the wallet would have to tweak
+// is reported as needing a signature.
+func TestAutoSignable(t *testing.T) {
+	t.Parallel()
+
+	signed := psbt.PInput{FinalScriptSig: []byte{txscript.OP_TRUE}}
+	direct := &psbtSignPlan{keyCommitted: true}
+
+	tests := []struct {
+		name     string
+		pInput   psbt.PInput
+		plan     *psbtSignPlan
+		sign     bool
+		planErr  error
+		wantSign bool
+		wantErr  error
+
+		// needsSig is whether the error reports a missing signature.
+		needsSig bool
+	}{{
+		name: "not planned",
+	}, {
+		name:     "direct key",
+		plan:     direct,
+		sign:     true,
+		wantSign: true,
+	}, {
+		name:   "finalized direct key",
+		pInput: signed,
+		plan:   direct,
+		sign:   true,
+	}, {
+		name:     "unsigned script spend",
+		plan:     &psbtSignPlan{},
+		sign:     true,
+		wantErr:  ErrInputNeedsSignature,
+		needsSig: true,
+	}, {
+		name:   "signed script spend",
+		pInput: signed,
+		plan:   &psbtSignPlan{},
+		sign:   true,
+	}, {
+		name:     "unsigned key mismatch",
+		planErr:  ErrSigningKeyMismatch,
+		wantErr:  ErrSigningKeyMismatch,
+		needsSig: true,
+	}, {
+		name:    "signed key mismatch",
+		pInput:  signed,
+		planErr: ErrSigningKeyMismatch,
+	}, {
+		name:    "unsigned invalid record",
+		planErr: ErrInvalidSignatureRecord,
+		wantErr: ErrInvalidSignatureRecord,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: decide whether to sign the input.
+			sign, err := autoSignable(
+				&tc.pInput, tc.plan, tc.sign, tc.planErr,
+			)
+
+			// Assert: the decision, and only the expected errors.
+			require.Equal(t, tc.wantSign, sign)
+
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Equal(
+				t, tc.needsSig,
+				errors.Is(err, ErrInputNeedsSignature),
+			)
+		})
+	}
+}
+
 // TestFinalizePsbtAutoSignsUntweakedKeys tests that FinalizePsbt signs and
-// finalizes an owned input whose output pays the derivation key directly.
+// finalizes an owned input whose output pays the derivation key directly. A
+// segwit input carrying only its parent transaction must still get a witness.
 func TestFinalizePsbtAutoSignsUntweakedKeys(t *testing.T) {
 	t.Parallel()
 
 	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
 	p2wpkh := testP2WPKHScript(t, walletPub)
+	p2pkh := testScript(
+		t, txscript.OP_DUP, txscript.OP_HASH160,
+		address.Hash160(walletPub.SerializeCompressed()),
+		txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG,
+	)
 
 	tests := []struct {
 		name         string
@@ -4276,6 +4388,13 @@ func TestFinalizePsbtAutoSignsUntweakedKeys(t *testing.T) {
 		pkScript     []byte
 		redeemScript []byte
 		taproot      bool
+
+		// legacy is finalized with a script sig and no witness.
+		legacy bool
+
+		// parentOnly carries the parent transaction instead of the
+		// witness UTXO.
+		parentOnly bool
 	}{{
 		name:     "p2wpkh",
 		purpose:  84,
@@ -4290,6 +4409,29 @@ func TestFinalizePsbtAutoSignsUntweakedKeys(t *testing.T) {
 		purpose:  86,
 		pkScript: testBip86Output(t, walletPub).PkScript,
 		taproot:  true,
+	}, {
+		name:       "p2wpkh parent only",
+		purpose:    84,
+		pkScript:   p2wpkh,
+		parentOnly: true,
+	}, {
+		name:         "np2wpkh parent only",
+		purpose:      49,
+		pkScript:     testP2SHScript(t, p2wpkh),
+		redeemScript: p2wpkh,
+		parentOnly:   true,
+	}, {
+		name:       "taproot key path parent only",
+		purpose:    86,
+		pkScript:   testBip86Output(t, walletPub).PkScript,
+		taproot:    true,
+		parentOnly: true,
+	}, {
+		name:       "p2pkh parent only",
+		purpose:    44,
+		pkScript:   p2pkh,
+		legacy:     true,
+		parentOnly: true,
 	}}
 
 	for _, tc := range tests {
@@ -4308,6 +4450,10 @@ func TestFinalizePsbtAutoSignsUntweakedKeys(t *testing.T) {
 				)
 			}
 
+			if tc.parentOnly {
+				testParentOnly(packet)
+			}
+
 			w, mocks := createUnlockedWalletWithMocks(t)
 			_, _ = expectStoreSignerPrivKey(
 				t, mocks, w.id, waddrmgr.KeyScope{
@@ -4321,7 +4467,10 @@ func TestFinalizePsbtAutoSignsUntweakedKeys(t *testing.T) {
 
 			// Assert: the input is finalized.
 			require.NoError(t, err)
-			require.NotEmpty(t, packet.Inputs[0].FinalScriptWitness)
+			require.Equal(
+				t, tc.legacy,
+				len(packet.Inputs[0].FinalScriptWitness) == 0,
+			)
 
 			_, err = psbt.Extract(packet)
 			require.NoError(t, err)
