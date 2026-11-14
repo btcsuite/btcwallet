@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -2476,4 +2477,185 @@ func TestBroadcastNeutrinoCancellationRetainsCandidates(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, credit.HasConflictingTx)
 	}
+}
+
+// TestRebroadcastStaleSnapshotKeepsDeletedBranch prevents a syncer snapshot
+// from recreating removed history and reserving the branch's funding again.
+func TestRebroadcastStaleSnapshotKeepsDeletedBranch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse the real SQLite wallet and record a Published root/child
+	// branch. Capture both rows before explicit deletion, just as sync startup
+	// can finish its read before the caller removes the branch.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	root := wire.NewMsgTx(wire.TxVersion)
+	root.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	root.AddTxOut(wire.NewTxOut(19_000, script))
+	rootOutput := wire.OutPoint{Hash: root.TxHash()}
+	child := wire.NewMsgTx(wire.TxVersion)
+	child.AddTxIn(wire.NewTxIn(&rootOutput, nil, nil))
+	child.AddTxOut(wire.NewTxOut(18_000, script))
+
+	for _, tx := range []*wire.MsgTx{root, child} {
+		err := w.store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: w.id,
+				Tx:       tx,
+				Received: time.Now(),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		)
+		require.NoError(t, err)
+	}
+
+	query := db.ListTxnsQuery{WalletID: w.id, UnminedOnly: true}
+	snapshot, err := w.store.ListTxns(t.Context(), query)
+	require.NoError(t, err)
+
+	snapshotStore := &walletmock.Store{}
+	snapshotStore.On("ListTxns", mock.Anything, query).
+		Return(snapshot, nil).Once().Run(
+		func(mock.Arguments) {
+			// Complete deletion before returning the earlier snapshot.
+			// The Wallet itself keeps its real Store for every operation.
+			require.NoError(
+				t, w.DeleteUnconfirmedTx(
+					t.Context(), root.TxHash(),
+				),
+			)
+		},
+	)
+	s := newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, snapshotStore, w.id,
+		w.chainSyncer, w.chainEventChan,
+	)
+
+	// Act: Run the actual syncer retry against the captured, now stale rows.
+	// Strict chain mocks permit neither a preflight nor a send after deletion.
+	err = s.broadcastUnminedTxns(t.Context())
+
+	// Assert: Both deleted rows remain absent and their shared funding returns
+	// to the UTXO set. No background retry has authority to recreate a claim.
+	require.NoError(t, err)
+
+	for _, tx := range []*wire.MsgTx{root, child} {
+		_, err := w.GetTx(t.Context(), tx.TxHash())
+		require.ErrorIs(t, err, ErrTxNotFound)
+	}
+
+	restored, err := w.store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: w.id,
+			OutPoint: input,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, input, restored.OutPoint)
+	snapshotStore.AssertExpectations(t)
+}
+
+// TestRebroadcastReplacedWitnessSkipsRelay skips an obsolete snapshot witness
+// without disturbing the currently recorded transaction.
+func TestRebroadcastReplacedWitnessSkipsRelay(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The retry snapshot uses witness1, while real SQLite already
+	// retains witness2 under the same txid. No backend expectation permits a
+	// stale witness to pass the Store identity check and reach preflight.
+	ctx := t.Context()
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	snapshot := wire.NewMsgTx(wire.TxVersion)
+	snapshot.AddTxIn(wire.NewTxIn(&input, nil, wire.TxWitness{{1}}))
+	snapshot.AddTxOut(wire.NewTxOut(19_000, script))
+	current := snapshot.Copy()
+	current.TxIn[0].Witness = wire.TxWitness{{2}}
+	require.Equal(t, snapshot.TxHash(), current.TxHash())
+	require.NotEqual(t, snapshot.WitnessHash(), current.WitnessHash())
+	err := w.store.CreateTx(ctx, db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       current,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	// Act: Retry through normal Wallet admission after the stored witness has
+	// already made this snapshot obsolete.
+	err = w.rebroadcast(ctx, snapshot)
+
+	// Assert: The stale retry succeeds without preflight or relay, and the
+	// current Published bytes remain intact. Fixture cleanup owns the strict
+	// chain mock's expectation check.
+	require.NoError(t, err)
+	info, err := w.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     current.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, info.Status)
+	require.Equal(t, serializeTx(t, current), info.SerializedTx)
+}
+
+// TestRebroadcastLateRejectionKeepsNewWitness prevents an old background
+// failure from deleting a newer explicit submission under the same txid.
+func TestRebroadcastLateRejectionKeepsNewWitness(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Retain an old Published witness in real SQLite, then prepare
+	// another witness under its txid. Chain mocks hold the old relay reply
+	// until public deletion and explicit submission have replaced the record.
+	ctx := t.Context()
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	old := wire.NewMsgTx(wire.TxVersion)
+	old.AddTxIn(wire.NewTxIn(&input, nil, wire.TxWitness{{1}}))
+	old.AddTxOut(wire.NewTxOut(19_000, script))
+	require.NoError(t, w.store.CreateTx(ctx, db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       old,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+	}))
+	next := old.Copy()
+	next.TxIn[0].Witness = wire.TxWitness{{2}}
+	require.Equal(t, old.TxHash(), next.TxHash())
+	require.NotEqual(t, old.WitnessHash(), next.WitnessHash())
+
+	client.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrUnimplemented).Twice()
+	client.On("NotifyReceived", mock.Anything).Return(nil).Twice()
+
+	var deleteErr, broadcastErr error
+	client.On("SendRawTransaction", old, false).
+		Return((*chainhash.Hash)(nil), chain.ErrScriptVerifyFlag).Once().
+		Run(func(mock.Arguments) {
+			// Replace the row while the old relay remains in flight. The
+			// admitted requests join before the outer retry returns.
+			deleteErr = w.DeleteUnconfirmedTx(ctx, old.TxHash())
+			broadcastErr = w.Broadcast(ctx, next, "")
+		})
+	client.On("SendRawTransaction", next, false).
+		Return((*chainhash.Hash)(nil), nil).Once()
+
+	// Act: Retry the old witness and let its held script rejection arrive
+	// after the new explicit submission has completed successfully.
+	err := w.rebroadcast(ctx, old)
+
+	// Assert: The old error remains visible while the newer serialized
+	// witness stays recorded. Fixture cleanup verifies each chain expectation.
+	require.NoError(t, deleteErr)
+	require.NoError(t, broadcastErr)
+	require.ErrorIs(t, err, chain.ErrScriptVerifyFlag)
+	info, err := w.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     next.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, serializeTx(t, next), info.SerializedTx)
 }
