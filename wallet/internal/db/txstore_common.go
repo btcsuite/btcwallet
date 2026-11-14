@@ -1420,18 +1420,11 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 		return err
 	}
 
-	if params.State != nil {
-		err = ops.PrepareState(ctx, *params.State)
-		if err != nil {
-			return fmt.Errorf("prepare tx state update: %w", err)
-		}
-
-		// Refuse graph-level changes before any metadata mutation; the backend
-		// transaction keeps this decision ordered with concurrent chain writes.
-		err = ops.CheckGraphState(ctx, params.WalletID, params.Txid)
-		if err != nil {
-			return fmt.Errorf("check tx graph state: %w", err)
-		}
+	// Finish graph admission before metadata changes so a rejected state
+	// request retains its original failure and transactional ordering.
+	err = prepareTxStateUpdate(ctx, params, ops)
+	if err != nil {
+		return err
 	}
 
 	if params.Label != nil {
@@ -1453,6 +1446,31 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 		if err != nil {
 			return fmt.Errorf("update tx spent leases: %w", err)
 		}
+	}
+
+	return nil
+}
+
+// prepareTxStateUpdate checks requested state and graph authority before the
+// shared update workflow can mutate a label or apply a state patch.
+func prepareTxStateUpdate(ctx context.Context, params UpdateTxParams,
+	ops UpdateTxOps) error {
+
+	// Label-only updates must not invoke graph or block operations.
+	if params.State == nil {
+		return nil
+	}
+
+	err := ops.PrepareState(ctx, *params.State)
+	if err != nil {
+		return fmt.Errorf("prepare tx state update: %w", err)
+	}
+
+	// The backend transaction orders this decision with concurrent chain
+	// writes; a row-local update cannot bypass graph confirmation authority.
+	err = ops.CheckGraphState(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return fmt.Errorf("check tx graph state: %w", err)
 	}
 
 	return nil

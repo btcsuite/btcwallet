@@ -656,13 +656,10 @@ func (s *Store) walkBalanceUTXOs(addrmgrNs, txmgrNs walletdb.ReadBucket,
 	var total, locked btcutil.Amount
 	for i := range unspent {
 		output := &unspent[i]
-		if _, excluded := conflicted[output.Hash]; excluded {
-			continue
-		}
 
 		accepted, err := s.balanceOutputAccepted(
 			addrmgrNs, output, scopeFilter, params, nameAcct,
-			syncBlock.Height, chainParams,
+			syncBlock.Height, chainParams, conflicted,
 		)
 		if err != nil {
 			return 0, 0, err
@@ -679,12 +676,19 @@ func (s *Store) walkBalanceUTXOs(addrmgrNs, txmgrNs walletdb.ReadBucket,
 // balanceOutputAccepted reports whether one unspent output counts toward the
 // balance under the BalanceParams filters. It resolves the owning account,
 // applies the Scope/account filters (via balanceFilterAllows) and the
-// confirmation filters (via confsAllowed), and returns false for outputs that
-// are unowned or filtered out so the caller skips them without error.
+// confirmation filters (via confsAllowed), and excludes incompatible claims.
+// Filtered or unowned outputs return false so the walk skips them.
 func (s *Store) balanceOutputAccepted(addrmgrNs walletdb.ReadBucket,
 	output *wtxmgr.Credit, scopeFilter *waddrmgr.KeyScope,
 	params db.BalanceParams, nameAcct *uint32, syncHeight int32,
-	chainParams *chaincfg.Params) (bool, error) {
+	chainParams *chaincfg.Params,
+	conflicted map[chainhash.Hash]struct{}) (bool, error) {
+
+	// Keep conflict exclusion with the other eligibility filters, using the
+	// graph already computed under the caller's walletdb read view.
+	if _, excluded := conflicted[output.Hash]; excluded {
+		return false, nil
+	}
 
 	owner, account, ok := s.classifyBalanceUTXO(
 		addrmgrNs, output, chainParams,
