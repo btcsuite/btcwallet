@@ -165,7 +165,11 @@ func (w *Wallet) checkMempoolAcceptance(_ context.Context,
 // publish: the tx is sent without a verdict, so a nil return reports that it
 // was handed to the network, not that the network kept it.
 //
-// Preflight rejection records nothing new. After recording, publication-policy
+// Already-in-mempool submissions still record relevant history and labels
+// without sending again. Already-mined preflight returns success without
+// creating unconfirmed history; block processing owns confirmation.
+// Preflight rejection records nothing new.
+// After recording, publication-policy
 // failures and unknown outcomes retain history and input claims; recognized
 // malformed/mandatory-script rejections clean up. ErrTxRetained also wraps
 // readback failures after recording; later validation or explicit deletion can
@@ -223,15 +227,18 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 func (w *Wallet) broadcastTx(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
 
-	// Preflight refusal must not create new history. A known transaction
-	// already satisfies the existing publication contract.
-	err := w.checkMempool(ctx, tx)
-	if errors.Is(err, errAlreadyBroadcasted) {
+	// Mempool-known preflight repairs history. A mined verdict lacks the
+	// block metadata required to record confirmation, so leave that history
+	// to block processing instead of inventing an unconfirmed row.
+	mempoolErr := w.checkMempool(ctx, tx)
+	if errors.Is(mempoolErr, chain.ErrTxAlreadyKnown) ||
+		errors.Is(mempoolErr, chain.ErrTxAlreadyConfirmed) {
+
 		return nil
 	}
 
-	if err != nil {
-		return err
+	if mempoolErr != nil && !errors.Is(mempoolErr, errAlreadyBroadcasted) {
+		return mempoolErr
 	}
 
 	// Record first so even an uncertain send result leaves enough durable
@@ -241,10 +248,13 @@ func (w *Wallet) broadcastTx(ctx context.Context, tx *wire.MsgTx,
 		return err
 	}
 
-	// A send reply has no graph authority: competing attempts stay recorded.
-	err = w.publishTx(tx, ourAddrs)
-	if err != nil {
-		return w.handlePublicationFailure(ctx, tx, recorded, err)
+	// Mempool-known submissions repair history without sending again. Other
+	// send replies have no graph authority: competing attempts stay recorded.
+	if !errors.Is(mempoolErr, errAlreadyBroadcasted) {
+		err = w.publishTx(tx, ourAddrs)
+		if err != nil {
+			return w.handlePublicationFailure(ctx, tx, recorded, err)
+		}
 	}
 
 	// Only relevant, recorded transactions have a detail to announce.
@@ -335,11 +345,9 @@ func (w *Wallet) checkMempool(ctx context.Context,
 
 		log.Infof("Tx %v already broadcasted", tx.TxHash())
 
-		// TODO(yy): Update the Store layer with the caller-supplied
-		// label when the transaction is already known. With this
-		// change, the label passed in will be ignored if the tx is
-		// already known.
-		return errAlreadyBroadcasted
+		// Preserve the backend reason so explicit submission can distinguish
+		// mined history from a mempool entry before choosing to record.
+		return fmt.Errorf("%w: %w", errAlreadyBroadcasted, err)
 
 	// If the backend does not support the mempool acceptance test, we'll
 	// just attempt to publish the tx.
