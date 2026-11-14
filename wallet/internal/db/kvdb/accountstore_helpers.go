@@ -113,8 +113,18 @@ func (s *Store) walkAccountUTXOs(addrmgrNs,
 		return fmt.Errorf("unspent outputs: %w", err)
 	}
 
+	// Account totals share the wallet's safe-sum rule; incompatible branches
+	// remain discoverable but cannot contribute independent change balances.
+	conflicted, err := s.unminedConflictSet(txmgrNs, unspent)
+	if err != nil {
+		return err
+	}
+
 	for i := range unspent {
 		output := &unspent[i]
+		if _, excluded := conflicted[output.Hash]; excluded {
+			continue
+		}
 
 		binding, _, err := s.resolveAccountForCredit(
 			addrmgrNs, output, chainParams,
