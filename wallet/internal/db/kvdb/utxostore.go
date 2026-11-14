@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
@@ -97,7 +98,21 @@ func (s *Store) getUtxoInView(tx walletdb.ReadTx,
 		return nil, err
 	}
 
-	return s.enrichOwnedCredit(tx, credit, leaseSet)
+	info, err := s.enrichOwnedCredit(tx, credit, leaseSet)
+	if err != nil {
+		return nil, err
+	}
+
+	// Derive the bit in this same snapshot so a concurrent confirmation cannot
+	// mix current credit ownership with an older branch graph.
+	conflicted, err := s.unminedConflictSet(txmgrNs, []wtxmgr.Credit{*credit})
+	if err != nil {
+		return nil, err
+	}
+
+	_, info.HasConflictingTx = conflicted[outPoint.Hash]
+
+	return info, nil
 }
 
 // loadCurrentCredit fetches one credit by outpoint and gates it through the
@@ -632,13 +647,19 @@ func (s *Store) walkBalanceUTXOs(addrmgrNs, txmgrNs walletdb.ReadBucket,
 		return 0, 0, fmt.Errorf("unspent outputs: %w", err)
 	}
 
+	// Only compatible funds can contribute to a safe total or locked subset.
+	conflicted, err := s.unminedConflictSet(txmgrNs, unspent)
+	if err != nil {
+		return 0, 0, err
+	}
+
 	var total, locked btcutil.Amount
 	for i := range unspent {
 		output := &unspent[i]
 
 		accepted, err := s.balanceOutputAccepted(
 			addrmgrNs, output, scopeFilter, params, nameAcct,
-			syncBlock.Height, chainParams,
+			syncBlock.Height, chainParams, conflicted,
 		)
 		if err != nil {
 			return 0, 0, err
@@ -653,14 +674,22 @@ func (s *Store) walkBalanceUTXOs(addrmgrNs, txmgrNs walletdb.ReadBucket,
 }
 
 // balanceOutputAccepted reports whether one unspent output counts toward the
-// balance under the BalanceParams filters. It resolves the owning account,
+// balance under the BalanceParams filters. It excludes contingent change
+// using the caller's conflict snapshot, resolves the owning account,
 // applies the Scope/account filters (via balanceFilterAllows) and the
 // confirmation filters (via confsAllowed), and returns false for outputs that
 // are unowned or filtered out so the caller skips them without error.
 func (s *Store) balanceOutputAccepted(addrmgrNs walletdb.ReadBucket,
 	output *wtxmgr.Credit, scopeFilter *waddrmgr.KeyScope,
 	params db.BalanceParams, nameAcct *uint32, syncHeight int32,
-	chainParams *chaincfg.Params) (bool, error) {
+	chainParams *chaincfg.Params,
+	conflicted map[chainhash.Hash]struct{}) (bool, error) {
+
+	// Competing branches cannot contribute independent safe funds. Use the
+	// same read-transaction snapshot as discovery before inspecting ownership.
+	if _, excluded := conflicted[output.Hash]; excluded {
+		return false, nil
+	}
 
 	owner, account, ok := s.classifyBalanceUTXO(
 		addrmgrNs, output, chainParams,
@@ -816,6 +845,95 @@ func calcConfs(outputHeight, curHeight int32) int32 {
 	}
 
 	return curHeight - outputHeight + 1
+}
+
+// collectConflictedTxIDs returns direct unmined alternatives and their
+// descendants in candidate order. The caller supplies only live unmined rows;
+// shared prevouts signal incompatible branches, not a preferred spender.
+func collectConflictedTxIDs(candidates []db.UnminedTxRecord) []int64 {
+	spenders := make(map[wire.OutPoint]db.UnminedTxRecord)
+	roots := make(map[int64]chainhash.Hash)
+
+	// Inputs need no owned parent: alternatives may share an external output
+	// while both create wallet change. Keep both roots when a prevout repeats.
+	for _, candidate := range candidates {
+		for _, input := range candidate.Tx.TxIn {
+			prevout := input.PreviousOutPoint
+
+			other, ok := spenders[prevout]
+			if ok && other.ID != candidate.ID {
+				roots[other.ID] = other.Hash
+				roots[candidate.ID] = candidate.Hash
+			}
+
+			spenders[prevout] = candidate
+		}
+	}
+
+	// Reuse the existing descendant walk so conflict eligibility propagates
+	// through the same dependency relation as confirmation invalidation.
+	rootIDs := make([]int64, 0, len(roots))
+
+	rootHashes := make([]chainhash.Hash, 0, len(roots))
+	for id, hash := range roots {
+		rootIDs = append(rootIDs, id)
+		rootHashes = append(rootHashes, hash)
+	}
+
+	for _, id := range db.CollectDescendantTxIDs(
+		rootHashes, rootIDs, candidates,
+	) {
+		roots[id] = chainhash.Hash{}
+	}
+
+	conflicted := make([]int64, 0, len(roots))
+	for _, candidate := range candidates {
+		if _, ok := roots[candidate.ID]; ok {
+			conflicted = append(conflicted, candidate.ID)
+		}
+	}
+
+	return conflicted
+}
+
+// unminedConflictSet derives incompatible branches within the current view.
+// Confirmed credits are authoritative, so load the unmined graph only when the
+// result contains change whose compatibility can affect metadata or safe sums.
+func (s *Store) unminedConflictSet(ns walletdb.ReadBucket,
+	credits []wtxmgr.Credit) (map[chainhash.Hash]struct{}, error) {
+
+	hasUnmined := false
+	for i := range credits {
+		if credits[i].Height < 0 {
+			hasUnmined = true
+			break
+		}
+	}
+
+	if !hasUnmined {
+		return map[chainhash.Hash]struct{}{}, nil
+	}
+
+	txs, err := s.txStore.UnminedTxs(ns)
+	if err != nil {
+		return nil, fmt.Errorf("list unmined conflict graph: %w", err)
+	}
+
+	// Local IDs adapt the existing pure descendant walk; native persistence
+	// continues to own transaction identities and its multiple-spender index.
+	records := make([]db.UnminedTxRecord, len(txs))
+	for i, tx := range txs {
+		records[i] = db.UnminedTxRecord{
+			ID: int64(i) + 1, Hash: tx.TxHash(), Tx: tx,
+		}
+	}
+
+	conflicted := make(map[chainhash.Hash]struct{})
+	for _, id := range collectConflictedTxIDs(records) {
+		conflicted[records[id-1].Hash] = struct{}{}
+	}
+
+	return conflicted, nil
 }
 
 // currentUTXOSet returns the set of current UTXOs, including leased outputs
@@ -1030,6 +1148,13 @@ func (s *Store) listUTXOsInView(tx walletdb.ReadTx,
 		return err
 	}
 
+	// Keep incompatible change discoverable while identifying it consistently
+	// with balance reads from the same native input facts.
+	conflicted, err := s.unminedConflictSet(txmgrNs, credits)
+	if err != nil {
+		return err
+	}
+
 	currentHeight := s.addrStore.SyncedTo().Height
 	chainParams := s.addrStore.ChainParams()
 
@@ -1046,6 +1171,7 @@ func (s *Store) listUTXOsInView(tx walletdb.ReadTx,
 			continue
 		}
 
+		_, enriched.HasConflictingTx = conflicted[enriched.OutPoint.Hash]
 		*utxos = append(*utxos, *enriched)
 	}
 
