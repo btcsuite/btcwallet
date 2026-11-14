@@ -98,21 +98,13 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		return nil, fmt.Errorf("initialize database identity: %w", err)
 	}
 
-	// Migrations borrow the same pool through their required SQL adapter.
-	migrationDB := stdlib.OpenDBFromPool(pool)
-
-	err = pg.ApplyMigrations(ctx, migrationDB)
-	if err != nil {
-		_ = migrationDB.Close()
-		pool.Close()
-
-		return nil, fmt.Errorf("apply migrations: %w", err)
-	}
-
-	err = migrationDB.Close()
+	// Keep the borrowed migration adapter's lifetime separate from the pool
+	// retained by Store, including both migration and adapter-close failures.
+	err = applyPoolMigrations(ctx, pool)
 	if err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("close migration database: %w", err)
+
+		return nil, err
 	}
 
 	store := &Store{
@@ -131,6 +123,28 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 	}
 
 	return store, nil
+}
+
+// applyPoolMigrations returns the borrowed SQL adapter before Store uses its
+// native pool for backfill, without transferring ownership of that pool.
+func applyPoolMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	// The migration library needs database/sql; closing this adapter returns
+	// borrowed connections while leaving the native pool open for Store.
+	migrationDB := stdlib.OpenDBFromPool(pool)
+
+	err := pg.ApplyMigrations(ctx, migrationDB)
+	if err != nil {
+		_ = migrationDB.Close()
+
+		return fmt.Errorf("apply migrations: %w", err)
+	}
+
+	err = migrationDB.Close()
+	if err != nil {
+		return fmt.Errorf("close migration database: %w", err)
+	}
+
+	return nil
 }
 
 // Close closes the database connection.

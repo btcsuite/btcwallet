@@ -54,6 +54,17 @@ type TxPublisher interface {
 	Broadcast(ctx context.Context, tx *wire.MsgTx, label string) error
 }
 
+// txRebroadcaster retries existing publication intent without creating history
+// from a syncer snapshot that may have been deleted since it was read.
+type txRebroadcaster interface {
+	// rebroadcast only relays a still-published transaction; it cannot insert
+	// history or promote Pending intent like an explicit Broadcast can.
+	rebroadcast(ctx context.Context, tx *wire.MsgTx) error
+}
+
+// Wallet supplies the syncer's private, non-creating publication capability.
+var _ txRebroadcaster = (*Wallet)(nil)
+
 // A compile time check to ensure that Wallet implements the interface.
 var _ TxPublisher = (*Wallet)(nil)
 
@@ -72,6 +83,105 @@ type broadcastReq struct {
 	tx          *wire.MsgTx
 	label       string
 	respErrChan chan error
+}
+
+// rebroadcastReq joins a background retry to the Wallet's existing lifetime.
+// It carries no recording authority, unlike an explicit broadcastReq.
+type rebroadcastReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	respErrChan chan error
+}
+
+// rebroadcast admits the syncer's retry and waits until its dependency access
+// completes. The syncer owns valid transaction inputs and Wallet lifetime.
+func (w *Wallet) rebroadcast(ctx context.Context, tx *wire.MsgTx) error {
+	// Reuse normal admission and joining so Stop drains this retry too.
+	r := rebroadcastReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		tx:          tx,
+		respErrChan: make(chan error, 1),
+	}
+
+	err := w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	return <-r.respErrChan
+}
+
+// handleRebroadcast retries only current Published intent, without recording.
+// Deletion after its read may allow late relay, but never recreates history.
+func (w *Wallet) handleRebroadcast(r rebroadcastReq) {
+	// A snapshot is not fresh submission authority: deletion, confirmation
+	// or a status change can make it ineligible before this request starts.
+	info, err := w.store.GetTx(
+		r.ctx, db.GetTxQuery{
+			WalletID: w.id,
+			Txid:     r.tx.TxHash(),
+		},
+	)
+	if errors.Is(err, db.ErrTxNotFound) {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	if info.Status != db.TxStatusPublished || info.Block != nil {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	// Known results need no repair on this path. Unsupported preflight still
+	// permits relay, while policy refusal preserves existing tracked history.
+	err = w.checkMempool(r.ctx, r.tx)
+	if errors.Is(err, errAlreadyBroadcasted) {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	// Reuse only read-only ownership resolution, never addTxToWallet: a
+	// concurrent delete must not turn this stale retry into a new record.
+	owned, err := w.filterOwnedAddresses(r.ctx, w.extractTxAddrs(r.tx))
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	ourAddrs := make([]address.Address, 0, len(owned))
+	for _, info := range owned {
+		ourAddrs = append(ourAddrs, info.addr)
+	}
+
+	// Keep the existing refusal cleanup and best-effort success notification;
+	// neither operation can insert the transaction or reserve its inputs.
+	err = w.publishTx(r.tx, ourAddrs)
+	if err != nil {
+		r.respErrChan <- w.handlePublicationFailure(r.ctx, r.tx, true, err)
+
+		return
+	}
+
+	w.notifyTx(r.ctx, r.tx.TxHash())
+
+	r.respErrChan <- nil
 }
 
 // CheckMempoolAcceptance checks if a transaction would be accepted by the
@@ -165,7 +275,9 @@ func (w *Wallet) checkMempoolAcceptance(_ context.Context,
 // publish: the tx is sent without a verdict, so a nil return reports that it
 // was handed to the network, not that the network kept it.
 //
-// Preflight rejection records nothing new. After recording, publication-policy
+// Already-known explicit submissions still record relevant history and labels
+// without sending again. Preflight rejection records nothing new.
+// After recording, publication-policy
 // failures and unknown outcomes retain history and input claims; recognized
 // malformed/mandatory-script rejections clean up. ErrTxRetained also wraps
 // readback failures after recording; later validation or explicit deletion can
@@ -202,53 +314,71 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	return <-r.respErrChan
 }
 
-// handleBroadcast records and publishes within the accepted outer request.
-// The admitted caller waits for this result before reusing its inputs.
+// handleBroadcast runs the explicit submission flow within one admission:
+//   - Check mempool policy before recording a new attempt.
+//   - Record relevant history and inputs before any network submission.
+//   - Register owned outputs and send the transaction.
+//   - Notify on success; on failure, remove only recognized invalid attempts
+//     and report any retained history to the caller.
+//
+// For example, B can be recorded alongside competing A before its send reply
+// arrives. The syncer may record competitor C while that reply is held. B's
+// eventual reply does not settle A/B/C; only confirmation chooses a winner.
+// Admission joins dependency access through Stop, not concurrent graph writes.
 func (w *Wallet) handleBroadcast(r broadcastReq) {
-	// We'll start by checking if the tx is acceptable to the mempool.
-	err := w.checkMempool(r.ctx, r.tx)
-	if errors.Is(err, errAlreadyBroadcasted) {
-		r.respErrChan <- nil
+	// The admitted caller retains its inputs until the entire flow completes.
+	r.respErrChan <- w.broadcastTx(r.ctx, r.tx, r.label)
+}
 
-		return
+// broadcastTx records an explicit submission before watches and relay, keeping
+// policy failures from silently abandoning the wallet's tracked input claims.
+func (w *Wallet) broadcastTx(ctx context.Context, tx *wire.MsgTx,
+	label string) error {
+
+	// Ordinary refusal creates no history. A known result still needs the
+	// same recording checks: the node may know an attempt our Store lacks.
+	preflightErr := w.checkMempool(ctx, tx)
+	if preflightErr != nil && !errors.Is(preflightErr, errAlreadyBroadcasted) {
+		return preflightErr
 	}
 
+	// Record first so even an uncertain send result leaves enough durable
+	// information to track confirmation and retry publication.
+	ourAddrs, recorded, err := w.addTxToWallet(ctx, tx, label)
 	if err != nil {
-		r.respErrChan <- err
-
-		return
+		return err
 	}
 
-	// First, we'll attempt to add the tx to our wallet's DB. This will
-	// allow us to track the tx's confirmation status, and also
-	// re-broadcast it upon startup.
-	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
-	if err != nil {
-		r.respErrChan <- err
-
-		return
+	// Already-known submissions repair history without sending again. Other
+	// send replies have no graph authority: competing attempts stay recorded.
+	if !errors.Is(preflightErr, errAlreadyBroadcasted) {
+		err = w.publishTx(tx, ourAddrs)
+		if err != nil {
+			return w.handlePublicationFailure(ctx, tx, recorded, err)
+		}
 	}
+
+	// Only relevant, recorded transactions have a detail to announce.
+	// Best-effort delivery cannot undo a successful network submission.
+	if recorded {
+		w.notifyTx(ctx, tx.TxHash())
+	}
+
+	return nil
+}
+
+// handlePublicationFailure preserves uncertain attempts and cleans up only
+// recognized malformed/script rejections. A failed cleanup retains both causes.
+func (w *Wallet) handlePublicationFailure(ctx context.Context, tx *wire.MsgTx,
+	recorded bool, err error) error {
 
 	// Cleanup depends on the refusal reason, not which attempt inserted
 	// the row. Publication-policy errors must never abandon a tracked spend.
-	err = w.publishTx(r.tx, ourAddrs)
-	if err == nil {
-		// Only recorded Wallet transactions have a detail to announce.
-		// Best-effort notification cannot undo a successful publication.
-		if recorded {
-			w.notifyTx(r.ctx, r.tx.TxHash())
-		}
-
-		r.respErrChan <- nil
-
-		return
-	}
-
-	txid := r.tx.TxHash()
+	txid := tx.TxHash()
 	if recorded && shouldRemoveTx(err) {
 		// A recognized malformed/script rejection keeps the existing
 		// cleanup behavior; policy and uncertain outcomes never enter it.
-		cleanupErr := w.deleteUnminedTx(r.ctx, r.tx)
+		cleanupErr := w.deleteUnminedTx(ctx, tx)
 		// Absence means cleanup is complete; other failures retain the
 		// claims signal and remain inspectable beside the send error.
 		if errors.Is(cleanupErr, db.ErrTxNotFound) {
@@ -267,7 +397,7 @@ func (w *Wallet) handleBroadcast(r broadcastReq) {
 
 	log.Warnf("%v: broadcast failed: %v", txid, err)
 
-	r.respErrChan <- err
+	return err
 }
 
 var (
@@ -316,10 +446,8 @@ func (w *Wallet) checkMempool(ctx context.Context,
 
 		log.Infof("Tx %v already broadcasted", tx.TxHash())
 
-		// TODO(yy): Update the Store layer with the caller-supplied
-		// label when the transaction is already known. With this
-		// change, the label passed in will be ignored if the tx is
-		// already known.
+		// Explicit submission still records relevant history and labels;
+		// this sentinel only avoids another network send.
 		return errAlreadyBroadcasted
 
 	// If the backend does not support the mempool acceptance test, we'll

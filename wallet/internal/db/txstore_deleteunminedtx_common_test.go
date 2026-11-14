@@ -115,7 +115,6 @@ func TestDeleteUnminedTxWithOps(t *testing.T) {
 	}
 
 	for _, member := range members {
-
 		ops.On("DeleteCreatedUtxos", mock.Anything, uint32(7), member.id).
 			Return(nil).
 			Run(recordDeleteStep(

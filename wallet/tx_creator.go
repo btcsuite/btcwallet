@@ -1067,45 +1067,58 @@ func (w *Wallet) createManualInputSource(ctx context.Context,
 	}
 
 	if checkAncestry {
-		// History retains terminal rows too; only active unconfirmed facts
-		// can be required ancestors of an explicitly selected live branch.
-		rows, err := w.store.ListTxns(
-			ctx, db.ListTxnsQuery{
-				WalletID: w.id, UnminedOnly: true,
-			},
-		)
+		err = w.validateManualInputAncestry(ctx, inputs.UTXOs)
 		if err != nil {
-			return nil, fmt.Errorf("load selected input ancestry: %w", err)
-		}
-
-		live := rows[:0]
-		for _, row := range rows {
-			if db.IsUnminedStatus(row.Status) {
-				live = append(live, row)
-			}
-		}
-
-		// The pure walk uses hashes rather than SQL IDs, so reuse the raw
-		// decoder with an unused ID instead of adding another graph type.
-		records, err := db.BuildUnminedTxRecords(
-			live,
-			func(row db.TxInfo) (int64, []byte, []byte) {
-				return 0, row.Hash[:], row.SerializedTx
-			},
-		)
-		if err != nil {
-			return nil, fmt.Errorf("decode selected input ancestry: %w", err)
-		}
-
-		err = db.ValidateInputAncestry(inputs.UTXOs, records)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrUtxoNotEligible, err)
+			return nil, err
 		}
 	}
 
 	// Return a constant input source that will only provide the selected
 	// UTXOs.
 	return constantInputSource(eligibleSelectedUtxo), nil
+}
+
+// validateManualInputAncestry checks that explicitly selected contingent coins
+// belong to compatible branches, without loading history for ordinary inputs.
+func (w *Wallet) validateManualInputAncestry(ctx context.Context,
+	inputs []wire.OutPoint) error {
+
+	// History retains terminal rows too; only active unconfirmed facts
+	// can be required ancestors of an explicitly selected live branch.
+	rows, err := w.store.ListTxns(
+		ctx, db.ListTxnsQuery{
+			WalletID: w.id, UnminedOnly: true,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("load selected input ancestry: %w", err)
+	}
+
+	live := rows[:0]
+	for _, row := range rows {
+		if db.IsUnminedStatus(row.Status) {
+			live = append(live, row)
+		}
+	}
+
+	// The pure walk uses hashes rather than SQL IDs, so reuse the raw
+	// decoder with an unused ID instead of adding another graph type.
+	records, err := db.BuildUnminedTxRecords(
+		live,
+		func(row db.TxInfo) (int64, []byte, []byte) {
+			return 0, row.Hash[:], row.SerializedTx
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("decode selected input ancestry: %w", err)
+	}
+
+	err = db.ValidateInputAncestry(inputs, records)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrUtxoNotEligible, err)
+	}
+
+	return nil
 }
 
 // createPolicyInputSource creates an input source that will perform automatic

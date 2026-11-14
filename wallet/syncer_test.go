@@ -42,17 +42,17 @@ const testScanRecoveryWindow = 20
 // behavior. An unsubscribed Wallet needs no Store reads, so persistence tests
 // retain their existing mock expectations without mocking delivery internals.
 func newTestSyncer(cfg Config, addrStore waddrmgr.AddrStore,
-	txStore wtxmgr.TxStore, publisher TxPublisher, store db.Store,
+	txStore wtxmgr.TxStore, publisher txRebroadcaster, store db.Store,
 	walletID uint32) *syncer {
 
 	// Keep the existing mock publisher and use a real, empty registry for
 	// observations outside these persistence tests' subscription contract.
 	manager := struct {
-		TxPublisher
+		txRebroadcaster
 		txNotifier
 	}{
-		TxPublisher: publisher,
-		txNotifier:  &Wallet{},
+		txRebroadcaster: publisher,
+		txNotifier:      &Wallet{},
 	}
 
 	// Keep live preparation on the same source/network as historical work.
@@ -5450,15 +5450,17 @@ func TestBroadcastUnminedTxns_Success(t *testing.T) {
 		}}, nil,
 	).Once()
 	mockPublisher.On(
-		"Broadcast", mock.Anything, mock.Anything, "",
+		"rebroadcast", mock.Anything, mock.Anything,
 	).Return(nil).Once()
 
-	// Act: Broadcast unmined transactions.
+	// Act: Run the syncer retry loop against the single stored Published row.
 	err := s.broadcastUnminedTxns(t.Context())
 
-	// Assert: Verify success.
+	// Assert: The active retry completes and both declared dependencies run
+	// once; Pending filtering and ordering have their existing focused cases.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	mockPublisher.AssertExpectations(t)
 }
 
 // TestFilterBatch_EmptyFilter verifies that empty filters force download.
@@ -5659,8 +5661,8 @@ func TestScanBatchHeadersOnly_ContextCancelled(t *testing.T) {
 func TestBroadcastUnminedTxns_BroadcastError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer where a transaction broadcast
-	// fails.
+	// Arrange: Return one Published transaction and reject its single
+	// background relay; the sync pass must continue despite that send result.
 	mockPublisher := &mockTxPublisher{}
 	store := &walletmock.Store{}
 
@@ -5680,14 +5682,17 @@ func TestBroadcastUnminedTxns_BroadcastError(t *testing.T) {
 			SerializedTx: serializeTx(t, tx),
 		}}, nil).Once()
 	mockPublisher.On(
-		"Broadcast", mock.Anything, mock.Anything, "",
+		"rebroadcast", mock.Anything, mock.Anything,
 	).Return(errBroadcast).Once()
 
-	// Act: Broadcast unmined transactions.
+	// Act: Run the real syncer retry loop over the stored snapshot.
 	err := s.broadcastUnminedTxns(t.Context())
 
-	// Assert: Verify that the error is not propagated (it's only logged).
+	// Assert: A per-transaction failure is logged without failing the sync
+	// pass, and both required dependency calls have occurred exactly once.
 	require.NoError(t, err)
+	store.AssertExpectations(t)
+	mockPublisher.AssertExpectations(t)
 }
 
 // TestCheckRollback_DBError verifies error propagation.
@@ -6544,6 +6549,8 @@ func TestAdvanceChainSyncUsesStoreSyncedTo(t *testing.T) {
 func TestBroadcastUnminedTxnsRoutesStore(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return one Published row and one Pending row; only existing
+	// publication intent may reach the narrow background capability.
 	store := &walletmock.Store{}
 	publisher := &mockTxPublisher{}
 	s := newTestSyncer(Config{}, nil, nil, publisher, &walletmock.Store{}, 0)
@@ -6576,13 +6583,19 @@ func TestBroadcastUnminedTxnsRoutesStore(t *testing.T) {
 			SerializedTx: txBytes.Bytes(),
 		},
 	}, nil).Once()
-	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
-		func(got *wire.MsgTx) bool {
-			return got.TxHash() == tx.TxHash()
-		},
-	), "").Return(nil).Once()
+	publisher.On(
+		"rebroadcast", mock.Anything, mock.MatchedBy(
+			func(got *wire.MsgTx) bool {
+				return got.TxHash() == tx.TxHash()
+			},
+		),
+	).Return(nil).Once()
 
+	// Act: Retry the actual stored snapshot through the syncer loop.
 	err = s.broadcastUnminedTxns(t.Context())
+
+	// Assert: Exactly the Published transaction was retried; no expectation
+	// permits automatic publication of the Pending row.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 	publisher.AssertExpectations(t)
@@ -6594,6 +6607,8 @@ func TestBroadcastUnminedTxnsRoutesStore(t *testing.T) {
 func TestBroadcastUnminedTxnsStoreSortsDependencies(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Supply child before parent so the retry must reuse the existing
+	// dependency sort instead of trusting Store row order.
 	store := &walletmock.Store{}
 	publisher := &mockTxPublisher{}
 	s := newTestSyncer(Config{}, nil, nil, publisher, store, 67)
@@ -6638,7 +6653,7 @@ func TestBroadcastUnminedTxnsStoreSortsDependencies(t *testing.T) {
 
 	var published []chainhash.Hash
 	publisher.On(
-		"Broadcast", mock.Anything, mock.AnythingOfType("*wire.MsgTx"), "",
+		"rebroadcast", mock.Anything, mock.AnythingOfType("*wire.MsgTx"),
 	).Return(nil).Run(func(args mock.Arguments) {
 		tx, ok := args.Get(1).(*wire.MsgTx)
 		require.True(t, ok)
@@ -6646,7 +6661,10 @@ func TestBroadcastUnminedTxnsStoreSortsDependencies(t *testing.T) {
 		published = append(published, tx.TxHash())
 	}).Twice()
 
+	// Act: Retry both rows through the same narrow publication capability.
 	err = s.broadcastUnminedTxns(t.Context())
+
+	// Assert: Both retries occur in spend order, independently of row order.
 	require.NoError(t, err)
 	require.Equal(t, []chainhash.Hash{
 		parent.TxHash(), child.TxHash(),
@@ -8121,11 +8139,13 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	// optional call local to the existing publisher mock, without writing
 	// the spend through the Wallet's publish API before the assertion.
 	publisher := &mockTxPublisher{}
-	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
-		func(tx *wire.MsgTx) bool {
-			return tx.TxHash() == record.Hash
-		},
-	), "").Return(nil).Maybe()
+	publisher.On(
+		"rebroadcast", mock.Anything, mock.MatchedBy(
+			func(tx *wire.MsgTx) bool {
+				return tx.TxHash() == record.Hash
+			},
+		),
+	).Return(nil).Maybe()
 
 	s, ok := w.sync.(*syncer)
 	require.True(t, ok)
@@ -8135,11 +8155,11 @@ func TestLiveWatchScanRetry(t *testing.T) {
 	// Preserve real Wallet notification while replacing only rebroadcast
 	// for this retry scenario's existing publication mock.
 	s.txManager = struct {
-		TxPublisher
+		txRebroadcaster
 		txNotifier
 	}{
-		TxPublisher: publisher,
-		txNotifier:  w,
+		txRebroadcaster: publisher,
+		txNotifier:      w,
 	}
 
 	// Declare both readiness calls before releasing the worker; the retry

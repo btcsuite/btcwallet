@@ -256,7 +256,7 @@ type chainProcessor interface {
 // txManager combines the Wallet capabilities used by the syncer for
 // publication and notification after successful commits.
 type txManager interface {
-	TxPublisher
+	txRebroadcaster
 	txNotifier
 }
 
@@ -838,7 +838,7 @@ func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
 }
 
 // broadcastUnminedTxns retrieves all unmined transactions from the wallet and
-// attempts to re-broadcast them to the network.
+// retries their publication without recreating history deleted after the read.
 func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	txs, err := s.unminedTxns(ctx)
 	if err != nil {
@@ -849,7 +849,7 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	}
 
 	for _, tx := range txs {
-		err := s.txManager.Broadcast(ctx, tx, "")
+		err := s.txManager.rebroadcast(ctx, tx)
 		if err != nil {
 			log.Warnf("Unable to rebroadcast tx %v: %v",
 				tx.TxHash(), err)
