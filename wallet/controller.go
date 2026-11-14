@@ -871,6 +871,10 @@ func (w *Wallet) handleReq(req any) {
 	case broadcastReq:
 		w.handleBroadcast(r)
 
+	// Background retries cannot acquire explicit submission authority.
+	case rebroadcastReq:
+		w.handleRebroadcast(r)
+
 	case derivePubKeyReq:
 		w.handleDerivePubKey(r)
 

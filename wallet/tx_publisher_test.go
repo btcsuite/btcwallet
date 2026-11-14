@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -2423,4 +2424,82 @@ func TestBroadcastNeutrinoCancellationRetainsCandidates(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, credit.IsConflicted)
 	}
+}
+
+// TestRebroadcastStaleSnapshotKeepsDeletedBranch prevents a syncer snapshot
+// from recreating removed history and reserving the branch's funding again.
+func TestRebroadcastStaleSnapshotKeepsDeletedBranch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse the real SQLite wallet and record a Published root/child
+	// branch. Capture both rows before explicit deletion, just as sync startup
+	// can finish its read before the caller removes the branch.
+	client := createTestChain(t)
+	w := createSQLiteWallet(t, client)
+	script, input, _ := storeFundingCredits(t, w)
+	root := wire.NewMsgTx(wire.TxVersion)
+	root.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	root.AddTxOut(wire.NewTxOut(19_000, script))
+	rootOutput := wire.OutPoint{Hash: root.TxHash()}
+	child := wire.NewMsgTx(wire.TxVersion)
+	child.AddTxIn(wire.NewTxIn(&rootOutput, nil, nil))
+	child.AddTxOut(wire.NewTxOut(18_000, script))
+
+	for _, tx := range []*wire.MsgTx{root, child} {
+		err := w.store.CreateTx(
+			t.Context(), db.CreateTxParams{
+				WalletID: w.id,
+				Tx:       tx,
+				Received: time.Now(),
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		)
+		require.NoError(t, err)
+	}
+
+	query := db.ListTxnsQuery{WalletID: w.id, UnminedOnly: true}
+	snapshot, err := w.store.ListTxns(t.Context(), query)
+	require.NoError(t, err)
+
+	snapshotStore := &walletmock.Store{}
+	snapshotStore.On("ListTxns", mock.Anything, query).
+		Return(snapshot, nil).Once().Run(
+		func(mock.Arguments) {
+			// Complete deletion before returning the earlier snapshot.
+			// The Wallet itself keeps its real Store for every operation.
+			require.NoError(
+				t, w.DeleteUnconfirmedTx(
+					t.Context(), root.TxHash(),
+				),
+			)
+		},
+	)
+	s := newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, snapshotStore, w.id,
+		w.chainSyncer, w.chainEventChan,
+	)
+
+	// Act: Run the actual syncer retry against the captured, now stale rows.
+	// Strict chain mocks permit neither a preflight nor a send after deletion.
+	err = s.broadcastUnminedTxns(t.Context())
+
+	// Assert: Both deleted rows remain absent and their shared funding returns
+	// to the UTXO set. No background retry has authority to recreate a claim.
+	require.NoError(t, err)
+
+	for _, tx := range []*wire.MsgTx{root, child} {
+		_, err := w.GetTx(t.Context(), tx.TxHash())
+		require.ErrorIs(t, err, ErrTxNotFound)
+	}
+
+	restored, err := w.store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: w.id,
+			OutPoint: input,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, input, restored.OutPoint)
+	snapshotStore.AssertExpectations(t)
 }

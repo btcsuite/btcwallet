@@ -54,6 +54,17 @@ type TxPublisher interface {
 	Broadcast(ctx context.Context, tx *wire.MsgTx, label string) error
 }
 
+// txRebroadcaster retries existing publication intent without creating history
+// from a syncer snapshot that may have been deleted since it was read.
+type txRebroadcaster interface {
+	// rebroadcast only relays a still-published transaction; it cannot insert
+	// history or promote Pending intent like an explicit Broadcast can.
+	rebroadcast(ctx context.Context, tx *wire.MsgTx) error
+}
+
+// Wallet supplies the syncer's private, non-creating publication capability.
+var _ txRebroadcaster = (*Wallet)(nil)
+
 // A compile time check to ensure that Wallet implements the interface.
 var _ TxPublisher = (*Wallet)(nil)
 
@@ -72,6 +83,105 @@ type broadcastReq struct {
 	tx          *wire.MsgTx
 	label       string
 	respErrChan chan error
+}
+
+// rebroadcastReq joins a background retry to the Wallet's existing lifetime.
+// It carries no recording authority, unlike an explicit broadcastReq.
+type rebroadcastReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	respErrChan chan error
+}
+
+// rebroadcast admits the syncer's retry and waits until its dependency access
+// completes. The syncer owns valid transaction inputs and Wallet lifetime.
+func (w *Wallet) rebroadcast(ctx context.Context, tx *wire.MsgTx) error {
+	// Reuse normal admission and joining so Stop drains this retry too.
+	r := rebroadcastReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		tx:          tx,
+		respErrChan: make(chan error, 1),
+	}
+
+	err := w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	return <-r.respErrChan
+}
+
+// handleRebroadcast retries only current Published intent, without recording.
+// Deletion after its read may allow late relay, but never recreates history.
+func (w *Wallet) handleRebroadcast(r rebroadcastReq) {
+	// A snapshot is not fresh submission authority: deletion, confirmation
+	// or a status change can make it ineligible before this request starts.
+	info, err := w.store.GetTx(
+		r.ctx, db.GetTxQuery{
+			WalletID: w.id,
+			Txid:     r.tx.TxHash(),
+		},
+	)
+	if errors.Is(err, db.ErrTxNotFound) {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	if info.Status != db.TxStatusPublished || info.Block != nil {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	// Known results need no repair on this path. Unsupported preflight still
+	// permits relay, while policy refusal preserves existing tracked history.
+	err = w.checkMempool(r.ctx, r.tx)
+	if errors.Is(err, errAlreadyBroadcasted) {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	// Reuse only read-only ownership resolution, never addTxToWallet: a
+	// concurrent delete must not turn this stale retry into a new record.
+	owned, err := w.filterOwnedAddresses(r.ctx, w.extractTxAddrs(r.tx))
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	ourAddrs := make([]address.Address, 0, len(owned))
+	for _, info := range owned {
+		ourAddrs = append(ourAddrs, info.addr)
+	}
+
+	// Keep the existing refusal cleanup and best-effort success notification;
+	// neither operation can insert the transaction or reserve its inputs.
+	err = w.publishTx(r.tx, ourAddrs)
+	if err != nil {
+		r.respErrChan <- w.handlePublicationFailure(r.ctx, r.tx, true, err)
+
+		return
+	}
+
+	w.notifyTx(r.ctx, r.tx.TxHash())
+
+	r.respErrChan <- nil
 }
 
 // CheckMempoolAcceptance checks if a transaction would be accepted by the
