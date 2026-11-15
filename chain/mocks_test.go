@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -211,3 +213,63 @@ func (m *mockGetRawTxReceiver) Receive() (*btcutil.Tx, error) {
 
 // Compile time assert the implementation.
 var _ getRawTxReceiver = (*mockGetRawTxReceiver)(nil)
+
+// mockRescanClient mocks the rescanClient interface.
+type mockRescanClient struct {
+	mock.Mock
+}
+
+// Compile time assert the implementation.
+var _ rescanClient = (*mockRescanClient)(nil)
+
+func (m *mockRescanClient) GetBestBlock() (*chainhash.Hash, int32, error) {
+	args := m.Called()
+	return args.Get(0).(*chainhash.Hash), args.Get(1).(int32), args.Error(2)
+}
+
+func (m *mockRescanClient) GetBlockHash(height int64) (*chainhash.Hash,
+	error) {
+
+	args := m.Called(height)
+	return args.Get(0).(*chainhash.Hash), args.Error(1)
+}
+
+func (m *mockRescanClient) GetBlockHeaderVerbose(
+	hash *chainhash.Hash) (*btcjson.GetBlockHeaderVerboseResult, error) {
+
+	args := m.Called(*hash)
+
+	return args.Get(0).(*btcjson.GetBlockHeaderVerboseResult),
+		args.Error(1)
+}
+
+func (m *mockRescanClient) GetHeaders(locators []chainhash.Hash,
+	stop *chainhash.Hash) ([]wire.BlockHeader, error) {
+
+	args := m.Called(locators, stop)
+	return args.Get(0).([]wire.BlockHeader), args.Error(1)
+}
+
+func (m *mockRescanClient) LoadTxFilter(reload bool,
+	addrs []address.Address, ops []wire.OutPoint) error {
+
+	args := m.Called(reload, addrs, ops)
+	return args.Error(0)
+}
+
+func (m *mockRescanClient) RescanBlocks(
+	hashes []chainhash.Hash) ([]btcjson.RescannedBlock, error) {
+
+	args := m.Called(hashes)
+	return args.Get(0).([]btcjson.RescannedBlock), args.Error(1)
+}
+
+func (m *mockRescanClient) NotifyReceived(addrs []address.Address) error {
+	args := m.Called(addrs)
+	return args.Error(0)
+}
+
+func (m *mockRescanClient) NotifySpent(ops []*wire.OutPoint) error {
+	args := m.Called(ops)
+	return args.Error(0)
+}

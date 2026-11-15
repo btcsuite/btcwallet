@@ -280,21 +280,14 @@ func (c *RPCClient) IsCurrent() bool {
 	return bestHeader.Timestamp.After(time.Now().Add(-isCurrentDelta))
 }
 
-// Rescan wraps the normal Rescan command with an additional parameter that
-// allows us to map an outpoint to the address in the chain that it pays to.
-// This is useful when using BIP 158 filters as they include the prev pkScript
-// rather than the full outpoint.
+// Rescan rescans from the block with the given hash through the best block for
+// the passed addresses and outpoints, and then watches them for subsequent
+// notifications. The rescan is performed on the client with loadtxfilter,
+// getheaders and rescanblocks, in place of the deprecated rescan command.
 func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []address.Address,
 	outPoints map[wire.OutPoint]address.Address) error {
 
-	flatOutpoints := make([]*wire.OutPoint, 0, len(outPoints))
-	for ops := range outPoints {
-		ops := ops
-
-		flatOutpoints = append(flatOutpoints, &ops)
-	}
-
-	return c.Client.Rescan(startHash, addrs, flatOutpoints) // nolint:staticcheck
+	return c.rescan(c.Client, startHash, addrs, outPoints)
 }
 
 // WaitForShutdown blocks until both the client has finished disconnecting
