@@ -144,7 +144,8 @@ type CreateWalletParams struct {
 // to manage multiple distinct wallets (e.g., for different coins or different
 // accounts) simultaneously.
 type Manager struct {
-	sync.RWMutex
+	// Mutex serializes Start, Stop and terminal failure cleanup.
+	sync.Mutex
 
 	// started claims the one active lifetime. The Manager lock serializes
 	// lifecycle changes, loop registration and terminal failure cleanup.
@@ -285,13 +286,6 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		if err != nil {
 			return wallets, err
 		}
-	}
-
-	// Cancellation must settle before publication so failed startup leaves
-	// only local candidates for the caller to drain.
-	err = ctx.Err()
-	if err != nil {
-		return wallets, err
 	}
 
 	for _, wallet := range wallets {
@@ -510,12 +504,8 @@ func (m *Manager) mainLoop() {
 	}
 }
 
-// chainRecipients fixes active membership without holding the Manager lock
-// across matching or potentially blocked delivery to a Wallet mailbox.
+// chainRecipients snapshots the current Wallets owned by this loop turn.
 func (m *Manager) chainRecipients() []*Wallet {
-	m.RLock()
-	defer m.RUnlock()
-
 	wallets := make([]*Wallet, 0, len(m.wallets))
 	for _, w := range m.wallets {
 		wallets = append(wallets, w)
@@ -579,28 +569,11 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 func (m *Manager) handleRollbackEvent(ctx context.Context,
 	event chain.BlockDisconnected) error {
 
-	// Keep the Wallet set fixed, exclude Create's new writers, and prevent
-	// Stop from closing Store until rollback or terminal cleanup finishes.
-	m.Lock()
-	defer m.Unlock()
-
-	// Stop may have cleared backend before this callback acquired the lock.
-	// Reject that stopped Manager before using its storage.
-	err := m.checkCreate()
-	if err != nil {
-		return err
-	}
-
 	// Preserve hash and time as well as height for storage that needs to
 	// distinguish a stale disconnect from a replacement at the same height.
 	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
 	if err != nil {
 		return fmt.Errorf("disconnect block: %w", err)
-	}
-
-	err = ctx.Err()
-	if err != nil {
-		return err
 	}
 
 	// Manager alone signals rollback completion. Terminal cleanup stops
@@ -616,21 +589,12 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	}
 
 	// Accepted persistence settles even if its caller or Stop cancels.
-	// The Manager lock keeps Store open until this one rollback completes.
+	// The owner keeps Store open until this one rollback completes.
 	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
 	if err != nil {
 		err = fmt.Errorf("rollback chain: %w", err)
-		if m.lifetimeCtx.Err() == nil {
-			// No Stop owns cleanup yet. Cancel and join writers on this
-			// reader without self-joining, then release its completion.
-			err = errors.Join(err, m.stopWallets(nil))
-
-			close(rollbackDone)
-		}
-
-		// If Stop already canceled, it owns cleanup and its close error.
-		// Otherwise cleanup canceled the reader's outer report, so include
-		// the joined close failure in this single persistence error log.
+		// Leave paused workers to the owner, which drains them on failure
+		// or handles the accepted Stop before another operation can run.
 		log.Errorf("Unable to roll back chain to height %d: %v",
 			block.Height, err)
 
@@ -737,25 +701,6 @@ func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
 
 	m.wallets[wallet.cfg.Name] = wallet
 	req.resp <- createWalletResp{wallet: wallet}
-
-	return nil
-}
-
-// checkCreate rejects terminal admission after Stop cancels the reader, even
-// before Stop obtains admission and closes storage. The caller holds the lock.
-func (m *Manager) checkCreate() error {
-	if m.lifetimeCtx.Err() != nil {
-		return ErrManagerStopped
-	}
-
-	if !m.started.Load() {
-		err := ErrStateForbidden
-		if m.backend == nil {
-			err = ErrManagerStopped
-		}
-
-		return err
-	}
 
 	return nil
 }
