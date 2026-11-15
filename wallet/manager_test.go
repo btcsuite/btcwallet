@@ -1650,6 +1650,90 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 	require.ErrorIs(t, <-result, closeErr)
 }
 
+// TestManagerStopRejectsStopped verifies invalid Stop calls leave cleanup to
+// the accepted lifecycle, including while that cleanup remains unfinished.
+func TestManagerStopRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	t.Run("initial stopped", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Keep the newly constructed Manager Stopped. Strict calls
+		// permit one later startup and one close by its accepted Stop only.
+		backend := &managerBackendMock{}
+		backend.On("listWallets", mock.Anything).
+			Return([]*walletData{}, nil).Once()
+		backend.On("close").Return(nil).Once()
+
+		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(nil)).Once()
+		manager := newManagerLifecycleTest(t, backend, source)
+
+		// Act: Reject Stop before startup, then exercise the intended lifecycle
+		// to verify that rejection did not dispose the constructor resources.
+		rejected := manager.Stop()
+		_, startErr := manager.Start(t.Context())
+		stopErr := manager.Stop()
+
+		// Assert: Only the first call is invalid; the subsequent legal calls
+		// retain the open backend and complete its single resource release.
+		require.ErrorIs(t, rejected, ErrManagerStopped)
+		require.NoError(t, startErr)
+		require.NoError(t, stopErr)
+	})
+
+	t.Run("duplicate during cleanup", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			t.Helper()
+
+			// Arrange: Hold the accepted Stop inside backend closure. A second
+			// Stop must reject without joining that held resource operation.
+			entered, release := make(chan struct{}), make(chan struct{})
+			backend := &managerBackendMock{}
+			backend.On("listWallets", mock.Anything).
+				Return([]*walletData{}, nil).Once()
+			backend.On("close").Run(func(mock.Arguments) {
+				close(entered)
+				<-release
+			}).Return(nil).Once()
+
+			source := &bwmock.Chain{}
+			source.On("Notifications").Return((<-chan any)(nil)).Once()
+			manager := newManagerLifecycleTest(t, backend, source)
+
+			releaseWork := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(releaseWork)
+			_, err := manager.Start(t.Context())
+			require.NoError(t, err)
+
+			// Act: Leave the accepted caller blocked in cleanup, then settle a
+			// duplicate caller while the owner still cannot finish the first.
+			first, duplicate := make(chan error, 1), make(chan error, 1)
+			go func() { first <- manager.Stop() }()
+
+			<-entered
+
+			go func() { duplicate <- manager.Stop() }()
+
+			synctest.Wait()
+
+			// Assert: The rejected caller returns before closure is released.
+			// The accepted caller still waits, then completes the one close.
+			select {
+			case err := <-duplicate:
+				require.ErrorIs(t, err, ErrManagerStopped)
+			default:
+				t.Fatal("duplicate Stop joined held cleanup")
+			}
+
+			require.Empty(t, first)
+			releaseWork()
+			require.NoError(t, <-first)
+		})
+	})
+}
+
 // TestManagerStopWaitsForStart verifies Stop lets synchronous startup settle
 // before closing its storage, and cannot return while that work is still held.
 func TestManagerStopWaitsForStart(t *testing.T) {
@@ -1704,6 +1788,7 @@ func TestManagerStopWaitsForStart(t *testing.T) {
 	}()
 
 	<-callingStop
+	<-manager.lifetimeCtx.Done()
 
 	close(release)
 
@@ -2118,7 +2203,7 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 
 	select {
 	case stopErr := <-stopped:
-		require.NoError(t, stopErr)
+		require.ErrorIs(t, stopErr, ErrManagerStopped)
 	case <-time.After(5 * time.Second):
 		t.Fatal("concurrent Stop did not join terminal cleanup")
 	}
@@ -3337,7 +3422,7 @@ func TestManagerChainSourceClosed(t *testing.T) {
 	close(notifications)
 
 	// Assert: Automatic teardown finishes without an external Stop rescuing
-	// it; retained Wallets are inert and later Stop is an idempotent no-op.
+	// it; retained Wallets are inert and later public Stop is rejected.
 	select {
 	case <-closed:
 	case <-time.After(5 * time.Second):
@@ -3351,7 +3436,7 @@ func TestManagerChainSourceClosed(t *testing.T) {
 		)
 	}
 
-	require.NoError(t, manager.Stop())
+	require.ErrorIs(t, manager.Stop(), ErrManagerStopped)
 }
 
 // TestManagerChainEventOrder proves source order and bounded delivery
