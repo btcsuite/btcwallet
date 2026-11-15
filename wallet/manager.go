@@ -151,8 +151,8 @@ type Manager struct {
 	started atomic.Bool
 
 	// wallets holds fully initialized and started Wallets keyed by unique
-	// name. The Manager lock serializes Store access, runtime assembly, and
-	// publication after initial-account import and private startup complete.
+	// name. The runtime loop serializes creation, delivery and rollback after
+	// synchronous startup publishes the initial set.
 	wallets map[string]*Wallet
 
 	// backend owns the database and resolves the storage dependencies for
@@ -172,6 +172,12 @@ type Manager struct {
 
 	// cancel signals terminal reader shutdown before draining Wallet work.
 	cancel context.CancelFunc
+
+	// chainEvents borrows the already-started source's one native stream.
+	chainEvents <-chan any
+
+	// requestChan transfers creation to the same owner as native delivery.
+	requestChan chan createWalletReq
 
 	// wg joins the runtime before normal Stop disposes Wallets and storage.
 	wg sync.WaitGroup
@@ -244,6 +250,8 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 
 	m := &Manager{
 		wallets:     make(map[string]*Wallet),
+		requestChan: make(chan createWalletReq),
+		chainEvents: cfg.ChainSource.Notifications(),
 		backend:     backend,
 		config:      cfg,
 		lifetimeCtx: lifetimeCtx,
@@ -399,9 +407,7 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 
 	// Register the loop before unlocking so Stop cannot miss a goroutine
 	// that has not yet been scheduled.
-	m.wg.Add(1)
-
-	go m.startChainSyncer()
+	m.wg.Go(m.mainLoop)
 
 	return wallets, nil
 }
@@ -438,26 +444,70 @@ func (m *Manager) Stop() error {
 	return m.stopWallets(nil)
 }
 
-// startChainSyncer reads the shared stream until shutdown or source loss.
-// Its caller registers it before launch so terminal shutdown joins the reader.
-func (m *Manager) startChainSyncer() {
-	defer m.wg.Done()
+// createWalletReq transfers creation and its result to the runtime owner.
+type createWalletReq struct {
+	params CreateWalletParams
+	resp   chan createWalletResp
+}
 
-	err := m.chainSyncer.run(m.lifetimeCtx, m.dispatchChainEvent)
+// createWalletResp returns a started Wallet or the settled creation error.
+type createWalletResp struct {
+	wallet *Wallet
+	err    error
+}
 
-	// Stop releases this lock before joining. A live source failure instead
-	// owns disposal here, and must finish it before reader completion.
-	m.Lock()
-	defer m.Unlock()
+// mainLoop serializes creation, source delivery and shared rollback until the
+// lifetime is canceled. Normal Stop joins the owner before disposing resources.
+func (m *Manager) mainLoop() {
+	var chainErr error
 
-	// Cancellation leaves disposal with the lifecycle caller that caused it.
-	// Do not consume its cleanup errors or dispose released storage twice.
-	if m.lifetimeCtx.Err() != nil {
-		return
+	// Fatal exits need private cleanup: public Stop would self-join.
+	defer func() {
+		if chainErr == nil {
+			return
+		}
+
+		// Serialize Start's lifetime check and CAS with terminal cleanup.
+		m.Lock()
+		defer m.Unlock()
+
+		// Stop cancels before joining and owns disposal and its errors.
+		// Draining here would consume the errors its caller must receive.
+		if m.lifetimeCtx.Err() != nil {
+			return
+		}
+
+		chainErr = errors.Join(chainErr, m.stopWallets(nil))
+		log.Errorf("Chain notification processing stopped: %v", chainErr)
+	}()
+
+	for {
+		select {
+		case <-m.lifetimeCtx.Done():
+			return
+
+		case req := <-m.requestChan:
+			err := m.handleCreateWalletReq(req)
+			if err != nil {
+				return
+			}
+
+		case event, ok := <-m.chainEvents:
+			if !ok {
+				chainErr = errors.New(
+					"chain notification source closed",
+				)
+
+				return
+			}
+
+			chainErr = m.dispatchChainEvent(m.lifetimeCtx, event)
+			if chainErr != nil {
+				// Failed rewind can leave workers paused; exit to cleanup.
+				return
+			}
+		}
 	}
-
-	err = errors.Join(err, m.stopWallets(nil))
-	log.Warnf("Chain notification reader stopped: %v", err)
 }
 
 // chainRecipients fixes active membership without holding the Manager lock
@@ -602,69 +652,93 @@ func validateManagedWalletName(name string) error {
 	return nil
 }
 
-// Create persists, starts, and publishes one Wallet while Manager is running.
-// Duplicate creation returns no Wallet and ErrWalletExists while preserving
-// the existing Wallet and its credentials, including all aliases on kvdb.
+// Create persists, starts and publishes one Wallet while Manager is active.
+// An inactive Manager returns ErrManagerStopped before validating the request.
+// Duplicates return ErrWalletExists without changing the existing Wallet.
 //
-// TODO(yy): Add a context parameter once wallet creation uses a single atomic
-// database transaction.
+// TODO(yy): Add caller context with atomic creation in the context follow-up.
 func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
-	m.Lock()
-	defer func() {
-		// Failed creation terminally drains the Manager; its reader may
-		// still need membership, so join only after releasing admission.
-		m.Unlock()
-
-		if m.lifetimeCtx.Err() != nil {
-			m.wg.Wait()
-		}
-	}()
-
-	err := m.checkCreate()
-	if err != nil {
-		return nil, err
+	if !m.started.Load() {
+		return nil, ErrManagerStopped
 	}
 
-	// The existing active set rejects duplicates before backend work. Skip
-	// absent names so kvdb's unnamed startup entry cannot mask name validation.
+	// Cancellation releases callers waiting to send. Once transferred,
+	// creation settles its result before the owner can close storage.
+	req := createWalletReq{
+		params: params,
+		resp:   make(chan createWalletResp, 1),
+	}
+
+	select {
+	case m.requestChan <- req:
+	case <-m.lifetimeCtx.Done():
+		return nil, ErrManagerStopped
+	}
+
+	// The owner always replies after accepted writes and cleanup settle.
+	// Lifetime cancellation here would hide the actual Wallet or error.
+	result := <-req.resp
+
+	return result.wallet, result.err
+}
+
+// handleCreateWalletReq replies on every path. It returns an error only after
+// terminal candidate cleanup, so the owner exits without accepting more work.
+func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
+	params := req.params
 	if params.Name != "" && m.wallets[params.Name] != nil {
-		return nil, fmt.Errorf("wallet %q: %w", params.Name, ErrWalletExists)
+		req.resp <- createWalletResp{err: fmt.Errorf(
+			"wallet %q: %w", params.Name, ErrWalletExists,
+		)}
+
+		return nil
 	}
 
-	// Finish preparation and startup before Stop closes storage. One context
-	// keeps those phases together until the operation completes.
+	// Accepted preparation failures return through the response. Only a
+	// known candidate's initialization failure terminates the owner below.
 	ctx := context.WithoutCancel(m.lifetimeCtx)
 
-	w, err := m.createWallet(ctx, params)
+	wallet, err := m.createWallet(ctx, params)
 	if err != nil {
-		// Backend occupancy retains both its native cause and the public
-		// duplicate identity; unrelated preparation failures pass through.
+		// Expose backend duplicates without changing private preparation.
 		if errors.Is(err, db.ErrWalletExists) {
 			err = fmt.Errorf("%w: %w", ErrWalletExists, err)
 		}
 
-		return nil, err
+		req.resp <- createWalletResp{err: err}
+
+		return nil
 	}
 
-	// Parameter validation permits initial accounts only in shell mode, so
-	// import any requested accounts before the Wallet starts.
-	if len(params.InitialAccounts) > 0 {
-		err = w.importInitialAccounts(
-			ctx, params.InitialAccounts,
-		)
-		if err != nil {
-			return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
-		}
-	}
-
-	err = w.start(ctx)
+	err = wallet.importInitialAccounts(ctx, params.InitialAccounts)
 	if err != nil {
-		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+		// Serialize cleanup with Start. Stop may have claimed shutdown;
+		// it joins us and observes closed storage, avoiding double disposal.
+		m.Lock()
+		err = errors.Join(err, m.stopWallets([]*Wallet{wallet}))
+		m.Unlock()
+
+		req.resp <- createWalletResp{err: err}
+
+		return err
 	}
 
-	m.wallets[w.cfg.Name] = w
+	err = wallet.start(ctx)
+	if err != nil {
+		// Failed startup needs the same serialized disposal and reply.
+		m.Lock()
+		err = errors.Join(err, m.stopWallets([]*Wallet{wallet}))
+		m.Unlock()
 
-	return w, nil
+		req.resp <- createWalletResp{err: err}
+
+		return err
+	}
+
+	m.wallets[wallet.cfg.Name] = wallet
+	req.resp <- createWalletResp{wallet: wallet}
+
+	return nil
 }
 
 // checkCreate rejects terminal admission after Stop cancels the reader, even
@@ -722,8 +796,8 @@ func (m *Manager) createWallet(ctx context.Context,
 		defer rootKey.Zero()
 	}
 
-	// The Manager mutex keeps runtime assembly, Store mutation, and cache
-	// publication atomic so no partial Wallet becomes observable.
+	// The owner keeps assembly, Store mutation and publication together so
+	// no partial Wallet becomes observable between runtime operations.
 	walletCfg, err := m.config.walletConfig(params.Name)
 	if err != nil {
 		return nil, err
