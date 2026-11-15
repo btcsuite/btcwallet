@@ -146,8 +146,8 @@ type CreateWalletParams struct {
 type Manager struct {
 	sync.RWMutex
 
-	// started rejects another Start while starting, running or stopping.
-	// The Manager lock serializes resource changes and terminal admission.
+	// started claims the one active lifetime. The Manager lock serializes
+	// lifecycle changes, loop registration and terminal failure cleanup.
 	started atomic.Bool
 
 	// wallets holds fully initialized and started Wallets keyed by unique
@@ -180,8 +180,9 @@ type Manager struct {
 // NewManager opens the one database described by cfg and returns a Manager that
 // owns it.
 //
-// Every Wallet the Manager serves shares that database. NewManager does not
-// start durable Wallets; callers use Start and eventually Stop. The legacy kvdb
+// Every Wallet shares that database and remains stopped until Start. Call
+// Start once, then Stop after successful startup. Failed startup closes the
+// owned resources; discard the Manager after failure or Stop. The legacy kvdb
 // backend remains single-wallet until it is removed.
 func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	err := cfg.validate()
@@ -319,10 +320,9 @@ func (m *Manager) stopWallets(wallets []*Wallet) error {
 		}
 	}
 
-	// Clear runtime ownership after shutdown has settled. The nil backend
-	// keeps later Start calls from reopening a terminal Manager. Wallet work
-	// is drained. Reader rollback holds this same lock through Store use;
-	// the reader itself joins only after its caller unlocks.
+	// Wallet work and accepted rollback settle before storage closes.
+	// Clearing backend records released resources so a lifecycle caller
+	// can skip disposal after waiting for the cleanup owner.
 	err := errors.Join(errs...)
 	err = errors.Join(err, m.backend.close())
 	m.backend = nil
@@ -367,42 +367,24 @@ func translateDatabaseIdentityError(err error) error {
 	}
 }
 
-// Start starts every durable Wallet and returns the complete active set in
-// stable Wallet-ID order. Another Start while starting, running, or stopping
-// returns ErrStateForbidden. Stop and admitted startup failure are terminal;
-// construct a fresh Manager to reopen the database.
-// Cancellation or failure cleans up all candidates before returning an error.
+// Start starts every durable Wallet in stable Wallet-ID order. Call it once
+// on a newly constructed Manager. Another Start on a running Manager returns
+// ErrStateForbidden; after Stop or failed startup it returns ErrManagerStopped.
+// Startup failure closes owned resources before returning; create a fresh
+// Manager rather than restarting this instance.
 func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
-	// Reject without waiting for the lock held by startup or shutdown. Claim
-	// under that lock below so Stop cannot overtake an admitted startup.
-	if m.started.Load() {
-		return nil, fmt.Errorf(
-			"manager already started: %w", ErrStateForbidden,
-		)
-	}
-
 	m.Lock()
-	defer func() {
-		// A terminal startup must release membership before joining a
-		// reader; successful startup leaves that reader running.
-		m.Unlock()
+	defer m.Unlock()
 
-		if m.lifetimeCtx.Err() != nil {
-			m.wg.Wait()
-		}
-	}()
-
-	err := ctx.Err()
-	if err != nil {
-		return nil, err
-	}
-
-	// Cleanup closes and clears the backend, making this Manager terminal.
-	if m.backend == nil {
+	// started is false initially and after terminal cleanup. Cancellation
+	// identifies the closed instance; without this check Start could claim
+	// the flag again and access released storage. Keep this check and CAS
+	// under the lock so terminal cleanup cannot race admission.
+	if m.lifetimeCtx.Err() != nil {
 		return nil, ErrManagerStopped
 	}
 
-	if m.started.Swap(true) {
+	if !m.started.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf(
 			"manager already started: %w", ErrStateForbidden,
 		)
@@ -410,13 +392,13 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 
 	wallets, err := m.startWallets(ctx)
 	if err != nil {
-		// No candidate is published on failure; join its work before closing
-		// shared storage and making the Manager terminal.
+		// Failed candidates remain private until their workers and storage
+		// close; the original startup caller owns the joined error.
 		return nil, errors.Join(err, m.stopWallets(wallets))
 	}
 
-	// Enroll under admission so shutdown cannot miss a reader whose
-	// goroutine has not yet been scheduled.
+	// Register the loop before unlocking so Stop cannot miss a goroutine
+	// that has not yet been scheduled.
 	m.wg.Add(1)
 
 	go m.startChainSyncer()
