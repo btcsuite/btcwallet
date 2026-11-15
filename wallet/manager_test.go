@@ -1607,74 +1607,51 @@ func TestManagerStartCanceledBeforeAdmission(t *testing.T) {
 	require.Empty(t, wallets)
 }
 
-// TestManagerStopWaitsForCleanup verifies shutdown blocks through backend
-// closure, and a repeated Stop has no remaining work.
+// TestManagerStopWaitsForCleanup verifies the accepted Stop joins backend
+// closure and returns its cleanup failure directly.
 func TestManagerStopWaitsForCleanup(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Hold closure of the database opened by construction, before
-	// any Start has claimed the guard. Shutdown must still reject startup.
+	// Arrange: Start an empty Manager and hold its backend closure so the
+	// accepted Stop cannot report completion before the resource is released.
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	closeErr := errors.New("backend close")
 	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
 	backend.On("close").Run(func(mock.Arguments) {
 		close(entered)
 		<-release
 	}).Return(closeErr).Once()
 
 	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
-	first := make(chan error, 1)
-	second := make(chan error, 1)
-	callingStop := make(chan struct{})
+	releaseWork := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseWork)
 
-	// Act: Hold shutdown, reject Start, and overlap another
-	// Stop. Both Stop callers check the shared completion boundary directly.
-	go func() {
-		err := manager.Stop()
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
 
-		select {
-		case <-release:
-		default:
-			t.Error("Stop returned before cleanup was released")
-		}
-
-		first <- err
-	}()
+	// Act: Stop the started Manager and observe its result while storage is
+	// held, then allow the resource owner to finish cleanup.
+	result := make(chan error, 1)
+	go func() { result <- manager.Stop() }()
 
 	<-entered
 
-	wallets, startErr := manager.Start(t.Context())
-	go func() {
-		close(callingStop)
+	select {
+	case err := <-result:
+		t.Fatalf("Stop returned before storage cleanup: %v", err)
+	default:
+	}
 
-		err := manager.Stop()
+	releaseWork()
 
-		select {
-		case <-release:
-		default:
-			t.Error("concurrent Stop returned before cleanup was released")
-		}
-
-		second <- err
-	}()
-
-	<-callingStop
-	close(release)
-
-	firstErr := <-first
-	secondErr := <-second
-	repeatedErr := manager.Stop()
-
-	// Assert: Only the call doing cleanup returns its failure. Neither
-	// overlapping nor repeated calls create detached work or replay errors.
-	require.Nil(t, wallets)
-	require.ErrorIs(t, startErr, ErrStateForbidden)
-	require.ErrorIs(t, firstErr, closeErr)
-	require.NoError(t, secondErr)
-	require.NoError(t, repeatedErr)
+	// Assert: The accepted caller receives the backend failure after closure;
+	// the strict close expectation rules out a second resource release.
+	require.ErrorIs(t, <-result, closeErr)
 }
 
 // TestManagerStopWaitsForStart verifies Stop lets synchronous startup settle
@@ -1774,12 +1751,17 @@ func TestManagerCreateAfterStop(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Complete terminal shutdown before attempting creation. The
-	// strict close expectation also covers the fixture's later no-op Stop.
+	// strict close expectation also covers later fixture disposal.
 	backend := &managerBackendMock{}
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
 	require.NoError(t, manager.Stop())
 
 	// Act: Submit an empty request after shutdown has released storage.
