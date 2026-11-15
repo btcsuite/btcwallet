@@ -174,6 +174,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
 		wallets:     make(map[string]*Wallet),
+		requestChan: make(chan createWalletReq),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },
@@ -187,7 +188,9 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 	}
 
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	// This Store fixture has no native input; the owner serves Create.
 	m.started.Store(true)
+	m.wg.Go(m.mainLoop)
 
 	// The fixture owns required-call verification. Stop joins workers before
 	// assertions run, while the caller retains ownership of the mock Store.

@@ -180,6 +180,7 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 		backend.On("close").Return(nil).Once()
 
 		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(nil)).Once()
 		m := newManagerLifecycleTest(t, backend, source)
 		m.started.Store(true)
 		m.wallets[first.cfg.Name], m.wallets[second.cfg.Name] = first, second
@@ -401,6 +402,7 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 			Return(nil).Once().NotBefore(priorWrite)
 
 		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(nil)).Once()
 		m := newManagerLifecycleTest(t, backend, source)
 		m.started.Store(true)
 		m.wallets[w.cfg.Name] = w
@@ -1081,6 +1083,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 				lifetimeCtx: lifetimeCtx,
 				cancel:      cancel,
 				wallets:     make(map[string]*Wallet),
+				requestChan: make(chan createWalletReq),
 				backend:     backend,
 				config: ManagerConfig{
 					ChainSource: &bwmock.Chain{},
@@ -1092,6 +1095,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 				m.config.ChainSource, &m.config.ChainParams,
 			)
 			m.started.Store(true)
+			m.wg.Go(m.mainLoop)
 			t.Cleanup(func() {
 				cancel()
 				m.wg.Wait()
@@ -1342,6 +1346,8 @@ func newManagerLifecycleTest(t *testing.T,
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
 		wallets:     make(map[string]*Wallet),
+		requestChan: make(chan createWalletReq),
+		chainEvents: source.Notifications(),
 		backend:     backend,
 		config: ManagerConfig{
 			ChainSource: source,
@@ -1496,6 +1502,7 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
@@ -1573,6 +1580,7 @@ func TestManagerStartCancellationCleansUp(t *testing.T) {
 	}).Return(nil).Once()
 
 	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1815,6 +1823,7 @@ func TestManagerCreateBeforeStart(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
 	// Act: Submit creation before any Start has admitted runtime work.
@@ -1823,7 +1832,7 @@ func TestManagerCreateBeforeStart(t *testing.T) {
 	// Assert: No Wallet escapes and the lifecycle sentinel takes precedence
 	// over request errors; unexpected backend access fails the strict mock.
 	require.Nil(t, w)
-	require.ErrorIs(t, err, ErrStateForbidden)
+	require.ErrorIs(t, err, ErrManagerStopped)
 }
 
 // TestManagerCreateAfterStop verifies creation rejects a terminal Manager
@@ -2066,8 +2075,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Accept creation, queue Stop behind its lock, and advance startup
-	// into a real chain call before allowing that worker to drain.
+	// Act: Accept creation, start Stop while startup is held, then let the
+	// real chain dependency finish before shutdown can dispose storage.
 	go func() {
 		w, err := manager.Create(params)
 		created <- createOutcome{
@@ -2521,8 +2530,10 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			backend.On("close").Return(nil).Once()
 
 			source := &bwmock.Chain{}
+			source.On("Notifications").Return((<-chan any)(nil)).Once()
 			manager := newManagerLifecycleTest(t, backend, source)
 			manager.started.Store(true)
+			manager.wg.Go(manager.mainLoop)
 			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 			require.True(t, ok)
 			chain.On("IsCurrent").Return(false).Maybe()
@@ -2592,8 +2603,10 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 			backend.On("close").Return(nil).Once()
 
 			source := &bwmock.Chain{}
+			source.On("Notifications").Return((<-chan any)(nil)).Once()
 			manager := newManagerLifecycleTest(t, backend, source)
 			manager.started.Store(true)
+			manager.wg.Go(manager.mainLoop)
 
 			// Act: Let the public request return its backend failure before
 			// inspecting the original root object and borrowed input bytes.
@@ -3621,6 +3634,7 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	manager.started.Store(true)
 	manager.cancel()
