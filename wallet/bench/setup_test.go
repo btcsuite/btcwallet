@@ -85,7 +85,16 @@ func startSQLBenchmarkManager(tb testing.TB,
 
 	manager, err := wallet.NewManager(tb.Context(), config)
 	require.NoError(tb, err)
-	tb.Cleanup(func() { require.NoError(tb, manager.Stop()) })
+	tb.Cleanup(func() {
+		// Seed preparation closes this Manager before saving its snapshot.
+		// Its later cleanup may observe that completed, successful shutdown.
+		err := manager.Stop()
+		if errors.Is(err, wallet.ErrManagerStopped) {
+			return
+		}
+
+		require.NoError(tb, err)
+	})
 	wallets, err := manager.Start(tb.Context())
 	require.NoError(tb, err)
 

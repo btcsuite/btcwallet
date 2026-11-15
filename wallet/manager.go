@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	// ErrManagerStopped is returned when an operation targets a Manager that
-	// is inactive after its owned resources have closed.
+	// ErrManagerStopped is returned when an operation targets an inactive
+	// Manager, including before Start or after Stop has claimed shutdown.
 	ErrManagerStopped = errors.New("manager stopped")
 
 	// ErrWalletParams is returned when the creation parameters are invalid.
@@ -173,7 +173,7 @@ type Manager struct {
 	// cancel signals terminal reader shutdown before draining Wallet work.
 	cancel context.CancelFunc
 
-	// wg joins routing after releasing the lock needed by recipient snapshots.
+	// wg joins the runtime before normal Stop disposes Wallets and storage.
 	wg sync.WaitGroup
 }
 
@@ -295,7 +295,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 
 // stopWallets stops all Wallets before closing storage. The slice holds Wallets
 // from failed Start/Create calls that are not in m.wallets.
-// The caller holds the write lock and must have a non-nil backend.
+// The caller holds the lifecycle lock or has joined the loop; backend is open.
 func (m *Manager) stopWallets(wallets []*Wallet) error {
 	m.cancel()
 
@@ -406,49 +406,58 @@ func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
 	return wallets, nil
 }
 
-// Stop terminally drains every Wallet and closes the owned database.
-// It waits for startup, accepted creation, and any other Stop to finish.
-// After shutdown, Stop is a no-op.
+// Stop cancels the active lifetime, joins its owner, then drains Wallets and
+// closes storage. Call it once after successful Start. An inactive or duplicate
+// Stop returns ErrManagerStopped without joining another caller's cleanup.
 func (m *Manager) Stop() error {
-	// Release a reader blocked on a full mailbox before waiting for admission.
-	m.cancel()
-
-	m.Lock()
-
-	// LIFO releases membership before joining, including repeated Stop after
-	// storage closed. The reader can be parked on its recipient snapshot.
-	defer m.wg.Wait()
-	defer m.Unlock()
-
-	// Preserve terminal admission on repeated no-op shutdown calls.
-	if m.backend == nil {
-		return nil
+	if !m.started.Load() {
+		return ErrManagerStopped
 	}
 
-	// Construction already owns an open backend, so shutdown must reject
-	// Start even when no startup attempt has claimed the guard yet.
-	m.started.Store(true)
+	// Cancel delivery before waiting for a running Start to register its
+	// goroutine or finish failed-start cleanup. The lock orders that work
+	// before the join and storage disposal below.
+	m.cancel()
+	m.Lock()
+
+	if !m.started.CompareAndSwap(true, false) {
+		m.Unlock()
+		return ErrManagerStopped
+	}
+
+	m.Unlock()
+
+	// Failed work may need the lifecycle lock during cleanup, so release it
+	// before joining. A failed operation may already have closed storage.
+	m.wg.Wait()
+
+	if m.backend == nil {
+		return ErrManagerStopped
+	}
 
 	return m.stopWallets(nil)
 }
 
 // startChainSyncer reads the shared stream until shutdown or source loss.
-// Its caller enrolls it before launch so terminal shutdown joins the reader.
+// Its caller registers it before launch so terminal shutdown joins the reader.
 func (m *Manager) startChainSyncer() {
+	defer m.wg.Done()
+
 	err := m.chainSyncer.run(m.lifetimeCtx, m.dispatchChainEvent)
 
-	// No reader work follows Done. Automatic teardown can therefore
-	// reuse Stop without waiting for this goroutine to join itself.
-	m.wg.Done()
+	// Stop releases this lock before joining. A live source failure instead
+	// owns disposal here, and must finish it before reader completion.
+	m.Lock()
+	defer m.Unlock()
 
-	if err != nil && m.lifetimeCtx.Err() == nil {
-		log.Warnf("Chain notification reader stopped: %v", err)
-
-		err := m.Stop()
-		if err != nil {
-			log.Errorf("Unable to stop manager: %v", err)
-		}
+	// Cancellation leaves disposal with the lifecycle caller that caused it.
+	// Do not consume its cleanup errors or dispose released storage twice.
+	if m.lifetimeCtx.Err() != nil {
+		return
 	}
+
+	err = errors.Join(err, m.stopWallets(nil))
+	log.Warnf("Chain notification reader stopped: %v", err)
 }
 
 // chainRecipients fixes active membership without holding the Manager lock
