@@ -3392,18 +3392,14 @@ func TestManagerChainSourceClosed(t *testing.T) {
 	require.NoError(t, manager.Stop())
 }
 
-// TestManagerChainEventOrder proves source order and bounded asynchronous
-// admission while an uncancelled Wallet deliberately stops draining its inbox.
+// TestManagerChainEventOrder proves source order and bounded delivery
+// while an uncancelled Wallet deliberately stops draining its inbox.
 func TestManagerChainEventOrder(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A data-only recipient isolates admission from Store processing.
+	// Arrange: A data-only Wallet isolates delivery from Store processing.
 	// Three headers expose the capacity-one bound without extra worker queues.
-	client := createTestChain(t)
 	notifications := make(chan any, 3)
-
-	client.On("Notifications").Unset()
-	client.On("Notifications").Return((<-chan any)(notifications)).Once()
 
 	w := &Wallet{
 		id:             1,
@@ -3411,32 +3407,30 @@ func TestManagerChainEventOrder(t *testing.T) {
 		chainEventChan: make(chan chainEvent, 1),
 	}
 
-	// This routing-only fixture has no Store/Wallet workers to stop. Join
-	// its sole reader explicitly after canceling the Manager-owned lifetime.
-	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	// Reuse owned cleanup so the same source fixture remains valid when the
+	// loop becomes responsible for terminal storage release.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
 
-	manager := &Manager{
-		wallets:     map[string]*Wallet{"first": w},
-		chainSyncer: newChainSyncer(client, &chainParams),
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-	}
-	defer func() {
-		manager.cancel()
-		manager.wg.Wait()
-	}()
+	source := &bwmock.Chain{}
+	source.On("Notifications").
+		Return((<-chan any)(notifications)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
 
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	manager.wallets["first"] = w
+
+	// Act: Queue three headers and let the loop block its second delivery
+	// behind the full first mailbox; it cannot consume the third event.
 	for height := int32(1); height <= 3; height++ {
 		notifications <- chain.BlockConnected{
 			Block: wtxmgr.Block{Height: height},
 		}
 	}
-
-	// Act: Enroll and launch the one reader, then wait until the second
-	// delivery blocks behind the first; it cannot consume the third event.
-	manager.wg.Add(1)
-
-	go manager.startChainSyncer()
 
 	require.Eventually(
 		t, func() bool {
@@ -3445,7 +3439,7 @@ func TestManagerChainEventOrder(t *testing.T) {
 	)
 
 	// Assert: Releasing capacity admits each unchanged header in FIFO order.
-	// The first acceptance did not wait for Wallet persistence or processing.
+	// The first delivery did not wait for Wallet persistence or processing.
 	for height := int32(1); height <= 3; height++ {
 		select {
 		case event := <-w.chainEventChan:
@@ -3453,7 +3447,7 @@ func TestManagerChainEventOrder(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, height, header.Height)
 		case <-time.After(time.Second):
-			t.Fatal("reader failed to resume after mailbox drain")
+			t.Fatal("delivery failed to resume after mailbox drain")
 		}
 	}
 }
@@ -3524,7 +3518,8 @@ func TestManagerChainEventBlockedStop(t *testing.T) {
 	notifications := make(chan any, 2)
 
 	client.On("Notifications").Unset()
-	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+	client.On("Notifications").
+		Return((<-chan any)(notifications)).Once()
 	manager := testSQLiteManagerWithChain(t, client)
 
 	// Release a held dependency before fixture Stop, even if a prerequisite
