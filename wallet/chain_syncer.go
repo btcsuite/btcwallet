@@ -2,7 +2,6 @@ package wallet
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -15,13 +14,9 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// chainRouter supplies live subscriptions and prepared events while its caller
-// owns the reader lifetime and each Wallet owns transaction persistence.
+// chainRouter supplies live subscriptions and prepared events. Manager owns
+// native delivery and each Wallet owns transaction persistence.
 type chainRouter interface {
-	// run reads the borrowed stream until cancellation or source failure.
-	run(ctx context.Context,
-		dispatch func(context.Context, any) error) error
-
 	// routeChainEvent prepares matches for the current membership snapshot.
 	routeChainEvent(n any, wallets []*Wallet) map[uint32]chainEvent
 
@@ -42,8 +37,7 @@ type chainRouter interface {
 }
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
-// Manager supplies its lifetime to the blocking reader instead of giving this
-// worker independent lifecycle state.
+// Manager owns the native event read; this component starts no worker.
 type chainSyncer struct {
 	// source is borrowed from the caller; Manager never starts or stops it.
 	source chain.Interface
@@ -361,28 +355,4 @@ func (r *watchRegistry) matchRecipients(match TxEntry,
 	}
 
 	return recipients
-}
-
-// run is the sole managed consumer of the borrowed backend stream. A
-// closed stream is terminal; cancellation releases blocked mailbox delivery.
-func (s *chainSyncer) run(ctx context.Context,
-	dispatch func(context.Context, any) error) error {
-
-	notifications := s.source.Notifications()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-
-		case n, ok := <-notifications:
-			if !ok {
-				return errors.New("chain notification source closed")
-			}
-
-			err := dispatch(ctx, n)
-			if err != nil {
-				return err
-			}
-		}
-	}
 }
