@@ -1360,9 +1360,9 @@ func RunKVDBBenchmark(b *testing.B,
 			// its existing fixture owns cleanup and worker shutdown.
 			path := nodeBenchmarkKVDBPath(b, workload)
 			manager := testKVDBManagerAt(b, path)
-			manager.RLock()
+			// Startup has settled, and this nil-source fixture receives no
+			// requests that could change the published Wallet set.
 			w := manager.wallets[""]
-			manager.RUnlock()
 			require.NoError(b, w.Unlock(b.Context(), UnlockRequest{
 				Passphrase: []byte("private"),
 				Timeout:    -1,

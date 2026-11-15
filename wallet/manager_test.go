@@ -831,12 +831,9 @@ func TestManagerCreateSuccess(t *testing.T) {
 			require.NotNil(t, w)
 			require.Zero(t, w.ID())
 
-			// Verify internal state: Ensure the manager is tracking the
-			// newly created wallet in its internal map, keyed by the
-			// durable request name.
-			m.RLock()
+			// Creation has settled, and this fixture has no native input
+			// or further requests that could change the published Wallet set.
 			loadedW, ok := m.wallets[testWalletName]
-			m.RUnlock()
 			require.True(t, ok)
 			require.Same(t, w, loadedW)
 
@@ -3534,15 +3531,14 @@ func TestManagerChainEventMembership(t *testing.T) {
 		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
 	}
 
-	// Act: Publish under the existing membership lock between two events.
+	// Act: Publish between two synchronous owner-turn dispatches.
 	require.NoError(
 		t, manager.dispatchChainEvent(
 			t.Context(), chain.BlockConnected{},
 		),
 	)
-	manager.Lock()
 	manager.wallets["second"] = second
-	manager.Unlock()
+
 	<-first.chainEventChan
 	require.NoError(
 		t, manager.dispatchChainEvent(
