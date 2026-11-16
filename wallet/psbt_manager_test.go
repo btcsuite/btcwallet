@@ -4566,6 +4566,238 @@ func testAddP2WPKHSig(t *testing.T, packet *psbt.Packet, idx int,
 	)
 }
 
+// testUtxoForm is how a finalize test's input describes the output it spends.
+type testUtxoForm uint8
+
+const (
+	// testWitnessUtxo carries only the witness UTXO.
+	testWitnessUtxo testUtxoForm = iota
+
+	// testParentUtxo carries only the parent transaction, as BIP 174
+	// allows for segwit inputs.
+	testParentUtxo
+
+	// testBothUtxos carries both, as DecorateInputs leaves every
+	// non-Taproot input.
+	testBothUtxos
+)
+
+// testSetUtxoForm gives input 0 the UTXO form, with a parent transaction
+// paying its witness UTXO.
+func testSetUtxoForm(packet *psbt.Packet, form testUtxoForm) {
+	if form == testWitnessUtxo {
+		return
+	}
+
+	pInput := &packet.Inputs[0]
+	txIn := packet.UnsignedTx.TxIn[0]
+
+	parent := wire.NewMsgTx(2)
+	parent.AddTxIn(&wire.TxIn{})
+
+	for range txIn.PreviousOutPoint.Index + 1 {
+		parent.AddTxOut(wire.NewTxOut(
+			pInput.WitnessUtxo.Value, pInput.WitnessUtxo.PkScript,
+		))
+	}
+
+	txIn.PreviousOutPoint.Hash = parent.TxHash()
+	pInput.NonWitnessUtxo = parent
+
+	if form == testParentUtxo {
+		pInput.WitnessUtxo = nil
+	}
+}
+
+// TestSetFinalizerUtxos tests that FinalizePsbt gives each unfinalized input
+// carrying its parent the witness UTXO the psbt finalizer needs to build the
+// right spend: the output for a segwit spend, including P2SH whose redeem
+// script is a witness program, and none otherwise. Finalized
+// inputs and inputs without a parent are left as they are.
+func TestSetFinalizerUtxos(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	p2wpkh := testP2WPKHScript(t, walletPub)
+	p2sh := testP2SHScript(t, p2wpkh)
+	p2pkh := testScript(
+		t, txscript.OP_DUP, txscript.OP_HASH160,
+		address.Hash160(walletPub.SerializeCompressed()),
+		txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG,
+	)
+	legacyP2sh := testP2SHScript(t, p2pkh)
+
+	tests := []struct {
+		name         string
+		pkScript     []byte
+		redeemScript []byte
+		utxos        testUtxoForm
+		finalized    bool
+
+		// cleared is whether the witness UTXO is removed; otherwise
+		// it is the spent output.
+		cleared bool
+	}{{
+		name:     "segwit parent only",
+		pkScript: p2wpkh,
+		utxos:    testParentUtxo,
+	}, {
+		name:         "nested segwit parent only",
+		pkScript:     p2sh,
+		redeemScript: p2wpkh,
+		utxos:        testParentUtxo,
+	}, {
+		name:         "legacy p2sh decorated",
+		pkScript:     legacyP2sh,
+		redeemScript: p2pkh,
+		utxos:        testBothUtxos,
+		cleared:      true,
+	}, {
+		name:     "legacy decorated",
+		pkScript: p2pkh,
+		utxos:    testBothUtxos,
+		cleared:  true,
+	}, {
+		name:      "finalized legacy decorated",
+		pkScript:  p2pkh,
+		utxos:     testBothUtxos,
+		finalized: true,
+	}, {
+		name:     "legacy without a parent",
+		pkScript: p2pkh,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input in the UTXO form.
+			packet, _, _ := testAuthPacket(
+				t, &wire.TxOut{Value: 1000, PkScript: tc.pkScript},
+				txscript.SigHashAll,
+			)
+			packet.Inputs[0].RedeemScript = tc.redeemScript
+			testSetUtxoForm(packet, tc.utxos)
+
+			if tc.finalized {
+				packet.Inputs[0].FinalScriptSig = []byte{
+					txscript.OP_TRUE,
+				}
+			}
+
+			witnessUtxo := packet.Inputs[0].WitnessUtxo
+			if witnessUtxo == nil {
+				witnessUtxo = &wire.TxOut{
+					Value: 1000, PkScript: tc.pkScript,
+				}
+			}
+
+			// Act: set the UTXOs the finalizer reads.
+			setFinalizerUtxos(packet)
+
+			// Assert: the witness UTXO is the spent output unless
+			// cleared.
+			if tc.cleared {
+				require.Nil(t, packet.Inputs[0].WitnessUtxo)
+
+				return
+			}
+
+			require.Equal(t, witnessUtxo, packet.Inputs[0].WitnessUtxo)
+		})
+	}
+}
+
+// TestFinalizePsbtSetsFinalizerUtxos tests that FinalizePsbt finalizes signed
+// inputs in the UTXO forms BIP 174 and DecorateInputs produce: a segwit input
+// carrying only its parent gets a witness, and a legacy input carrying both
+// its parent and a witness UTXO gets a script sig.
+func TestFinalizePsbtSetsFinalizerUtxos(t *testing.T) {
+	t.Parallel()
+
+	signer := testAuthKeys()[0]
+	pub := signer.PubKey()
+	p2pkh := testScript(
+		t, txscript.OP_DUP, txscript.OP_HASH160,
+		address.Hash160(pub.SerializeCompressed()),
+		txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG,
+	)
+
+	tests := []struct {
+		name     string
+		pkScript []byte
+		utxos    testUtxoForm
+		legacy   bool
+	}{{
+		name:     "p2wpkh parent only",
+		pkScript: testP2WPKHScript(t, pub),
+		utxos:    testParentUtxo,
+	}, {
+		name:     "p2pkh with both utxos",
+		pkScript: p2pkh,
+		utxos:    testBothUtxos,
+		legacy:   true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input signed by the key its output pays.
+			packet, _, _ := testAuthPacket(
+				t, &wire.TxOut{Value: 1000, PkScript: tc.pkScript},
+				txscript.SigHashAll,
+			)
+			testSetUtxoForm(packet, tc.utxos)
+
+			prevOuts, err := PsbtPrevOutputFetcher(packet)
+			require.NoError(t, err)
+
+			tx := packet.UnsignedTx
+
+			var sig []byte
+			if tc.legacy {
+				sig, err = txscript.RawTxInSignature(
+					tx, 0, tc.pkScript, txscript.SigHashAll,
+					signer,
+				)
+			} else {
+				sig, err = txscript.RawTxInWitnessSignature(
+					tx, txscript.NewTxSigHashes(
+						tx, prevOuts,
+					), 0, 1000, tc.pkScript,
+					txscript.SigHashAll, signer,
+				)
+			}
+
+			require.NoError(t, err)
+
+			packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+				PubKey:    pub.SerializeCompressed(),
+				Signature: sig,
+			}}
+
+			// The wallet does not own the key.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			mocks.store.On(
+				"GetAddress", mock.Anything, mock.Anything,
+			).Return(
+				(*db.AddressInfo)(nil), errAddrNotFound,
+			).Maybe()
+
+			// Act: finalize the packet.
+			err = w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the input is finalized in its spend's form.
+			require.NoError(t, err)
+			require.Equal(
+				t, tc.legacy,
+				len(packet.Inputs[0].FinalScriptWitness) == 0,
+			)
+		})
+	}
+}
+
 // TestFinalizePsbtLeavesCallerPacketOnError tests that FinalizePsbt refuses a
 // packet with an invalid record, a final witness that does not decode within
 // its bytes, or a final script that does not execute, and leaves the caller's

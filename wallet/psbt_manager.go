@@ -2357,6 +2357,8 @@ func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 //  3. Execution: Running every input through the script engine with the
 //     standard flags; an input that fails returns ErrInvalidFinalScript.
 //
+// An input carrying its parent transaction is finalized as the spent output
+// requires: with a witness for a segwit spend and a script sig otherwise.
 // The packet is validated first and finalized on a copy, so the caller's
 // packet is replaced only on success.
 func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
@@ -2429,6 +2431,8 @@ func (w *Wallet) finalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 			return err
 		}
 	}
+
+	setFinalizerUtxos(clone)
 
 	// Finally, attempt to finalize the entire PSBT. This will check if all
 	// inputs have final scripts (either added by us above or constructed
@@ -2532,6 +2536,43 @@ func addScriptToPInput(pInput *psbt.PInput,
 	}
 
 	return nil
+}
+
+// setFinalizerUtxos sets the witness UTXO of each unfinalized input that
+// carries its parent transaction, which validatePacket has matched to the
+// outpoint, to what the psbt finalizer expects: the spent output for a segwit
+// spend and none for a legacy one. The finalizer builds a witness exactly when
+// an input has a witness UTXO, and DecorateInputs sets one on legacy inputs.
+func setFinalizerUtxos(packet *psbt.Packet) {
+	for i := range packet.Inputs {
+		pInput := &packet.Inputs[i]
+		if pInput.NonWitnessUtxo == nil || pInput.FinalScriptSig != nil ||
+			pInput.FinalScriptWitness != nil {
+
+			continue
+		}
+
+		prevIdx := packet.UnsignedTx.TxIn[i].PreviousOutPoint.Index
+		utxo := pInput.NonWitnessUtxo.TxOut[prevIdx]
+
+		pInput.WitnessUtxo = nil
+		if spendsWitness(utxo.PkScript, pInput.RedeemScript) {
+			pInput.WitnessUtxo = wire.NewTxOut(
+				utxo.Value, utxo.PkScript,
+			)
+		}
+	}
+}
+
+// spendsWitness reports whether an output is spent with a witness: it is a
+// witness program, or P2SH with a witness program redeem script.
+func spendsWitness(pkScript, redeemScript []byte) bool {
+	if txscript.IsWitnessProgram(pkScript) {
+		return true
+	}
+
+	return txscript.IsPayToScriptHash(pkScript) &&
+		txscript.IsWitnessProgram(redeemScript)
 }
 
 // checkFinalWitness checks that a serialized final witness decodes, reading
