@@ -191,7 +191,7 @@ BEFORE UPDATE OF block_height ON transactions
 FOR EACH ROW
 EXECUTE FUNCTION set_coinbase_orphaned_on_disconnect();
 
--- Retain input facts without changing the existing credit-spender policy.
+-- Retain immutable input facts independently of wallet credit discovery.
 -- Unknown parents have no credit row, so only the spending transaction is a FK.
 CREATE TABLE tx_inputs (
     wallet_id BIGINT NOT NULL REFERENCES wallets (id) ON DELETE RESTRICT,
@@ -210,3 +210,56 @@ CREATE TABLE tx_inputs (
 -- unique and remains useful before the referenced credit is discovered.
 CREATE INDEX idx_tx_inputs_prevout
 ON tx_inputs (wallet_id, prev_tx_hash, prev_output_index);
+
+-- Derive eligibility from retained facts; no pointer or flag can become stale.
+-- Correlate ancestry to each requested row so point reads use indexed parents.
+CREATE VIEW eligible_transactions AS
+SELECT
+    t.wallet_id,
+    t.id
+FROM transactions AS t
+WHERE
+    t.tx_status IN (0, 1)
+    AND (
+        t.block_height IS NOT NULL
+        OR NOT EXISTS (
+            WITH RECURSIVE ancestors (id, tx_status, block_height) AS (
+                SELECT
+                    t.id,
+                    t.tx_status,
+                    t.block_height
+                UNION
+                SELECT
+                    parent.id,
+                    parent.tx_status,
+                    parent.block_height
+                FROM ancestors AS ancestor
+                INNER JOIN tx_inputs AS claim
+                    ON claim.wallet_id = t.wallet_id AND ancestor.id = claim.tx_id
+                INNER JOIN transactions AS parent
+                    ON parent.wallet_id = t.wallet_id AND claim.prev_tx_hash = parent.tx_hash
+                WHERE ancestor.block_height IS NULL AND ancestor.tx_status IN (0, 1)
+            )
+
+            SELECT 1 FROM ancestors AS ancestor
+            WHERE
+                ancestor.tx_status NOT IN (0, 1)
+                OR (
+                    ancestor.block_height IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM tx_inputs AS claim
+                        INNER JOIN tx_inputs AS other
+                            ON
+                                claim.wallet_id = other.wallet_id
+                                AND claim.prev_tx_hash = other.prev_tx_hash
+                                AND claim.prev_output_index = other.prev_output_index
+                                AND claim.tx_id != other.tx_id
+                        INNER JOIN transactions AS confirmed
+                            ON other.wallet_id = confirmed.wallet_id AND other.tx_id = confirmed.id
+                        WHERE
+                            claim.wallet_id = t.wallet_id AND claim.tx_id = ancestor.id
+                            AND confirmed.block_height IS NOT NULL
+                    )
+                )
+        )
+    );
