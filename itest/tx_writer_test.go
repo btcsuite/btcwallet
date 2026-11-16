@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
@@ -371,6 +372,8 @@ func testLabelTxWalletState(h *bwtest.HarnessTest) {
 // the coin the branch spent, leaving the wallet as if it had never recorded
 // the branch at all.
 func testDeleteUnconfirmedTx(h *bwtest.HarnessTest) {
+	// Arrange: Build the branch through the real backend, then isolate the
+	// local deletion contract from later mempool observations of those txns.
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txWriterFundingType,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
@@ -418,10 +421,18 @@ func testDeleteUnconfirmedTx(h *bwtest.HarnessTest) {
 	_, err = w.GetUtxo(h.Context(), branchOutput)
 	require.NoError(h, err, "branch output did not become a wallet coin")
 
+	// Join the live processor before reopening the same real database. The
+	// unsynced source cannot rediscover the branch during the direct reads.
+	liveSource := h.ChainClient
+	h.ChainClient = bwmock.NewGenesisChain(h, false)
+	w = h.ReloadWallet(w)
+
+	// Act: Remove the recorded branch through the public wallet method.
 	err = w.DeleteUnconfirmedTx(h.Context(), root.TxHash())
 	require.NoError(h, err, "failed to remove the unconfirmed transaction")
 
-	// Neither the root nor the transaction that depended on it is kept.
+	// Assert: Both records and their outputs disappear, the spent funding
+	// returns, and the independent coin remains available.
 	for _, tx := range []*wire.MsgTx{root, child} {
 		_, err = w.GetTx(h.Context(), tx.TxHash())
 		require.ErrorIs(
@@ -446,8 +457,10 @@ func testDeleteUnconfirmedTx(h *bwtest.HarnessTest) {
 	_, err = w.GetUtxo(h.Context(), untouched)
 	require.NoError(h, err, "removal consumed an unrelated coin")
 
-	// The network still holds both txns. Mine them to leave the miner as
-	// this case found it.
+	// Restore the live source through the same reload owner before mining
+	// cleanup. Later chain observations may legitimately rediscover the txns.
+	h.ChainClient = liveSource
+	h.ReloadWallet(w)
 	h.MineBlocksAndAssertNumTxns(1, 2)
 }
 
