@@ -285,7 +285,10 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		wallet := newManagedWallet(cfg, walletData, m.chainSyncer, m.cancel)
 		wallets = append(wallets, wallet)
 
-		err = wallet.start(ctx)
+		// SQL publication requires watches; KVDB keeps background setup.
+		prepareWatches := m.config.Backend != DBBackendKVDB
+
+		err = wallet.start(ctx, prepareWatches)
 		if err != nil {
 			return wallets, err
 		}
@@ -703,7 +706,10 @@ func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
 		return err
 	}
 
-	err = wallet.start(ctx)
+	// SQL publication requires watches; KVDB keeps background setup.
+	prepareWatches := m.config.Backend != DBBackendKVDB
+
+	err = wallet.start(ctx, prepareWatches)
 	if err != nil {
 		// Failed startup needs the same serialized disposal and reply.
 		m.Lock()

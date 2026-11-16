@@ -167,8 +167,9 @@ type Controller interface {
 }
 
 // start starts the background processes owned by a Wallet. Manager is its sole
-// caller and invokes it at most once for each Wallet instance.
-func (w *Wallet) start(startCtx context.Context) error {
+// caller and invokes it at most once for each Wallet instance. Requested watch
+// preparation completes during setup before either worker can run.
+func (w *Wallet) start(startCtx context.Context, prepareWatches bool) error {
 	// 1. Attempt to transition from Stopped to Starting.
 	err := w.state.toStarting()
 	if err != nil {
@@ -186,7 +187,7 @@ func (w *Wallet) start(startCtx context.Context) error {
 	// We use startCtx here because these operations must complete
 	// synchronously before the wallet is considered "started". If
 	// startCtx is canceled, the startup sequence aborts.
-	err = w.performRuntimeSetup(startCtx)
+	err = w.performRuntimeSetup(startCtx, prepareWatches)
 	if err != nil {
 		// Cleanup resources.
 		w.cancel()
@@ -238,8 +239,10 @@ func (w *Wallet) runSyncLoop() {
 // performRuntimeSetup executes the synchronous initialization tasks required
 // before the wallet's main loops can start. This includes sanity checking the
 // birthday block, fail-fast verifying that the wallet's accounts can be read
-// from the store, and cleaning up expired locks.
-func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
+// from the store, cleaning up expired locks, and requested native readiness.
+func (w *Wallet) performRuntimeSetup(startCtx context.Context,
+	prepareWatches bool) error {
+
 	// Perform the birthday sanity check synchronously to ensure we are
 	// connected and our status is valid before starting the main loop.
 	//
@@ -267,6 +270,12 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	err = w.store.DeleteExpiredLeases(startCtx, w.id)
 	if err != nil {
 		return fmt.Errorf("delete expired leases: %w", err)
+	}
+
+	// Publication can require native watches without waiting for historical
+	// catch-up. Keep preparation inside setup's existing failure cleanup.
+	if prepareWatches {
+		return w.sync.prepareLiveWatches(startCtx)
 	}
 
 	return nil

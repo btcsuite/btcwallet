@@ -180,6 +180,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 			closeFn: func() error { return nil },
 		},
 		config: ManagerConfig{
+			Backend:                 DBBackendSQLite,
 			ChainSource:             createTestChain(tb),
 			ChainParams:             chainParams,
 			WalletSyncRetryInterval: initialBackoff,
@@ -464,7 +465,7 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 	expectStopTeardown(deps)
 
 	// Start the wallet.
-	require.NoError(t, w.start(t.Context()))
+	require.NoError(t, w.start(t.Context(), false))
 
 	t.Cleanup(func() {
 		require.NoError(t, w.stop())

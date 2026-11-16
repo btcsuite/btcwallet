@@ -331,6 +331,7 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	}).
 		Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(7)).Return(nil).Once()
+	expectEmptyLiveWatches(store, uint32(7))
 
 	// Act: Create through Manager, including its mandatory runtime startup,
 	// with a birthday row that cannot supply the committed identity.

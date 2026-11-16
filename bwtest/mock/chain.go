@@ -37,6 +37,7 @@ var _ chain.Interface = (*Chain)(nil)
 // syncing at genesis without scanning. Startup calls are optional because
 // scheduling and empty/reopened Wallets differ. Cleanup verifies expectations
 // once, after callers' later Wallet and container cleanup has completed.
+// SQL subscribes before catch-up even when the backend is not current.
 func NewGenesisChain(tb testing.TB, current bool) *Chain {
 	tb.Helper()
 
@@ -51,10 +52,8 @@ func NewGenesisChain(tb testing.TB, current bool) *Chain {
 	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
 	chain.On("IsCurrent").Return(current).Maybe()
 
-	// Only a current backend subscribes after completing startup sync.
-	if current {
-		chain.On("NotifyBlocks").Return(nil).Maybe()
-	}
+	// SQL subscribes before catch-up; a non-current fixture must accept it.
+	chain.On("NotifyBlocks").Return(nil).Maybe()
 
 	chain.On("GetBestBlock").Return(
 		params.GenesisHash, int32(0), nil,

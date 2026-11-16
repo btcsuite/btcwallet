@@ -72,6 +72,7 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 			Return([]db.AccountInfo{}, nil).Once()
 		store.On("DeleteExpiredLeases", mock.Anything, walletID).
 			Return(nil).Once()
+		expectEmptyLiveWatches(store, walletID)
 	}
 
 	manager := testSQLManager(t, store)
@@ -181,7 +182,7 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 
 		source := &bwmock.Chain{}
 		source.On("Notifications").Return((<-chan any)(nil)).Once()
-		m := newManagerLifecycleTest(t, backend, source)
+		m := newManagerLifecycleTest(t, backend, source, DBBackendSQLite)
 		m.started.Store(true)
 		m.wallets[first.cfg.Name], m.wallets[second.cfg.Name] = first, second
 		firstEvents := make(chan chainEvent, 1)
@@ -280,7 +281,7 @@ func TestManagerChainRollbackStopsOnError(t *testing.T) {
 			source := &bwmock.Chain{}
 			source.On("Notifications").
 				Return((<-chan any)(notifications)).Once()
-			m := newManagerLifecycleTest(t, backend, source)
+			m := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 			backend.On("listWallets", mock.Anything).
 				Return([]*walletData{}, nil).Once()
 
@@ -403,7 +404,7 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 
 		source := &bwmock.Chain{}
 		source.On("Notifications").Return((<-chan any)(nil)).Once()
-		m := newManagerLifecycleTest(t, backend, source)
+		m := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 		m.started.Store(true)
 		m.wallets[w.cfg.Name] = w
 
@@ -453,7 +454,7 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 	source := &bwmock.Chain{}
 	source.On("Notifications").
 		Return((<-chan any)(notifications)).Once()
-	m := newManagerLifecycleTest(t, backend, source)
+	m := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 	backend.On("listWallets", mock.Anything).
 		Return([]*walletData{}, nil).Once()
 
@@ -580,7 +581,7 @@ func TestManagerChainRollbackStop(t *testing.T) {
 			source := &bwmock.Chain{}
 			source.On("Notifications").
 				Return((<-chan any)(notifications)).Once()
-			m := newManagerLifecycleTest(t, backend, source)
+			m := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 			backend.On("listWallets", mock.Anything).
 				Return([]*walletData{}, nil).Once()
 
@@ -705,7 +706,7 @@ func TestManagerChainRollbackStopDuringPreparation(t *testing.T) {
 				source := &bwmock.Chain{}
 				source.On("Notifications").
 					Return((<-chan any)(notifications)).Once()
-				m := newManagerLifecycleTest(t, backend, source)
+				m := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 				backend.On("listWallets", mock.Anything).
 					Return([]*walletData{}, nil).Once()
 
@@ -1333,7 +1334,8 @@ func (b *managerBackendMock) close() error {
 // newManagerLifecycleTest supplies strict backend and chain dependencies;
 // fixture cleanup joins runtime work before verifying their expected calls.
 func newManagerLifecycleTest(t *testing.T,
-	backend *managerBackendMock, source *bwmock.Chain) *Manager {
+	backend *managerBackendMock, source *bwmock.Chain,
+	kind DBBackend) *Manager {
 
 	t.Helper()
 
@@ -1347,6 +1349,7 @@ func newManagerLifecycleTest(t *testing.T,
 		chainEvents: source.Notifications(),
 		backend:     backend,
 		config: ManagerConfig{
+			Backend:     kind,
 			ChainSource: source,
 			ChainParams: chainParams,
 		},
@@ -1387,6 +1390,7 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 		}).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+		expectEmptyLiveWatches(deps.store, id)
 		deps.vault.On("Lock").Return().Once()
 		data = append(data, &walletData{
 			id:    id,
@@ -1401,8 +1405,11 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
+	source.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	source.On("NotifyBlocks").Return(nil).Twice()
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendSQLite)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 	chain.On("IsCurrent").Return(false).Maybe()
@@ -1457,12 +1464,12 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The second Wallet fails its birthday read. Hold the first
-	// Wallet's real vault cleanup so the primary error cannot escape before
-	// the original call finishes cleaning up its partially started set.
+	// Arrange: The second Wallet fails watch readiness before activation. Hold
+	// the first vault so neither the readiness nor cleanup error can escape
+	// before both candidates and shared storage have finished shutdown.
 	_, firstDeps := createTestWalletWithMocks(t)
 	_, secondDeps := createTestWalletWithMocks(t)
-	startErr := errors.New("birthday unavailable")
+	startErr := errors.New("watch unavailable")
 
 	firstDeps.store.On("GetWallet", mock.Anything, "first").Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
@@ -1472,8 +1479,16 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	firstDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
-	secondDeps.store.On("GetWallet", mock.Anything, "second").
-		Return(nil, startErr).Once()
+	expectEmptyLiveWatches(firstDeps.store, uint32(1))
+	secondDeps.store.On("GetWallet", mock.Anything, "second").Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	secondDeps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 2,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	secondDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
+		Return(nil).Once()
+	expectEmptyLiveWatches(secondDeps.store, uint32(2))
 
 	cleanupEntered := make(chan struct{})
 	releaseCleanup := make(chan struct{})
@@ -1497,13 +1512,17 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 			vault: secondDeps.vault,
 		},
 	}, nil).Once()
-	backend.On("close").Return(nil).Once()
+	backend.On("close").Return(errDBFail).Once()
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendSQLite)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	chain.On("NotifyBlocks").Return(nil).Once()
+	chain.On("NotifyBlocks").Return(startErr).Once()
 	chain.On("IsCurrent").Return(false).Maybe()
 
 	// Preserve both return values to detect any partial Wallet publication
@@ -1544,6 +1563,7 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	// cannot reuse the failed Manager.
 	require.Nil(t, first.wallets)
 	require.ErrorIs(t, first.err, startErr)
+	require.ErrorIs(t, first.err, errDBFail)
 	require.Nil(t, terminalWallets)
 	require.ErrorIs(t, terminalErr, ErrManagerStopped)
 
@@ -1579,7 +1599,7 @@ func TestManagerStartCancellationCleansUp(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -1628,7 +1648,7 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 
 	releaseWork := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseWork)
@@ -1673,7 +1693,7 @@ func TestManagerStopRejectsStopped(t *testing.T) {
 
 		source := &bwmock.Chain{}
 		source.On("Notifications").Return((<-chan any)(nil)).Once()
-		manager := newManagerLifecycleTest(t, backend, source)
+		manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 
 		// Act: Reject Stop before startup, then exercise the intended lifecycle
 		// to verify that rejection did not dispose the constructor resources.
@@ -1706,7 +1726,9 @@ func TestManagerStopRejectsStopped(t *testing.T) {
 
 			source := &bwmock.Chain{}
 			source.On("Notifications").Return((<-chan any)(nil)).Once()
-			manager := newManagerLifecycleTest(t, backend, source)
+			manager := newManagerLifecycleTest(
+				t, backend, source, DBBackendKVDB,
+			)
 
 			releaseWork := sync.OnceFunc(func() { close(release) })
 			t.Cleanup(releaseWork)
@@ -1764,7 +1786,7 @@ func TestManagerStopWaitsForStart(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 
 	started := make(chan error, 1)
 	stopped := make(chan error, 1)
@@ -1822,7 +1844,7 @@ func TestManagerCreateBeforeStart(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 
 	// Act: Submit creation before any Start has admitted runtime work.
 	w, err := manager.Create(CreateWalletParams{})
@@ -1845,7 +1867,7 @@ func TestManagerCreateAfterStop(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
 
 	_, err := manager.Start(t.Context())
@@ -2052,7 +2074,7 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
 
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 	chain.On("IsCurrent").Return(false).Maybe()
@@ -2137,7 +2159,7 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 	// Release test gates before fixture Stop, even after failed assertions.
 	releaseBirthday := sync.OnceFunc(func() { close(birthdayRelease) })
 	releaseClose := sync.OnceFunc(func() { close(release) })
@@ -2521,7 +2543,9 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 
 			source := &bwmock.Chain{}
 			source.On("Notifications").Return((<-chan any)(nil)).Once()
-			manager := newManagerLifecycleTest(t, backend, source)
+			manager := newManagerLifecycleTest(
+				t, backend, source, DBBackendKVDB,
+			)
 			manager.started.Store(true)
 			manager.wg.Go(manager.mainLoop)
 			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
@@ -2594,7 +2618,9 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 
 			source := &bwmock.Chain{}
 			source.On("Notifications").Return((<-chan any)(nil)).Once()
-			manager := newManagerLifecycleTest(t, backend, source)
+			manager := newManagerLifecycleTest(
+				t, backend, source, DBBackendKVDB,
+			)
 			manager.started.Store(true)
 			manager.wg.Go(manager.mainLoop)
 
@@ -2864,6 +2890,7 @@ func TestManagerCreateRejectsActiveDuplicate(t *testing.T) {
 		WalletID: 1,
 	}).Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).Return(nil).Once()
+	expectEmptyLiveWatches(store, uint32(1))
 	m := testSQLManager(t, store)
 	first, err := m.Create(params)
 	require.NoError(t, err)
@@ -3388,6 +3415,7 @@ func TestManagerChainSourceClosed(t *testing.T) {
 		).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+		expectEmptyLiveWatches(deps.store, id)
 		deps.vault.On("Lock").Return().Once()
 		data = append(
 			data, &walletData{
@@ -3410,9 +3438,12 @@ func TestManagerChainSourceClosed(t *testing.T) {
 
 	notifications := make(chan any)
 	source := &bwmock.Chain{}
+	source.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	source.On("NotifyBlocks").Return(nil).Twice()
 	source.On("Notifications").
 		Return((<-chan any)(notifications)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendSQLite)
 	client, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 
@@ -3465,7 +3496,7 @@ func TestManagerChainEventOrder(t *testing.T) {
 	source := &bwmock.Chain{}
 	source.On("Notifications").
 		Return((<-chan any)(notifications)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 	backend.On("listWallets", mock.Anything).
 		Return([]*walletData{}, nil).Once()
 
@@ -3624,7 +3655,7 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 
 	source := &bwmock.Chain{}
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
+	manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 	manager.started.Store(true)
 	manager.cancel(ErrManagerStopped)
 
@@ -3784,7 +3815,7 @@ func TestManagerWorkerFailureStops(t *testing.T) {
 
 		source := &bwmock.Chain{}
 		source.On("Notifications").Return((<-chan any)(notifications)).Once()
-		manager := newManagerLifecycleTest(t, backend, source)
+		manager := newManagerLifecycleTest(t, backend, source, DBBackendKVDB)
 		manager.wallets[w.cfg.Name] = w
 		manager.started.Store(true)
 		w.reportFailure = manager.cancel
