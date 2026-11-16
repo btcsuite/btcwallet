@@ -108,6 +108,9 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked
 
+	// Conflict metadata describes branch compatibility, not custody or leasing.
+	utxo.HasConflictingTx = row.HasConflictingTx
+
 	utxo.Spendable = shape.SpendabilityOverride()
 
 	// Raw imports have no account provenance; the query's key-material

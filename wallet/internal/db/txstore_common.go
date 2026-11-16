@@ -1724,6 +1724,76 @@ func BuildUnminedTxRecords[T any](rows []T,
 	return records, nil
 }
 
+// ValidateInputBranchCompatibility checks whether one selected set of outputs
+// requires distinct transactions that spend the same previous output. It
+// returns ErrTxInputConflict if the selected dependencies cannot coexist.
+// Competing unconfirmed alternatives may remain in wallet history; this check
+// rejects only a selection that requires both alternatives together.
+//
+// The caller supplies decoded Pending or Published unconfirmed candidates.
+// Confirmed and unknown parents are absent and end that part of the walk.
+// This checks wallet-known input relationships, not mempool acceptance.
+//
+// The check:
+//   - Starts at the creator of each selected output.
+//   - Visits each known parent once and records the transaction that spends
+//     each previous output.
+//   - Allows shared ancestors, but rejects different required transactions
+//     spending the same previous output.
+//
+// For example, A and B spend F:0; C and D spend different outputs of A:
+//   - Selecting C and D is valid because both depend on the same ancestor A.
+//   - Selecting C and B, or A and B, needs both competitors and fails.
+func ValidateInputBranchCompatibility(inputs []wire.OutPoint,
+	candidates []UnminedTxRecord) error {
+
+	parents := make(map[chainhash.Hash]*wire.MsgTx, len(candidates))
+	for _, candidate := range candidates {
+		parents[candidate.Hash] = candidate.Tx
+	}
+
+	// Start at the selected creators so an unrelated competing transaction
+	// elsewhere in wallet history cannot reject an explicit choice.
+	pending := make([]chainhash.Hash, 0, len(inputs))
+	for _, input := range inputs {
+		pending = append(pending, input.Hash)
+	}
+
+	visited := make(map[chainhash.Hash]struct{})
+
+	spenders := make(map[wire.OutPoint]chainhash.Hash)
+	for len(pending) != 0 {
+		hash := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+
+		if _, ok := visited[hash]; ok {
+			continue
+		}
+
+		visited[hash] = struct{}{}
+
+		tx, ok := parents[hash]
+		if !ok {
+			continue
+		}
+
+		// Shared ancestry is valid, but two distinct ancestors consuming one
+		// output cannot coexist in the transaction being constructed.
+		for _, input := range tx.TxIn {
+			prevout := input.PreviousOutPoint
+			if other, ok := spenders[prevout]; ok && other != hash {
+				return fmt.Errorf("incompatible input ancestry: %w",
+					ErrTxInputConflict)
+			}
+
+			spenders[prevout] = hash
+			pending = append(pending, prevout.Hash)
+		}
+	}
+
+	return nil
+}
+
 // CollectDirectChildTxIDs returns the IDs of unmined transactions that directly
 // spend any output created by the provided parent hash.
 func CollectDirectChildTxIDs(parentHash chainhash.Hash,

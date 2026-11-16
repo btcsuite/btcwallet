@@ -418,12 +418,13 @@ type AccountInfo struct {
 	// child rows, and therefore report zero here.
 	ImportedKeyCount uint32
 
-	// ConfirmedBalance is the total balance of the account from confirmed
-	// transactions.
+	// ConfirmedBalance sums the account's confirmed unspent outputs,
+	// excluding those affected by known unconfirmed double spends.
 	ConfirmedBalance btcutil.Amount
 
-	// UnconfirmedBalance is the total balance of the account from
-	// unconfirmed transactions.
+	// UnconfirmedBalance sums unconfirmed unspent outputs, including
+	// local Pending credits, and excludes outputs affected by known
+	// unconfirmed double spends.
 	UnconfirmedBalance btcutil.Amount
 
 	// IsWatchOnly reports whether the account has no local signing path.
@@ -1478,6 +1479,14 @@ type UtxoInfo struct {
 	// pre-computed flag lets the wallet skip a per-row lease lookup.
 	IsLocked bool
 
+	// HasConflictingTx reports a known unconfirmed double spend affecting
+	// this output's transaction or one of its unconfirmed ancestors.
+	// Balances and automatic input selection exclude flagged outputs;
+	// explicit inputs may choose one compatible branch. Only transactions
+	// known to the wallet are considered, so this is not a mempool check.
+	// Excluding all competing branches can make balances understate funds.
+	HasConflictingTx bool
+
 	// KeyScope is the BIP-43 key scope (purpose + coin type) of the
 	// account that owns this UTXO, sourced from key_scopes. Callers use it
 	// instead of deriving a scope from AddrType, which is lossy (a P2WPKH
@@ -1723,7 +1732,9 @@ type LeasedOutput struct {
 // BalanceResult represents one wallet-scoped balance view after applying the
 // requested filters.
 type BalanceResult struct {
-	// Total is the sum of every matching UTXO, including leased outputs.
+	// Total sums matching unspent outputs, including leased outputs,
+	// excluding those marked HasConflictingTx. Local Pending credits can
+	// contribute even when omitted from discovery.
 	Total btcutil.Amount
 
 	// Locked is the subset of Total currently covered by active output leases.

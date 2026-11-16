@@ -577,21 +577,20 @@ type TxStore interface {
 type UTXOStore interface {
 	// GetUtxo retrieves a single unspent transaction output (UTXO) by its
 	// outpoint. It returns a UtxoInfo struct containing the UTXO's details
-	// or an error if the UTXO is not found or has been spent.
+	// or an error if the UTXO is not found or has an eligible spending claim.
+	// Outputs on competing branches remain available with HasConflictingTx
+	// metadata, so explicit selection can choose one compatible branch.
 	//
 	// GetUtxo treats outputs created by unmined `pending` and `published`
 	// transactions as present in the wallet's UTXO set.
 	GetUtxo(ctx context.Context, query GetUtxoQuery) (*UtxoInfo, error)
 
-	// ListUTXOs returns a slice of all unspent transaction outputs (UTXOs)
-	// that match the provided query parameters. This can be used to list
-	// all UTXOs or filter them by account or confirmation status.
+	// ListUTXOs lists matching unspent outputs visible for discovery.
+	// Local Pending outputs may be omitted; GetUtxo supports explicit
+	// chaining before publication. Listed outputs can carry HasConflictingTx
+	// and are then excluded from balances and automatic input selection.
 	//
-	// ListUTXOs includes outputs from unmined `pending` and `published`
-	// parent transactions.
-	// Spendability policy such as coinbase maturity, lease state, or whether
-	// a caller wants to exclude TxStatusPending parents belongs in higher-level
-	// selection logic.
+	// Coinbase maturity and leases are applied during input selection.
 	ListUTXOs(ctx context.Context, query ListUtxosQuery) ([]UtxoInfo, error)
 
 	// LeaseOutput locks a specific UTXO for a given duration, preventing
@@ -637,8 +636,11 @@ type UTXOStore interface {
 	// Balance returns a wallet-scoped balance view for the current unspent UTXO
 	// set after applying any optional caller-supplied filters.
 	//
-	// The zero-value BalanceParams request the wallet's current factual
-	// balance.
+	// Outputs marked HasConflictingTx are excluded, so this balance can
+	// understate available funds.
+	//
+	// The zero-value BalanceParams apply no optional filters. Local Pending
+	// credits can contribute even when omitted from ListUTXOs.
 	// Callers may narrow that view by account, confirmation range, lease
 	// or coinbase maturity when they need a workflow-specific balance policy
 	// from the public store interface. The returned BalanceResult always uses
