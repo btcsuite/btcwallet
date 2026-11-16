@@ -9,6 +9,17 @@ INSERT INTO tx_inputs (
 )
 ON CONFLICT (wallet_id, tx_id, input_index) DO NOTHING;
 
+-- name: GetWalletCreditByOutpoint :one
+-- Credit replay checks immutable ownership even after a credit has been spent.
+-- Availability belongs to the input relation, not this ownership lookup.
+SELECT a.script_pub_key
+FROM transactions AS t
+INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id AND t.wallet_id = a.wallet_id
+WHERE
+    t.wallet_id = sqlc.arg('wallet_id') AND t.tx_hash = sqlc.arg('tx_hash')
+    AND u.output_index = sqlc.arg('output_index');
+
 -- name: ListConflictingTransactions :many
 -- Lists unconfirmed transactions that share an input with this transaction.
 -- Parent credits need not be known: the lookup matches retained prevouts.

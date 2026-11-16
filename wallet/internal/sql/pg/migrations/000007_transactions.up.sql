@@ -263,3 +263,37 @@ WHERE
                 )
         )
     );
+
+-- Unconfirmed transactions whose inputs, or whose unconfirmed ancestors'
+-- inputs, compete with another eligible unconfirmed transaction. Keep their
+-- outputs discoverable while excluding conflicting branches from safe totals.
+CREATE VIEW conflict_affected_transactions AS
+SELECT
+    t.wallet_id,
+    t.id
+FROM transactions AS t
+INNER JOIN eligible_transactions AS eligible ON t.wallet_id = eligible.wallet_id AND t.id = eligible.id
+WHERE
+    t.block_height IS NULL
+    AND EXISTS (
+        WITH RECURSIVE ancestors (id) AS (
+            SELECT t.id
+            UNION
+            SELECT parent.id
+            FROM ancestors AS ancestor
+            INNER JOIN tx_inputs AS claim ON claim.wallet_id = t.wallet_id AND ancestor.id = claim.tx_id
+            INNER JOIN transactions AS parent
+                ON parent.wallet_id = t.wallet_id AND claim.prev_tx_hash = parent.tx_hash
+            WHERE parent.block_height IS NULL AND parent.tx_status IN (0, 1)
+        )
+
+        SELECT 1 FROM ancestors AS ancestor
+        INNER JOIN tx_inputs AS claim ON claim.wallet_id = t.wallet_id AND ancestor.id = claim.tx_id
+        INNER JOIN tx_inputs AS other
+            ON
+                claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+                AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+        INNER JOIN transactions AS peer ON other.wallet_id = peer.wallet_id AND other.tx_id = peer.id
+        INNER JOIN eligible_transactions AS live ON peer.wallet_id = live.wallet_id AND peer.id = live.id
+        WHERE peer.block_height IS NULL
+    );

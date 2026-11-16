@@ -4,6 +4,7 @@
 DROP TRIGGER IF EXISTS trg_set_coinbase_orphaned_on_disconnect ON transactions;
 DROP FUNCTION IF EXISTS set_coinbase_orphaned_on_disconnect();
 -- Drop dependent views before the input and transaction relations.
+DROP VIEW IF EXISTS conflict_affected_transactions;
 DROP VIEW IF EXISTS eligible_transactions;
 
 -- Drop input facts before their parent transaction relation.
