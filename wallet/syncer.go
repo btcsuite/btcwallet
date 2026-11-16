@@ -369,29 +369,12 @@ func (s *syncer) syncState() syncState {
 // enabling block notifications. It returns an error if any of these setup
 // steps fail.
 func (s *syncer) initChainSync(ctx context.Context) error {
-	var err error
-
-	// Inform the backend about our birthday for optimization. For backends
-	// like Neutrino (SPV), this provides a starting point for the internal
-	// synchronization of block headers and compact filters. Without this
-	// hint, the backend might attempt to sync from genesis or its latest
-	// checkpoint, leading to unnecessary network I/O and delayed wallet
-	// readiness.
-	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
-		birthday, err := s.walletBirthday(ctx)
-		if err != nil {
-			return err
-		}
-
-		cc.SetStartTime(birthday)
-	}
-
 	// Wait for the backend to be synced to the network. We require the
 	// backend to be synced before we start scanning to ensure we have a
 	// consistent view of the chain and can perform recovery correctly.
 	s.state.Store(uint32(syncStateBackendSyncing))
 
-	err = s.waitUntilBackendSynced(ctx)
+	err := s.waitUntilBackendSynced(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to wait for backend sync: %w", err)
 	}
@@ -402,12 +385,29 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 		return fmt.Errorf("unable to check for rollback: %w", err)
 	}
 
+	return s.prepareLiveWatches(ctx)
+}
+
+// prepareLiveWatches installs persisted watches with the birthday needed by
+// native scan activation. It does not wait for currency or catch-up.
+func (s *syncer) prepareLiveWatches(ctx context.Context) error {
+	// Neutrino consumes the hint at native scan activation, not IsCurrent.
+	// Set it before registering watches; later retries preserve active scans.
+	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
+		birthday, err := s.walletBirthday(ctx)
+		if err != nil {
+			return err
+		}
+
+		cc.SetStartTime(birthday)
+	}
+
 	// A retry may follow a committed scan whose registration failed.
 	// Register stored addresses and outpoints even if the tip is current.
 	//
 	// TODO(yy): Avoid rereading and registering the full set on each retry
 	// while preserving registration that failed after a committed scan.
-	err = s.refreshLiveWatches(ctx)
+	err := s.refreshLiveWatches(ctx)
 	if err != nil {
 		return err
 	}

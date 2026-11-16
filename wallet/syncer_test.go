@@ -6169,41 +6169,25 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	require.ErrorIs(t, err, ErrScanBatchEmpty)
 }
 
-// TestInitChainSync_Neutrino verifies the type switch case for NeutrinoClient.
-func TestInitChainSync_Neutrino(t *testing.T) {
+// TestPrepareLiveWatchesNeutrino preserves birthday read failures before
+// activation, without waiting for backend currency or starting a native scan.
+func TestPrepareLiveWatchesNeutrino(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock neutrino chain service and a syncer with a
-	// NeutrinoClient.
-	mockCS := &bwmock.NeutrinoChain{}
-	// IsCurrent called by waitUntilBackendSynced.
-	// Return false to keep polling until context cancel.
-	mockCS.On("IsCurrent").Return(false).Maybe()
-
-	nc := &chain.NeutrinoClient{
-		CS: mockCS,
-	}
-	mockAddrStore := &bwmock.AddrStore{}
-
-	// SetStartTime reads birthday metadata through the durable Store.
+	// Arrange: Fail the persisted birthday read before native activation.
+	// The client needs no service because this error must escape first.
 	store := &walletmock.Store{}
-	store.On("GetWallet", mock.Anything, "").
-		Return(&db.WalletInfo{}, nil).Once()
-
+	store.On("GetWallet", mock.Anything, "").Return(nil, errDBMock).Once()
 	s := newTestSyncer(
-		Config{Chain: nc}, mockAddrStore, nil, nil,
-		store, 0,
+		Config{Chain: &chain.NeutrinoClient{}}, nil, nil, nil, store, 0,
 	)
 
-	// Cancel context immediately to abort waitUntilBackendSynced.
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+	// Act: Prepare native watches through the durable birthday boundary,
+	// without activating a scan when the persisted metadata cannot be read.
+	err := s.prepareLiveWatches(t.Context())
 
-	// Act: Attempt chain sync initialization.
-	err := s.initChainSync(ctx)
-
-	// Assert: Initialization propagates cancellation after durable metadata.
-	require.Error(t, err)
+	// Assert: Keep the storage cause and avoid any native subscription attempt.
+	require.ErrorIs(t, err, errDBMock)
 	store.AssertExpectations(t)
 }
 
