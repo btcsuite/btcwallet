@@ -192,6 +192,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getWalletByNameStmt, err = db.PrepareContext(ctx, GetWalletByName); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletByName: %w", err)
 	}
+	if q.getWalletCreditByOutpointStmt, err = db.PrepareContext(ctx, GetWalletCreditByOutpoint); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletCreditByOutpoint: %w", err)
+	}
 	if q.getWalletSecretsStmt, err = db.PrepareContext(ctx, GetWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletSecrets: %w", err)
 	}
@@ -627,6 +630,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getWalletByNameStmt: %w", cerr)
 		}
 	}
+	if q.getWalletCreditByOutpointStmt != nil {
+		if cerr := q.getWalletCreditByOutpointStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletCreditByOutpointStmt: %w", cerr)
+		}
+	}
 	if q.getWalletSecretsStmt != nil {
 		if cerr := q.getWalletSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getWalletSecretsStmt: %w", cerr)
@@ -972,6 +980,7 @@ type Queries struct {
 	getUtxoSpendByOutpointStmt                    *sql.Stmt
 	getWalletByIDStmt                             *sql.Stmt
 	getWalletByNameStmt                           *sql.Stmt
+	getWalletCreditByOutpointStmt                 *sql.Stmt
 	getWalletSecretsStmt                          *sql.Stmt
 	hasInvalidWalletUtxoByOutpointStmt            *sql.Stmt
 	hasTxGraphStateChangeStmt                     *sql.Stmt
@@ -1084,6 +1093,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getUtxoSpendByOutpointStmt:                    q.getUtxoSpendByOutpointStmt,
 		getWalletByIDStmt:                             q.getWalletByIDStmt,
 		getWalletByNameStmt:                           q.getWalletByNameStmt,
+		getWalletCreditByOutpointStmt:                 q.getWalletCreditByOutpointStmt,
 		getWalletSecretsStmt:                          q.getWalletSecretsStmt,
 		hasInvalidWalletUtxoByOutpointStmt:            q.hasInvalidWalletUtxoByOutpointStmt,
 		hasTxGraphStateChangeStmt:                     q.hasTxGraphStateChangeStmt,

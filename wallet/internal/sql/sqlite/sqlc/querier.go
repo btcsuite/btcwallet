@@ -164,7 +164,7 @@ type Querier interface {
 	// - Applies to timed leases and leases without expiry alike.
 	// Performance:
 	// - Resolves the spender through its unique hash and reaches its inputs
-	//   through the spent_by index.
+	//   through the input-position and prevout indexes.
 	DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error)
 	// Deletes all UTXO rows created by the provided transaction ID.
 	//
@@ -306,6 +306,9 @@ type Querier interface {
 	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
+	// Credit replay checks immutable ownership even after a credit has been spent.
+	// Availability belongs to the input relation, not this ownership lookup.
+	GetWalletCreditByOutpoint(ctx context.Context, arg GetWalletCreditByOutpointParams) ([]byte, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
 	// Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
 	// transaction is already invalid.
@@ -593,8 +596,7 @@ type Querier interface {
 	//   then uses derived_addresses/accounts for optional account filters.
 	// - Returns leased outputs too because the API models leases separately from
 	//   UTXO existence.
-	// - Includes outputs whose parent transaction is still in `pending` or
-	//   `published` status.
+	// - Lists published creators; pending credits remain available to point reads.
 	// - Intentionally does not enforce coinbase maturity because this query models
 	//   wallet-owned UTXO existence rather than a strictly spendable subset.
 	// Performance:
