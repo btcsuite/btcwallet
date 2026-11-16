@@ -12,7 +12,9 @@ This package is only a driver to the walletdb package and provides the database
 type of "bdb". The only parameters the Open and Create functions take are the
 database path as a string, an option for the database to not sync its freelist
 to disk as a bool, a timeout value for opening the database as a
-time.Duration and an option to open the database in read-only mode as a bool:
+time.Duration and an option to open the database in read-only mode as a bool.
+An optional fifth parameter of type int specifies additional flags to use when
+memory mapping the database file, such as syscall.MAP_POPULATE on Linux:
 
 	db, err := walletdb.Open(
 		"bdb", "path/to/database.db", true, 60*time.Second, false,

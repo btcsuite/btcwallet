@@ -15,67 +15,104 @@ const (
 	dbType = "bdb"
 )
 
-// parseArgs parses the arguments from the walletdb Open/Create methods.
-func parseArgs(funcName string,
-	args ...interface{}) (string, bool, time.Duration, bool, error) {
+// dbArgs holds the parsed arguments of the walletdb Open/Create methods.
+type dbArgs struct {
+	// dbPath is the path of the database file.
+	dbPath string
 
-	if len(args) != 4 {
-		return "", false, 0, false, fmt.Errorf("invalid arguments to %s.%s "+
+	// noFreelistSync prevents the database from syncing its freelist to
+	// disk.
+	noFreelistSync bool
+
+	// timeout is the amount of time to wait to obtain the file lock.
+	timeout time.Duration
+
+	// readOnly opens the database in read-only mode.
+	readOnly bool
+
+	// mmapFlags are additional flags to set when memory mapping the
+	// database file, such as syscall.MAP_POPULATE on Linux.
+	mmapFlags int
+}
+
+// parseArgs parses the arguments from the walletdb Open/Create methods.
+func parseArgs(funcName string, args ...interface{}) (*dbArgs, error) {
+	if len(args) < 4 || len(args) > 5 {
+		return nil, fmt.Errorf("invalid arguments to %s.%s "+
 			"-- expected database path, no-freelist-sync, "+
-			"timeout option and read-only flag",
-			dbType, funcName)
+			"timeout option, read-only flag and optional mmap "+
+			"flags", dbType, funcName)
 	}
 
 	dbPath, ok := args[0].(string)
 	if !ok {
-		return "", false, 0, false, fmt.Errorf("first argument to %s.%s is "+
+		return nil, fmt.Errorf("first argument to %s.%s is "+
 			"invalid -- expected database path string", dbType,
 			funcName)
 	}
 
 	noFreelistSync, ok := args[1].(bool)
 	if !ok {
-		return "", false, 0, false, fmt.Errorf("second argument to %s.%s is "+
+		return nil, fmt.Errorf("second argument to %s.%s is "+
 			"invalid -- expected no-freelist-sync bool", dbType,
 			funcName)
 	}
 
 	timeout, ok := args[2].(time.Duration)
 	if !ok {
-		return "", false, 0, false, fmt.Errorf("third argument to %s.%s is "+
+		return nil, fmt.Errorf("third argument to %s.%s is "+
 			"invalid -- expected timeout time.Duration", dbType,
 			funcName)
 	}
 
 	readOnly, ok := args[3].(bool)
 	if !ok {
-		return "", false, 0, false, fmt.Errorf("fourth argument to %s.%s is "+
+		return nil, fmt.Errorf("fourth argument to %s.%s is "+
 			"invalid -- expected read-only bool", dbType,
 			funcName)
 	}
-	return dbPath, noFreelistSync, timeout, readOnly, nil
+
+	// The mmap flags are optional to remain compatible with callers that
+	// only pass the four arguments above.
+	var mmapFlags int
+	if len(args) == 5 {
+		mmapFlags, ok = args[4].(int)
+		if !ok {
+			return nil, fmt.Errorf("fifth argument to %s.%s is "+
+				"invalid -- expected mmap flags int", dbType,
+				funcName)
+		}
+	}
+
+	return &dbArgs{
+		dbPath:         dbPath,
+		noFreelistSync: noFreelistSync,
+		timeout:        timeout,
+		readOnly:       readOnly,
+		mmapFlags:      mmapFlags,
+	}, nil
 }
 
 // openDBDriver is the callback provided during driver registration that opens
 // an existing database for use.
 func openDBDriver(args ...interface{}) (walletdb.DB, error) {
-	dbPath, noFreelistSync, timeout, readOnly, err := parseArgs("Open", args...)
+	dbArgs, err := parseArgs("Open", args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return openDB(dbPath, noFreelistSync, false, timeout, readOnly)
+	return openDB(dbArgs, false)
 }
 
 // createDBDriver is the callback provided during driver registration that
 // creates, initializes, and opens a database for use.
 func createDBDriver(args ...interface{}) (walletdb.DB, error) {
-	dbPath, noFreelistSync, timeout, readOnly, err := parseArgs("Create", args...)
+	dbArgs, err := parseArgs("Create", args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return openDB(dbPath, noFreelistSync, true, timeout, readOnly)
+	return openDB(dbArgs, true)
 }
 
 func init() {
