@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -662,18 +663,28 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 
 // TestControllerStart verifies that start correctly initializes the
 // wallet, verifying the birthday block, loading accounts, cleaning up locks,
-// and starting the syncer.
+// and preparing the native birthday before starting the syncer.
 func TestControllerStart(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet and mock all dependencies required for
-	// startup.
+	// Arrange: Use the existing startup fixture with a native client and
+	// verified birthday block, so startup must still prepare its scan hint.
 	w, deps := createTestWalletWithMocks(t)
+	native := &chain.NeutrinoClient{}
+	w.cfg.Chain = native
+	birthday := time.Unix(1700000000, 0)
+	expected := &chain.NeutrinoClient{}
+	expected.SetStartTime(birthday)
+
+	birthdayReady := make(chan bool, 1)
 
 	// 1. Mock verifyBirthday: Expect a call to retrieve the birthday
 	//    block.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
-		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
+		&db.WalletInfo{
+			Birthday:      birthday,
+			BirthdayBlock: &db.Block{Height: 100},
+		}, nil,
 	).Once()
 
 	// 2. Mock DBGetAllAccounts: Expect a call to load active account
@@ -687,26 +698,30 @@ func TestControllerStart(t *testing.T) {
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
 
-	// 4. Mock syncer.run: Expect the syncer to be started.
+	// Observe configuration when the worker begins, before it can wait for
+	// currency or activate scanning. Compare with the public setter's result
+	// and report to the test goroutine, which owns all assertions.
 	deps.syncer.On(
 		"run", mock.Anything,
-	).Return(nil).Once()
+	).Return(nil).Run(func(mock.Arguments) {
+		birthdayReady <- reflect.DeepEqual(expected, native)
+	}).Once()
 
 	// Allow Stop to clear secret material.
 	expectStopTeardown(deps)
 
-	// Act: Start the wallet.
+	// Act: Complete synchronous setup and launch the existing Wallet loops.
 	err := w.start(t.Context())
-
-	// Assert: Verify that Start returned no error and the wallet state is
-	// 'Started'.
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, w.stop())
+	})
+
+	// Assert: Startup publishes Started only after preparing the persisted
+	// hint, including when the background worker runs immediately. Cleanup
+	// joins both Wallet loops even if this regression assertion fails.
 	require.True(t, w.state.isStarted())
-
-	// Cleanup: Stop the wallet to release resources.
-	err = w.stop()
-	require.NoError(t, err)
-	w.wg.Wait()
+	require.True(t, <-birthdayReady, "native birthday precedes sync startup")
 }
 
 // TestControllerUnlock_Interrupted_SendCancelled verifies Unlock when the
@@ -2531,8 +2546,10 @@ func TestControllerRescan(t *testing.T) {
 func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where GetWallet fails.
+	// Arrange: Fail the existing metadata read before native hint setup, so
+	// startup must preserve the Store error without reaching any backend call.
 	w, deps := createTestWalletWithMocks(t)
+	w.cfg.Chain = &chain.NeutrinoClient{}
 
 	deps.store.On(
 		"GetWallet", mock.Anything, mock.Anything,

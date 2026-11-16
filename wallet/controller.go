@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
@@ -949,7 +950,7 @@ func (w *Wallet) handleReq(req any) {
 }
 
 // verifyBirthday performs a sanity check on the wallet's birthday block to
-// ensure it is set and valid.
+// ensure it is set and valid, and prepares the native scan's birthday hint.
 //
 // Logical Steps:
 //  1. Fetch the current birthday block from the database.
@@ -968,6 +969,13 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 		log.Errorf("Unable to sanity check wallet birthday block: %v", err)
 
 		return fmt.Errorf("get wallet birthday: %w", err)
+	}
+
+	// Address requests can activate Neutrino as soon as we publish Started.
+	// Reuse this startup read before either background loop can start, even
+	// when the birthday block below is already verified.
+	if client, ok := w.cfg.Chain.(*chain.NeutrinoClient); ok {
+		client.SetStartTime(walletInfo.Birthday)
 	}
 
 	// If the birthday block has already been verified, we initialize the
