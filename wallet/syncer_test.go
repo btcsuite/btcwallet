@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -9093,4 +9094,107 @@ func TestSyncerBackoffCommitUncertainty(t *testing.T) {
 	// Assert: The failure escapes before another attempt or a second write.
 	require.ErrorIs(t, err, db.ErrIndeterminateCommit)
 	store.AssertExpectations(t)
+}
+
+// TestManagerIndependentCatchup resumes each Wallet from its committed tip.
+func TestManagerIndependentCatchup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit one empty block only for the current Wallet, as after
+	// partial delivery. Both lifetimes then stop before reopening shared data.
+	manager := testSQLiteManager(t)
+	params := sqliteCreateParams(t)
+	params.Name = "current"
+	params.Birthday = chainParams.GenesisBlock.Header.Timestamp
+	current, err := manager.Create(params)
+	require.NoError(t, err)
+	params = sqliteCreateParams(t)
+	params.Name = "lagging"
+	params.Birthday = chainParams.GenesisBlock.Header.Timestamp
+	lagging, err := manager.Create(params)
+	require.NoError(t, err)
+
+	genesis := db.Block{
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+	}
+	for _, w := range []*Wallet{current, lagging} {
+		require.NoError(t, w.store.UpdateWallet(t.Context(),
+			db.UpdateWalletParams{
+				WalletID:      w.id,
+				BirthdayBlock: &genesis,
+				SyncedTo:      &genesis,
+			},
+		))
+	}
+
+	header := &wire.BlockHeader{
+		PrevBlock: genesis.Hash,
+		Timestamp: genesis.Timestamp.Add(time.Minute),
+	}
+	tip := db.Block{
+		Height:    1,
+		Hash:      header.BlockHash(),
+		Timestamp: header.Timestamp,
+	}
+	require.NoError(t, current.store.ApplyTxBatch(t.Context(),
+		db.TxBatchParams{
+			WalletID: current.id,
+			SyncedTo: &tip,
+		},
+	))
+	require.NoError(t, manager.Stop())
+
+	// The backend is current, but the lagging Wallet's one fetch stays held.
+	// The existing worker and Store must determine each readiness separately.
+	client := createTestChain(t)
+	client.On("IsCurrent").Unset()
+	client.On("IsCurrent").Return(true).Maybe()
+	client.On("GetBestBlock").Unset()
+	client.On("GetBestBlock").Return(&tip.Hash, int32(1), nil).Maybe()
+	client.On("GetBlockHashes", int64(0), int64(1)).
+		Return([]chainhash.Hash{genesis.Hash, tip.Hash}, nil).Once()
+	client.On("GetBlockHashes", int64(1), int64(1)).
+		Return([]chainhash.Hash{tip.Hash}, nil).Once()
+
+	held, release := make(chan struct{}), make(chan struct{})
+	client.On("GetBlockHeaders", []chainhash.Hash{tip.Hash}).
+		Run(func(mock.Arguments) {
+			close(held)
+			<-release
+		}).Return([]*wire.BlockHeader{header}, nil).Once()
+
+	cfg := manager.config
+	cfg.ChainSource = client
+	fresh, err := NewManager(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fresh.Stop() })
+
+	releaseCatchup := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseCatchup)
+
+	// Act: Reopen once and keep historical work pending after Start returns.
+	wallets, err := fresh.Start(t.Context())
+	require.NoError(t, err)
+	require.Len(t, wallets, 2)
+	<-held
+
+	// Assert: A current Wallet is ready while its sibling remains behind;
+	// releasing only that sibling's fetch lets it reach the committed tip.
+	require.Eventually(t, func() bool {
+		info, err := wallets[0].Info(t.Context())
+		return err == nil && info.Synced
+	}, time.Second, time.Millisecond)
+	info, err := wallets[1].Info(t.Context())
+	require.NoError(t, err)
+	require.False(t, info.Synced)
+	releaseCatchup()
+	require.Eventually(t, func() bool {
+		info, err := wallets[1].Info(t.Context())
+		return err == nil && info.Synced
+	}, time.Second, time.Millisecond)
+	info, err = wallets[1].Info(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, tip.Hash, info.SyncedTo.Hash)
+	require.EqualValues(t, tip.Height, info.SyncedTo.Height)
 }
