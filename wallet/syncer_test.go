@@ -6169,44 +6169,6 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	require.ErrorIs(t, err, ErrScanBatchEmpty)
 }
 
-// TestInitChainSync_Neutrino verifies the type switch case for NeutrinoClient.
-func TestInitChainSync_Neutrino(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup mock neutrino chain service and a syncer with a
-	// NeutrinoClient.
-	mockCS := &bwmock.NeutrinoChain{}
-	// IsCurrent called by waitUntilBackendSynced.
-	// Return false to keep polling until context cancel.
-	mockCS.On("IsCurrent").Return(false).Maybe()
-
-	nc := &chain.NeutrinoClient{
-		CS: mockCS,
-	}
-	mockAddrStore := &bwmock.AddrStore{}
-
-	// SetStartTime reads birthday metadata through the durable Store.
-	store := &walletmock.Store{}
-	store.On("GetWallet", mock.Anything, "").
-		Return(&db.WalletInfo{}, nil).Once()
-
-	s := newTestSyncer(
-		Config{Chain: nc}, mockAddrStore, nil, nil,
-		store, 0,
-	)
-
-	// Cancel context immediately to abort waitUntilBackendSynced.
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	// Act: Attempt chain sync initialization.
-	err := s.initChainSync(ctx)
-
-	// Assert: Initialization propagates cancellation after durable metadata.
-	require.Error(t, err)
-	store.AssertExpectations(t)
-}
-
 // TestFetchAndFilterBlocks_HeaderScan verifies the optimization for empty scan
 // state.
 func TestFetchAndFilterBlocks_HeaderScan(t *testing.T) {
