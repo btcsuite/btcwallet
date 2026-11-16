@@ -30,6 +30,11 @@ var ErrInvalidSignatureRecord = errors.New("invalid psbt signature record")
 var ErrSigningKeyMismatch = errors.New("signing key does not satisfy the " +
 	"psbt input")
 
+// errKeyNotPaid marks an ErrSigningKeyMismatch where the output pays a key
+// other than the one SignPsbt would sign with, so only that key's holder can
+// sign it.
+var errKeyNotPaid = errors.New("output does not pay the key")
+
 // ecdsaScriptContext is what an ECDSA signature on one input commits to.
 type ecdsaScriptContext struct {
 	// script is the script the spend runs.
@@ -758,8 +763,8 @@ func authorizeEcdsaSigner(scriptCtx ecdsaScriptContext, key []byte) error {
 	if scriptCtx.keyHash != nil &&
 		!bytes.Equal(address.Hash160(key), scriptCtx.keyHash) {
 
-		return fmt.Errorf("%w: output does not pay the key",
-			ErrSigningKeyMismatch)
+		return fmt.Errorf("%w: %w", ErrSigningKeyMismatch,
+			errKeyNotPaid)
 	}
 
 	return nil
@@ -802,8 +807,8 @@ func authorizeTaprootSigner(pIn *psbt.PInput, utxo *wire.TxOut,
 
 	if len(derivation.LeafHashes) == 0 {
 		if !keySpendsOutput(pIn, outputKey, key) {
-			return fmt.Errorf("%w: output does not pay the "+
-				"derivation key", ErrSigningKeyMismatch)
+			return fmt.Errorf("%w: %w", ErrSigningKeyMismatch,
+				errKeyNotPaid)
 		}
 
 		return nil
