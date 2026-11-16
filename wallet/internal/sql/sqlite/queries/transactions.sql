@@ -145,28 +145,6 @@ WHERE
     AND t.tx_status IN (0, 1)
 ORDER BY t.received_time DESC, t.id DESC;
 
--- name: ListActiveTransactionRaws :many
--- Lists active wallet transaction rows and their raw transaction bytes.
---
--- How:
--- - Reads from transactions only and filters to rows that may currently spend
---   wallet-owned outputs (`pending` and `published`).
--- - Returns the primary key, transaction hash, block assignment, and raw
---   transaction bytes so callers can rebuild input outpoints not normalized in
---   the SQL schema.
--- Performance:
--- - Matches the wallet/status index used by active wallet history paths.
-SELECT
-    t.id,
-    t.tx_hash,
-    t.block_height,
-    t.raw_tx
-FROM transactions AS t
-WHERE
-    t.wallet_id = ?
-    AND t.tx_status IN (0, 1)
-ORDER BY t.id;
-
 -- name: ListTransactionsByHeightRange :many
 -- Lists all confirmed transactions for a wallet in the provided height range.
 --
@@ -229,8 +207,8 @@ ORDER BY u.tx_id, u.output_index;
 -- - Resolves previous transaction hashes to this wallet's tracked UTXO rows.
 -- - Rejoins addresses so debit reconstruction does not depend only on
 --   transaction wallet scope.
--- - Does not read `spent_by_tx_id` because invalidation and rollback can clear
---   that mutable edge while the historical spending transaction still exists.
+-- - Reconstructs debit ownership from recorded credits, including credits
+--   whose spenders or creating transactions are no longer eligible.
 -- Performance:
 -- - Uses one batched transaction-hash lookup, then the UTXO tx-id index for the
 --   previous transactions' wallet-owned outputs.
