@@ -61,25 +61,6 @@ func (o deleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
 	return ensureDeleteLeaf(ctx, o.qtx, walletID, txHash, txID)
 }
 
-// ClearSpentUtxos restores any wallet-owned parent outputs the transaction had
-// marked spent.
-func (o deleteTxOps) ClearSpentUtxos(ctx context.Context, walletID uint32,
-	txID int64) error {
-
-	_, err := o.qtx.ClearUtxosSpentByTxID(
-		ctx,
-		sqlc.ClearUtxosSpentByTxIDParams{
-			WalletID:    int64(walletID),
-			SpentByTxID: sql.NullInt64{Int64: txID, Valid: true},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("clear spent utxo rows: %w", err)
-	}
-
-	return nil
-}
-
 // DeleteCreatedUtxos removes any wallet-owned outputs created by the
 // transaction being deleted.
 func (o deleteTxOps) DeleteCreatedUtxos(ctx context.Context,

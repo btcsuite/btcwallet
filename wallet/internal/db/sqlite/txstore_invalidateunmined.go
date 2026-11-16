@@ -87,27 +87,6 @@ func (o invalidateUnminedTxOps) ListUnminedTxRecords(
 	)
 }
 
-// ClearSpentUtxos restores any wallet-owned parent outputs spent by the given
-// transaction row.
-func (o invalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
-	walletID int64, txID int64) error {
-
-	_, err := o.qtx.ClearUtxosSpentByTxID(
-		ctx, sqlc.ClearUtxosSpentByTxIDParams{
-			WalletID: walletID,
-			SpentByTxID: sql.NullInt64{
-				Int64: txID,
-				Valid: true,
-			},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("clear spent utxos: %w", err)
-	}
-
-	return nil
-}
-
 // MarkTxnsFailed marks the provided tx rows failed in one
 // batch update.
 func (o invalidateUnminedTxOps) MarkTxnsFailed(
