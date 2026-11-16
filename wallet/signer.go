@@ -1050,7 +1050,6 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 // handleComputeUnlockingScript delivers the result of an accepted component
 // request.
 func (w *Wallet) handleComputeUnlockingScript(r unlockingScriptReq) {
-	// Reuse the signing operation also called from admitted PSBT finalization.
 	script, err := w.computeUnlockingScript(r.ctx, r.params)
 	r.respChan <- unlockingScriptResp{script: script, err: err}
 }
