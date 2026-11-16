@@ -235,8 +235,15 @@ func testManagerStartReopen(h *bwtest.HarnessTest) {
 		"initial wallet did not initialize its birthday block",
 	)
 
-	// Mine through the real chain while the original wallet is active; the
-	// harness waits for the wallet to synchronize to the new tip.
+	// Supply common history before forking to isolate missed notifications
+	// from sparse birthday-history traversal, covered by the Store sibling.
+	h.MineBlocks(10)
+
+	// Arrange a fork below the next committed checkpoint on each backend.
+	// KVDB retains one Wallet while exercising the same owner recovery route.
+	alternate := h.SpawnTempMiner()
+
+	// Mine while active so the Wallet commits the branch it must later undo.
 	h.MineBlocks(1)
 
 	require.NoError(h, manager.Stop(), "failed to stop manager")
@@ -245,12 +252,44 @@ func testManagerStartReopen(h *bwtest.HarnessTest) {
 		"stopped wallet accepted maintained access")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+
+	// Act: Miss the disconnect entirely, then reopen with a fresh client.
+	// The harness owns this connection; Manager only borrowed it.
+	h.ChainClient.Stop()
+	alternate.MineBlocks(2)
+	replacement, replacementHeight := alternate.GetBestBlock()
+	h.ConnectToMiner(alternate)
+
+	client, cleanup, err := h.Backend.NewChainClient(h.Context())
+	require.NoError(h, err, "failed to replace borrowed client")
+	h.Cleanup(cleanup)
+
+	// The source itself must have adopted the fork before registration;
+	// otherwise live disconnects could conceal broken startup recovery.
+	err = wait.NoError(func() error {
+		tip, height, err := client.GetBestBlock()
+		if err != nil {
+			return err
+		}
+
+		if height != replacementHeight || !tip.IsEqual(replacement) {
+			return fmt.Errorf("replacement tip not active: %v", tip)
+		}
+
+		return nil
+	}, pollTimeout)
+	require.NoError(h, err, "source did not adopt replacement branch")
+	h.ChainClient = client
+
 	manager = h.NewWalletManager()
 	loaded, err = manager.Start(h.Context())
 	require.NoError(h, err, "failed to reload wallet")
 	require.Len(h, loaded, 1, "unexpected reloaded wallet count")
 	reloaded := loaded[0]
 	h.RegisterWallet(manager, reloaded)
+
+	// Assert recovery reaches the replacement tip from each saved checkpoint.
+	h.AssertWalletSynced(reloaded)
 
 	require.NotSame(h, w, reloaded, "reload returned the torn-down instance")
 	reloadedInfo, err := reloaded.Info(h.Context())
@@ -319,6 +358,9 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 // testManagerLiveWatchReplay proves a fresh client restores both persisted
 // address and outpoint watches for payments and external mempool spends.
 func testManagerLiveWatchReplay(h *bwtest.HarnessTest) {
+	// The CLI still supports this legacy backend; its typed enum is deprecated.
+	const kvdbBackend = "kvdb"
+
 	if _, ok := h.ChainClient.(*chain.NeutrinoClient); ok {
 		h.Skip("SPV does not deliver mempool transactions")
 	}
@@ -359,7 +401,24 @@ func testManagerLiveWatchReplay(h *bwtest.HarnessTest) {
 
 	w = wallets[0]
 	h.RegisterWallet(manager, w)
-	h.AssertWalletSynced(w)
+
+	// SQL Start promises restored live watches before historical readiness.
+	// Keep the legacy KVDB wait before sending its control payment.
+	if *dbBackend == kvdbBackend {
+		h.AssertWalletSynced(w)
+	}
+
+	paymentScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to construct payment script")
+
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: paymentScript,
+	}, bwtest.MinerFeeRate)
+	if *dbBackend != kvdbBackend {
+		h.AssertWalletSynced(w)
+	}
+
 	h.UnlockWallet(w)
 
 	// Keep outputs external as well, so only the outpoint watch can deliver
@@ -382,16 +441,8 @@ func testManagerLiveWatchReplay(h *bwtest.HarnessTest) {
 		},
 	})
 
-	paymentScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(h, err, "failed to construct payment script")
-
-	// Act: Pay the persisted address and broadcast the external spend after
-	// reopening. Neither transaction can be discovered by a mined block yet.
-	payment := h.SendOutput(&wire.TxOut{
-		Value:    oneBTC,
-		PkScript: paymentScript,
-	}, bwtest.MinerFeeRate)
-
+	// Act: Broadcast the external spend after the payment sent at startup.
+	// Neither observation can be recovered from a mined block yet.
 	_, err = h.ChainClient.SendRawTransaction(tx, false)
 	require.NoError(h, err, "failed to broadcast external spend")
 
