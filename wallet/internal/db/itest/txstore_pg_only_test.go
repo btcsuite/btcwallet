@@ -91,8 +91,8 @@ func TestRollbackToBlockRejectsHeightOverflowPostgres(t *testing.T) {
 func TestTxGraphChildBeforeConflictPostgres(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A spends F. B spends A:0 and independent input Q. Hold Q so
-	// B stops after its graph reads, while W can still try to replace A.
+	// Arrange: A spends F. B spends A:0 and independent Q. Hold their owned
+	// address so B pauses at credit insertion after its graph reads.
 	store, childParams, winnerParams := newTxGraphConflict(t)
 	walletID := childParams.WalletID
 	child := childParams.Tx
@@ -103,10 +103,10 @@ func TestTxGraphChildBeforeConflictPostgres(t *testing.T) {
 	otherID := newWallet(t, store, "other")
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
-	barrier := lockTxGraphOutput(t, ctx, store.DB(), walletID, q)
+	barrier := lockTxGraphCreditAddress(t, ctx, store.DB(), walletID, q)
 
-	// Act: Pause B at Q, then start W. Another Wallet must still accept a
-	// graph write. Release Q and join both writes before reading results.
+	// Act: Pause B at its credit FK, then start W. Another Wallet still
+	// accepts a graph write. Release the address and join both calls.
 	childCall := startTxGraphCall(
 		t, cancel, func() error {
 			return store.CreateTx(ctx, childParams)
@@ -179,8 +179,8 @@ func TestTxGraphChildBeforeConflictPostgres(t *testing.T) {
 func TestTxGraphConflictBeforeChildPostgres(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A spends F and B spends A:0 plus Q. Hold F so W stops after
-	// reading A's descendants, before it can mark A as replaced.
+	// Arrange: A spends F and B spends A:0 plus Q. Hold A's row so W stops
+	// after descendant discovery while marking the direct root replaced.
 	store, childParams, winnerParams := newTxGraphConflict(t)
 	walletID := childParams.WalletID
 	child := childParams.Tx
@@ -191,10 +191,12 @@ func TestTxGraphConflictBeforeChildPostgres(t *testing.T) {
 	winnerParams.Received = time.Unix(3, 0)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
-	barrier := lockTxGraphOutput(t, ctx, store.DB(), walletID, f)
+	barrier := lockTxGraphTransaction(
+		t, ctx, store.DB(), walletID, child.TxIn[0].PreviousOutPoint.Hash,
+	)
 
-	// Act: Pause W at F, then start B against the same Wallet. Release F
-	// after both calls reach SQL and join them before reading the graph.
+	// Act: Pause W at A's status update, then start B against the same
+	// Wallet. Release A and join both calls before reading their results.
 	winnerCall := startTxGraphCall(
 		t, cancel, func() error {
 			return store.CreateTx(ctx, winnerParams)
@@ -375,10 +377,10 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 			},
 		),
 	)
-	barrier := lockTxGraphOutput(t, ctx, store.DB(), walletID, q)
+	barrier := lockTxGraphCreditAddress(t, ctx, store.DB(), walletID, q)
 
-	// Act: Pause B at Q, then start rollback. Release Q after both calls
-	// reach SQL. Cancellation and joining also run if an assertion fails.
+	// Act: Pause B at its credit FK, then start rollback. Release the address
+	// after both calls reach SQL. Cleanup cancels and joins on failure too.
 	childCall := startTxGraphCall(
 		t, cancel, func() error {
 			return store.CreateTx(
@@ -437,9 +439,9 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// lockTxGraphOutput holds a UTXO row in a separate SQL transaction. This
-// pauses a graph write after its reads, without changing its commit path.
-func lockTxGraphOutput(t *testing.T, ctx context.Context, raw *sql.DB,
+// lockTxGraphCreditAddress pauses credit insertion at its existing address FK.
+// This remains a write boundary after input claims no longer update UTXO rows.
+func lockTxGraphCreditAddress(t *testing.T, ctx context.Context, raw *sql.DB,
 	walletID uint32, output wire.OutPoint) *sql.Tx {
 
 	t.Helper()
@@ -450,10 +452,11 @@ func lockTxGraphOutput(t *testing.T, ctx context.Context, raw *sql.DB,
 	t.Cleanup(func() { _ = barrier.Rollback() })
 
 	_, err = barrier.ExecContext(
-		ctx, `SELECT u.id FROM utxos AS u
+		ctx, `SELECT a.id FROM utxos AS u
 		JOIN transactions AS t ON t.id = u.tx_id
+		JOIN addresses AS a ON a.id = u.address_id
 		WHERE t.wallet_id = $1 AND t.tx_hash = $2 AND u.output_index = $3
-		FOR UPDATE OF u`, walletID, output.Hash[:], output.Index,
+		FOR UPDATE OF a`, walletID, output.Hash[:], output.Index,
 	)
 	require.NoError(t, err)
 

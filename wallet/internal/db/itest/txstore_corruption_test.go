@@ -428,12 +428,12 @@ func TestCreateTxReturnsQueryErrorWhenTransactionsTableMissing(t *testing.T) {
 }
 
 // TestCreateTxReturnsQueryErrorWhenUtxosTableMissing verifies that confirmed
-// conflict cleanup reports a missing credit table after indexed root lookup.
+// lease cleanup surfaces a missing credit table after indexed conflict lookup.
 func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Record the competing history, then remove the credit table so
-	// surviving pointer cleanup cannot clear the replaced root's spent outputs.
+	// the existing confirmed lease-cleanup operation cannot finish recording.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-create-missing-utxos-table")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -491,7 +491,7 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	)
 	// Assert: The atomic recording failure retains the surviving operation
 	// context rather than depending on the removed pointer lookup.
-	require.ErrorContains(t, err, "clear replaced root spent utxos")
+	require.ErrorContains(t, err, "delete spent utxo leases")
 }
 
 // TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing checks that a

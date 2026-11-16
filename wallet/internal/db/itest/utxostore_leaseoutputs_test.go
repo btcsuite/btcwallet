@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newLeaseSetFixture creates a wallet with one pending transaction paying
+// newLeaseSetFixture creates a wallet with one published transaction paying
 // count wallet-owned outputs and returns the wallet ID and those outpoints.
 func newLeaseSetFixture(t *testing.T, store db.Store, name string,
 	count int) (uint32, []wire.OutPoint) {
@@ -42,7 +42,7 @@ func newLeaseSetFixture(t *testing.T, store db.Store, name string,
 		WalletID: walletID,
 		Tx:       tx,
 		Received: time.Unix(1710001800, 0),
-		Status:   db.TxStatusPending,
+		Status:   db.TxStatusPublished,
 		Credits:  credits,
 	})
 	require.NoError(t, err)
