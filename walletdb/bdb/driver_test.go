@@ -41,10 +41,18 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to open a database with the wrong number of
 	// parameters returns the expected error.
 	wantErr = fmt.Errorf("invalid arguments to %s.Open -- expected "+
-		"database path, no-freelist-sync, timeout option and "+
-		"read-only flag", dbType)
+		"database path, no-freelist-sync, timeout option, "+
+		"read-only flag and optional mmap flags", dbType)
 	if _, err := walletdb.Open(
-		dbType, 1, 2, 3, 4, 5,
+		dbType, 1, 2, 3, 4, 5, 6,
+	); err.Error() != wantErr.Error() {
+
+		t.Errorf("Open: did not receive expected error - got %v, "+
+			"want %v", err, wantErr)
+		return
+	}
+	if _, err := walletdb.Open(
+		dbType, 1, 2, 3,
 	); err.Error() != wantErr.Error() {
 
 		t.Errorf("Open: did not receive expected error - got %v, "+
@@ -107,10 +115,18 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to create a database with the wrong number of
 	// parameters returns the expected error.
 	wantErr = fmt.Errorf("invalid arguments to %s.Create -- expected "+
-		"database path, no-freelist-sync, timeout option and "+
-		"read-only flag", dbType)
+		"database path, no-freelist-sync, timeout option, "+
+		"read-only flag and optional mmap flags", dbType)
 	if _, err := walletdb.Create(
-		dbType, 1, 2, 3, 4, 5,
+		dbType, 1, 2, 3, 4, 5, 6,
+	); err.Error() != wantErr.Error() {
+
+		t.Errorf("Create: did not receive expected error - got %v, "+
+			"want %v", err, wantErr)
+		return
+	}
+	if _, err := walletdb.Create(
+		dbType, 1, 2, 3,
 	); err.Error() != wantErr.Error() {
 
 		t.Errorf("Create: did not receive expected error - got %v, "+
@@ -166,6 +182,30 @@ func TestCreateOpenFail(t *testing.T) {
 	); err.Error() != wantErr.Error() {
 
 		t.Errorf("Open: did not receive expected error - got %v, "+
+			"want %v", err, wantErr)
+		return
+	}
+
+	// Ensure that attempting to open or create a database with an invalid
+	// type for the optional fifth parameter returns the expected error.
+	wantErr = fmt.Errorf("fifth argument to %s.Open is invalid -- "+
+		"expected mmap flags int", dbType)
+	if _, err := walletdb.Open(
+		dbType, "noexist.db", true, defaultDBTimeout, false, "1",
+	); err.Error() != wantErr.Error() {
+
+		t.Errorf("Open: did not receive expected error - got %v, "+
+			"want %v", err, wantErr)
+		return
+	}
+
+	wantErr = fmt.Errorf("fifth argument to %s.Create is invalid -- "+
+		"expected mmap flags int", dbType)
+	if _, err := walletdb.Create(
+		dbType, "noexist.db", true, defaultDBTimeout, false, "1",
+	); err.Error() != wantErr.Error() {
+
+		t.Errorf("Create: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
 		return
 	}
