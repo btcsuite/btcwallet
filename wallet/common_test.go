@@ -171,10 +171,11 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 	// Match the service lifetime; the existing Stop cleanup cancels and joins.
 	lifetimeCtx, cancel := context.WithCancelCause(context.Background())
 	m := &Manager{
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
+		lifetimeCtx:      lifetimeCtx,
+		cancel:           cancel,
+		wallets:          make(map[string]*Wallet),
+		recoveryRequests: make(chan db.Block, 1),
+		requestChan:      make(chan createWalletReq),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },

@@ -170,3 +170,20 @@ func newSQLAddressDeriver(
 		return deriveAddressData(chainParams, params)
 	}
 }
+
+// syncedBlock reads the backend's shared history for queued recovery evidence.
+func (b *sqlManagerBackend) syncedBlock(ctx context.Context,
+	height uint32) (db.Block, error) {
+
+	blocks, err := b.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		StartHeight: height,
+		EndHeight:   height,
+	})
+	if err != nil {
+		return db.Block{}, err
+	}
+
+	// Exact-height success holds one block; missing heights return
+	// db.ErrBlockNotFound under the Store contract.
+	return blocks[0], nil
+}

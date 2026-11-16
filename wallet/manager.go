@@ -175,6 +175,10 @@ type Manager struct {
 	// The lifecycle claim, not cancellation order, selects the cleanup owner.
 	cancel context.CancelCauseFunc
 
+	// recoveryRequests coalesces fork evidence while the owner is busy.
+	// Reporting workers must not wait for their own pause acknowledgment.
+	recoveryRequests chan db.Block
+
 	// chainEvents borrows the already-started source's one native stream.
 	chainEvents <-chan any
 
@@ -253,13 +257,14 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	lifetimeCtx, cancel := context.WithCancelCause(context.Background())
 
 	m := &Manager{
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
-		chainEvents: cfg.ChainSource.Notifications(),
-		backend:     backend,
-		config:      cfg,
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
+		wallets:          make(map[string]*Wallet),
+		recoveryRequests: make(chan db.Block, 1),
+		requestChan:      make(chan createWalletReq),
+		chainEvents:      cfg.ChainSource.Notifications(),
+		backend:          backend,
+		config:           cfg,
+		lifetimeCtx:      lifetimeCtx,
+		cancel:           cancel,
 	}
 
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
@@ -477,6 +482,12 @@ func (m *Manager) mainLoop() {
 				return
 			}
 
+		case block := <-m.recoveryRequests:
+			// Queued evidence shares the native delivery and rollback owner.
+			chainErr = m.handleRollbackEvent(
+				m.lifetimeCtx, block, queuedRecovery,
+			)
+
 		case event, ok := <-m.chainEvents:
 			if !ok {
 				chainErr = errors.New(
@@ -543,7 +554,13 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 	// Settle their earlier writes and rewind Store once before the next
 	// source event; independent Wallet delivery cannot order that rewind.
 	if disconnect, ok := n.(chain.BlockDisconnected); ok {
-		return m.handleRollbackEvent(ctx, disconnect)
+		// Keep full native identity when crossing into durable history.
+		block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(disconnect))
+		if err != nil {
+			return fmt.Errorf("disconnect block: %w", err)
+		}
+
+		return m.handleRollbackEvent(ctx, *block, nativeDisconnect)
 	}
 
 	wallets := m.chainRecipients()
@@ -583,33 +600,58 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 	return nil
 }
 
+// rollbackOrigin distinguishes authoritative native input from queued evidence
+// that may have become obsolete while another recovery replaced shared history.
+type rollbackOrigin uint8
+
+const (
+	// nativeDisconnect carries the source's ordered rollback decision.
+	nativeDisconnect rollbackOrigin = iota
+	// queuedRecovery checks stored evidence after writers pause.
+	queuedRecovery
+)
+
 // handleRollbackEvent settles published writers around one backend rollback.
 // Success releases workers and lets the source reader dispatch its next event.
 // A rollback error stops every Wallet before any worker can write again.
 func (m *Manager) handleRollbackEvent(ctx context.Context,
-	event chain.BlockDisconnected) error {
-
-	// Preserve hash and time as well as height for storage that needs to
-	// distinguish a stale disconnect from a replacement at the same height.
-	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
-	if err != nil {
-		return fmt.Errorf("disconnect block: %w", err)
-	}
+	block db.Block, origin rollbackOrigin) error {
 
 	// Manager alone signals rollback completion. Terminal cleanup stops
 	// workers first, so a failed rewind cannot resume old writes.
 	rollbackDone := make(chan struct{})
 
-	err = m.prepareWalletsForRollback(ctx, rollbackDone)
+	err := m.prepareWalletsForRollback(ctx, rollbackDone)
 	if err != nil {
-		// Leave prepared workers paused until the loop or accepted Stop joins
-		// them. Resuming here could permit writes after an unsafe failure.
+		// Keep prepared writers paused until the cleanup owner joins them;
+		// resuming could permit another write after a terminal failure.
 		return fmt.Errorf("wait for rollback writers: %w", err)
+	}
+
+	// Native disconnects are authoritative. Queued evidence must still
+	// identify committed history after all earlier writers have paused.
+	if origin == queuedRecovery {
+		needed, err := m.recoveryStillNeeded(ctx, block)
+		if err != nil {
+			// A failed read cannot authorize rewind. Resume writers so the
+			// detecting worker can reread history on its existing retry.
+			log.Warnf("Unable to check recovery hint: %v", err)
+			close(rollbackDone)
+
+			return nil
+		}
+
+		if !needed {
+			// Replacement history makes the hint obsolete, not the workers.
+			close(rollbackDone)
+
+			return nil
+		}
 	}
 
 	// Accepted persistence settles even if its caller or Stop cancels.
 	// The owner keeps Store open until this one rollback completes.
-	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
+	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), block)
 	if err != nil {
 		err = fmt.Errorf("rollback chain: %w", err)
 		// Leave paused workers to the owner, which drains them on failure
@@ -623,6 +665,23 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	close(rollbackDone)
 
 	return nil
+}
+
+// recoveryStillNeeded checks queued evidence against the shared stored branch.
+// The backend reads its own Store after all published writers have paused.
+func (m *Manager) recoveryStillNeeded(ctx context.Context,
+	block db.Block) (bool, error) {
+
+	stored, err := m.backend.syncedBlock(ctx, block.Height)
+	if errors.Is(err, db.ErrBlockNotFound) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("read recovery history: %w", err)
+	}
+
+	return stored.Hash == block.Hash, nil
 }
 
 // validateManagedWalletName rejects an absent durable identity before cache,

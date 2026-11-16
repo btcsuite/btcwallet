@@ -1317,6 +1317,16 @@ func (b *managerBackendMock) create(ctx context.Context,
 	return args.Get(0).(*walletData), args.Error(1)
 }
 
+// syncedBlock returns the retained identity or read error set by the test.
+func (b *managerBackendMock) syncedBlock(ctx context.Context,
+	height uint32) (db.Block, error) {
+
+	args := b.Called(ctx, height)
+	block, _ := args.Get(0).(db.Block)
+
+	return block, args.Error(1)
+}
+
 // rollbackToBlock exposes the full block identity to strict expectations,
 // so a height-only Manager handoff cannot satisfy the ordering regression.
 func (b *managerBackendMock) rollbackToBlock(ctx context.Context,
@@ -1343,12 +1353,13 @@ func newManagerLifecycleTest(t *testing.T,
 	// Manager owns the service lifetime; fixture Stop joins before assertions.
 	lifetimeCtx, cancel := context.WithCancelCause(context.Background())
 	manager := &Manager{
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
-		chainEvents: source.Notifications(),
-		backend:     backend,
+		lifetimeCtx:      lifetimeCtx,
+		cancel:           cancel,
+		wallets:          make(map[string]*Wallet),
+		recoveryRequests: make(chan db.Block, 1),
+		requestChan:      make(chan createWalletReq),
+		chainEvents:      source.Notifications(),
+		backend:          backend,
 		config: ManagerConfig{
 			Backend:     kind,
 			ChainSource: source,
