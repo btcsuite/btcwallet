@@ -287,7 +287,9 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 			return wallets, err
 		}
 
-		wallet := newManagedWallet(cfg, walletData, m.chainSyncer, m.cancel)
+		wallet := newManagedWallet(
+			cfg, walletData, m.chainSyncer, m.cancel, m.recoveryRequests,
+		)
 		wallets = append(wallets, wallet)
 
 		// SQL publication requires watches; KVDB keeps background setup.
@@ -840,7 +842,9 @@ func (m *Manager) createWallet(ctx context.Context,
 		return nil, err
 	}
 
-	return newManagedWallet(walletCfg, data, m.chainSyncer, m.cancel), nil
+	return newManagedWallet(
+		walletCfg, data, m.chainSyncer, m.cancel, m.recoveryRequests,
+	), nil
 }
 
 // validateInitialAccounts checks resolved scope and script ownership before

@@ -64,6 +64,7 @@ func newTestSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	return newSyncer(
 		cfg, addrStore, txStore, manager, store, walletID,
 		newChainSyncer(cfg.Chain, params), make(chan chainEvent, 1),
+		make(chan db.Block, 1),
 	)
 }
 
@@ -840,13 +841,15 @@ func TestCheckRollbackDetected(t *testing.T) {
 	// Arrange: Initialize a store-backed syncer and mocks to simulate a
 	// chain reorganization.
 	mockChain := &bwmock.Chain{}
-	mockPublisher := &mockTxPublisher{}
 	store := &walletmock.Store{}
 
 	s := newTestSyncer(
-		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		Config{Chain: mockChain}, nil, nil, nil,
 		store, 0,
 	)
+
+	recoveryRequests := make(chan db.Block, 1)
+	s.recoveryRequests = recoveryRequests
 
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 	expectSyncedTip(store, tip)
@@ -890,19 +893,26 @@ func TestCheckRollbackDetected(t *testing.T) {
 	header := &wire.BlockHeader{Timestamp: time.Now()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// Expect a single atomic rollback to the common ancestor: rewindToBlock
-	// rolls transaction state back and rewinds the sync tip together via
-	// RollbackToBlock for the rollback boundary (fork height 95 + 1).
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
-	).Return(nil).Once()
+	// Preserve the first abandoned identity for Manager's later validation;
+	// the Store mock rejects any direct mutation by this detecting worker.
+	localBlocks[5].Timestamp = time.Unix(96, 0)
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 96,
+		EndHeight:   96,
+	}).Return(localBlocks[5:6], nil).Once()
 
-	// Act: Compare the committed Store history against the diverging branch.
+	// Act: Detect the fork through the existing history comparison. Recovery
+	// must yield to the owner rather than wait on this worker's own pause.
 	err := s.checkRollback(t.Context())
 
-	// Assert: Recovery synchronously commits the fork boundary through one
-	// atomic Store rollback, using only the expected backend reads.
-	require.NoError(t, err)
+	// Assert: The worker requests retry and supplies the abandoned identity;
+	// the separate owner ordering case proves its committed shared rewind.
+	require.ErrorIs(t, err, ErrStateChanged)
+
+	hint := <-recoveryRequests
+	require.Equal(t, localBlocks[5].Hash, hint.Hash)
+	require.EqualValues(t, 96, hint.Height)
+	require.Equal(t, localBlocks[5].Timestamp, hint.Timestamp)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
 }
@@ -947,14 +957,20 @@ func TestCheckRollbackSparseFork(t *testing.T) {
 	client.On("GetBestBlock").Return(&tip.Hash, int32(100), nil).Times(3)
 	client.On("GetBlockHeader", &forkHash).
 		Return(&wire.BlockHeader{Timestamp: time.Unix(98, 0)}, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(99)).Return(nil).Once()
+	// Retain the first abandoned row from this fixture's compared history.
+	// Only Manager may mutate it after the detecting worker yields.
+	abandoned := db.Block{Height: 99, Hash: chainhash.Hash{99}}
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 99,
+		EndHeight:   99,
+	}).Return([]db.Block{abandoned}, nil).Once()
 
 	// Act: Recover against the diverging sparse history using Store reads.
 	err := s.checkRollback(t.Context())
 
-	// Assert: Recovery reaches the recorded ancestor and synchronously rewinds
-	// once at its exclusive boundary, with remote reads aligned to each row.
-	require.NoError(t, err)
+	// Assert: Exact Store and RPC calls prove sparse traversal reaches the
+	// recorded ancestor instead of skipping the remaining stored history.
+	require.ErrorIs(t, err, ErrStateChanged)
 	store.AssertExpectations(t)
 	client.AssertExpectations(t)
 }
@@ -1001,14 +1017,20 @@ func TestCheckRollbackShorterTip(t *testing.T) {
 		Return(remoteHashes, nil).Once()
 	client.On("GetBlockHeader", &forkHash).
 		Return(&wire.BlockHeader{Timestamp: time.Unix(90, 0)}, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(91)).Return(nil).Once()
+	// Retain the first abandoned row from this fixture's compared history.
+	// Only Manager may mutate it after the detecting worker yields.
+	abandoned := db.Block{Height: 91, Hash: chainhash.Hash{91}}
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 91,
+		EndHeight:   91,
+	}).Return([]db.Block{abandoned}, nil).Once()
 
 	// Act: Compare the stored tip against the shorter current chain.
 	err := s.checkRollback(t.Context())
 
-	// Assert: The first batch is skipped without an above-tip RPC and the
-	// second proves the backend tip as the synchronous rollback boundary.
-	require.NoError(t, err)
+	// Assert: Strict calls reject above-tip RPCs and require comparison of
+	// the next stored batch before the worker yields shared recovery.
+	require.ErrorIs(t, err, ErrStateChanged)
 	store.AssertExpectations(t)
 	client.AssertExpectations(t)
 }
@@ -1054,14 +1076,20 @@ func TestCheckRollbackGenesisFork(t *testing.T) {
 		Return([]chainhash.Hash{*chainParams.GenesisHash}, nil).Once()
 	client.On("GetBlockHeader", chainParams.GenesisHash).
 		Return(&chainParams.GenesisBlock.Header, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(1)).Return(nil).Once()
+	// Retain the first abandoned row from this fixture's compared history.
+	// Only Manager may mutate it after the detecting worker yields.
+	abandoned := blocks[0]
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 1,
+		EndHeight:   1,
+	}).Return([]db.Block{abandoned}, nil).Once()
 
 	// Act: Search backwards beyond the mismatching first batch.
 	err := s.checkRollback(t.Context())
 
-	// Assert: Genesis is considered and its match rewinds synchronously rather
-	// than treating an unsearched height zero as successful recovery.
-	require.NoError(t, err)
+	// Assert: The separate height-zero lookup proves genesis was searched
+	// before yielding recovery; exact calls reject skipping the ancestor.
+	require.ErrorIs(t, err, ErrStateChanged)
 	store.AssertExpectations(t)
 	client.AssertExpectations(t)
 }
@@ -6699,33 +6727,6 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// TestRewindToBlockRoutesStore verifies the store rewind path issues a single
-// atomic RollbackToBlock for the rollback boundary, which rewinds the wallet
-// sync tip and rolls transaction state back together, rather than two
-// independent sync-tip and rollback writes.
-func TestRewindToBlockRoutesStore(t *testing.T) {
-	t.Parallel()
-
-	store := &walletmock.Store{}
-	s := newTestSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
-	s.store = store
-	s.walletID = 99
-
-	fork := waddrmgr.BlockStamp{
-		Hash:      chainhash.Hash{99},
-		Height:    100,
-		Timestamp: time.Unix(1710003900, 0),
-	}
-
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(101),
-	).Return(nil).Once()
-
-	err := s.rewindToBlock(t.Context(), fork)
-	require.NoError(t, err)
-	store.AssertExpectations(t)
-}
-
 // TestScanWithRewindRoutesStoreRewind verifies manual rescans route through
 // the wallet-scoped Store rewind API when Store-backed sync reads are enabled.
 func TestScanWithRewindRoutesStoreRewind(t *testing.T) {
@@ -7667,10 +7668,9 @@ func TestAdvanceChainSync_LargeGap(t *testing.T) {
 	require.Equal(t, uint32(syncStateSyncing), s.state.Load())
 }
 
-// TestCheckRollbackStoreSyncedTip verifies a Store tip above a shorter backend
-// tip compares only the available prefix and synchronously rewinds to that
-// matching backend tip. This guards against above-tip hash requests while
-// retaining the Store as the tip source: the legacy addrStore is nil.
+// TestCheckRollbackStoreSyncedTip verifies a Store tip within a shorter
+// backend's last comparison batch requests only the available hash prefix.
+// The absent legacy manager ensures the Store supplies its checkpoint.
 func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	t.Parallel()
 
@@ -7726,20 +7726,20 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	header := &wire.BlockHeader{Timestamp: time.Unix(95, 0).UTC()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// The rollback is written atomically through the Store to the fork
-	// height plus one (96). RollbackToBlock derives the new sync tip from
-	// the stored fork-point block, so the caller only supplies the rollback
-	// boundary.
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
-	).Return(nil).Once()
+	// The worker loads immutable evidence rather than changing shared state;
+	// the strict mock forbids bypassing Manager's writer pause barrier.
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 96,
+		EndHeight:   96,
+	}).Return(localBlocks[5:6], nil).Once()
 
-	// Act: Check the saved tip against the shorter current branch.
+	// Act: Detect the reorg using the Store's checkpoint with no legacy
+	// address manager available to supply an alternative synchronization tip.
 	err := s.checkRollback(t.Context())
 
-	// Assert: Recovery synchronously rewinds to the matching backend tip
-	// through Store, without an above-tip RPC or legacy metadata read.
-	require.NoError(t, err)
+	// Assert: With no legacy manager, strict calls prove comparison uses
+	// the Store checkpoint and only the backend's available hash prefix.
+	require.ErrorIs(t, err, ErrStateChanged)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
 }
@@ -8401,10 +8401,16 @@ func TestScanBatchAncestry(t *testing.T) {
 	// a replacement tip that hides the old transaction's detached block.
 	finished, err := s.advanceChainSync(t.Context())
 
-	// Assert: Public Wallet state still exposes the fork point and a detached
-	// transaction before any new branch can overwrite the fork evidence.
-	require.NoError(t, err)
+	// Assert: The worker yields recovery to Manager. Observe its committed
+	// fork point before retrying, so no direct shared write can satisfy this
+	// regression while skipping the owner's writer pause barrier.
+	require.ErrorIs(t, err, ErrStateChanged)
 	require.False(t, finished)
+	require.Eventually(t, func() bool {
+		current, readErr := w.store.GetWallet(t.Context(), w.cfg.Name)
+		return readErr == nil && current.SyncedTo.Height == 0
+	}, time.Second, time.Millisecond)
+
 	info, err := w.Info(t.Context())
 	require.NoError(t, err)
 	require.EqualValues(t, 0, info.SyncedTo.Height)
@@ -8484,8 +8490,9 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 			// in both rows; fixture cleanup verifies each expectation once.
 			w, deps := createStartedWalletWithMocks(t)
 			s := newSyncer(
-				w.cfg, w.addrStore, w.txStore, w,
-				deps.store, w.id, w.chainSyncer, w.chainEventChan,
+				w.cfg, w.addrStore, w.txStore, w, deps.store, w.id,
+				w.chainSyncer,
+				w.chainEventChan, make(chan db.Block, 1),
 			)
 			events, _, err := w.SubscribeTxns(t.Context())
 			require.NoError(t, err)
@@ -8543,8 +8550,9 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	// any unexpected notification read fails through the existing Store mock.
 	w, deps := createStartedWalletWithMocks(t)
 	s := newSyncer(
-		w.cfg, w.addrStore, w.txStore, w,
-		deps.store, w.id, w.chainSyncer, w.chainEventChan,
+		w.cfg, w.addrStore, w.txStore, w, deps.store, w.id,
+		w.chainSyncer,
+		w.chainEventChan, make(chan db.Block, 1),
 	)
 	events, _, err := w.SubscribeTxns(t.Context())
 	require.NoError(t, err)

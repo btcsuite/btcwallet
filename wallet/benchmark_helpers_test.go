@@ -330,8 +330,8 @@ func setupBenchmarkWallet(tb testing.TB,
 
 	if w.sync == nil {
 		w.sync = newSyncer(
-			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
-			w.chainSyncer, w.chainEventChan,
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id, w.chainSyncer,
+			w.chainEventChan, make(chan db.Block, 1),
 		)
 	}
 

@@ -297,6 +297,9 @@ type syncer struct {
 	// processor; every maintained Wallet receives its Manager's instance.
 	chainSyncer    chainRouter
 	chainEventChan <-chan chainEvent
+
+	// recoveryRequests offers evidence without waiting for its own pause.
+	recoveryRequests chan<- db.Block
 }
 
 // A compile-time assertion to ensure that syncer implements chainProcessor.
@@ -343,18 +346,19 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
 	walletID uint32, chainSyncer chainRouter,
-	events <-chan chainEvent) *syncer {
+	events <-chan chainEvent, recoveryRequests chan<- db.Block) *syncer {
 
 	return &syncer{
-		cfg:            cfg,
-		addrStore:      addrStore,
-		txStore:        txStore,
-		scanReqChan:    make(chan *scanReq, 1),
-		txManager:      txManager,
-		store:          store,
-		walletID:       walletID,
-		chainSyncer:    chainSyncer,
-		chainEventChan: events,
+		cfg:              cfg,
+		addrStore:        addrStore,
+		txStore:          txStore,
+		scanReqChan:      make(chan *scanReq, 1),
+		txManager:        txManager,
+		store:            store,
+		walletID:         walletID,
+		chainSyncer:      chainSyncer,
+		chainEventChan:   events,
+		recoveryRequests: recoveryRequests,
 	}
 }
 
@@ -473,7 +477,7 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 
 // checkRollback ensures the wallet is synchronized with the current chain tip.
 // It checks if the wallet's synced tip is still on the main chain, and if not,
-// rewinds the wallet state to the common ancestor.
+// reports a shared recovery hint and yields from the current attempt.
 // If no recorded ancestor is found for a non-genesis tip, it returns
 // db.ErrBlockNotFound without rewinding.
 func (s *syncer) checkRollback(ctx context.Context) error {
@@ -510,10 +514,10 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 }
 
 // checkRollbackBatch compares one recorded range within the remote tip;
-// a common ancestor is rewound synchronously through the existing Store.
+// a common ancestor is handed to Manager for ordered shared recovery.
 // With done false, it returns the next end height and a nil error; -1 marks
 // exhausted history. With done true, the error is the final outcome: nil for
-// a confirmed tip or successful rewind, otherwise the read or rewind failure.
+// a confirmed tip, otherwise a read failure or recovery handoff.
 func (s *syncer) checkRollbackBatch(ctx context.Context,
 	syncedTo waddrmgr.BlockStamp, endHeight int32) (int32, bool, error) {
 
@@ -575,7 +579,7 @@ func (s *syncer) checkRollbackBatch(ctx context.Context,
 		return 0, true, fmt.Errorf("get fork header: %w", err)
 	}
 
-	return 0, true, s.rewindToBlock(ctx, waddrmgr.BlockStamp{
+	return 0, true, s.reportFork(ctx, waddrmgr.BlockStamp{
 		Height:    forkHeight,
 		Hash:      *forkHash,
 		Timestamp: header.Timestamp,
@@ -603,9 +607,9 @@ func (s *syncer) resolveMissingHistoricalBlock(listErr error,
 	return listErr
 }
 
-// rewindToBlock rewinds wallet sync and transaction state to the given fork
-// point.
-func (s *syncer) rewindToBlock(ctx context.Context,
+// reportFork offers the first abandoned identity to Manager, then yields.
+// Manager pauses shared writers; this worker retries from committed history.
+func (s *syncer) reportFork(ctx context.Context,
 	block waddrmgr.BlockStamp) error {
 
 	rollbackBoundary := int64(block.Height) + 1
@@ -615,17 +619,29 @@ func (s *syncer) rewindToBlock(ctx context.Context,
 		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
 	}
 
-	// Roll transaction state back and rewind the wallet sync tip to the same
-	// fork point in one atomic store call so a failure cannot leave the sync
-	// tip rewound while transaction state still references the abandoned
-	// chain. RollbackToBlock derives the new sync tip from the stored
-	// fork-point block, so the caller only supplies the rollback boundary.
-	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	// Exact-height Store reads return one identity or ErrBlockNotFound.
+	blocks, err := s.store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		StartHeight: rollbackHeight,
+		EndHeight:   rollbackHeight,
+	})
 	if err != nil {
-		return fmt.Errorf("rollback to block: %w", err)
+		return fmt.Errorf("read recovery boundary: %w", err)
 	}
 
-	return nil
+	s.offerRecoveryHint(ctx, blocks[0])
+
+	return ErrStateChanged
+}
+
+// offerRecoveryHint coalesces evidence without waiting for its own pause.
+func (s *syncer) offerRecoveryHint(ctx context.Context, block db.Block) {
+	// Manager may be blocked delivering to this very worker. A full slot
+	// already holds evidence; the normal retry rereads any remaining fork.
+	select {
+	case s.recoveryRequests <- block:
+	case <-ctx.Done():
+	default:
+	}
 }
 
 // rewindWallet rewinds this wallet's sync and transaction state for a manual

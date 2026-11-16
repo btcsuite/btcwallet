@@ -295,6 +295,7 @@ func TestManagerChainRollbackStopsOnError(t *testing.T) {
 			processor := newSyncer(
 				w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
 				m.chainSyncer, events,
+				m.recoveryRequests,
 			)
 
 			processed := make(chan error, 1)
@@ -374,8 +375,8 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		w.cfg.WalletSyncRetryInterval = time.Hour
 		w.id = 1
 		processor := newSyncer(
-			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
-			w.chainSyncer, w.chainEventChan,
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id, w.chainSyncer,
+			w.chainEventChan, make(chan db.Block, 1),
 		)
 		w.sync = processor
 		w.state = newWalletState(processor)
