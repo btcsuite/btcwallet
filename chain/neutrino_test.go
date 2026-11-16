@@ -142,46 +142,89 @@ func TestNeutrinoClientSequentialStartStop(t *testing.T) {
 	}
 }
 
-// TestNeutrinoClientNotifyReceived verifies that a call to NotifyReceived sets
-// the client into the scanning state and that subsequent calls while scanning
-// will call Update on the client's Rescanner.
+// TestNeutrinoClientNotifyReceived verifies live watch updates preserve the
+// birthday selected before the native scan starts, including concurrent hints.
 func TestNeutrinoClientNotifyReceived(t *testing.T) {
-	var (
-		nc                      = newMockNeutrinoClient()
-		wantNotifyReceivedCalls = 50
-		wantUpdateCalls         = wantNotifyReceivedCalls - 1
-	)
+	// Arrange: Activate the native scan with an early birthday, then route
+	// callbacks through its existing notification channels without a service
+	// worker. A block between the two birthdays exposes any later mutation.
+	const eventCount = 50
 
-	// executeCalls calls NotifyReceived() synchronously n times without
-	// blocking the test and requires no error after each call.
-	executeCalls := func(n int) <-chan struct{} {
-		done := make(chan struct{})
+	nc := newMockNeutrinoClient()
+	notifications := make(chan interface{}, eventCount)
+	nc.enqueueNotification = notifications
+	nc.dequeueNotification = notifications
+	birthday := time.Unix(100, 0)
+	laterBirthday := time.Unix(300, 0)
+	blockTime := time.Unix(200, 0)
 
-		go func() {
-			defer close(done)
+	nc.SetStartTime(birthday)
+	require.NoError(t, nc.NotifyReceived(nil))
 
-			var addrs []address.Address
-			for i := 0; i < n; i++ {
-				err := nc.NotifyReceived(addrs)
-				require.NoError(t, err)
+	service, ok := nc.CS.(*mockChainService)
+	require.True(t, ok)
+
+	service.On("BestBlock").Return(testBestBlock, nil).Times(eventCount)
+
+	start := make(chan struct{})
+	updates := make(chan error, 1)
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+
+	// Act: Later readiness and retry hints overlap native callbacks while
+	// repeated address registration must reuse the already active scan.
+	// Offer a later hint first so the delivery assertion is deterministic
+	// even if the scheduler runs the callbacks before the remaining updates.
+	nc.SetStartTime(laterBirthday)
+
+	go func() {
+		defer workers.Done()
+
+		<-start
+
+		for range eventCount - 1 {
+			nc.SetStartTime(laterBirthday)
+
+			err := nc.NotifyReceived(nil)
+			if err != nil {
+				updates <- err
+				return
 			}
-		}()
+		}
 
-		return done
+		updates <- nil
+	}()
+	go func() {
+		defer workers.Done()
+
+		<-start
+
+		for range eventCount {
+			nc.onBlockConnected(&chainhash.Hash{}, 1, blockTime)
+		}
+	}()
+
+	close(start)
+	workers.Wait()
+
+	// Assert: The original birthday still permits every block notification,
+	// and all later registrations extend the same rescan. Join both paths
+	// before reading outputs or verifying exact dependency expectations.
+	require.NoError(t, <-updates)
+	require.Len(t, notifications, eventCount)
+
+	for range eventCount {
+		event, ok := (<-nc.Notifications()).(BlockConnected)
+		require.True(t, ok)
+		require.Equal(t, int32(1), event.Height)
+		require.Equal(t, blockTime, event.Time)
 	}
 
-	// Wait for all calls to complete or test to time out.
-	timeout := time.After(maxDur)
-	select {
-	case <-timeout:
-		t.Fatal("timed out")
-	case <-executeCalls(wantNotifyReceivedCalls):
-		// Require that the expected number of calls to Update were made
-		// once done sending all NotifyReceived calls.
-		mockRescan := nc.rescan.(*mockRescanner)
-		gotUpdateCalls := mockRescan.updateArgs.Len()
-		require.Equal(t, wantUpdateCalls, gotUpdateCalls)
-	}
+	rescan, ok := nc.rescan.(*mockRescanner)
+	require.True(t, ok)
+	require.Equal(t, eventCount-1, rescan.updateArgs.Len())
+	service.AssertExpectations(t)
 }
 
 // TestNeutrinoClientNotifyReceivedRescan verifies concurrent calls to
