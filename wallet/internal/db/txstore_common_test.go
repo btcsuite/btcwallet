@@ -743,8 +743,6 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 		},
 	).Once()
 
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
-
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
 
@@ -799,8 +797,6 @@ func TestCreateTxWithOpsCoinbaseSkipsInputFacts(t *testing.T) {
 
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).
 		Return(nil).Once()
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
-
 	ops.On(
 		"DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash,
@@ -863,8 +859,6 @@ func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	ops.On("GetInputValidity", mock.Anything, req).
 		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
-
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
@@ -1037,8 +1031,6 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
 
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
-
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
 
@@ -1090,9 +1082,6 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(5)).Return(
 		[]UnminedTxRecord(nil), nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(5), int64(5)).Return(nil).
-		Once()
-
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(5), []int64{5}).Return(nil).
 		Once()
 
@@ -1104,8 +1093,6 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	ops.On("GetInputValidity", mock.Anything, req).
 		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
-
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
@@ -1300,15 +1287,6 @@ func (m *mockCreateTxOps) ListUnminedTxRecords(ctx context.Context,
 	return records, args.Error(1)
 }
 
-// ClearSpentUtxos implements InvalidateUnminedTxOps.
-func (m *mockCreateTxOps) ClearSpentUtxos(ctx context.Context, walletID int64,
-	txID int64) error {
-
-	args := m.Called(ctx, walletID, txID)
-
-	return args.Error(0)
-}
-
 // MarkTxnsFailed implements InvalidateUnminedTxOps.
 func (m *mockCreateTxOps) MarkTxnsFailed(ctx context.Context, walletID int64,
 	txIDs []int64) error {
@@ -1371,15 +1349,6 @@ func (m *mockCreateTxOps) GetInputValidity(ctx context.Context,
 
 // InsertCredits implements CreateTxOps.
 func (m *mockCreateTxOps) InsertCredits(ctx context.Context,
-	req CreateTxRequest, txID int64) error {
-
-	args := m.Called(ctx, req, txID)
-
-	return args.Error(0)
-}
-
-// MarkInputsSpent implements CreateTxOps.
-func (m *mockCreateTxOps) MarkInputsSpent(ctx context.Context,
 	req CreateTxRequest, txID int64) error {
 
 	args := m.Called(ctx, req, txID)
@@ -1655,6 +1624,9 @@ func TestCollectConflictDescendants(t *testing.T) {
 func TestHandleTxConflicts(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Model one confirmed winner with a losing root and two dependent
+	// generations.
+
 	rootHash := chainhash.Hash{1}
 	childHash := chainhash.Hash{2}
 	grandchildHash := chainhash.Hash{3}
@@ -1693,25 +1665,22 @@ func TestHandleTxConflicts(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		candidates, nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
-		Once()
-
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(nil).
 		Once()
 
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1},
 		int64(9)).Return(nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
-		Once()
-
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(nil).
-		Once()
-
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{2, 3}).
 		Return(nil).Once()
 
+	// Act: Handle the confirming transaction and try to mark its
+	// unconfirmed competitors Replaced.
 	err = handleTxConflicts(t.Context(), req, 9, ops)
+
+	// Assert: Root replacement and descendant invalidation use their distinct
+	// status writes.
+	// The fixture cleanup verifies each required adapter call once.
 	require.NoError(t, err)
 }
 
@@ -1720,6 +1689,9 @@ func TestHandleTxConflicts(t *testing.T) {
 // root and would otherwise appear in the descendant walk.
 func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 	t.Parallel()
+
+	// Arrange: Model two direct peers that also depend on each other and one
+	// further child.
 
 	rootAHash := chainhash.Hash{1}
 	rootBHash := chainhash.Hash{2}
@@ -1759,20 +1731,20 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 			}}},
 		}}, nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
-		Once()
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
-		Once()
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1, 2}).
 		Return(nil).Once()
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1, 2},
 		int64(9)).Return(nil).Once()
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(nil).
-		Once()
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{3}).Return(nil).
 		Once()
 
+	// Act: Handle the confirming transaction and try to mark its
+	// unconfirmed competitors Replaced.
 	err = handleTxConflicts(t.Context(), req, 9, ops)
+
+	// Assert: Direct peers remain Replaced while only the further child becomes
+	// Failed.
+	// The fixture cleanup verifies each required adapter call once.
 	require.NoError(t, err)
 }
 
@@ -1781,6 +1753,7 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 func TestHandleTxConflictsNoDescendants(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Model one direct peer with no dependent branch in the snapshot.
 	req, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 7,
 		Tx:       testRegularMsgTx(),
@@ -1802,14 +1775,17 @@ func TestHandleTxConflictsNoDescendants(t *testing.T) {
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		[]UnminedTxRecord(nil), nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
-		Once()
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(nil).
 		Once()
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1},
 		int64(9)).Return(nil).Once()
 
+	// Act: Handle the confirming transaction and try to mark its
+	// unconfirmed competitors Replaced.
 	err = handleTxConflicts(t.Context(), req, 9, ops)
+
+	// Assert: The root is replaced without any descendant status update.
+	// The fixture cleanup verifies each required adapter call once.
 	require.NoError(t, err)
 }
 
@@ -1817,6 +1793,9 @@ func TestHandleTxConflictsNoDescendants(t *testing.T) {
 // replacement edges before returning descendant failure errors.
 func TestHandleTxConflictsMarkFailedError(t *testing.T) {
 	t.Parallel()
+
+	// Arrange: Model a confirmed winner and a descendant status write that
+	// fails.
 
 	req, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 7,
@@ -1848,18 +1827,19 @@ func TestHandleTxConflictsMarkFailedError(t *testing.T) {
 			}}},
 		}}, nil).Once()
 
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
-		Once()
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(nil).
 		Once()
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1},
 		int64(9)).Return(nil).Once()
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
-		Once()
 	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{2}).Return(
 		errConflictMarkFailed).Once()
 
+	// Act: Handle the confirming transaction and try to mark its
+	// unconfirmed competitors Replaced.
 	err = handleTxConflicts(t.Context(), req, 9, ops)
+
+	// Assert: The descendant failure retains its cause and replacement context.
+	// The fixture cleanup verifies each required adapter call once.
 	require.ErrorIs(t, err, errConflictMarkFailed)
 	require.ErrorContains(t, err, "mark conflict descendants failed")
 }
@@ -2245,29 +2225,12 @@ func TestLoadCreateTxExisting(t *testing.T) {
 	require.ErrorContains(t, loadErr, "load create tx target")
 }
 
-// TestHandleRootTxnsClearError verifies that root spend-clearing failures are
-// returned before the helper mutates any later replacement state.
-func TestHandleRootTxnsClearError(t *testing.T) {
-	t.Parallel()
-
-	ops := &mockCreateTxOps{}
-	t.Cleanup(func() {
-		ops.AssertExpectations(t)
-	})
-
-	ops.On("ClearSpentUtxos", mock.Anything, int64(9), int64(1)).Return(
-		errCreateTxTest).Once()
-
-	err := handleRootTxns(context.Background(), 9, []int64{1}, 11, ops)
-	require.ErrorIs(t, err, errCreateTxTest)
-	require.ErrorContains(t, err, "clear replaced root spent utxos")
-}
-
 // TestHandleTxConflictsEdgeError verifies that replacement edge writes are
 // wrapped after the branch state has been updated.
 func TestHandleTxConflictsEdgeError(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Model one direct peer whose replacement-history write fails.
 	req, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 7,
 		Tx:       testRegularMsgTx(),
@@ -2287,16 +2250,19 @@ func TestHandleTxConflictsEdgeError(t *testing.T) {
 	).Once()
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		[]UnminedTxRecord(nil), nil).Once()
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
-		nil,
-	).Once()
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(
 		nil,
 	).Once()
 	ops.On("InsertReplacementEdges", mock.Anything, int64(7), []int64{1},
 		int64(9)).Return(errCreateTxTest).Once()
 
+	// Act: Handle the confirming transaction and try to mark its
+	// unconfirmed competitors Replaced.
 	err = handleTxConflicts(context.Background(), req, 9, ops)
+
+	// Assert: The edge failure is returned after the required root status
+	// update.
+	// The fixture cleanup verifies each required adapter call once.
 	require.ErrorIs(t, err, errCreateTxTest)
 	require.ErrorContains(t, err, "record conflict replacement edges")
 }
@@ -2336,6 +2302,7 @@ func TestHandleTxConflictsListError(t *testing.T) {
 func TestHandleTxConflictsMarkReplacedError(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Model one direct peer whose root status write fails.
 	req, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 7,
 		Tx:       testRegularMsgTx(),
@@ -2355,13 +2322,15 @@ func TestHandleTxConflictsMarkReplacedError(t *testing.T) {
 	).Once()
 	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		[]UnminedTxRecord(nil), nil).Once()
-	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
-		nil,
-	).Once()
 	ops.On("MarkTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(
 		errCreateTxTest).Once()
 
+	// Act: Handle the confirming transaction and try to mark its
+	// unconfirmed competitors Replaced.
 	err = handleTxConflicts(context.Background(), req, 9, ops)
+
+	// Assert: A failure to mark those transactions Replaced prevents any
+	// replacement-history write. Fixture cleanup checks required calls once.
 	require.ErrorIs(t, err, errCreateTxTest)
 	require.ErrorContains(t, err, "mark direct conflicts replaced")
 }

@@ -3,7 +3,6 @@ package sqlite
 import (
 	"database/sql"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -20,10 +19,7 @@ func TestDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	deleteOps := deleteTxOps{qtx: qtx}
 	rollbackOps := rollbackToBlockOps{qtx: qtx}
 
-	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear spent utxo rows")
-
-	err = deleteOps.DeleteCreatedUtxos(t.Context(), 1, 2)
+	err := deleteOps.DeleteCreatedUtxos(t.Context(), 1, 2)
 	require.ErrorContains(t, err, "delete created utxo rows")
 
 	_, err = deleteOps.DeleteUnminedTransaction(
@@ -33,9 +29,6 @@ func TestDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 
 	_, err = rollbackOps.ListUnminedTxRecords(t.Context(), 1)
 	require.ErrorContains(t, err, "list unmined txns")
-
-	err = rollbackOps.ClearDescendantSpends(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear descendant spends")
 
 	err = rollbackOps.MarkDescendantsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark descendants failed")
@@ -60,19 +53,8 @@ func TestTxStoreOpsWrapBackendErrors(t *testing.T) {
 	err = createOps.InsertReplacementEdges(t.Context(), 1, []int64{2}, 3)
 	require.ErrorContains(t, err, "insert replacement edge")
 
-	err = markInputsSpent(t.Context(), qtx, db.CreateTxParams{
-		WalletID: 1,
-		Tx:       testRegularMsgTx(),
-		Received: time.Unix(1, 0),
-		Status:   db.TxStatusPending,
-	}, 7)
-	require.ErrorContains(t, err, "mark spent input 0")
-
 	_, err = invalidateOps.ListUnminedTxRecords(t.Context(), 1)
 	require.ErrorContains(t, err, "list unmined txns")
-
-	err = invalidateOps.ClearSpentUtxos(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear spent utxos")
 
 	err = invalidateOps.MarkTxnsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark txns failed")

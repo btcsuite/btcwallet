@@ -979,9 +979,9 @@ func TestAddTxToWallet(t *testing.T) {
 // spendsWalletOutput must therefore derive wallet relevance from the parent's
 // owned outputs, not from current-UTXO membership, and report the spend as
 // ours. That is what keeps addTxToWallet from taking its wallet-unrelated
-// early-out: the tx is instead recorded, and for SQL backends the store-level
-// CreateTx / MarkInputsSpent path then arbitrates the double-spend before it
-// can broadcast unrecorded.
+// early-out: the transaction and its input facts are recorded before a
+// broadcast attempt, even when it creates no wallet change. SQL can then
+// identify its competing spend without requiring a current parent UTXO.
 func TestSpendsWalletOutputConflictingNoChangeSpend(t *testing.T) {
 	t.Parallel()
 
