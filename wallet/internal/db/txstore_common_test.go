@@ -1346,6 +1346,16 @@ func (m *mockCreateTxOps) InsertInputs(ctx context.Context,
 	return args.Error(0)
 }
 
+// GetInputValidity returns arranged invalid-parent and confirmed-spend facts
+// so workflow tests reuse the same backend-independent query contract.
+func (m *mockCreateTxOps) GetInputValidity(ctx context.Context,
+	req CreateTxRequest) (bool, bool, error) {
+
+	args := m.Called(ctx, req)
+
+	return args.Bool(0), args.Bool(1), args.Error(2)
+}
+
 // InsertCredits implements CreateTxOps.
 func (m *mockCreateTxOps) InsertCredits(ctx context.Context,
 	req CreateTxRequest, txID int64) error {
