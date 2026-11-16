@@ -9005,3 +9005,84 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	require.Len(t, history, 1)
 	require.Equal(t, coinbase.Hash, history[0].Hash)
 }
+
+// TestSyncerRunInitCommitUncertainty preserves an unknown native write during
+// backend initialization even when its adapter error wraps cancellation.
+func TestSyncerRunInitCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Keep the backend behind and queue one real observation.
+		// The runnable mailbox precedes polling, so its ambiguous Store write
+		// must end initialization before another backend check or retry.
+		client := &bwmock.Chain{}
+		store := &walletmock.Store{}
+		s := newTestSyncer(Config{Chain: client}, nil, nil, nil, store, 0)
+		record, err := wtxmgr.NewTxRecordFromMsgTx(
+			subscriptionTx([]byte{txscript.OP_TRUE}, 423), time.Now(),
+		)
+		require.NoError(t, err)
+
+		client.On("IsCurrent").Return(false).Once()
+		store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+			Return(&dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			}).Once()
+
+		events := make(chan chainEvent, 1)
+		s.chainEventChan = events
+
+		events <- chainEvent{
+			notification: chain.RelevantTx{TxRecord: record},
+			matches:      liveMatches(record),
+		}
+
+		// Act: Run the actual initialization and retry owner with a live
+		// context, leaving error classification to the production path.
+		err = s.run(t.Context())
+
+		// Assert: The unknown write escapes as indeterminate, rather than
+		// successful cancellation or a retry; verify each required call once.
+		require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+		client.AssertExpectations(t)
+		store.AssertExpectations(t)
+	})
+}
+
+// TestSyncerBackoffCommitUncertainty stops retry waiting after unknown effects.
+func TestSyncerBackoffCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Queue an actual write while only the retry mailbox can run.
+	// Its live context prevents wrapped cancellation from hiding uncertainty.
+	store := &walletmock.Store{}
+	s := newTestSyncer(Config{}, nil, nil, nil, store, 0)
+	record, err := wtxmgr.NewTxRecordFromMsgTx(
+		subscriptionTx([]byte{txscript.OP_TRUE}, 423), time.Now(),
+	)
+	require.NoError(t, err)
+	store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Return(&dbruntime.AmbiguousTxCommitError{
+			Err: context.Canceled,
+		}).Once()
+
+	events := make(chan chainEvent, 1)
+
+	s.chainEventChan = events
+	events <- chainEvent{
+		notification: chain.RelevantTx{TxRecord: record},
+		matches:      liveMatches(record),
+	}
+
+	// Act: Keep the retry timer blocked so only the mailbox write can exit.
+	_, err = s.waitForBackoff(
+		t.Context(), time.Now(), time.Hour,
+		func(time.Duration) <-chan time.Time { return make(chan time.Time) },
+	)
+
+	// Assert: The failure escapes before another attempt or a second write.
+	require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+	store.AssertExpectations(t)
+}

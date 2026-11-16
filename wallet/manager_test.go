@@ -3760,3 +3760,59 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	require.Nil(t, orphan.Block)
 	require.Len(t, orphan.OwnedOutputs, 1)
 }
+
+// TestManagerWorkerFailureStops joins workers after blocked delivery is woken.
+func TestManagerWorkerFailureStops(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Keep the real Wallet worker alive without draining its
+		// mailbox, and let the third header expose blocked Manager delivery.
+		w, deps := createTestWalletWithMocks(t)
+		failWorker := make(chan struct{})
+		deps.syncer.On("run", mock.Anything).Run(func(mock.Arguments) {
+			<-failWorker
+		}).Return(&dbruntime.AmbiguousTxCommitError{
+			Err: errDBMock,
+		}).Once()
+		vaultLock := deps.vault.On("Lock").Return().Once()
+		notifications := make(chan any, 3)
+		backend := &managerBackendMock{}
+		backend.On("close").Return(nil).Once().NotBefore(vaultLock)
+
+		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(notifications)).Once()
+		manager := newManagerLifecycleTest(t, backend, source)
+		manager.wallets[w.cfg.Name] = w
+		manager.started.Store(true)
+		w.reportFailure = manager.cancel
+		startLoadedWalletForTest(t, w)
+		manager.wg.Go(manager.mainLoop)
+		w.wg.Go(w.runSyncLoop)
+
+		for height := int32(1); height <= 3; height++ {
+			notifications <- chain.BlockConnected{
+				Block: wtxmgr.Block{Height: height},
+			}
+		}
+
+		synctest.Wait()
+		require.Len(t, notifications, 1)
+		require.Len(t, w.chainEventChan, 1)
+
+		// Act: Report the terminal worker result while Manager cannot read
+		// another input. No public Stop is allowed to rescue this shutdown.
+		close(failWorker)
+		manager.wg.Wait()
+
+		// Assert: The worker's cause survives canceled delivery; the Wallet
+		// is joined before the single backend close, checked by the fixture.
+		require.ErrorIs(t, context.Cause(manager.lifetimeCtx),
+			db.ErrIndeterminateCommit)
+		require.Equal(t, lifecycleStopped,
+			lifecycle(w.state.lifecycle.Load()))
+		require.ErrorIs(t, manager.Stop(), ErrManagerStopped)
+	})
+}
