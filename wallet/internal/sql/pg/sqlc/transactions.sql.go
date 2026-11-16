@@ -275,62 +275,6 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 	return id, err
 }
 
-const ListActiveTransactionRaws = `-- name: ListActiveTransactionRaws :many
-SELECT
-    t.id,
-    t.tx_hash,
-    t.block_height,
-    t.raw_tx
-FROM transactions AS t
-WHERE
-    t.wallet_id = $1
-    AND t.tx_status IN (0, 1)
-ORDER BY t.id
-`
-
-type ListActiveTransactionRawsRow struct {
-	ID          int64
-	TxHash      []byte
-	BlockHeight sql.NullInt32
-	RawTx       []byte
-}
-
-// Lists active wallet transaction rows and their raw transaction bytes.
-//
-// How:
-//   - Reads from transactions only and filters to rows that may currently spend
-//     wallet-owned outputs (`pending` and `published`).
-//   - Returns the primary key, transaction hash, block assignment, and raw
-//     transaction bytes so callers can rebuild input outpoints not normalized in
-//     the SQL schema.
-//
-// Performance:
-// - Matches the wallet/status index used by active wallet history paths.
-func (q *Queries) ListActiveTransactionRaws(ctx context.Context, walletID int64) ([]ListActiveTransactionRawsRow, error) {
-	rows, err := q.db.Query(ctx, ListActiveTransactionRaws, walletID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListActiveTransactionRawsRow
-	for rows.Next() {
-		var i ListActiveTransactionRawsRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.TxHash,
-			&i.BlockHeight,
-			&i.RawTx,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const ListOwnedInputPrevOutputsByTxHashes = `-- name: ListOwnedInputPrevOutputsByTxHashes :many
 SELECT
     t.tx_hash,
@@ -364,8 +308,8 @@ type ListOwnedInputPrevOutputsByTxHashesRow struct {
 //   - Resolves previous transaction hashes to this wallet's tracked UTXO rows.
 //   - Rejoins addresses so debit reconstruction does not depend only on
 //     transaction wallet scope.
-//   - Does not read `spent_by_tx_id` because invalidation and rollback can clear
-//     that mutable edge while the historical spending transaction still exists.
+//   - Reconstructs debit ownership from recorded credits, including credits
+//     whose spenders or creating transactions are no longer eligible.
 //
 // Performance:
 //   - Uses one batched transaction-hash lookup, then the UTXO tx-id index for the
