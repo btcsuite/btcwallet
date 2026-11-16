@@ -11,8 +11,8 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
-// DeleteTx atomically removes one unmined transaction and restores any wallet
-// UTXO rows that it had spent.
+// DeleteTx atomically removes one unmined transaction. Its spent wallet outputs
+// become available only if no other eligible transaction still claims them.
 //
 // DeleteTx is limited to unmined pending/published rows; confirmed rows and
 // terminal invalid-history rows remain part of the wallet timeline. The

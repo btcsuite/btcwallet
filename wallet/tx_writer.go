@@ -43,7 +43,8 @@ type TxWriter interface {
 	LabelTx(ctx context.Context, hash chainhash.Hash, label string) error
 
 	// DeleteUnconfirmedTx removes an unconfirmed tx and every recorded tx
-	// that spends it, restoring the wallet outputs they spent. It returns
+	// that spends it. Outputs they spent become available only if no other
+	// eligible transaction still claims them. It returns
 	// ErrTxNotFound if the wallet has no active unconfirmed record of the
 	// tx, which includes a tx an earlier event already made terminal, and
 	// ErrTxNotUnconfirmed if the tx is confirmed or coinbase. A terminal tx
@@ -135,7 +136,8 @@ type deleteUnconfirmedTxReq struct {
 }
 
 // DeleteUnconfirmedTx removes an unconfirmed tx and every tx the wallet
-// recorded as spending it, and restores the wallet outputs that branch spent.
+// recorded as spending it. Outputs the branch spent become available only
+// if no other eligible transaction still claims them.
 // The removal is atomic, and no history is retained: a tx the chain later
 // confirms is recorded again by synchronization.
 //

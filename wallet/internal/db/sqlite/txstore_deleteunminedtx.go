@@ -10,7 +10,8 @@ import (
 )
 
 // DeleteUnminedTx atomically removes one wallet-owned unmined transaction
-// branch and restores the wallet outputs it spent.
+// branch. Its spent wallet outputs become available only if no other eligible
+// transaction still claims them.
 func (s *Store) DeleteUnminedTx(ctx context.Context,
 	params db.DeleteUnminedTxParams) error {
 

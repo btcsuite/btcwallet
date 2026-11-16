@@ -105,18 +105,12 @@ func loadDeletableRoot(ctx context.Context, params DeleteUnminedTxParams,
 	return target, nil
 }
 
-// deleteUnminedBranchMember removes one member of an unmined branch. Its spend
-// edges are cleared before its row goes: the schema uses ON DELETE RESTRICT, so
-// a transaction another row still points at cannot be dropped.
+// deleteUnminedBranchMember removes one member's credits before its history.
+// Cascading input deletion releases only this member's claims, not its peers'.
 func deleteUnminedBranchMember(ctx context.Context, walletID uint32,
 	txID int64, txHash chainhash.Hash, ops DeleteUnminedTxOps) error {
 
-	err := ops.ClearSpentUtxos(ctx, int64(walletID), txID)
-	if err != nil {
-		return fmt.Errorf("clear spent utxos: %w", err)
-	}
-
-	err = ops.DeleteCreatedUtxos(ctx, walletID, txID)
+	err := ops.DeleteCreatedUtxos(ctx, walletID, txID)
 	if err != nil {
 		return fmt.Errorf("delete created utxos: %w", err)
 	}

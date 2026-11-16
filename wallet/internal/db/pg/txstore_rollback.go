@@ -278,7 +278,7 @@ func (o rollbackToBlockOps) ClearDescendantSpends(
 }
 
 // MarkDescendantsFailed batch-marks the collected rollback descendants as
-// failed once every dependent spend edge has been cleared.
+// failed while retaining their input facts for history.
 func (o rollbackToBlockOps) MarkDescendantsFailed(
 	ctx context.Context, walletID int64, descendantIDs []int64) error {
 

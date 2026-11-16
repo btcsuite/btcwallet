@@ -34,8 +34,7 @@ type InvalidateUnminedTxTarget struct {
 }
 
 // UnminedBranchOps is the branch discovery the unmined branch workflows share:
-// it loads the requested root, loads the rows the descendant walk considers,
-// and clears one row's wallet-owned spend edges.
+// it loads the requested root and the rows the descendant walk considers.
 type UnminedBranchOps interface {
 	// LoadUnminedTxTarget loads the wallet-scoped root tx metadata.
 	LoadUnminedTxTarget(ctx context.Context, walletID uint32,
@@ -47,10 +46,6 @@ type UnminedBranchOps interface {
 	// made terminal.
 	ListUnminedTxRecords(ctx context.Context, walletID int64) (
 		[]UnminedTxRecord, error)
-
-	// ClearSpentUtxos restores any wallet-owned parent outputs spent by the
-	// given transaction row.
-	ClearSpentUtxos(ctx context.Context, walletID int64, txID int64) error
 }
 
 // InvalidateUnminedTxOps is the small backend adapter the shared
@@ -61,14 +56,11 @@ type UnminedBranchOps interface {
 //   - load the active unmined graph snapshot used for descendant discovery
 //   - discover every descendant that depends on the root before any mutation
 //     starts
-//   - clear wallet-owned spent-input edges for the root and every discovered
-//     descendant
 //   - mark the full invalidated branch failed in one batch update
 //
 // This sequencing keeps the invalidation event atomic and prevents a partially
-// invalid branch from retaining wallet-owned spend edges if any later step
-// fails. The backend adapters only supply query wiring and row-shape
-// conversions.
+// invalid branch from retaining eligibility if any later step fails. Backend
+// adapters only supply query wiring and row-shape conversions.
 type InvalidateUnminedTxOps interface {
 	UnminedBranchOps
 
@@ -101,11 +93,9 @@ func validateUnminedTxTarget(target InvalidateUnminedTxTarget,
 // InvalidateUnminedTxWithOps invalidates one wallet-owned unmined transaction
 // root together with any descendant branch that depends on it.
 //
-// The helper performs descendant discovery before any spend-edge or status
-// mutation begins. It then clears the root spend, clears descendant spends, and
-// finally marks the combined branch failed. Keeping that ordering in one shared
-// helper ensures postgres and sqlite invalidate branches with identical wallet
-// semantics.
+// Discover descendants before status changes can hide them from the walk.
+// The shared status update invalidates the branch but retains input facts;
+// both SQL backends derive the resulting availability from those facts.
 func InvalidateUnminedTxWithOps(ctx context.Context,
 	params InvalidateUnminedTxParams, ops InvalidateUnminedTxOps) error {
 
@@ -127,18 +117,6 @@ func InvalidateUnminedTxWithOps(ctx context.Context,
 	descendantIDs := CollectDescendantTxIDs(
 		[]chainhash.Hash{target.TxHash}, nil, candidates,
 	)
-
-	err = ops.ClearSpentUtxos(ctx, int64(params.WalletID), target.ID)
-	if err != nil {
-		return fmt.Errorf("clear root spent utxos: %w", err)
-	}
-
-	for _, descendantID := range descendantIDs {
-		err = ops.ClearSpentUtxos(ctx, int64(params.WalletID), descendantID)
-		if err != nil {
-			return fmt.Errorf("clear descendant spent utxos: %w", err)
-		}
-	}
 
 	failedIDs := make([]int64, 0, len(descendantIDs)+1)
 	failedIDs = append(failedIDs, target.ID)

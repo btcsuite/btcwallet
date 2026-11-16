@@ -47,11 +47,8 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 			return err
 		}
 
-		// Record any in-batch parent before its children. Each tx claims
-		// its spent parent inputs by updating the parent credit's UTXO row,
-		// so a child applied before its in-batch parent would update no row
-		// and silently drop the spend edge. Sorting parents first makes the
-		// batch order-independent; an already parents-first or
+		// Make in-batch parents available to each child's input validation,
+		// regardless of caller order. An already parents-first or
 		// dependency-free batch is returned unchanged.
 		txs := db.SortTxBatchParentsFirst(params.Transactions)
 

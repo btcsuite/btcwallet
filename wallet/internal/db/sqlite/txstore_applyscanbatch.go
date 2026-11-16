@@ -60,11 +60,9 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 			return err
 		}
 
-		// Record any in-batch parent before its children. Each tx claims
-		// its spent parent inputs by updating the parent credit's UTXO row,
-		// so a child applied before its in-batch parent would update no row
-		// and silently drop the spend edge. Sorting parents first makes the
-		// batch order-independent.
+		// Make in-batch parents available to each child's input validation,
+		// regardless of the scanner's discovery order. Outside parents keep
+		// their existing recorded or unknown-parent interpretation.
 		txs := db.SortTxBatchParentsFirst(params.Transactions)
 
 		for i := range txs {
