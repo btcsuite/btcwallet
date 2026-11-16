@@ -117,6 +117,32 @@ func (o *updateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	return nil
 }
 
+// CheckGraphState rejects status/block changes that would revive terminal
+// history or confirm/unconfirm a transaction sharing inputs with a peer.
+// CreateTx and rollback handle those changes together with competing rows;
+// this check runs before UpdateTx writes either state or label.
+func (o *updateTxOps) CheckGraphState(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) error {
+
+	needsGraph, err := o.qtx.HasTxGraphStateChange(
+		ctx, sqlc.HasTxGraphStateChangeParams{
+			WalletID:    int64(walletID),
+			TxHash:      txHash[:],
+			BlockHeight: o.blockHeight,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("check state patch input claims: %w", err)
+	}
+
+	if needsGraph {
+		return fmt.Errorf("%w: status/block change requires conflict handling",
+			db.ErrInvalidParam)
+	}
+
+	return nil
+}
+
 // UpdateState writes one block/status patch after PrepareState has validated
 // any referenced block metadata.
 func (o *updateTxOps) UpdateState(ctx context.Context, walletID uint32,
