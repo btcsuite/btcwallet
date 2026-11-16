@@ -4392,18 +4392,21 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 		addrType waddrmgr.AddressType
 		dbType   db.AddressType
 		keyScope waddrmgr.KeyScope
+		hashType txscript.SigHashType
 	}{
 		{
 			name:     "p2wkh",
 			addrType: waddrmgr.WitnessPubKey,
 			dbType:   db.WitnessPubKey,
 			keyScope: waddrmgr.KeyScopeBIP0084,
+			hashType: txscript.SigHashAll,
 		},
 		{
 			name:     "taproot",
 			addrType: waddrmgr.TaprootPubKey,
 			dbType:   db.TaprootPubKey,
 			keyScope: waddrmgr.KeyScopeBIP0086,
+			hashType: txscript.SigHashDefault,
 		},
 	}
 
@@ -4426,8 +4429,11 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 				err  error
 			)
 			if tc.addrType == waddrmgr.TaprootPubKey {
+				outputKey := txscript.ComputeTaprootKeyNoScript(
+					pubKey,
+				)
 				addr, err = address.NewAddressTaproot(
-					schnorr.SerializePubKey(pubKey),
+					schnorr.SerializePubKey(outputKey),
 					&chainParams,
 				)
 			} else {
@@ -4454,7 +4460,7 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 				Value:    1000,
 				PkScript: pkScript,
 			}
-			packet.Inputs[0].SighashType = txscript.SigHashDefault
+			packet.Inputs[0].SighashType = tc.hashType
 
 			// Arrange: Mock Store.GetAddress for ScriptForOutput
 			// with a usable derivation scope so signing routes
@@ -4532,6 +4538,151 @@ func TestFinalizePsbtErrors(t *testing.T) {
 		// Assert: Should return error from MaybeFinalizeAll.
 		require.ErrorContains(t, err, "error finalizing PSBT")
 	})
+}
+
+// testAddP2WPKHSig adds key's SIGHASH_ALL signature to a P2WPKH input, signed
+// over the given amount.
+func testAddP2WPKHSig(t *testing.T, packet *psbt.Packet, idx int,
+	key *btcec.PrivateKey, amount int64) {
+
+	t.Helper()
+
+	prevOuts, err := PsbtPrevOutputFetcher(packet)
+	require.NoError(t, err)
+
+	tx := packet.UnsignedTx
+	sig, err := txscript.RawTxInWitnessSignature(
+		tx, txscript.NewTxSigHashes(tx, prevOuts), idx, amount,
+		packet.Inputs[idx].WitnessUtxo.PkScript, txscript.SigHashAll,
+		key,
+	)
+	require.NoError(t, err)
+
+	packet.Inputs[idx].PartialSigs = append(
+		packet.Inputs[idx].PartialSigs, &psbt.PartialSig{
+			PubKey:    key.PubKey().SerializeCompressed(),
+			Signature: sig,
+		},
+	)
+}
+
+// TestFinalizePsbtLeavesCallerPacketOnError tests that FinalizePsbt refuses a
+// packet with an invalid record, a final witness that does not decode within
+// its bytes, or a final script that does not execute, and leaves the caller's
+// packet unchanged.
+func TestFinalizePsbtLeavesCallerPacketOnError(t *testing.T) {
+	t.Parallel()
+
+	foreign := testAuthKeys()[0]
+
+	var badWitness bytes.Buffer
+
+	err := psbt.WriteTxWitness(&badWitness, wire.TxWitness{{1}})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+
+		// sigAmount, if set, adds the foreign key's signature over
+		// that amount. The input spends 1000.
+		sigAmount int64
+
+		// finalWitness, if set, is the foreign input's final witness.
+		finalWitness []byte
+
+		// sigHash is the foreign input's sighash type.
+		sigHash txscript.SigHashType
+
+		// parentValue, if set, adds a parent paying that amount.
+		parentValue int64
+
+		wantErr error
+	}{{
+		name:      "signature over the wrong amount",
+		sigAmount: 999,
+		sigHash:   txscript.SigHashAll,
+		wantErr:   ErrInvalidFinalScript,
+	}, {
+		name:         "final witness that does not execute",
+		finalWitness: badWitness.Bytes(),
+		sigHash:      txscript.SigHashAll,
+		wantErr:      ErrInvalidFinalScript,
+	}, {
+		name:         "final witness with an oversized item count",
+		finalWitness: bytes.Repeat([]byte{0xff}, 9),
+		sigHash:      txscript.SigHashAll,
+		wantErr:      ErrInvalidFinalScript,
+	}, {
+		name: "final witness with an oversized item",
+		finalWitness: []byte{
+			0x01, 0xfe, 0xff, 0xff, 0xff, 0x7f,
+		},
+		sigHash: txscript.SigHashAll,
+		wantErr: ErrInvalidFinalScript,
+	}, {
+		name:      "unknown segwit sighash",
+		sigAmount: 1000,
+		sigHash:   0x55,
+		wantErr:   ErrUnsafeSighash,
+	}, {
+		name:        "witness utxo disagrees with parent",
+		sigAmount:   1000,
+		sigHash:     txscript.SigHashAll,
+		parentValue: 2000,
+		wantErr:     ErrConflictingUtxo,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a foreign P2WPKH input as the case
+			// describes it.
+			utxo := &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, foreign.PubKey()),
+			}
+			packet, _, _ := testAuthPacket(t, utxo, tc.sigHash)
+
+			if tc.parentValue != 0 {
+				parent := wire.NewMsgTx(2)
+				parent.AddTxIn(&wire.TxIn{})
+				parent.AddTxOut(&wire.TxOut{
+					Value:    tc.parentValue,
+					PkScript: utxo.PkScript,
+				})
+				packet.UnsignedTx.TxIn[0].PreviousOutPoint =
+					wire.OutPoint{Hash: parent.TxHash()}
+				packet.Inputs[0].NonWitnessUtxo = parent
+			}
+
+			packet.Inputs[0].FinalScriptWitness = tc.finalWitness
+
+			if tc.sigAmount != 0 {
+				testAddP2WPKHSig(
+					t, packet, 0, foreign, tc.sigAmount,
+				)
+			}
+
+			// The wallet does not own the foreign key.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			mocks.store.On(
+				"GetAddress", mock.Anything, mock.Anything,
+			).Return(
+				(*db.AddressInfo)(nil), errAddrNotFound,
+			).Maybe()
+
+			before := clonePacket(packet)
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the call fails and the caller's packet is
+			// unchanged.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Equal(t, before, clonePacket(packet))
+		})
+	}
 }
 
 // TestValidatePsbtMerge tests the validatePsbtMerge helper function.

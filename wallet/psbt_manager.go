@@ -135,6 +135,11 @@ var (
 	ErrInputMissingUtxoInfo = errors.New("input missing both " +
 		"WitnessUtxo and NonWitnessUtxo")
 
+	// ErrInvalidFinalScript is returned by FinalizePsbt when a finalized
+	// input's scripts fail to execute.
+	ErrInvalidFinalScript = errors.New("psbt final script does not " +
+		"execute")
+
 	// errAlreadySigned is returned when an input is already signed.
 	//
 	// NOTE: This error is private because it is used for internal control
@@ -453,8 +458,9 @@ type PsbtManager interface {
 	//
 	// It validates that all inputs have sufficient signatures to satisfy
 	// their spending scripts. If valid, it constructs the final
-	// `scriptSig` and `witness` fields and removes the partial signature
-	// data.
+	// `scriptSig` and `witness` fields, removes the partial signature
+	// data, and checks that every input executes. The caller's packet
+	// changes only on success.
 	//
 	// Note: This implementation is "smart": if it detects an input owned
 	// by the wallet that is not yet signed, it will attempt to sign it
@@ -2348,6 +2354,11 @@ func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 //     in the packet has the necessary data to pass script validation. If so, it
 //     constructs the final witnesses and strips the PSBT metadata, leaving a
 //     ready-to-broadcast transaction.
+//  3. Execution: Running every input through the script engine with the
+//     standard flags; an input that fails returns ErrInvalidFinalScript.
+//
+// The packet is validated first and finalized on a copy, so the caller's
+// packet is replaced only on success.
 func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 	err := w.state.canSign()
 	if err != nil {
@@ -2373,56 +2384,68 @@ func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 // handleFinalizePsbt completes its accepted operation with the caller's packet.
 // The admitted caller waits for this result before reusing its inputs.
 func (w *Wallet) handleFinalizePsbt(r finalizePsbtReq) {
-	// Check that the PSBT is structurally ready to be signed/finalized.
-	err := psbt.InputsReadyToSign(r.packet)
-	if err != nil {
-		r.respErrChan <- fmt.Errorf("psbt inputs not ready: %w", err)
+	r.respErrChan <- w.finalizePsbt(r.ctx, r.packet)
+}
 
-		return
+// finalizePsbt signs, finalizes and executes a clone of the packet, and copies
+// it to the caller's packet only if every input executes.
+func (w *Wallet) finalizePsbt(ctx context.Context, packet *psbt.Packet) error {
+	// Validate before cloning: cloning panics on the nil transaction
+	// entries that validation refuses.
+	err := validatePacket(packet)
+	if err != nil {
+		return err
 	}
 
-	tx := r.packet.UnsignedTx
+	clone := clonePacket(packet)
+
+	// Check that the PSBT is structurally ready to be signed/finalized.
+	err = psbt.InputsReadyToSign(clone)
+	if err != nil {
+		return fmt.Errorf("psbt inputs not ready: %w", err)
+	}
 
 	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
 	// previous transaction outputs needed for sighash generation. This is
 	// required for generating valid signatures, as the value and script of
 	// the UTXO being spent are part of the signed digest.
-	prevOutFetcher, err := PsbtPrevOutputFetcher(r.packet)
+	prevOuts, err := PsbtPrevOutputFetcher(clone)
 	if err != nil {
-		r.respErrChan <- fmt.Errorf("error creating prevOutFetcher: %w", err)
-
-		return
+		return fmt.Errorf("error creating prevOutFetcher: %w", err)
 	}
 
 	// Compute the transaction's sighashes. This is an optimization to
 	// calculate the sighashes once and reuse them for all inputs, rather
 	// than recalculating them for each signature. This is particularly
 	// beneficial for transactions with many inputs.
-	sigHashes := txscript.NewTxSigHashes(tx, prevOutFetcher)
+	sigHashes := txscript.NewTxSigHashes(clone.UnsignedTx, prevOuts)
 
 	// Iterate through each input in the PSBT. For each input, we will
 	// check if we can sign and finalize it (i.e., if we own the UTXO and
 	// have the private key).
-	for i := range r.packet.Inputs {
-		err := w.finalizeInput(r.ctx, r.packet, i, sigHashes)
+	for i := range clone.Inputs {
+		err := w.finalizeInput(ctx, clone, i, sigHashes)
 		if err != nil {
-			r.respErrChan <- err
-
-			return
+			return err
 		}
 	}
 
 	// Finally, attempt to finalize the entire PSBT. This will check if all
 	// inputs have final scripts (either added by us above or constructed
 	// from PartialSigs by the psbt library) and strip the partial data.
-	err = psbt.MaybeFinalizeAll(r.packet)
+	err = psbt.MaybeFinalizeAll(clone)
 	if err != nil {
-		r.respErrChan <- fmt.Errorf("error finalizing PSBT: %w", err)
-
-		return
+		return fmt.Errorf("error finalizing PSBT: %w", err)
 	}
 
-	r.respErrChan <- nil
+	err = executeFinalScripts(clone, prevOuts)
+	if err != nil {
+		return err
+	}
+
+	*packet = *clone
+
+	return nil
 }
 
 // finalizeInput attempts to finalize a single input of the PSBT.
@@ -2506,6 +2529,73 @@ func addScriptToPInput(pInput *psbt.PInput,
 	// it.
 	if len(unlockingScript.SigScript) > 0 {
 		pInput.FinalScriptSig = unlockingScript.SigScript
+	}
+
+	return nil
+}
+
+// checkFinalWitness checks that a serialized final witness decodes, reading
+// items one at a time under the same size limit psbt.Extract applies.
+func checkFinalWitness(raw []byte) error {
+	if raw == nil {
+		return nil
+	}
+
+	r := bytes.NewReader(raw)
+
+	count, err := wire.ReadVarInt(r, 0)
+	if err != nil {
+		return fmt.Errorf("witness item count: %w", err)
+	}
+
+	for range count {
+		_, err := wire.ReadVarBytes(
+			r, 0, txscript.MaxScriptSize, "witness item",
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// executeFinalScripts runs every input of a finalized packet through the
+// script engine with the standard verification flags.
+func executeFinalScripts(packet *psbt.Packet,
+	prevOuts *txscript.MultiPrevOutFetcher) error {
+
+	// Extract allocates a witness's stack from its encoded item count, so
+	// each witness must first decode within its bytes.
+	for i := range packet.Inputs {
+		err := checkFinalWitness(packet.Inputs[i].FinalScriptWitness)
+		if err != nil {
+			return fmt.Errorf("%w: input %d: %w",
+				ErrInvalidFinalScript, i, err)
+		}
+	}
+
+	tx, err := psbt.Extract(packet)
+	if err != nil {
+		return fmt.Errorf("extract finalized tx: %w", err)
+	}
+
+	sigHashes := txscript.NewTxSigHashes(tx, prevOuts)
+	for i, txIn := range tx.TxIn {
+		prevOut := prevOuts.FetchPrevOutput(txIn.PreviousOutPoint)
+
+		vm, err := txscript.NewEngine(
+			prevOut.PkScript, tx, i, txscript.StandardVerifyFlags,
+			nil, sigHashes, prevOut.Value, prevOuts,
+		)
+		if err == nil {
+			err = vm.Execute()
+		}
+
+		if err != nil {
+			return fmt.Errorf("%w: input %d: %w",
+				ErrInvalidFinalScript, i, err)
+		}
 	}
 
 	return nil
