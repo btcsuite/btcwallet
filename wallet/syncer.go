@@ -767,29 +767,29 @@ func (s *syncer) findForkPoint(localHashes []*chainhash.Hash,
 	return -1
 }
 
-// run executes the main synchronization loop.
+// run executes one synchronization attempt and normalizes worker shutdown.
 func (s *syncer) run(ctx context.Context) error {
-	// Initialize the chain sync state.
+	err := s.runAttempt(ctx)
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, ErrWalletShuttingDown) {
+
+		return nil
+	}
+
+	return err
+}
+
+// runAttempt initializes and advances synchronization until an operation fails.
+// It preserves failures for run's lifetime policy and revokes failed readiness.
+func (s *syncer) runAttempt(ctx context.Context) error {
 	err := s.initChainSync(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) ||
-			errors.Is(err, ErrWalletShuttingDown) {
-
-			return nil
-		}
-
 		return fmt.Errorf("initialize chain sync: %w", err)
 	}
 
 	for {
 		err := s.runSyncStep(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) ||
-				errors.Is(err, ErrWalletShuttingDown) {
-
-				return nil
-			}
-
 			s.state.Store(uint32(syncStateSyncing))
 
 			return err
