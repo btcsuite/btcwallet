@@ -7,7 +7,90 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 )
+
+const GetTxInputValidity = `-- name: GetTxInputValidity :one
+SELECT
+    cast(EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS parent
+            ON claim.wallet_id = parent.wallet_id AND claim.prev_tx_hash = parent.tx_hash
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.tx_id = t.id
+            AND NOT EXISTS (
+                SELECT 1 FROM eligible_transactions AS eligible
+                WHERE eligible.wallet_id = parent.wallet_id AND eligible.id = parent.id
+            )
+    ) AS BOOLEAN) AS has_invalid_parent,
+    cast(EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN tx_inputs AS other
+            ON
+                claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+                AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+        INNER JOIN transactions AS peer ON other.wallet_id = peer.wallet_id AND other.tx_id = peer.id
+        WHERE claim.wallet_id = t.wallet_id AND claim.tx_id = t.id AND peer.block_height IS NOT NULL
+    ) AS BOOLEAN) AS has_confirmed_conflict
+FROM transactions AS t
+WHERE t.wallet_id = $1 AND t.tx_hash = $2
+`
+
+type GetTxInputValidityParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+type GetTxInputValidityRow struct {
+	HasInvalidParent     bool
+	HasConfirmedConflict bool
+}
+
+// Check recorded inputs for invalid known parents or a confirmed competitor.
+// An unknown parent is allowed; its credit need not be discovered first.
+func (q *Queries) GetTxInputValidity(ctx context.Context, arg GetTxInputValidityParams) (GetTxInputValidityRow, error) {
+	row := q.db.QueryRow(ctx, GetTxInputValidity, arg.WalletID, arg.TxHash)
+	var i GetTxInputValidityRow
+	err := row.Scan(&i.HasInvalidParent, &i.HasConfirmedConflict)
+	return i, err
+}
+
+const HasTxGraphStateChange = `-- name: HasTxGraphStateChange :one
+SELECT cast(EXISTS (
+    SELECT 1 FROM transactions AS t
+    WHERE
+        t.wallet_id = $1 AND t.tx_hash = $2
+        AND (
+            t.tx_status NOT IN (0, 1)
+            OR (
+                (t.block_height IS NULL) != (cast($3 AS INTEGER) IS NULL)
+                AND EXISTS (
+                    SELECT 1 FROM tx_inputs AS claim
+                    INNER JOIN tx_inputs AS other
+                        ON
+                            claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+                            AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+                    WHERE claim.wallet_id = t.wallet_id AND claim.tx_id = t.id
+                )
+            )
+        )
+) AS BOOLEAN) AS requires_reconciliation
+`
+
+type HasTxGraphStateChangeParams struct {
+	WalletID    int64
+	TxHash      []byte
+	BlockHeight sql.NullInt32
+}
+
+// Report whether the requested status/block change involves terminal history
+// or competing input claims, so UpdateTx can reject it before writing metadata.
+func (q *Queries) HasTxGraphStateChange(ctx context.Context, arg HasTxGraphStateChangeParams) (bool, error) {
+	row := q.db.QueryRow(ctx, HasTxGraphStateChange, arg.WalletID, arg.TxHash, arg.BlockHeight)
+	var requires_reconciliation bool
+	err := row.Scan(&requires_reconciliation)
+	return requires_reconciliation, err
+}
 
 const InsertTxInput = `-- name: InsertTxInput :exec
 INSERT INTO tx_inputs (
@@ -38,4 +121,53 @@ func (q *Queries) InsertTxInput(ctx context.Context, arg InsertTxInputParams) er
 		arg.PrevOutputIndex,
 	)
 	return err
+}
+
+const ListConflictingTransactions = `-- name: ListConflictingTransactions :many
+SELECT DISTINCT
+    peer.id,
+    peer.tx_hash
+FROM transactions AS t
+INNER JOIN tx_inputs AS claim ON t.wallet_id = claim.wallet_id AND t.id = claim.tx_id
+INNER JOIN tx_inputs AS other
+    ON
+        claim.wallet_id = other.wallet_id AND claim.prev_tx_hash = other.prev_tx_hash
+        AND claim.prev_output_index = other.prev_output_index AND claim.tx_id != other.tx_id
+INNER JOIN transactions AS peer ON other.wallet_id = peer.wallet_id AND other.tx_id = peer.id
+WHERE
+    t.wallet_id = $1 AND t.tx_hash = $2
+    AND peer.block_height IS NULL AND peer.tx_status IN (0, 1)
+ORDER BY peer.id
+`
+
+type ListConflictingTransactionsParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+type ListConflictingTransactionsRow struct {
+	ID     int64
+	TxHash []byte
+}
+
+// Lists unconfirmed transactions that share an input with this transaction.
+// Parent credits need not be known: the lookup matches retained prevouts.
+func (q *Queries) ListConflictingTransactions(ctx context.Context, arg ListConflictingTransactionsParams) ([]ListConflictingTransactionsRow, error) {
+	rows, err := q.db.Query(ctx, ListConflictingTransactions, arg.WalletID, arg.TxHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListConflictingTransactionsRow
+	for rows.Next() {
+		var i ListConflictingTransactionsRow
+		if err := rows.Scan(&i.ID, &i.TxHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

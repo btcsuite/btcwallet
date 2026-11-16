@@ -73,6 +73,11 @@ type DerivedAddress struct {
 	AddressIndex  int64
 }
 
+type EligibleTransaction struct {
+	WalletID int64
+	ID       int64
+}
+
 type KeyScope struct {
 	ID                int64
 	WalletID          int64
