@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
@@ -459,6 +460,29 @@ func lockTxGraphOutput(t *testing.T, ctx context.Context, raw *sql.DB,
 	return barrier
 }
 
+// lockTxGraphTransaction locks a transaction row, pausing a writer that
+// holds the wallet lock. Tests can then start a second call and observe it
+// waiting for that wallet lock.
+func lockTxGraphTransaction(t *testing.T, ctx context.Context, raw *sql.DB,
+	walletID uint32, txHash chainhash.Hash) *sql.Tx {
+
+	t.Helper()
+
+	// Releasing the barrier is safe even when the test fails before its Act.
+	barrier, err := raw.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = barrier.Rollback() })
+
+	_, err = barrier.ExecContext(
+		ctx,
+		`SELECT id FROM transactions WHERE wallet_id=$1 AND tx_hash=$2
+		FOR UPDATE`, walletID, txHash[:],
+	)
+	require.NoError(t, err)
+
+	return barrier
+}
+
 // startTxGraphCall runs one graph write and joins it during cleanup. Cancel
 // releases SQL waits if the test stops before it reads the result.
 func startTxGraphCall(t *testing.T, cancel context.CancelFunc,
@@ -626,4 +650,70 @@ func TestConcurrentTxAdmissionPostgres(t *testing.T) {
 			require.Equal(t, 1, count)
 		})
 	}
+}
+
+// TestUpdateTxConcurrentConfirmationPostgres checks that UpdateTx waits for
+// a confirming competitor before checking the stored status, then refuses
+// to confirm the replaced transaction or change its label.
+func TestUpdateTxConcurrentConfirmationPostgres(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Retain pending B and hold its row so confirming C can read the
+	// branch but cannot yet replace B. Both calls share a bounded cancellation.
+	store, childParams, winnerParams := newTxGraphConflict(t)
+	walletID := childParams.WalletID
+	rootHash := childParams.Tx.TxIn[0].PreviousOutPoint.Hash
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	barrier := lockTxGraphTransaction(t, ctx, store.DB(), walletID, rootHash)
+	label := "racing update"
+
+	// Act: Pause C's confirmation at B's row, then ask UpdateTx to confirm B.
+	// The wallet lock makes UpdateTx wait until C commits B's Replaced status,
+	// so it cannot confirm B or change B's label.
+	winnerCall := startTxGraphCall(
+		t, cancel, func() error {
+			return store.CreateTx(ctx, winnerParams)
+		},
+	)
+	waitTxGraphCall(t, ctx, store.DB(), winnerCall, 1)
+	patchCall := startTxGraphCall(
+		t, cancel, func() error {
+			return store.UpdateTx(
+				ctx, db.UpdateTxParams{
+					WalletID: walletID, Txid: rootHash, Label: &label,
+					State: &db.UpdateTxState{
+						Block: winnerParams.Block, Status: db.TxStatusPublished,
+					},
+				},
+			)
+		},
+	)
+	waitTxGraphCall(t, ctx, store.DB(), patchCall, 2)
+	require.NoError(t, barrier.Rollback())
+	require.NoError(t, <-winnerCall)
+
+	patchErr := <-patchCall
+
+	// Assert: C remains the only confirmed claimant. B keeps its replaced
+	// status and original label rather than accepting the stale metadata patch.
+	require.ErrorIs(t, patchErr, db.ErrInvalidParam)
+	root, err := store.GetTx(
+		ctx, db.GetTxQuery{
+			WalletID: walletID, Txid: rootHash,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, root.Status)
+	require.Nil(t, root.Block)
+	require.Empty(t, root.Label)
+
+	winner, err := store.GetTx(
+		ctx, db.GetTxQuery{
+			WalletID: walletID, Txid: winnerParams.Tx.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, winner.Block)
+	require.Equal(t, db.TxStatusPublished, winner.Status)
 }
