@@ -695,7 +695,7 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Normalize a fresh request and arrange one stable row ID.
-	// Input facts, credits and spend claims must use that same identity.
+	// Input facts and credits must use that same identity.
 	req := testCreateTxRequest(t)
 
 	var (
@@ -724,7 +724,16 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 	).Once()
 
 	ops.On("InsertInputs", mock.Anything, req, int64(11)).
-		Return(nil).Once()
+		Return(nil).Run(
+		func(args mock.Arguments) {
+			id, ok := args.Get(2).(int64)
+			require.True(t, ok)
+
+			inputsID = id
+		},
+	).Once()
+	ops.On("GetInputValidity", mock.Anything, req).
+		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Run(
 		func(args mock.Arguments) {
 			txID, ok := args.Get(2).(int64)
@@ -734,14 +743,7 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 		},
 	).Once()
 
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Run(
-		func(args mock.Arguments) {
-			txID, ok := args.Get(2).(int64)
-			require.True(t, ok)
-
-			inputsID = txID
-		},
-	).Once()
+	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
@@ -792,10 +794,13 @@ func TestCreateTxWithOpsCoinbaseSkipsInputFacts(t *testing.T) {
 		[]int64(nil), []chainhash.Hash(nil), nil,
 	).Once()
 
+	ops.On("GetInputValidity", mock.Anything, req).
+		Return(false, false, nil).Once()
+
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).
 		Return(nil).Once()
-	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).
-		Return(nil).Once()
+	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
+
 	ops.On(
 		"DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash,
@@ -855,7 +860,10 @@ func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
 	ops.On("InsertInputs", mock.Anything, req, int64(4)).
 		Return(nil).Once()
+	ops.On("GetInputValidity", mock.Anything, req).
+		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
+
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
@@ -1025,7 +1033,10 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	).Once()
 	ops.On("InsertInputs", mock.Anything, req, int64(7)).
 		Return(nil).Once()
+	ops.On("GetInputValidity", mock.Anything, req).
+		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
+
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
@@ -1090,6 +1101,8 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 
 	ops.On("InsertInputs", mock.Anything, req, int64(11)).
 		Return(nil).Once()
+	ops.On("GetInputValidity", mock.Anything, req).
+		Return(false, false, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
@@ -1883,6 +1896,8 @@ func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
 	ops.On("PrepareState", mock.Anything, UpdateTxState{
 		Status: TxStatusPublished,
 	}).Return(nil).Once()
+	ops.On("CheckGraphState", mock.Anything, uint32(5), chainhash.Hash{1}).
+		Return(nil).Once()
 
 	ops.On("UpdateLabel", mock.Anything, uint32(5), chainhash.Hash{1},
 		label).Return(nil).Run(func(args mock.Arguments) {
