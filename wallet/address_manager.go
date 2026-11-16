@@ -88,8 +88,8 @@ type AddressProperty struct {
 	// Address is the address.
 	Address address.Address
 
-	// Balance is the total unspent balance of the address, including both
-	// confirmed and unconfirmed funds.
+	// Balance sums the address's listed unspent outputs, excluding outputs
+	// marked HasConflictingTx. The result can understate available funds.
 	Balance btcutil.Amount
 }
 
@@ -499,7 +499,8 @@ func storeAddressPubKeyCompressed(pubKey []byte) bool {
 	return len(pubKey) == btcec.PubKeyBytesLenCompressed
 }
 
-// addrBalances returns wallet address balances from store UTXO rows.
+// addrBalances sums the backend's listed credits per address.
+// SQL discovery omits Pending creators while factual account reads retain them.
 func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	error) {
 
@@ -513,6 +514,12 @@ func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	}
 
 	for i := range utxos {
+		// Listed credits still need the compatibility filter: two competing
+		// change outputs cannot both contribute funds to the same script.
+		if utxos[i].HasConflictingTx {
+			continue
+		}
+
 		addr := extractAddrFromPKScript(
 			utxos[i].PkScript, w.cfg.ChainParams,
 		)
@@ -1164,6 +1171,8 @@ func (w *Wallet) getAddressInfo(ctx context.Context, a address.Address) (
 // balances. The account is resolved in the key scope of addrType; if no such
 // account exists there, the returned error wraps ErrAccountNotFound. An
 // existing account with no addresses yields an empty list.
+// Address balances use the listed unspent outputs and can differ from
+// account balances.
 func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 	addrType waddrmgr.AddressType) ([]AddressProperty, error) {
 
