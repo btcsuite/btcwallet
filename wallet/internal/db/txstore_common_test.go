@@ -1546,6 +1546,15 @@ func (m *mockUpdateTxOps) PrepareState(ctx context.Context,
 	return args.Error(0)
 }
 
+// CheckGraphState returns the arranged result for a status/block check.
+func (m *mockUpdateTxOps) CheckGraphState(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) error {
+
+	args := m.Called(ctx, walletID, txHash)
+
+	return args.Error(0)
+}
+
 // UpdateLabel implements UpdateTxOps.
 func (m *mockUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, label string) error {

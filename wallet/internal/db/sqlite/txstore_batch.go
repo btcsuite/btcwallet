@@ -247,17 +247,11 @@ func promoteBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
 			db.ErrTxNotFound)
 	}
 
-	err = ops.InsertCredits(ctx, req, txID)
-	if err != nil {
-		return fmt.Errorf("record promoted duplicate tx credits: %w", err)
-	}
+	// An empty incoming label keeps the stored label during shared replay;
+	// promotion must not erase it even when the echo supplies another label.
+	req.Params.Label = ""
 
-	err = ops.MarkInputsSpent(ctx, req, txID)
-	if err != nil {
-		return fmt.Errorf("record promoted duplicate tx spends: %w", err)
-	}
-
-	return nil
+	return db.ApplyBatchTxWithOps(ctx, req, ops)
 }
 
 // promotableBatchDuplicate returns the existing tx id when createErr is a
