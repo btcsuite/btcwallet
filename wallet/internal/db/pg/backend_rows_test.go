@@ -260,21 +260,9 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	confirmRow.AssertExpectations(t)
 	confirmDB.AssertExpectations(t)
 
-	// Arrange: Resolve the wallet's input, then fail the unmined conflict query
-	// to exercise the later lookup's contextual error path.
-	conflictRow := &mockRow{}
-	conflictRow.On("Scan", mock.Anything).Run(func(args mock.Arguments) {
-		dest, ok := args.Get(0).([]any)
-		require.True(t, ok)
-		require.NoError(
-			t, scanValues([]any{int64(5), []byte{1}}, dest),
-		)
-	}).Return(nil).Once()
-
+	// Arrange: Fail the indexed conflict query directly; no parent-credit
+	// pointer lookup precedes the retained-input owner.
 	conflictDB := &mockDBTX{}
-	conflictDB.On(
-		"QueryRow", mock.Anything, mock.Anything, mock.Anything,
-	).Return(conflictRow).Once()
 	conflictDB.On(
 		"Query", mock.Anything, mock.Anything, mock.Anything,
 	).Return(nil, errDummy).Once()
@@ -284,13 +272,12 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 		},
 	}
 
-	// Act: List conflicts after the input lookup succeeds.
+	// Act: Resolve direct peers through the indexed conflict query.
 	_, _, err = conflictOps.ListConflictTxns(ctx, req)
 
-	// Assert: The failure identifies the unmined lookup rather than the
-	// successful input scan, and neither query is retried.
-	require.ErrorContains(t, err, "list unmined txns")
-	conflictRow.AssertExpectations(t)
+	// Assert: The retained cause has its indexed-query context, and the
+	// existing expectation check verifies the one required query once.
+	require.ErrorContains(t, err, "list input conflicts")
 	conflictDB.AssertExpectations(t)
 }
 
