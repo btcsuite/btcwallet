@@ -238,10 +238,6 @@ type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
-	// processChainEventBeforeSync services ordered observations and rollback
-	// preparation without advancing a checkpoint before watches are ready.
-	processChainEventBeforeSync(ctx context.Context, event chainEvent) error
-
 	// requestScan submits a rescan job to the syncer.
 	requestScan(ctx context.Context, req *scanReq) error
 
@@ -767,16 +763,114 @@ func (s *syncer) findForkPoint(localHashes []*chainhash.Hash,
 	return -1
 }
 
-// run executes one synchronization attempt and normalizes worker shutdown.
+// run owns synchronization attempts, retry delays and mailbox processing.
 func (s *syncer) run(ctx context.Context) error {
-	err := s.runAttempt(ctx)
-	if errors.Is(err, context.Canceled) ||
-		errors.Is(err, ErrWalletShuttingDown) {
+	backoff := s.initialSyncBackoff()
+	for {
+		// A retry timer can race Stop; do not initialize after cancellation.
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 
-		return nil
+		startTime := time.Now()
+		err := s.runAttempt(ctx)
+		// Stop can interrupt a blocking attempt and already owns its cleanup.
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		// Unknown effects can wrap cancellation but cannot be retried.
+		if errors.Is(err, db.ErrIndeterminateCommit) {
+			return err
+		}
+
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, ErrWalletShuttingDown) {
+
+			return nil
+		}
+
+		log.Errorf("Chain sync loop exited with error: %v", err)
+
+		backoff, err = s.waitForBackoff(
+			ctx, startTime, backoff, time.After,
+		)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// initialSyncBackoff returns the configured retry policy, preserving the
+// default for legacy or test syncers assembled without Manager.
+func (s *syncer) initialSyncBackoff() time.Duration {
+	if s.cfg.WalletSyncRetryInterval <= 0 {
+		return initialBackoff
 	}
 
-	return err
+	return s.cfg.WalletSyncRetryInterval
+}
+
+// waitForBackoff handles the delay between synchronization retry attempts. It
+// resets the backoff if the previous run was stable, waits for the calculated
+// delay, and then returns the updated backoff duration for the next attempt.
+// Lifetime cancellation completes normally; unsafe writes escape to the owner.
+func (s *syncer) waitForBackoff(ctx context.Context, startTime time.Time,
+	backoff time.Duration,
+	timerFn func(time.Duration) <-chan time.Time) (time.Duration, error) {
+
+	// If the syncer ran for a significant amount of time, we consider it a
+	// "stable" run and reset the backoff.
+	if time.Since(startTime) > stableRunTime {
+		backoff = s.initialSyncBackoff()
+	}
+
+	log.Infof("Restarting sync loop in %v...", backoff)
+
+	// Keep the original retry deadline while servicing the same mailbox.
+	// A failed initialization must not prevent rollback from repairing it.
+	retry := timerFn(backoff)
+	for {
+		select {
+		case event := <-s.chainEventChan:
+			err := s.processChainEventBeforeSync(ctx, event)
+			// Stop may interrupt a mailbox operation; release the blocking
+			// wait instead of continuing with a canceled service lifetime.
+			select {
+			case <-ctx.Done():
+				return 0, nil
+			default:
+			}
+
+			// Propagate unknown effects immediately; logging and continuing
+			// here would lose the error before run can stop the owner.
+			if errors.Is(err, db.ErrIndeterminateCommit) {
+				return 0, err
+			}
+
+			if err != nil {
+				// Retain the scheduled retry after an observation fails, just
+				// as a failed sync attempt returns here instead of stopping.
+				log.Errorf("Chain event processing failed during retry: %v",
+					err)
+			}
+
+		case <-retry:
+			// Increase backoff for the next attempt, capping it.
+			backoff *= 2
+
+			return min(backoff, maxBackoff), nil
+
+		case <-ctx.Done():
+			log.Debug("Backoff interrupted by wallet shutdown")
+
+			return 0, nil
+		}
+	}
 }
 
 // runAttempt initializes and advances synchronization until an operation fails.

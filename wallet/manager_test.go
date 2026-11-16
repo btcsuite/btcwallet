@@ -2012,17 +2012,15 @@ func TestManagerCreatePreservesInitialAccountIdentity(t *testing.T) {
 }
 
 // TestManagerCreateLifecycleSerializesStop verifies accepted creation finishes
-// startup before Stop can close storage, and real chain work drains first.
+// startup before Stop can close storage and leaves the retained API terminal.
 func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block the candidate's runtime read and its chain worker at
-	// separate dependencies. Storage closure checks that both have returned.
+	// Arrange: Hold accepted runtime setup while Stop waits for the owner.
+	// Existing blocked-worker Stop coverage separately verifies worker joins.
 	_, deps := createTestWalletWithMocks(t)
 	startupEntered := make(chan struct{})
 	releaseStartup := make(chan struct{})
-	chainEntered := make(chan struct{})
-	releaseChain := make(chan struct{})
 
 	deps.store.On("GetWallet", mock.Anything, "created").
 		Run(func(mock.Arguments) {
@@ -2056,10 +2054,7 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
-	chain.On("IsCurrent").Run(func(mock.Arguments) {
-		close(chainEntered)
-		<-releaseChain
-	}).Return(false).Once()
+	chain.On("IsCurrent").Return(false).Maybe()
 
 	_, err := manager.Start(t.Context())
 	require.NoError(t, err)
@@ -2072,8 +2067,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Accept creation, start Stop while startup is held, then let the
-	// real chain dependency finish before shutdown can dispose storage.
+	// Act: Accept creation, start Stop while runtime setup is held, then
+	// finish that accepted setup before shutdown can dispose shared storage.
 	go func() {
 		w, err := manager.Create(params)
 		created <- createOutcome{
@@ -2089,9 +2084,6 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	close(releaseStartup)
 
 	outcome := <-created
-
-	<-chainEntered
-	close(releaseChain)
 
 	stopErr := <-stopped
 
