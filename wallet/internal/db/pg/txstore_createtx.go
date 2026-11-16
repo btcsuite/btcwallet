@@ -16,15 +16,13 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
-// CreateTx atomically records a wallet-scoped transaction row, its wallet-owned
-// credits, immutable input facts, and any current spend edges.
+// CreateTx records a wallet transaction, its owned credits and input facts.
+// Confirming it also marks unconfirmed competing transactions Replaced and
+// their dependent transactions Failed, in the same database write.
 //
-// The full write runs inside the shared write helper so the transaction row,
-// created UTXOs, spent-parent markers, and any required invalidation are
-// either committed together or not at all. Received timestamps are normalized
-// to UTC before Insert. When the wallet already stores the same unmined
-// transaction hash, CreateTx may promote that existing row to confirmed state
-// instead of inserting a duplicate.
+// The shared write commits all changes or none. Received times are normalized
+// to UTC. A current block can confirm retained Replaced/Failed history using
+// its existing row and credits; an unconfirmed observation cannot revive it.
 func (s *Store) CreateTx(ctx context.Context,
 	params db.CreateTxParams) error {
 
@@ -395,11 +393,6 @@ func insertCredits(ctx context.Context, ops *createTxOps,
 		if err != nil {
 			return err
 		}
-	}
-
-	err := markExistingChildSpends(ctx, ops, params, txID)
-	if err != nil {
-		return err
 	}
 
 	return nil
@@ -850,8 +843,8 @@ func creditExists(ctx context.Context, qtx *sqlc.Queries,
 			outputIndex, err)
 	}
 
-	row, err := qtx.GetUtxoSpendByOutpoint(
-		ctx, sqlc.GetUtxoSpendByOutpointParams{
+	row, err := qtx.GetWalletCreditByOutpoint(
+		ctx, sqlc.GetWalletCreditByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      txHash[:],
 			OutputIndex: convertedIndex,
@@ -866,7 +859,7 @@ func creditExists(ctx context.Context, qtx *sqlc.Queries,
 			outputIndex, err)
 	}
 
-	return true, row.ScriptPubKey, nil
+	return true, row, nil
 }
 
 // markInputsSpent attaches wallet-owned outpoints spent by the stored

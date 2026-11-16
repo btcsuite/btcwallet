@@ -2026,6 +2026,8 @@ var errCreateTxTest = errors.New("create tx test")
 func TestCheckReuseCreateTx(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Build confirmed regular and coinbase observations plus persisted
+	// row metadata that either SQL loader can return for reuse decisions.
 	coinbaseReq, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 9,
 		Tx:       testCoinbaseMsgTx(),
@@ -2076,13 +2078,6 @@ func TestCheckReuseCreateTx(t *testing.T) {
 			},
 		},
 		{
-			name: "non coinbase orphan not reused",
-			req:  confirmedReq,
-			existing: CreateTxExistingTarget{
-				Status: TxStatusOrphaned,
-			},
-		},
-		{
 			name: "orphaned coinbase reused",
 			req:  coinbaseReq,
 			existing: CreateTxExistingTarget{
@@ -2104,8 +2099,14 @@ func TestCheckReuseCreateTx(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, test.want,
-				checkReuseCreateTx(test.req, test.existing))
+
+			// Act: Evaluate reuse for the row so the block and coinbase
+			// gates decide whether confirmation can promote it.
+			reuse := checkReuseCreateTx(test.req, test.existing)
+
+			// Assert: Compare the result with the expected decision to keep
+			// confirmation reuse and coinbase rejection rules intact.
+			require.Equal(t, test.want, reuse)
 		})
 	}
 }

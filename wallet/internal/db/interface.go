@@ -151,7 +151,7 @@ var (
 	ErrUtxoNotFound = errors.New("utxo not found")
 
 	// ErrTxInputConflict is returned when a recorded confirmed transaction
-	// already spends an input, or a wallet-owned input has another spender.
+	// already spends an input, or selected input ancestry is incompatible.
 	ErrTxInputConflict = errors.New(
 		"transaction input conflicts with another wallet spend",
 	)
@@ -449,10 +449,12 @@ type TxStore interface {
 	// wallet history; it does not build or publish transactions on the
 	// caller's behalf.
 	//
-	// The same write also updates the corresponding UTXO state: it marks any
-	// wallet-owned outputs referenced by the new transaction's inputs as spent
-	// and creates new UTXOs for any outputs that are spendable by the wallet.
-	// This keeps the transaction record and UTXO set consistent.
+	// Records all transaction inputs and wallet-owned outputs. Unconfirmed
+	// competitors may coexist until a transaction confirms, replacing its
+	// direct competitors and failing their unconfirmed descendants.
+	// Re-observing a confirmed, Replaced or Failed transaction without a
+	// confirming block does not revive it or add credits. A confirming block
+	// can restore a previously Replaced or Failed transaction.
 	//
 	// CreateTx is also responsible for recording transaction metadata
 	// required by higher-level wallet policy:
@@ -549,10 +551,11 @@ type TxStore interface {
 	// history.
 	//
 	// Implementations must remove the root, its descendants and the outputs
-	// they created, and restore the outputs the branch spent, inside one
-	// database transaction. Descendants an earlier event already made
-	// terminal are removed with the branch, while a root the wallet already
-	// made terminal is reported with ErrTxNotFound.
+	// they created inside one database transaction. Outputs the branch spent
+	// become available only if no other eligible transaction still claims them.
+	// Descendants an earlier event already made terminal are removed with the
+	// branch, while a root the wallet already made terminal is reported with
+	// ErrTxNotFound.
 	DeleteUnminedTx(ctx context.Context,
 		params DeleteUnminedTxParams) error
 
