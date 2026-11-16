@@ -45,8 +45,23 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = ?2
     AND a.wallet_id = ?2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM conflict_affected_transactions AS affected
+        WHERE affected.wallet_id = t.wallet_id AND affected.id = t.id
+    )
     AND (
         (a.is_derived = FALSE AND da.address_id IS NULL)
         OR (
@@ -266,6 +281,11 @@ SELECT
         AND coalesce(length(asec.encrypted_priv_key), 0) = 0
         AS BOOLEAN
     ) AS raw_is_watch_only,
+    -- Report competing transactions affecting the creator or unconfirmed ancestors.
+    cast(EXISTS (
+        SELECT 1 FROM conflict_affected_transactions AS affected
+        WHERE affected.wallet_id = t.wallet_id AND affected.id = t.id
+    ) AS BOOLEAN) AS has_conflicting_tx,
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -296,8 +316,19 @@ WHERE
     AND a.wallet_id = ?2
     AND t.tx_hash = ?3
     AND u.output_index = ?4
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 `
 
 type GetUtxoByOutpointParams struct {
@@ -325,6 +356,7 @@ type GetUtxoByOutpointRow struct {
 	CoinType         sql.NullInt64
 	AccountName      sql.NullString
 	RawIsWatchOnly   bool
+	HasConflictingTx bool
 	HasScript        bool
 	IsLocked         int64
 }
@@ -370,6 +402,7 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.CoinType,
 		&i.AccountName,
 		&i.RawIsWatchOnly,
+		&i.HasConflictingTx,
 		&i.HasScript,
 		&i.IsLocked,
 	)
@@ -386,8 +419,19 @@ WHERE
     AND a.wallet_id = ?1
     AND t.tx_hash = ?2
     AND u.output_index = ?3
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 `
 
 type GetUtxoIDByOutpointParams struct {
@@ -420,7 +464,9 @@ func (q *Queries) GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpoi
 }
 
 const GetUtxoSpendByOutpoint = `-- name: GetUtxoSpendByOutpoint :one
-SELECT utxos.spent_by_tx_id, a.script_pub_key
+SELECT
+    utxos.spent_by_tx_id,
+    a.script_pub_key
 FROM transactions AS t
 INNER JOIN utxos ON t.id = utxos.tx_id
 INNER JOIN addresses AS a ON utxos.address_id = a.id
@@ -565,19 +611,22 @@ SELECT
     t.raw_tx
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
-LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
 LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
 LEFT JOIN accounts AS acc ON da.account_id = acc.id
 WHERE
     t.wallet_id = ?1
     AND (acc.id IS NULL OR NOT acc.no_chain_sync)
-    AND t.tx_status IN (0, 1)
-    AND (
-        u.spent_by_tx_id IS NULL
-        OR (
-            spend.block_height IS NULL
-            AND spend.tx_status IN (0, 1)
-        )
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- Recovery still watches unconfirmed-spent credits; a current block ends it.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS spender ON claim.wallet_id = spender.wallet_id AND claim.tx_id = spender.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index AND spender.block_height IS NOT NULL
     )
 ORDER BY t.tx_hash, u.output_index
 `
@@ -711,6 +760,11 @@ SELECT
         AND coalesce(length(asec.encrypted_priv_key), 0) = 0
         AS BOOLEAN
     ) AS raw_is_watch_only,
+    -- Report competing transactions affecting the creator or unconfirmed ancestors.
+    cast(EXISTS (
+        SELECT 1 FROM conflict_affected_transactions AS affected
+        WHERE affected.wallet_id = t.wallet_id AND affected.id = t.id
+    ) AS BOOLEAN) AS has_conflicting_tx,
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -740,8 +794,21 @@ LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = ?2
     AND a.wallet_id = ?2
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    -- Pending credits support explicit chaining without entering discovery.
+    AND t.tx_status = 1
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
     AND (
         cast(?3 AS INTEGER) IS NULL
         OR ks.purpose = cast(?3 AS INTEGER)
@@ -817,6 +884,7 @@ type ListUtxosRow struct {
 	CoinType         sql.NullInt64
 	AccountName      sql.NullString
 	RawIsWatchOnly   bool
+	HasConflictingTx bool
 	HasScript        bool
 	IsLocked         int64
 }
@@ -830,8 +898,7 @@ type ListUtxosRow struct {
 //     then uses derived_addresses/accounts for optional account filters.
 //   - Returns leased outputs too because the API models leases separately from
 //     UTXO existence.
-//   - Includes outputs whose parent transaction is still in `pending` or
-//     `published` status.
+//   - Lists published creators; pending credits remain available to point reads.
 //   - Intentionally does not enforce coinbase maturity because this query models
 //     wallet-owned UTXO existence rather than a strictly spendable subset.
 //
@@ -877,6 +944,7 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.CoinType,
 			&i.AccountName,
 			&i.RawIsWatchOnly,
+			&i.HasConflictingTx,
 			&i.HasScript,
 			&i.IsLocked,
 		); err != nil {

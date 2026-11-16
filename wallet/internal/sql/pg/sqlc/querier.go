@@ -39,8 +39,7 @@ type Querier interface {
 	// lease without expiry. Callers should pass UTC values for both expires_at and
 	// now_utc.
 	// Performance:
-	// - Locks the target utxo row during resolution so concurrent spend updates on
-	//   that row serialize with lease acquisition.
+	// - Locks the target credit row to coordinate concurrent lease writers.
 	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (sql.NullTime, error)
 	// Reserves the cursor past an exact account without consuming lower holes.
 	// Updating this row serializes exact and sequential allocation in the caller's
@@ -167,7 +166,7 @@ type Querier interface {
 	// - Applies to timed leases and leases without expiry alike.
 	// Performance:
 	// - Resolves the spender through its unique hash and reaches its inputs
-	//   through the spent_by index.
+	//   through the input-position and prevout indexes.
 	DeleteUtxoLeasesSpentByConfirmedTx(ctx context.Context, arg DeleteUtxoLeasesSpentByConfirmedTxParams) (int64, error)
 	// Deletes all UTXO rows created by the provided transaction ID.
 	//
@@ -309,6 +308,9 @@ type Querier interface {
 	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
+	// Credit replay checks immutable ownership even after a credit has been spent.
+	// Availability belongs to the input relation, not this ownership lookup.
+	GetWalletCreditByOutpoint(ctx context.Context, arg GetWalletCreditByOutpointParams) ([]byte, error)
 	// Serializes account admission across all scopes of a wallet. NO KEY UPDATE
 	// permits foreign-key checks while holding the lock until the write completes.
 	GetWalletForAccountCreation(ctx context.Context, id int64) (bool, error)
@@ -605,8 +607,7 @@ type Querier interface {
 	//   then uses derived_addresses/accounts for optional account filters.
 	// - Returns leased outputs too because the API models leases separately from
 	//   UTXO existence.
-	// - Includes outputs whose parent transaction is still in `pending` or
-	//   `published` status.
+	// - Lists published creators; pending credits remain available to point reads.
 	// - Intentionally does not enforce coinbase maturity because this query models
 	//   wallet-owned UTXO existence rather than a strictly spendable subset.
 	// Performance:

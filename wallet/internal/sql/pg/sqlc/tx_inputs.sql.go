@@ -55,6 +55,31 @@ func (q *Queries) GetTxInputValidity(ctx context.Context, arg GetTxInputValidity
 	return i, err
 }
 
+const GetWalletCreditByOutpoint = `-- name: GetWalletCreditByOutpoint :one
+SELECT a.script_pub_key
+FROM transactions AS t
+INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id AND t.wallet_id = a.wallet_id
+WHERE
+    t.wallet_id = $1 AND t.tx_hash = $2
+    AND u.output_index = $3
+`
+
+type GetWalletCreditByOutpointParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int32
+}
+
+// Credit replay checks immutable ownership even after a credit has been spent.
+// Availability belongs to the input relation, not this ownership lookup.
+func (q *Queries) GetWalletCreditByOutpoint(ctx context.Context, arg GetWalletCreditByOutpointParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, GetWalletCreditByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var script_pub_key []byte
+	err := row.Scan(&script_pub_key)
+	return script_pub_key, err
+}
+
 const HasTxGraphStateChange = `-- name: HasTxGraphStateChange :one
 SELECT cast(EXISTS (
     SELECT 1 FROM transactions AS t
