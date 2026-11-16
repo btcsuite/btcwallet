@@ -454,6 +454,149 @@ func TestCreateTxRejectsInvalidParentWalletOutput(t *testing.T) {
 	require.True(t, ok)
 }
 
+// TestCreateTxValidatesParentWithoutCredit rejects an unconfirmed child of
+// a failed parent without credits, but accepts the child with a confirming
+// block. Parent status alone cannot override the supplied chain fact.
+func TestCreateTxValidatesParentWithoutCredit(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Mark a recorded parent without credits Failed. Its child
+	// pays the wallet, so acceptance would store a transaction and credit.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "invalid-parent-no-credit")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	parent := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
+	)
+	require.NoError(t, store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID, Tx: parent, Status: db.TxStatusPending,
+		Received: time.Unix(1, 0),
+	}))
+	setTxStatus(t, store, walletID, parent.TxHash(), db.TxStatusFailed)
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: parent.TxHash()}},
+		[]*wire.TxOut{{Value: 4000, PkScript: addr.ScriptPubKey}},
+	)
+
+	block := CreateBlockFixture(t, store.Queries(), 220)
+
+	// Act: Request a wallet credit from a child of the failed parent.
+	// Retained inputs must reject it without a parent credit.
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID, Tx: child, Status: db.TxStatusPending,
+		Received: time.Unix(2, 0),
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+
+	// Assert: The public error identifies the invalid parent; neither
+	// the rejected transaction nor its requested credit is committed.
+	require.ErrorIs(t, err, db.ErrTxInputInvalidParent)
+	_, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: child.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+	_, err = store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: wire.OutPoint{Hash: child.TxHash()},
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+
+	// Act: Submit the same child with a stored confirming block. The chain
+	// observation must take precedence over the parent's stale Failed state.
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID, Tx: child, Status: db.TxStatusPublished,
+		Received: time.Unix(2, 0), Block: &block,
+		Credits: map[uint32]address.Address{0: nil},
+	})
+
+	// Assert: The child is recorded as published in the supplied block,
+	// rather than rejected by the unconfirmed-parent admission rule.
+	require.NoError(t, err)
+	stored, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: child.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, stored.Status)
+	require.NotNil(t, stored.Block)
+	require.Equal(t, block.Hash, stored.Block.Hash)
+	require.Equal(t, block.Height, stored.Block.Height)
+}
+
+// TestCreateTxRejectsConfirmedExternalInputConflict rejects both unconfirmed
+// and confirming competitors of a confirmed spend, including external inputs
+// with no wallet-owned credit to enforce the conflict.
+func TestCreateTxRejectsConfirmedExternalInputConflict(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Confirm a transaction with an external input and no credits.
+	// Another transaction shares that input and requests an owned credit.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "confirmed-external-input")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	first := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
+	)
+	block := CreateBlockFixture(t, store.Queries(), 221)
+	require.NoError(t, store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID, Tx: first, Status: db.TxStatusPublished,
+		Received: time.Unix(1, 0), Block: &block,
+	}))
+	second := first.Copy()
+	second.TxOut[0].Value = 4000
+	second.TxOut[0].PkScript = addr.ScriptPubKey
+
+	// Arrange: Vary only the target's block context. Sequential subtests
+	// share the confirmed spender because every rejected write rolls back.
+	testCases := []struct {
+		name   string
+		status db.TxStatus
+		block  *db.Block
+	}{
+		{
+			name:   "pending without block",
+			status: db.TxStatusPending,
+			block:  nil,
+		},
+		{
+			name:   "published with block",
+			status: db.TxStatusPublished,
+			block:  &block,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Act: Offer the competitor with the row's block context.
+			// Retained inputs identify the existing confirmed spender.
+			err := store.CreateTx(t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: second, Status: tc.status,
+				Received: time.Unix(2, 0), Block: tc.block,
+				Credits: map[uint32]address.Address{0: nil},
+			})
+
+			// Assert: The confirmed spend wins in either context; rollback
+			// leaves neither a competing transaction nor its requested credit.
+			require.ErrorIs(t, err, db.ErrTxInputConflict)
+			_, err = store.GetTx(t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: second.TxHash(),
+			})
+			require.ErrorIs(t, err, db.ErrTxNotFound)
+			_, err = store.GetUtxo(t.Context(), db.GetUtxoQuery{
+				WalletID: walletID,
+				OutPoint: wire.OutPoint{Hash: second.TxHash()},
+			})
+			require.ErrorIs(t, err, db.ErrUtxoNotFound)
+		})
+	}
+}
+
 // TestCreateTxRejectsSecondPendingSpend verifies that CreateTx rejects a second
 // pending transaction that spends the same wallet-owned output.
 //
@@ -5198,4 +5341,63 @@ func TestApplyTxBatchExcludesNoChainSync(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, detail.OwnedOutputs, 1)
 	require.Zero(t, detail.OwnedOutputs[0].Index)
+}
+
+// TestUpdateTxRejectsCompetingConfirmation checks that UpdateTx refuses to
+// confirm a transaction with a competing input claimant and preserves its
+// original label and state when the request is refused.
+func TestUpdateTxRejectsCompetingConfirmation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two pending transactions share an external input. Their facts
+	// precede credit discovery, so input facts identify the conflict.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "state-claim-guard")
+	input := randomOutPoint()
+	a := newRegularTx(
+		[]wire.OutPoint{input}, []*wire.TxOut{
+			{Value: 6000, PkScript: []byte{0x51}},
+		},
+	)
+	b := a.Copy()
+	b.TxOut[0].Value = 5000
+
+	for _, tx := range []*wire.MsgTx{a, b} {
+		require.NoError(
+			t, store.CreateTx(
+				t.Context(), db.CreateTxParams{
+					WalletID: walletID, Tx: tx, Received: time.Unix(1, 0),
+					Status: db.TxStatusPending, Label: "original",
+				},
+			),
+		)
+	}
+
+	block := CreateBlockFixture(t, store.Queries(), 220)
+	label := "changed"
+
+	// Act: Try to confirm B and change its label through UpdateTx rather
+	// than CreateTx, which also updates competing transactions.
+	err := store.UpdateTx(
+		t.Context(), db.UpdateTxParams{
+			WalletID: walletID, Txid: b.TxHash(), Label: &label,
+			State: &db.UpdateTxState{
+				Block:  &block,
+				Status: db.TxStatusPublished,
+			},
+		},
+	)
+
+	// Assert: Refusing this confirmation preserves the stored label and state;
+	// CreateTx must handle confirmation together with competing transactions.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	info, err := store.GetTx(
+		t.Context(), db.GetTxQuery{
+			WalletID: walletID, Txid: b.TxHash(),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "original", info.Label)
+	require.Equal(t, db.TxStatusPending, info.Status)
+	require.Nil(t, info.Block)
 }
