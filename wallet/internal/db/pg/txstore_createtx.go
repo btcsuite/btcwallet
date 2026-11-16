@@ -170,95 +170,34 @@ func (o *createTxOps) PrepareBlock(ctx context.Context,
 	return nil
 }
 
-// ListConflictTxns returns the direct conflict root IDs plus the matching tx
-// hashes used for descendant discovery.
+// ListConflictTxns returns unconfirmed transactions sharing inputs with req.
+// Parent credits need not be known; the hashes allow descendants to be found.
 func (o *createTxOps) ListConflictTxns(ctx context.Context,
 	req db.CreateTxRequest) ([]int64, []chainhash.Hash, error) {
 
-	rootIDs, err := collectConflictRootIDs(ctx, o.qtx, req)
+	rows, err := o.qtx.ListConflictingTransactions(
+		ctx, sqlc.ListConflictingTransactionsParams{
+			WalletID: int64(req.Params.WalletID), TxHash: req.TxHash[:],
+		},
+	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("list input conflicts: %w", err)
 	}
 
-	if len(rootIDs) == 0 {
-		return nil, nil, nil
-	}
+	ids := make([]int64, 0, len(rows))
+	hashes := make([]chainhash.Hash, 0, len(rows))
 
-	rows, err := o.qtx.ListUnminedTransactions(ctx, int64(req.Params.WalletID))
-	if err != nil {
-		return nil, nil, fmt.Errorf("list unmined txns: %w", err)
-	}
-
-	return buildConflictRoots(rows, rootIDs)
-}
-
-// collectConflictRootIDs returns the active unmined spender row IDs
-// that currently own any wallet-controlled input spent by the incoming tx.
-func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
-	req db.CreateTxRequest) (map[int64]struct{}, error) {
-
-	if blockchain.IsCoinBaseTx(req.Params.Tx) {
-		return map[int64]struct{}{}, nil
-	}
-
-	rootIDs := make(map[int64]struct{}, len(req.Params.Tx.TxIn))
-	for inputIndex, txIn := range req.Params.Tx.TxIn {
-		outputIndex, err := db.Uint32ToInt32(txIn.PreviousOutPoint.Index)
-		if err != nil {
-			return nil, fmt.Errorf("convert input outpoint index %d: %w",
-				inputIndex, err)
-		}
-
-		spend, err := qtx.GetUtxoSpendByOutpoint(
-			ctx, sqlc.GetUtxoSpendByOutpointParams{
-				WalletID:    int64(req.Params.WalletID),
-				TxHash:      txIn.PreviousOutPoint.Hash[:],
-				OutputIndex: outputIndex,
-			},
-		)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-
-			return nil, fmt.Errorf("lookup input conflict %d: %w", inputIndex,
-				err)
-		}
-
-		if !spend.SpentByTxID.Valid {
-			continue
-		}
-
-		rootIDs[spend.SpentByTxID.Int64] = struct{}{}
-	}
-
-	return rootIDs, nil
-}
-
-// buildConflictRoots maps the selected unmined rows into ordered root IDs and
-// the matching root hashes used for descendant discovery.
-func buildConflictRoots(rows []sqlc.ListUnminedTransactionsRow,
-	rootIDSet map[int64]struct{}) (
-	[]int64, []chainhash.Hash, error) {
-
-	rootIDs := make([]int64, 0, len(rootIDSet))
-
-	rootHashes := make([]chainhash.Hash, 0, len(rootIDSet))
 	for _, row := range rows {
-		if _, ok := rootIDSet[row.ID]; !ok {
-			continue
-		}
-
-		txHash, err := chainhash.NewHash(row.TxHash)
+		hash, err := chainhash.NewHash(row.TxHash)
 		if err != nil {
 			return nil, nil, fmt.Errorf("tx hash: %w", err)
 		}
 
-		rootIDs = append(rootIDs, row.ID)
-		rootHashes = append(rootHashes, *txHash)
+		ids = append(ids, row.ID)
+		hashes = append(hashes, *hash)
 	}
 
-	return rootIDs, rootHashes, nil
+	return ids, hashes, nil
 }
 
 // Insert stores one new postgres transaction row for CreateTx.
@@ -301,6 +240,26 @@ func (o *createTxOps) InsertInputs(ctx context.Context,
 	}
 
 	return nil
+}
+
+// GetInputValidity loads the invalid-parent and confirmed-competing-spender
+// facts, in that order, without applying transaction admission policy.
+func (o *createTxOps) GetInputValidity(ctx context.Context,
+	req db.CreateTxRequest) (bool, bool, error) {
+
+	// Retained prevouts expose conflicts before parent credit discovery.
+	inp, err := o.qtx.GetTxInputValidity(
+		ctx, sqlc.GetTxInputValidityParams{
+			WalletID: int64(req.Params.WalletID),
+			TxHash:   req.TxHash[:],
+		},
+	)
+	if err != nil {
+		return false, false,
+			fmt.Errorf("check transaction input claims: %w", err)
+	}
+
+	return inp.HasInvalidParent, inp.HasConfirmedConflict, nil
 }
 
 // InsertCredits stores any wallet-owned outputs created by the transaction.

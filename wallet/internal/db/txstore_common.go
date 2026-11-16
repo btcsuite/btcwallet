@@ -813,14 +813,13 @@ var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
 //     it
 //   - Insert the base transaction row exactly once when no existing row can be
 //     reused
-//   - when the incoming tx is confirmed, discover any direct conflict roots
-//     before later writes claim shared inputs or rewrite that branch
-//   - if direct conflicts were found, rewrite those roots to replaced state,
-//     fail their descendants, and record replacement history before the new
-//     row claims their wallet-owned inputs
 //   - index immutable inputs even when their parent credits are not known
-//   - Insert every wallet-owned credited output as a UTXO
-//   - attach any wallet-owned spent inputs to that final transaction row
+//   - validate known parent ancestry and reject a second confirmed claimant
+//   - only for a confirming block, mark direct peers Replaced and descendants
+//     Failed while retaining input facts and recording replacement history
+//   - insert wallet-owned credited outputs and attach already-recorded children
+//     to those credits
+//   - attach this transaction's wallet-owned spent inputs
 //   - delete the leases on those inputs if the transaction is confirmed
 //
 // Each backend implements those steps with its own sqlc-generated query types
@@ -848,8 +847,8 @@ type CreateTxOps interface {
 	// the later Insert step needs.
 	PrepareBlock(ctx context.Context, req CreateTxRequest) error
 
-	// ListConflictTxns returns the direct wallet-owned conflict tx IDs plus the
-	// corresponding hashes used for descendant discovery.
+	// ListConflictTxns returns direct unmined peers sharing retained inputs,
+	// including unknown parents, and their hashes for descendant discovery.
 	ListConflictTxns(ctx context.Context, req CreateTxRequest) ([]int64,
 		[]chainhash.Hash, error)
 
@@ -869,6 +868,12 @@ type CreateTxOps interface {
 	// Replaying the same input position preserves its immutable identity.
 	// The shared workflow calls it only for non-coinbase transactions.
 	InsertInputs(ctx context.Context, req CreateTxRequest, txID int64) error
+
+	// GetInputValidity reports whether a known parent is invalid and whether
+	// a different confirmed transaction spends any input, in that order.
+	// It returns facts only; the shared workflow decides admission.
+	GetInputValidity(ctx context.Context,
+		req CreateTxRequest) (bool, bool, error)
 
 	// InsertCredits records every wallet-owned output that the caller
 	// marked as a credit for this transaction.
@@ -1103,45 +1108,28 @@ func handleTxDescendants(ctx context.Context, walletID int64,
 	return nil
 }
 
-// handleTxConflicts discovers the direct conflicting roots of a new confirmed
-// tx, rewrites them to replaced state, and marks their descendants failed.
-//
-// The replacement algorithm is intentionally ordered:
-//   - load the direct conflicting roots first
-//   - load the live unmined graph snapshot used for descendant discovery
-//   - discover every descendant that depends on those roots before any mutation
-//     starts
-//   - handle the direct root txns first
-//   - handle the descendant txns second
-//
-// That sequencing preserves replacement history for the direct conflicts while
-// still invalidating the dependent branch atomically inside one SQL
-// transaction.
+// handleTxConflicts grants replacement authority only to a current block.
+// Both fresh recording and replay reach this gate after indexing their inputs.
 func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 	replacementTxID int64, ops CreateTxOps) error {
 
-	// Only confirmed inserts can replace an active unmined branch.
 	if req.Params.Block == nil {
 		return nil
 	}
 
-	// Load the direct roots first so every later step works from the currently
-	// visible spend edges on the shared parent inputs.
 	rootIDs, rootHashes, err := ops.ListConflictTxns(ctx, req)
 	if err != nil {
 		return fmt.Errorf("list conflict txns: %w", err)
 	}
 
-	// Exit early if there are no conflicts.
 	if len(rootIDs) == 0 {
 		return nil
 	}
 
+	// Capture descendants before root mutation changes their eligibility.
+	// Indexed lookup produces each root ID and hash together in this snapshot.
 	walletID := int64(req.Params.WalletID)
 
-	// Discover descendants before any mutation starts.
-	// Later rewrites can otherwise hide part of the displaced
-	// branch from the graph walk.
 	descendantIDs, err := collectConflictDescendants(
 		ctx, walletID, rootHashes, rootIDs, ops,
 	)
@@ -1149,19 +1137,12 @@ func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 		return err
 	}
 
-	// Direct roots keep the replacement state and replacement history.
 	err = handleRootTxns(ctx, walletID, rootIDs, replacementTxID, ops)
 	if err != nil {
 		return err
 	}
 
-	// Descendants clear their spend edges and then fall to the failed state.
-	err = handleTxDescendants(ctx, walletID, descendantIDs, ops)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return handleTxDescendants(ctx, walletID, descendantIDs, ops)
 }
 
 // ReplaceUnminedTxConflicts rewrites direct unmined conflict roots displaced by
@@ -1206,44 +1187,46 @@ func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
 	return nil
 }
 
-// insertCreateTx completes the fresh-Insert CreateTx path.
-//
-// The order is important:
-//   - Insert first so the new winner row has a stable tx ID
-//   - reconcile conflicts next while the displaced unmined branch is still
-//     discoverable through the current spend edges
-//   - create wallet-owned credits after replacement handling
-//   - claim wallet-owned parent inputs last, because that rewires the shared
-//     spend edges to the new winner row
+// insertCreateTx inserts the transaction before recording its inputs and
+// credits, so those records share the same ID as a later replay.
 func insertCreateTx(ctx context.Context, req CreateTxRequest,
 	ops CreateTxOps) error {
 
-	// Insert the winner row first so every later write can point at its stable
-	// primary key. In particular, replacement-history edges need the new tx ID.
 	txID, err := ops.Insert(ctx, req)
 	if err != nil {
 		return fmt.Errorf("insert tx: %w", err)
 	}
 
-	// Reconcile any conflicting unmined branch before this tx claims the shared
-	// parent inputs. Conflict discovery looks at the current spend edges on
-	// those parents; once MarkInputsSpent rewires them to this new row, the old
-	// branch is no longer discoverable as the direct conflict root.
-	err = handleTxConflicts(ctx, req, txID, ops)
+	return recordCreateTxEdges(ctx, req, txID, ops)
+}
+
+// validateCreateTxInputs rejects unconfirmed children of invalid parents and
+// any competitor of a confirmed spender. Query errors take precedence.
+func validateCreateTxInputs(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) error {
+
+	invalidParent, confirmedConflict, err := ops.GetInputValidity(ctx, req)
 	if err != nil {
 		return err
 	}
 
-	err = recordCreateTxEdges(ctx, req, txID, ops)
-	if err != nil {
-		return err
+	// A confirming block is authoritative even when a known parent's status
+	// has not yet been restored from a previous conflict or failure.
+	if req.Params.Block == nil && invalidParent {
+		return ErrTxInputInvalidParent
+	}
+
+	// Block context cannot authorize a second spend of a confirmed input.
+	if confirmedConflict {
+		return ErrTxInputConflict
 	}
 
 	return nil
 }
 
-// recordCreateTxEdges records immutable inputs, wallet-owned credits and spend
-// edges using the same transaction identity during creation and replay.
+// recordCreateTxEdges records inputs, confirmed conflicts and owned outputs.
+// Index inputs before validation, then handle confirmed competitors before
+// inserting credits; creation and replay use the same transaction ID.
 func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 	ops CreateTxOps) error {
 
@@ -1257,17 +1240,28 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 		}
 	}
 
-	// Credits only describe outputs created by the tx itself, so they do not
-	// interfere with conflict discovery. Keep them after replacement handling
-	// so the branch rewrite stays grouped with the shared-input reconciliation.
-	err := ops.InsertCredits(ctx, req, txID)
+	// Reject invalid known parents or a second confirmed spender before
+	// creating credits or changing competing transactions in this write.
+	err := validateCreateTxInputs(ctx, req, ops)
+	if err != nil {
+		return fmt.Errorf("validate tx inputs: %w", err)
+	}
+
+	// Only a current confirming block can invalidate competing branches.
+	err = handleTxConflicts(ctx, req, txID, ops)
+	if err != nil {
+		return err
+	}
+
+	// Insert credits before claiming this transaction's inputs. Credit
+	// insertion also attaches any children recorded before their parent credit.
+	err = ops.InsertCredits(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx credits: %w", err)
 	}
 
-	// Claim wallet-owned parent inputs last. This is the write that makes this
-	// tx the recorded spender of the shared parents, so doing it earlier would
-	// hide a displaced unmined branch from the replacement walk.
+	// Attach wallet-owned input pointers after owned credits are available.
+	// Conflict lookup above uses retained inputs independently of these rows.
 	err = ops.MarkInputsSpent(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx spends: %w", err)
@@ -1302,11 +1296,6 @@ func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
 	err := ops.ConfirmExisting(ctx, req, existing)
 	if err != nil {
 		return fmt.Errorf("confirm existing tx: %w", err)
-	}
-
-	err = handleTxConflicts(ctx, req, existing.ID, ops)
-	if err != nil {
-		return err
 	}
 
 	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
@@ -1967,28 +1956,13 @@ func ValidateBatchTransactionsTx(txs []CreateTxParams) error {
 	return nil
 }
 
-// SortTxBatchParentsFirst returns the batch transactions reordered so that any
-// transaction creating an output another batch member spends is positioned
-// before that spending member, regardless of the caller's original order.
+// SortTxBatchParentsFirst puts each in-batch parent before its spenders, so
+// recording and input validation see parents from the same batch regardless
+// of the caller's order. It preserves relative order between unrelated rows.
+// Parents outside the batch impose no ordering constraint.
 //
-// The SQL backends record a transaction's wallet-owned credits and then claim
-// its spent parent inputs in the same per-transaction step. Claiming a spent
-// input is an UPDATE on the parent credit's UTXO row, so the parent credit must
-// already exist when the child is recorded; otherwise the UPDATE matches no row
-// and, finding no conflicting spend either, silently drops the spend edge and
-// leaves the parent credit unspent. Applying a batch in caller order is
-// therefore unsafe whenever a child is listed before its in-batch parent.
-//
-// This makes ApplyTxBatch order-independent: it stably topologically sorts the
-// batch so every in-batch parent precedes its children while preserving the
-// caller's relative order among transactions that have no in-batch dependency.
-// A batch that is already parents-first, has a single transaction, or has no
-// in-batch parent/child edges is returned unchanged. Edges to outpoints created
-// outside the batch impose no ordering, since those parent rows either already
-// exist or never will.
-//
-// The returned slice is a fresh reordering of the same CreateTxParams values;
-// the input slice is not mutated.
+// The stable topological walk reuses the same CreateTxParams values without
+// changing the input slice. An already ordered batch can be returned unchanged.
 func SortTxBatchParentsFirst(txs []CreateTxParams) []CreateTxParams {
 	// Nothing to reorder: a single transaction (or none) cannot list a
 	// child ahead of an in-batch parent.

@@ -152,29 +152,9 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	t.Parallel()
 
-	req, err := db.NewCreateTxRequest(db.CreateTxParams{
-		WalletID: 1,
-		Tx: &wire.MsgTx{
-			Version: wire.TxVersion,
-			TxIn: []*wire.TxIn{{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  chainhash.Hash{1},
-					Index: ^uint32(0),
-				},
-			}},
-			TxOut: []*wire.TxOut{{Value: 1, PkScript: []byte{0x51}}},
-		},
-		Received: time.Unix(1, 0),
-		Status:   db.TxStatusPending,
-	})
-	require.NoError(t, err)
-
-	_, err = collectConflictRootIDs(
-		t.Context(), nil, req,
+	_, _, err := creditExists(
+		t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0),
 	)
-	require.ErrorContains(t, err, "convert input outpoint index 0")
-
-	_, _, err = creditExists(t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0))
 	require.ErrorContains(t, err, "convert credit index")
 
 	err = markInputsSpent(t.Context(), nil, db.CreateTxParams{
@@ -201,13 +181,6 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 		t.Context(), ^uint32(0),
 	)
 	require.ErrorContains(t, err, "convert rollback height")
-
-	_, _, err = buildConflictRoots([]sqlc.ListUnminedTransactionsRow{{
-		ID:       1,
-		TxHash:   []byte{1},
-		TxStatus: 0,
-	}}, map[int64]struct{}{1: {}})
-	require.ErrorContains(t, err, "tx hash")
 
 	leaseOps := &leaseOutputOps{}
 
