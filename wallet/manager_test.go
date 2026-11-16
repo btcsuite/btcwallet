@@ -1075,7 +1075,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 
 			// Validation must leave Store untouched. Fixture cleanup joins work
 			// without closing the strictly untouched backend.
-			lifetimeCtx, cancel := context.WithCancel(context.Background())
+			lifetimeCtx, cancel := context.WithCancelCause(context.Background())
 			m := &Manager{
 				lifetimeCtx: lifetimeCtx,
 				cancel:      cancel,
@@ -1094,7 +1094,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			m.started.Store(true)
 			m.wg.Go(m.mainLoop)
 			t.Cleanup(func() {
-				cancel()
+				cancel(ErrManagerStopped)
 				m.wg.Wait()
 			})
 
@@ -1338,7 +1338,7 @@ func newManagerLifecycleTest(t *testing.T,
 	t.Helper()
 
 	// Manager owns the service lifetime; fixture Stop joins before assertions.
-	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	lifetimeCtx, cancel := context.WithCancelCause(context.Background())
 	manager := &Manager{
 		lifetimeCtx: lifetimeCtx,
 		cancel:      cancel,
@@ -1419,11 +1419,12 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	t.Cleanup(releaseStop)
 
 	cancel := manager.cancel
-	manager.cancel = sync.OnceFunc(func() {
+	cancelStop := sync.OnceFunc(func() {
 		close(reserved)
 		<-release
-		cancel()
+		cancel(ErrManagerStopped)
 	})
+	manager.cancel = func(error) { cancelStop() }
 
 	stopped := make(chan error, 1)
 	go func() { stopped <- manager.Stop() }()
@@ -3625,7 +3626,7 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	manager.started.Store(true)
-	manager.cancel()
+	manager.cancel(ErrManagerStopped)
 
 	// Act: Try creation before the ordinary cleanup owner closes the Store.
 	w, err := manager.Create(CreateWalletParams{Name: "late"})

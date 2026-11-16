@@ -324,6 +324,7 @@ func setupBenchmarkWallet(tb testing.TB,
 		w.cfg.Chain = cfg.chainSource
 	}
 
+	w.reportFailure = func(error) { w.cancel() }
 	w.chainSyncer = newChainSyncer(w.cfg.Chain, w.cfg.ChainParams)
 	w.chainEventChan = make(chan chainEvent, 1)
 

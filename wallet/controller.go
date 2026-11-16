@@ -231,6 +231,7 @@ func (w *Wallet) runSyncLoop() {
 	err := w.sync.run(w.lifetimeCtx)
 	if err != nil {
 		log.Errorf("Chain sync loop stopped: %v", err)
+		w.reportFailure(err)
 	}
 }
 

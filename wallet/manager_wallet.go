@@ -8,7 +8,7 @@ import (
 // newManagedWallet constructs a Wallet from backend-validated storage data.
 // The backend remains the owner of every resource referenced by data.
 func newManagedWallet(cfg Config, data *walletData,
-	syncer chainRouter) *Wallet {
+	syncer chainRouter, reportFailure func(error)) *Wallet {
 
 	lockTimer := time.NewTimer(0)
 	if !lockTimer.Stop() {
@@ -32,6 +32,7 @@ func newManagedWallet(cfg Config, data *walletData,
 		lockTimer:         lockTimer,
 		masterFingerprint: data.masterFingerprint,
 		isWatchOnly:       data.isWatchOnly,
+		reportFailure:     reportFailure,
 	}
 
 	// Allocate routing admission before the Wallet can be published. Its

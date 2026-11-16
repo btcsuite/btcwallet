@@ -388,6 +388,10 @@ type Wallet struct {
 	chainSyncer    chainRouter
 	chainEventChan chan chainEvent
 
+	// reportFailure wakes Manager without waiting on this worker's own join.
+	// Manager retains the cause and owns aggregate disposal.
+	reportFailure func(error)
+
 	// state maintains the wallet's atomic, three-dimensional status:
 	// Lifecycle (System), Synchronization (Chain), and Authentication
 	// (Security).
