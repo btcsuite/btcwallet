@@ -35,10 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	errDb           = errors.New("db error")
-	errAddrNotFound = errors.New("addr not found")
-)
+var errDb = errors.New("db error")
 
 // expectFundingLease registers the single atomic set lease a FundPsbt attempt
 // makes for its complete input set under a non-zero, wallet-generated lease ID
@@ -4190,354 +4187,41 @@ func TestPlanBip32PsbtInputErrors(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidSignParam)
 }
 
-// TestAddScriptToPInput tests that addScriptToPInput correctly updates
-// the PSBT input with the provided witness and/or sigScript.
-func TestAddScriptToPInput(t *testing.T) {
-	t.Parallel()
+// testFinalizeTweak returns lnd's single tweak used by the FinalizePsbt tests,
+// with the wallet's base key at account 0, branch 0, index 0 under it.
+func testFinalizeTweak(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
+	t.Helper()
 
-	// Arrange: Dummy witness and sigScript.
-	witness := wire.TxWitness{[]byte{0x01}, []byte{0x02}}
-	sigScript := []byte{0x03}
+	tweak, err := NewAddTweak([32]byte{31: 7})
+	require.NoError(t, err)
 
-	// Arrange: Expected serialized witness:
-	// - 0x02 (stack items)
-	// - 0x01 (len) + 0x01 (data)
-	// - 0x01 (len) + 0x02 (data)
-	expectedWitness := []byte{0x02, 0x01, 0x01, 0x01, 0x02}
+	basePriv, _ := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	tweaked, _ := btcec.PrivKeyFromBytes(basePriv.Serialize())
+	require.NoError(t, tweak.apply(tweaked))
 
-	tests := []struct {
-		name            string
-		witness         wire.TxWitness
-		sigScript       []byte
-		expectedWitness []byte
-		expectedSig     []byte
-	}{
-		{
-			name:            "witness only",
-			witness:         witness,
-			sigScript:       nil,
-			expectedWitness: expectedWitness,
-			expectedSig:     nil,
-		},
-		{
-			name:            "sigScript only",
-			witness:         nil,
-			sigScript:       sigScript,
-			expectedWitness: nil,
-			expectedSig:     sigScript,
-		},
-		{
-			name:            "both",
-			witness:         witness,
-			sigScript:       sigScript,
-			expectedWitness: expectedWitness,
-			expectedSig:     sigScript,
-		},
-		{
-			name:            "none",
-			witness:         nil,
-			sigScript:       nil,
-			expectedWitness: nil,
-			expectedSig:     nil,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange: UnlockingScript and target PInput.
-			script := &UnlockingScript{
-				Witness:   tc.witness,
-				SigScript: tc.sigScript,
-			}
-			pInput := &psbt.PInput{}
-
-			// Act: Call addScriptToPInput.
-			err := addScriptToPInput(pInput, script)
-
-			// Assert: Verify no error and fields match
-			// expectations.
-			require.NoError(t, err)
-			require.Equal(t, tc.expectedWitness,
-				pInput.FinalScriptWitness)
-			require.Equal(t, tc.expectedSig,
-				pInput.FinalScriptSig)
-		})
-	}
+	return tweaked, tweaked.PubKey()
 }
 
-// TestFinalizeInput tests that finalizeInput correctly processes a single PSBT
-// input, handling success, skips, and errors.
-func TestFinalizeInput(t *testing.T) {
-	t.Parallel()
+// testPrependOwnedInput puts an owned P2WPKH input, which FinalizePsbt signs,
+// before the packet's only input.
+func testPrependOwnedInput(t *testing.T, packet *psbt.Packet,
+	hashType txscript.SigHashType) {
 
-	t.Run("success", func(t *testing.T) {
-		t.Parallel()
+	t.Helper()
 
-		w, mocks := createUnlockedWalletWithMocks(t)
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	owned := testEcdsaSignPacket(
+		t, testP2WPKHScript(t, walletPub), nil, nil, 84,
+	)
+	owned.Inputs[0].SighashType = hashType
 
-		// The signing key is resolved through the store account secret;
-		// take the leaf public key to build the input address.
-		scope := waddrmgr.KeyScopeBIP0084
-		path := waddrmgr.DerivationPath{}
-		_, pubKey := expectStoreSignerPrivKey(
-			t, mocks, w.id, scope, path,
-		)
+	txIn := owned.UnsignedTx.TxIn[0]
+	txIn.PreviousOutPoint.Index = 4
 
-		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-			address.Hash160(pubKey.SerializeCompressed()),
-			&chainParams,
-		)
-		require.NoError(t, err)
-		p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
-		require.NoError(t, err)
-
-		// Arrange: Valid PSBT input.
-		tx := wire.NewMsgTx(2)
-		tx.AddTxIn(&wire.TxIn{})
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(t, err)
-
-		packet.Inputs[0].WitnessUtxo = &wire.TxOut{
-			Value:    1000,
-			PkScript: p2wkhScript,
-		}
-		packet.Inputs[0].SighashType = txscript.SigHashAll
-
-		// Arrange: Mock dependencies with a usable derivation scope so
-		// signing routes through the store account secret.
-		expectSignerAddressInfoWithKeyScope(
-			t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false,
-			pubKey, scope,
-		)
-
-		sigHashes := txscript.NewTxSigHashes(
-			tx, txscript.NewCannedPrevOutputFetcher(
-				packet.Inputs[0].WitnessUtxo.PkScript,
-				packet.Inputs[0].WitnessUtxo.Value,
-			),
-		)
-
-		err = w.finalizeInput(t.Context(), packet, 0, sigHashes)
-
-		require.NoError(t, err)
-		require.NotEmpty(t, packet.Inputs[0].FinalScriptWitness)
-	})
-
-	t.Run("skip finalized", func(t *testing.T) {
-		t.Parallel()
-		// Arrange: Already finalized input.
-		tx := wire.NewMsgTx(2)
-		tx.AddTxIn(&wire.TxIn{})
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(t, err)
-
-		packet.Inputs[0].FinalScriptWitness = []byte{0x01}
-
-		w, _ := createUnlockedWalletWithMocks(t)
-
-		err = w.finalizeInput(t.Context(), packet, 0, nil)
-
-		// Assert: No error, remains unchanged (mock not called).
-		require.NoError(t, err)
-	})
-
-	t.Run("skip missing utxo", func(t *testing.T) {
-		t.Parallel()
-		// Arrange: Input without UTXO.
-		tx := wire.NewMsgTx(2)
-		tx.AddTxIn(&wire.TxIn{})
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(t, err)
-
-		w, _ := createUnlockedWalletWithMocks(t)
-
-		err = w.finalizeInput(t.Context(), packet, 0, nil)
-
-		// Assert: No error (logs error but continues).
-		require.NoError(t, err)
-	})
-
-	t.Run("skip malformed script", func(t *testing.T) {
-		t.Parallel()
-		// Arrange: Input with malformed pkScript.
-		tx := wire.NewMsgTx(2)
-		tx.AddTxIn(&wire.TxIn{})
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(t, err)
-
-		// OP_RETURN script cannot be extracted as an address.
-		packet.Inputs[0].WitnessUtxo = &wire.TxOut{
-			Value:    1000,
-			PkScript: []byte{0x6a},
-		}
-
-		w, _ := createUnlockedWalletWithMocks(t)
-
-		err = w.finalizeInput(t.Context(), packet, 0, nil)
-
-		// Assert: No error (logs error but continues).
-		require.NoError(t, err)
-	})
-}
-
-// TestFinalizePsbtSuccess tests that FinalizePsbt successfully generates
-// witnesses for supported input types (P2WKH, Taproot).
-func TestFinalizePsbtSuccess(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		addrType waddrmgr.AddressType
-		dbType   db.AddressType
-		keyScope waddrmgr.KeyScope
-		hashType txscript.SigHashType
-	}{
-		{
-			name:     "p2wkh",
-			addrType: waddrmgr.WitnessPubKey,
-			dbType:   db.WitnessPubKey,
-			keyScope: waddrmgr.KeyScopeBIP0084,
-			hashType: txscript.SigHashAll,
-		},
-		{
-			name:     "taproot",
-			addrType: waddrmgr.TaprootPubKey,
-			dbType:   db.TaprootPubKey,
-			keyScope: waddrmgr.KeyScopeBIP0086,
-			hashType: txscript.SigHashDefault,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			w, mocks := createUnlockedWalletWithMocks(t)
-
-			// The signing key is resolved through the store account
-			// secret; take the leaf public key to build the input
-			// address.
-			path := waddrmgr.DerivationPath{}
-			_, pubKey := expectStoreSignerPrivKey(
-				t, mocks, w.id, tc.keyScope, path,
-			)
-
-			var (
-				addr address.Address
-				err  error
-			)
-			if tc.addrType == waddrmgr.TaprootPubKey {
-				outputKey := txscript.ComputeTaprootKeyNoScript(
-					pubKey,
-				)
-				addr, err = address.NewAddressTaproot(
-					schnorr.SerializePubKey(outputKey),
-					&chainParams,
-				)
-			} else {
-				addr, err = address.NewAddressWitnessPubKeyHash(
-					address.Hash160(
-						pubKey.SerializeCompressed(),
-					), &chainParams,
-				)
-			}
-
-			require.NoError(t, err)
-
-			pkScript, err := txscript.PayToAddrScript(addr)
-			require.NoError(t, err)
-
-			// Arrange: Create PSBT.
-			tx := wire.NewMsgTx(2)
-			tx.AddTxIn(&wire.TxIn{})
-			tx.AddTxOut(&wire.TxOut{Value: 1000}) // Add output
-			packet, err := psbt.NewFromUnsignedTx(tx)
-			require.NoError(t, err)
-
-			packet.Inputs[0].WitnessUtxo = &wire.TxOut{
-				Value:    1000,
-				PkScript: pkScript,
-			}
-			packet.Inputs[0].SighashType = tc.hashType
-
-			// Arrange: Mock Store.GetAddress for ScriptForOutput
-			// with a usable derivation scope so signing routes
-			// through the store account secret.
-			expectSignerAddressInfoWithKeyScope(
-				t, w, mocks, addr, tc.dbType, false, false,
-				pubKey, tc.keyScope,
-			)
-
-			// Act: Call FinalizePsbt.
-			err = w.FinalizePsbt(t.Context(), packet)
-
-			// Assert: Verify success and witness presence.
-			require.NoError(t, err)
-			require.NotEmpty(
-				t, packet.Inputs[0].FinalScriptWitness,
-			)
-		})
-	}
-}
-
-// TestFinalizePsbtErrors tests error conditions for FinalizePsbt.
-func TestFinalizePsbtErrors(t *testing.T) {
-	t.Parallel()
-
-	t.Run("inputs not ready", func(t *testing.T) {
-		t.Parallel()
-		// Arrange: Packet with input but no UTXO info.
-		tx := wire.NewMsgTx(2)
-		tx.AddTxIn(&wire.TxIn{})
-		tx.AddTxOut(&wire.TxOut{Value: 1000})
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(t, err)
-
-		w, _ := createUnlockedWalletWithMocks(t)
-
-		err = w.FinalizePsbt(t.Context(), packet)
-
-		require.ErrorContains(t, err, "psbt inputs not ready")
-	})
-
-	t.Run("finalization failed", func(t *testing.T) {
-		t.Parallel()
-		// Arrange: Packet with valid UTXO but we can't sign it (watch
-		// only).
-		tx := wire.NewMsgTx(2)
-		tx.AddTxIn(&wire.TxIn{})
-		tx.AddTxOut(&wire.TxOut{Value: 1000})
-		packet, err := psbt.NewFromUnsignedTx(tx)
-		require.NoError(t, err)
-
-		// Use a valid P2WKH script so extraction succeeds.
-		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-			make([]byte, 20), &chainParams,
-		)
-		require.NoError(t, err)
-		dummyScript, err := txscript.PayToAddrScript(p2wkhAddr)
-		require.NoError(t, err)
-
-		packet.Inputs[0].WitnessUtxo = &wire.TxOut{
-			Value:    1000,
-			PkScript: dummyScript,
-		}
-
-		w, mocks := createUnlockedWalletWithMocks(t)
-
-		// Arrange: Mock Store.GetAddress to return an error.
-		// ComputeUnlockingScript will fail, log, and continue.
-		// Then MaybeFinalizeAll will fail because no witness.
-		mocks.store.On("GetAddress", mock.Anything, mock.Anything).
-			Return((*db.AddressInfo)(nil), errAddrNotFound)
-
-		err = w.FinalizePsbt(t.Context(), packet)
-
-		// Assert: Should return error from MaybeFinalizeAll.
-		require.ErrorContains(t, err, "error finalizing PSBT")
-	})
+	packet.UnsignedTx.TxIn = append(
+		[]*wire.TxIn{txIn}, packet.UnsignedTx.TxIn...,
+	)
+	packet.Inputs = append([]psbt.PInput{owned.Inputs[0]}, packet.Inputs...)
 }
 
 // testAddP2WPKHSig adds key's SIGHASH_ALL signature to a P2WPKH input, signed
@@ -4563,6 +4247,42 @@ func testAddP2WPKHSig(t *testing.T, packet *psbt.Packet, idx int,
 			PubKey:    key.PubKey().SerializeCompressed(),
 			Signature: sig,
 		},
+	)
+}
+
+// testAddTaprootKeySig adds key's default sighash key-path signature to a
+// Taproot input paying key with no script tree.
+func testAddTaprootKeySig(t *testing.T, packet *psbt.Packet, idx int,
+	key *btcec.PrivateKey) {
+
+	t.Helper()
+
+	prevOuts, err := PsbtPrevOutputFetcher(packet)
+	require.NoError(t, err)
+
+	tx := packet.UnsignedTx
+	utxo := packet.Inputs[idx].WitnessUtxo
+	sig, err := txscript.RawTxInTaprootSignature(
+		tx, txscript.NewTxSigHashes(tx, prevOuts), idx, utxo.Value,
+		utxo.PkScript, nil, txscript.SigHashDefault, key,
+	)
+	require.NoError(t, err)
+
+	packet.Inputs[idx].TaprootKeySpendSig = sig
+}
+
+// expectFinalizeSignerKey expects FinalizePsbt to check the public key and
+// then sign with the private key at account 0, branch 0, index 0 of the
+// purpose's scope.
+func expectFinalizeSignerKey(t *testing.T, mocks *mockWalletDeps,
+	walletID uint32, purpose uint32) {
+
+	t.Helper()
+
+	scope := waddrmgr.KeyScope{Purpose: purpose, Coin: 1}
+	expectStorePubKey(t, mocks, walletID, scope, waddrmgr.DerivationPath{})
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, walletID, scope, waddrmgr.DerivationPath{},
 	)
 }
 
@@ -4606,6 +4326,97 @@ func testSetUtxoForm(packet *psbt.Packet, form testUtxoForm) {
 
 	if form == testParentUtxo {
 		pInput.WitnessUtxo = nil
+	}
+}
+
+// TestAutoSignable tests how FinalizePsbt treats SignPsbt's plan for an
+// input. Only an unsigned input paying the key directly is signed; a signed
+// input is never signed again, and only an output paying another key, which
+// that key's signature would satisfy, is reported as needing a signature.
+func TestAutoSignable(t *testing.T) {
+	t.Parallel()
+
+	signed := psbt.PInput{FinalScriptSig: []byte{txscript.OP_TRUE}}
+	direct := &psbtSignPlan{keyCommitted: true}
+	notPaid := fmt.Errorf("%w: %w", ErrSigningKeyMismatch, errKeyNotPaid)
+
+	tests := []struct {
+		name     string
+		pInput   psbt.PInput
+		plan     *psbtSignPlan
+		sign     bool
+		planErr  error
+		wantSign bool
+		wantErr  error
+
+		// needsSig is whether the error reports a missing signature.
+		needsSig bool
+	}{{
+		name: "not planned",
+	}, {
+		name:     "direct key",
+		plan:     direct,
+		sign:     true,
+		wantSign: true,
+	}, {
+		name:   "finalized direct key",
+		pInput: signed,
+		plan:   direct,
+		sign:   true,
+	}, {
+		name:     "unsigned script spend",
+		plan:     &psbtSignPlan{},
+		sign:     true,
+		wantErr:  ErrInputNeedsSignature,
+		needsSig: true,
+	}, {
+		name:   "signed script spend",
+		pInput: signed,
+		plan:   &psbtSignPlan{},
+		sign:   true,
+	}, {
+		name:     "unsigned output paying another key",
+		planErr:  notPaid,
+		wantErr:  errKeyNotPaid,
+		needsSig: true,
+	}, {
+		name:    "signed output paying another key",
+		pInput:  signed,
+		planErr: notPaid,
+	}, {
+		name:    "unsigned forged script",
+		planErr: ErrSigningKeyMismatch,
+		wantErr: ErrSigningKeyMismatch,
+	}, {
+		name:    "unsigned unsupported record",
+		planErr: ErrUnsupportedMultipleBip32Derivation,
+		wantErr: ErrUnsupportedMultipleBip32Derivation,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: decide whether to sign the input.
+			sign, err := autoSignable(
+				&tc.pInput, tc.plan, tc.sign, tc.planErr,
+			)
+
+			// Assert: the decision, and only the expected errors.
+			require.Equal(t, tc.wantSign, sign)
+
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Equal(
+				t, tc.needsSig,
+				errors.Is(err, ErrInputNeedsSignature),
+			)
+		})
 	}
 }
 
@@ -4708,6 +4519,416 @@ func TestSetFinalizerUtxos(t *testing.T) {
 	}
 }
 
+// TestFinalizePsbtAutoSignsUntweakedKeys tests that FinalizePsbt signs and
+// finalizes an owned input whose output pays the derivation key directly. A
+// segwit input carrying only its parent transaction must still get a witness,
+// and a legacy input carrying a witness UTXO, as decorated, a script sig.
+func TestFinalizePsbtAutoSignsUntweakedKeys(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	p2wpkh := testP2WPKHScript(t, walletPub)
+	p2pkh := testScript(
+		t, txscript.OP_DUP, txscript.OP_HASH160,
+		address.Hash160(walletPub.SerializeCompressed()),
+		txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG,
+	)
+
+	tests := []struct {
+		name         string
+		purpose      uint32
+		pkScript     []byte
+		redeemScript []byte
+		taproot      bool
+
+		// legacy is finalized with a script sig and no witness.
+		legacy bool
+
+		utxos testUtxoForm
+	}{{
+		name:     "p2wpkh",
+		purpose:  84,
+		pkScript: p2wpkh,
+	}, {
+		name:         "np2wpkh",
+		purpose:      49,
+		pkScript:     testP2SHScript(t, p2wpkh),
+		redeemScript: p2wpkh,
+	}, {
+		name:     "taproot key path",
+		purpose:  86,
+		pkScript: testBip86Output(t, walletPub).PkScript,
+		taproot:  true,
+	}, {
+		name:     "p2wpkh parent only",
+		purpose:  84,
+		pkScript: p2wpkh,
+		utxos:    testParentUtxo,
+	}, {
+		name:         "np2wpkh parent only",
+		purpose:      49,
+		pkScript:     testP2SHScript(t, p2wpkh),
+		redeemScript: p2wpkh,
+		utxos:        testParentUtxo,
+	}, {
+		name:     "taproot key path parent only",
+		purpose:  86,
+		pkScript: testBip86Output(t, walletPub).PkScript,
+		taproot:  true,
+		utxos:    testParentUtxo,
+	}, {
+		name:     "p2pkh parent only",
+		purpose:  44,
+		pkScript: p2pkh,
+		legacy:   true,
+		utxos:    testParentUtxo,
+	}, {
+		name:     "p2pkh decorated",
+		purpose:  44,
+		pkScript: p2pkh,
+		legacy:   true,
+		utxos:    testBothUtxos,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an owned input with the wallet's derivation.
+			packet := testEcdsaSignPacket(
+				t, tc.pkScript, tc.redeemScript, nil, tc.purpose,
+			)
+			if tc.taproot {
+				packet = testTaprootSignPacket(
+					t, &wire.TxOut{
+						Value: 1000, PkScript: tc.pkScript,
+					}, nil,
+				)
+			}
+
+			testSetUtxoForm(packet, tc.utxos)
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			expectFinalizeSignerKey(t, mocks, w.id, tc.purpose)
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the input is finalized.
+			require.NoError(t, err)
+			require.Equal(
+				t, tc.legacy,
+				len(packet.Inputs[0].FinalScriptWitness) == 0,
+			)
+
+			_, err = psbt.Extract(packet)
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestFinalizePsbtRequiresSignatureBeforeKeyLookup tests that an input the
+// wallet holds a derivation for but does not auto-sign, because it needs a
+// tweak or spends a script, fails FinalizePsbt when unsigned. The call fails
+// before any key is looked up, even for an owned input ahead of it, and leaves
+// the caller's packet unchanged.
+func TestFinalizePsbtRequiresSignatureBeforeKeyLookup(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	_, tweakedPub := testFinalizeTweak(t)
+
+	checkSig := testScript(
+		t, walletPub.SerializeCompressed(), txscript.OP_CHECKSIG,
+	)
+	leafOutput, _, leafScript := testOneLeafOutput(
+		t, testAuthKeys(), txscript.BaseLeafVersion, testScript(
+			t, schnorr.SerializePubKey(walletPub),
+			txscript.OP_CHECKSIG,
+		),
+	)
+
+	tests := []struct {
+		name          string
+		pkScript      []byte
+		witnessScript []byte
+		leafScript    *psbt.TaprootTapLeafScript
+		taproot       bool
+	}{{
+		name:     "tweaked p2wpkh",
+		pkScript: testP2WPKHScript(t, tweakedPub),
+	}, {
+		name:     "tweaked taproot key path",
+		pkScript: testBip86Output(t, tweakedPub).PkScript,
+		taproot:  true,
+	}, {
+		name:          "p2wsh",
+		pkScript:      testP2WSHScript(t, checkSig),
+		witnessScript: checkSig,
+	}, {
+		name:       "tapscript leaf",
+		pkScript:   leafOutput.PkScript,
+		leafScript: leafScript,
+		taproot:    true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an owned input ahead of an unsigned input
+			// the wallet holds a derivation for.
+			packet := testEcdsaSignPacket(
+				t, tc.pkScript, nil, tc.witnessScript, 84,
+			)
+			if tc.taproot {
+				packet = testTaprootSignPacket(
+					t, &wire.TxOut{
+						Value: 1000, PkScript: tc.pkScript,
+					}, tc.leafScript,
+				)
+			}
+
+			testPrependOwnedInput(t, packet, txscript.SigHashAll)
+
+			before := clonePacket(packet)
+			w, mocks := createUnlockedWalletWithMocks(t)
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the input is refused, no key was looked up,
+			// and the caller's packet is unchanged.
+			require.ErrorIs(t, err, ErrInputNeedsSignature)
+			mocks.store.AssertNotCalled(
+				t, "GetAccountSecret", mock.Anything,
+				mock.Anything,
+			)
+			require.Equal(t, before, clonePacket(packet))
+		})
+	}
+}
+
+// TestFinalizePsbtRefusesRecordNamingAnotherKey tests that FinalizePsbt
+// refuses an unsigned input whose output pays the key its record names when
+// that key, such as a tweaked one, is not the wallet's key at the record's
+// path. The public keys show the mismatch before any private key is looked
+// up, and the caller's packet is unchanged.
+func TestFinalizePsbtRefusesRecordNamingAnotherKey(t *testing.T) {
+	t.Parallel()
+
+	_, tweakedPub := testFinalizeTweak(t)
+
+	tests := []struct {
+		name     string
+		pkScript []byte
+		taproot  bool
+
+		// purpose is the key scope of the record's path.
+		purpose uint32
+	}{{
+		name:     "p2wpkh",
+		pkScript: testP2WPKHScript(t, tweakedPub),
+		purpose:  84,
+	}, {
+		name:     "taproot key path",
+		pkScript: testBip86Output(t, tweakedPub).PkScript,
+		taproot:  true,
+		purpose:  86,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an owned input ahead of an unsigned input
+			// whose record names the tweaked key at the wallet's
+			// path.
+			packet := testEcdsaSignPacket(
+				t, tc.pkScript, nil, nil, tc.purpose,
+			)
+			if tc.taproot {
+				packet = testTaprootSignPacket(
+					t, &wire.TxOut{
+						Value: 1000, PkScript: tc.pkScript,
+					}, nil,
+				)
+				packet.Inputs[0].TaprootBip32Derivation[0].
+					XOnlyPubKey = schnorr.SerializePubKey(
+					tweakedPub,
+				)
+			} else {
+				packet.Inputs[0].Bip32Derivation[0].PubKey =
+					tweakedPub.SerializeCompressed()
+			}
+
+			testPrependOwnedInput(t, packet, txscript.SigHashAll)
+
+			before := clonePacket(packet)
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			for _, purpose := range []uint32{84, tc.purpose} {
+				expectStorePubKey(
+					t, mocks, w.id, waddrmgr.KeyScope{
+						Purpose: purpose, Coin: 1,
+					}, waddrmgr.DerivationPath{},
+				)
+			}
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the input is refused as needing a signature
+			// by another key, no private key was looked up, and
+			// the caller's packet is unchanged.
+			require.ErrorIs(t, err, ErrInputNeedsSignature)
+			require.ErrorIs(t, err, ErrSigningKeyMismatch)
+			mocks.store.AssertNotCalled(
+				t, "GetAccountSecret", mock.Anything,
+				mock.Anything,
+			)
+			require.Equal(t, before, clonePacket(packet))
+		})
+	}
+}
+
+// TestFinalizePsbtChecksRecordKeyAccount tests the public-key check before an
+// auto-signed input is signed. An account the wallet lacks makes the input
+// another signer's, as in SignPsbt, and any other Store failure is returned.
+// Neither looks up a private key or changes the caller's packet.
+func TestFinalizePsbtChecksRecordKeyAccount(t *testing.T) {
+	t.Parallel()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+
+	tests := []struct {
+		name     string
+		storeErr error
+		wantErr  error
+	}{{
+		name:     "account the wallet lacks",
+		storeErr: db.ErrAccountNotFound,
+		wantErr:  psbt.ErrNotFinalizable,
+	}, {
+		name:     "store failure",
+		storeErr: errDb,
+		wantErr:  errDb,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an owned input whose account read fails.
+			packet := testEcdsaSignPacket(
+				t, testP2WPKHScript(t, walletPub), nil, nil, 84,
+			)
+			before := clonePacket(packet)
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			mocks.store.On(
+				"GetAccount", mock.Anything, mock.Anything,
+			).Return((*db.AccountInfo)(nil), tc.storeErr).Once()
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the expected error, no private key lookup,
+			// and an unchanged packet.
+			require.ErrorIs(t, err, tc.wantErr)
+			mocks.store.AssertNotCalled(
+				t, "GetAccountSecret", mock.Anything,
+				mock.Anything,
+			)
+			require.Equal(t, before, clonePacket(packet))
+		})
+	}
+}
+
+// TestFinalizePsbtFinalizesSignedInputs tests that FinalizePsbt finalizes an
+// input that already carries a valid signature, including one by a tweaked
+// key the wallet would not sign with, without looking up a key.
+func TestFinalizePsbtFinalizesSignedInputs(t *testing.T) {
+	t.Parallel()
+
+	tweakedPriv, _ := testFinalizeTweak(t)
+
+	tests := []struct {
+		name string
+
+		// signer signs the input, whose output pays its key.
+		signer *btcec.PrivateKey
+
+		// walletRecord adds the wallet's base derivation record.
+		walletRecord bool
+
+		taproot bool
+	}{{
+		name:         "tweaked p2wpkh",
+		signer:       tweakedPriv,
+		walletRecord: true,
+	}, {
+		name:         "tweaked taproot key path",
+		signer:       tweakedPriv,
+		walletRecord: true,
+		taproot:      true,
+	}, {
+		name:   "foreign p2wpkh",
+		signer: testAuthKeys()[0],
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input signed by the key its output pays.
+			pub := tc.signer.PubKey()
+
+			var packet *psbt.Packet
+			switch {
+			case tc.taproot && tc.walletRecord:
+				packet = testTaprootSignPacket(
+					t, testBip86Output(t, pub), nil,
+				)
+
+			case tc.walletRecord:
+				packet = testEcdsaSignPacket(
+					t, testP2WPKHScript(t, pub), nil, nil,
+					84,
+				)
+
+			default:
+				packet, _, _ = testAuthPacket(
+					t, &wire.TxOut{
+						Value:    1000,
+						PkScript: testP2WPKHScript(t, pub),
+					}, txscript.SigHashAll,
+				)
+			}
+
+			if tc.taproot {
+				testAddTaprootKeySig(t, packet, 0, tc.signer)
+			} else {
+				testAddP2WPKHSig(t, packet, 0, tc.signer, 1000)
+			}
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the input is finalized and no key was
+			// looked up.
+			require.NoError(t, err)
+			require.NotEmpty(t, packet.Inputs[0].FinalScriptWitness)
+			mocks.store.AssertNotCalled(
+				t, "GetAccountSecret", mock.Anything,
+				mock.Anything,
+			)
+		})
+	}
+}
+
 // TestFinalizePsbtSetsFinalizerUtxos tests that FinalizePsbt finalizes signed
 // inputs in the UTXO forms BIP 174 and DecorateInputs produce: a segwit input
 // carrying only its parent gets a witness, and a legacy input carrying both
@@ -4777,13 +4998,7 @@ func TestFinalizePsbtSetsFinalizerUtxos(t *testing.T) {
 				Signature: sig,
 			}}
 
-			// The wallet does not own the key.
-			w, mocks := createUnlockedWalletWithMocks(t)
-			mocks.store.On(
-				"GetAddress", mock.Anything, mock.Anything,
-			).Return(
-				(*db.AddressInfo)(nil), errAddrNotFound,
-			).Maybe()
+			w, _ := createUnlockedWalletWithMocks(t)
 
 			// Act: finalize the packet.
 			err = w.FinalizePsbt(t.Context(), packet)
@@ -4799,9 +5014,9 @@ func TestFinalizePsbtSetsFinalizerUtxos(t *testing.T) {
 }
 
 // TestFinalizePsbtLeavesCallerPacketOnError tests that FinalizePsbt refuses a
-// packet with an invalid record, a final witness that does not decode within
-// its bytes, or a final script that does not execute, and leaves the caller's
-// packet unchanged.
+// packet with an invalid record, an unfinalizable input, a final witness that
+// does not decode within its bytes, or a final script that does not execute,
+// and leaves the caller's packet unchanged.
 func TestFinalizePsbtLeavesCallerPacketOnError(t *testing.T) {
 	t.Parallel()
 
@@ -4833,7 +5048,7 @@ func TestFinalizePsbtLeavesCallerPacketOnError(t *testing.T) {
 		name:      "signature over the wrong amount",
 		sigAmount: 999,
 		sigHash:   txscript.SigHashAll,
-		wantErr:   ErrInvalidFinalScript,
+		wantErr:   ErrInvalidSignatureRecord,
 	}, {
 		name:         "final witness that does not execute",
 		finalWitness: badWitness.Bytes(),
@@ -4891,20 +5106,76 @@ func TestFinalizePsbtLeavesCallerPacketOnError(t *testing.T) {
 			packet.Inputs[0].FinalScriptWitness = tc.finalWitness
 
 			if tc.sigAmount != 0 {
-				testAddP2WPKHSig(
-					t, packet, 0, foreign, tc.sigAmount,
-				)
+				testAddP2WPKHSig(t, packet, 0, foreign, tc.sigAmount)
 			}
 
-			// The wallet does not own the foreign key.
-			w, mocks := createUnlockedWalletWithMocks(t)
-			mocks.store.On(
-				"GetAddress", mock.Anything, mock.Anything,
-			).Return(
-				(*db.AddressInfo)(nil), errAddrNotFound,
-			).Maybe()
+			before := clonePacket(packet)
+			w, _ := createUnlockedWalletWithMocks(t)
+
+			// Act: finalize the packet.
+			err := w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: the call fails and the caller's packet is
+			// unchanged.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Equal(t, before, clonePacket(packet))
+		})
+	}
+}
+
+// TestFinalizePsbtOwnedInputLeavesCallerPacketOnError tests that FinalizePsbt
+// fails after signing an owned input, when a foreign input beside it is
+// unsigned or the owned input's unset sighash cannot be finalized, and leaves
+// the caller's packet unchanged.
+func TestFinalizePsbtOwnedInputLeavesCallerPacketOnError(t *testing.T) {
+	t.Parallel()
+
+	foreign := testAuthKeys()[0]
+
+	tests := []struct {
+		name string
+
+		// foreignSigned adds the foreign key's signature.
+		foreignSigned bool
+
+		// ownedSigHash is the owned input's sighash type.
+		ownedSigHash txscript.SigHashType
+
+		wantErr error
+	}{{
+		name:         "unsigned foreign input",
+		ownedSigHash: txscript.SigHashAll,
+		wantErr:      psbt.ErrNotFinalizable,
+	}, {
+		name:          "owned input with an unset sighash",
+		foreignSigned: true,
+		ownedSigHash:  txscript.SigHashDefault,
+		wantErr:       psbt.ErrInvalidSigHashFlags,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an owned input ahead of a foreign P2WPKH
+			// input.
+			utxo := &wire.TxOut{
+				Value:    1000,
+				PkScript: testP2WPKHScript(t, foreign.PubKey()),
+			}
+			packet, _, _ := testAuthPacket(
+				t, utxo, txscript.SigHashAll,
+			)
+			testPrependOwnedInput(t, packet, tc.ownedSigHash)
+
+			// Sign last, once the transaction is complete.
+			if tc.foreignSigned {
+				testAddP2WPKHSig(t, packet, 1, foreign, 1000)
+			}
 
 			before := clonePacket(packet)
+			w, mocks := createUnlockedWalletWithMocks(t)
+			expectFinalizeSignerKey(t, mocks, w.id, 84)
 
 			// Act: finalize the packet.
 			err := w.FinalizePsbt(t.Context(), packet)
