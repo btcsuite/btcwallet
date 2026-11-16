@@ -613,15 +613,20 @@ func (s *NeutrinoClient) Notifications() <-chan interface{} {
 	return s.dequeueNotification
 }
 
-// SetStartTime is a non-interface method to set the birthday of the wallet
-// using this object. Since only a single rescan at a time is currently
-// supported, only one birthday needs to be set. This does not fully restart a
-// running rescan, so should not be used to update a rescan while it is running.
+// SetStartTime sets the birthday used when the native rescan starts. Once a
+// scan is active, later hints leave its birthday unchanged; they do not restart
+// it. The client currently supports only one rescan at a time.
 // TODO: When factoring out to multiple rescans per Neutrino client, add a
 // birthday per client.
 func (s *NeutrinoClient) SetStartTime(startTime time.Time) {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
+
+	// Activation holds this same mutex before callbacks can read startTime.
+	// Readiness and retry hints must not rewrite an already running scan.
+	if s.scanning {
+		return
+	}
 
 	s.startTime = startTime
 }
