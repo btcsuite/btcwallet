@@ -28,7 +28,7 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	dbtx := &mockDBTX{}
 	dbtx.On(
 		"Exec", mock.Anything, mock.Anything, mock.Anything,
-	).Return(pgconn.CommandTag{}, errDummy).Times(5)
+	).Return(pgconn.CommandTag{}, errDummy).Times(3)
 	dbtx.On(
 		"Query", mock.Anything, mock.Anything, mock.Anything,
 	).Return(nil, errDummy).Once()
@@ -38,13 +38,10 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 
 	// Act: Invoke the existing adapter operations in order, using the
 	// configured driver failure to exercise their contextual error returns.
-	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
+	err := deleteOps.DeleteCreatedUtxos(t.Context(), 1, 2)
 
-	// Assert: Check each operation's specific error context immediately; the
-	// final expectation check verifies all query budgets once.
-	require.ErrorContains(t, err, "clear spent utxo rows")
-
-	err = deleteOps.DeleteCreatedUtxos(t.Context(), 1, 2)
+	// Assert: Each surviving adapter preserves its own failure context; the
+	// final check accounts for the reduced set of pointer-free operations.
 	require.ErrorContains(t, err, "delete created utxo rows")
 
 	_, err = deleteOps.DeleteUnminedTransaction(
@@ -54,9 +51,6 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 
 	_, err = rollbackOps.ListUnminedTxRecords(t.Context(), 1)
 	require.ErrorContains(t, err, "list unmined txns")
-
-	err = rollbackOps.ClearDescendantSpends(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear descendant spends")
 
 	err = rollbackOps.MarkDescendantsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark descendants failed")
@@ -74,7 +68,7 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	dbtx := &mockDBTX{}
 	dbtx.On(
 		"Exec", mock.Anything, mock.Anything, mock.Anything,
-	).Return(pgconn.CommandTag{}, errDummy).Times(11)
+	).Return(pgconn.CommandTag{}, errDummy).Times(9)
 	dbtx.On(
 		"Query", mock.Anything, mock.Anything, mock.Anything,
 	).Return(nil, errDummy).Times(2)
@@ -102,19 +96,8 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "insert replacement edge")
 
-	err = markInputsSpent(t.Context(), qtx, db.CreateTxParams{
-		WalletID: 1,
-		Tx:       testRegularMsgTx(),
-		Received: time.Unix(1, 0),
-		Status:   db.TxStatusPending,
-	}, 7)
-	require.ErrorContains(t, err, "mark spent input 0")
-
 	_, err = invalidateOps.ListUnminedTxRecords(t.Context(), 1)
 	require.ErrorContains(t, err, "list unmined txns")
-
-	err = invalidateOps.ClearSpentUtxos(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear spent utxos")
 
 	err = invalidateOps.MarkTxnsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark txns failed")
@@ -152,25 +135,16 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Use values outside the SQL integer range; nil query adapters
+	// ensure each conversion fails before attempting a database operation.
+
+	// Act: Pass an oversized output index through the remaining credit lookup.
 	_, _, err := creditExists(
 		t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0),
 	)
-	require.ErrorContains(t, err, "convert credit index")
 
-	err = markInputsSpent(t.Context(), nil, db.CreateTxParams{
-		WalletID: 1,
-		Tx: &wire.MsgTx{
-			Version: wire.TxVersion,
-			TxIn: []*wire.TxIn{{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  chainhash.Hash{1},
-					Index: ^uint32(0),
-				},
-			}},
-		},
-		Status: db.TxStatusPending,
-	}, 3)
-	require.ErrorContains(t, err, "convert input outpoint index 0")
+	// Assert: Every conversion reports its specific context before querying.
+	require.ErrorContains(t, err, "convert credit index")
 
 	err = rollbackToBlockOps{}.RewindWalletSyncStateHeights(
 		t.Context(), ^uint32(0),
