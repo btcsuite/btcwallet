@@ -174,6 +174,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getTransactionMetaByHashStmt, err = db.PrepareContext(ctx, GetTransactionMetaByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query GetTransactionMetaByHash: %w", err)
 	}
+	if q.getTxInputValidityStmt, err = db.PrepareContext(ctx, GetTxInputValidity); err != nil {
+		return nil, fmt.Errorf("error preparing query GetTxInputValidity: %w", err)
+	}
 	if q.getUtxoByOutpointStmt, err = db.PrepareContext(ctx, GetUtxoByOutpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query GetUtxoByOutpoint: %w", err)
 	}
@@ -194,6 +197,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.hasInvalidWalletUtxoByOutpointStmt, err = db.PrepareContext(ctx, HasInvalidWalletUtxoByOutpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query HasInvalidWalletUtxoByOutpoint: %w", err)
+	}
+	if q.hasTxGraphStateChangeStmt, err = db.PrepareContext(ctx, HasTxGraphStateChange); err != nil {
+		return nil, fmt.Errorf("error preparing query HasTxGraphStateChange: %w", err)
 	}
 	if q.insertAddressSecretStmt, err = db.PrepareContext(ctx, InsertAddressSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertAddressSecret: %w", err)
@@ -254,6 +260,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listAddressesByScriptPubKeysStmt, err = db.PrepareContext(ctx, ListAddressesByScriptPubKeys); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAddressesByScriptPubKeys: %w", err)
+	}
+	if q.listConflictingTransactionsStmt, err = db.PrepareContext(ctx, ListConflictingTransactions); err != nil {
+		return nil, fmt.Errorf("error preparing query ListConflictingTransactions: %w", err)
 	}
 	if q.listKeyScopesByWalletStmt, err = db.PrepareContext(ctx, ListKeyScopesByWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query ListKeyScopesByWallet: %w", err)
@@ -588,6 +597,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getTransactionMetaByHashStmt: %w", cerr)
 		}
 	}
+	if q.getTxInputValidityStmt != nil {
+		if cerr := q.getTxInputValidityStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getTxInputValidityStmt: %w", cerr)
+		}
+	}
 	if q.getUtxoByOutpointStmt != nil {
 		if cerr := q.getUtxoByOutpointStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getUtxoByOutpointStmt: %w", cerr)
@@ -621,6 +635,11 @@ func (q *Queries) Close() error {
 	if q.hasInvalidWalletUtxoByOutpointStmt != nil {
 		if cerr := q.hasInvalidWalletUtxoByOutpointStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing hasInvalidWalletUtxoByOutpointStmt: %w", cerr)
+		}
+	}
+	if q.hasTxGraphStateChangeStmt != nil {
+		if cerr := q.hasTxGraphStateChangeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing hasTxGraphStateChangeStmt: %w", cerr)
 		}
 	}
 	if q.insertAddressSecretStmt != nil {
@@ -721,6 +740,11 @@ func (q *Queries) Close() error {
 	if q.listAddressesByScriptPubKeysStmt != nil {
 		if cerr := q.listAddressesByScriptPubKeysStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAddressesByScriptPubKeysStmt: %w", cerr)
+		}
+	}
+	if q.listConflictingTransactionsStmt != nil {
+		if cerr := q.listConflictingTransactionsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listConflictingTransactionsStmt: %w", cerr)
 		}
 	}
 	if q.listKeyScopesByWalletStmt != nil {
@@ -942,6 +966,7 @@ type Queries struct {
 	getOldestUnusedAddressStmt                    *sql.Stmt
 	getTransactionByHashStmt                      *sql.Stmt
 	getTransactionMetaByHashStmt                  *sql.Stmt
+	getTxInputValidityStmt                        *sql.Stmt
 	getUtxoByOutpointStmt                         *sql.Stmt
 	getUtxoIDByOutpointStmt                       *sql.Stmt
 	getUtxoSpendByOutpointStmt                    *sql.Stmt
@@ -949,6 +974,7 @@ type Queries struct {
 	getWalletByNameStmt                           *sql.Stmt
 	getWalletSecretsStmt                          *sql.Stmt
 	hasInvalidWalletUtxoByOutpointStmt            *sql.Stmt
+	hasTxGraphStateChangeStmt                     *sql.Stmt
 	insertAddressSecretStmt                       *sql.Stmt
 	insertBlockStmt                               *sql.Stmt
 	insertDatabaseIdentityStmt                    *sql.Stmt
@@ -969,6 +995,7 @@ type Queries struct {
 	listAddressTypesStmt                          *sql.Stmt
 	listAddressesByAccountStmt                    *sql.Stmt
 	listAddressesByScriptPubKeysStmt              *sql.Stmt
+	listConflictingTransactionsStmt               *sql.Stmt
 	listKeyScopesByWalletStmt                     *sql.Stmt
 	listOutputsToWatchStmt                        *sql.Stmt
 	listOwnedInputPrevOutputsByTxHashesStmt       *sql.Stmt
@@ -1051,6 +1078,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getOldestUnusedAddressStmt:                    q.getOldestUnusedAddressStmt,
 		getTransactionByHashStmt:                      q.getTransactionByHashStmt,
 		getTransactionMetaByHashStmt:                  q.getTransactionMetaByHashStmt,
+		getTxInputValidityStmt:                        q.getTxInputValidityStmt,
 		getUtxoByOutpointStmt:                         q.getUtxoByOutpointStmt,
 		getUtxoIDByOutpointStmt:                       q.getUtxoIDByOutpointStmt,
 		getUtxoSpendByOutpointStmt:                    q.getUtxoSpendByOutpointStmt,
@@ -1058,6 +1086,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getWalletByNameStmt:                           q.getWalletByNameStmt,
 		getWalletSecretsStmt:                          q.getWalletSecretsStmt,
 		hasInvalidWalletUtxoByOutpointStmt:            q.hasInvalidWalletUtxoByOutpointStmt,
+		hasTxGraphStateChangeStmt:                     q.hasTxGraphStateChangeStmt,
 		insertAddressSecretStmt:                       q.insertAddressSecretStmt,
 		insertBlockStmt:                               q.insertBlockStmt,
 		insertDatabaseIdentityStmt:                    q.insertDatabaseIdentityStmt,
@@ -1078,6 +1107,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAddressTypesStmt:                          q.listAddressTypesStmt,
 		listAddressesByAccountStmt:                    q.listAddressesByAccountStmt,
 		listAddressesByScriptPubKeysStmt:              q.listAddressesByScriptPubKeysStmt,
+		listConflictingTransactionsStmt:               q.listConflictingTransactionsStmt,
 		listKeyScopesByWalletStmt:                     q.listKeyScopesByWalletStmt,
 		listOutputsToWatchStmt:                        q.listOutputsToWatchStmt,
 		listOwnedInputPrevOutputsByTxHashesStmt:       q.listOwnedInputPrevOutputsByTxHashesStmt,
