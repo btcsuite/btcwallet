@@ -556,10 +556,9 @@ func (w *Wallet) handleExistingTx(ctx context.Context, tx *wire.MsgTx,
 		return err
 	}
 
-	// A retained-invalid row cannot be safely revived through this path: the
-	// spend edges its invalidating event cleared would need to be re-claimed
-	// as a graph-affecting lifecycle change. Return a clear error before
-	// publishing against a stale, untracked row.
+	// A publication retry cannot revive terminal transaction history.
+	// Reject it before sending; retained input facts alone do not make a
+	// failed or replaced transaction eligible again.
 	if !db.IsUnminedStatus(existing.Status) {
 		return fmt.Errorf("%w: tx %v exists with status %v",
 			ErrTxRetainedInvalid, txHash, existing.Status)
@@ -573,10 +572,9 @@ func (w *Wallet) handleExistingTx(ctx context.Context, tx *wire.MsgTx,
 		return fmt.Errorf("%w: tx %v", ErrTxWitnessMismatch, txHash)
 	}
 
-	// The existing row is still live, so recording is idempotent: its credits
-	// and spend edges are already claimed. If another workflow inserted the
-	// duplicate as pending, promote it to match the published state this
-	// record-before-publish path uses for new rows.
+	// The live row already retains its credits and input facts. Promote a
+	// Pending duplicate to Published, matching new publication attempts,
+	// while preserving its existing label when none was supplied.
 	if len(label) == 0 || label == existing.Label {
 		if existing.Status == db.TxStatusPending {
 			state := db.UpdateTxState{Status: db.TxStatusPublished}
