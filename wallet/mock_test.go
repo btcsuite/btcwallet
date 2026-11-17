@@ -118,6 +118,15 @@ type mockChainProcessor struct {
 // chainProcessor interface.
 var _ chainProcessor = (*mockChainProcessor)(nil)
 
+// loadWatchSet exposes data preparation while Manager retains
+// native subscription and startup policy.
+func (m *mockChainProcessor) loadWatchSet(
+	ctx context.Context) (watchSet, error) {
+
+	args := m.Called(ctx)
+	return args.Get(0).(watchSet), args.Error(1)
+}
+
 // run implements the chainProcessor interface.
 func (m *mockChainProcessor) run(ctx context.Context) error {
 	args := m.Called(ctx)
