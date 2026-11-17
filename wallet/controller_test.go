@@ -2227,16 +2227,8 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 
 		// Complete startup registration with no stored watches so the
 		// worker reaches the maintenance failure exercised below.
-		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-			WalletID:      w.id,
-			SkipBalance:   true,
-			ChainSyncOnly: true,
-		}).Return([]db.AccountInfo(nil), nil).Once()
-		expectImportedScanAddressPage(
-			deps.store, w.id, page.Result[db.AddressInfo, uint32]{},
-		)
-		deps.store.On("ListOutputsToWatch", mock.Anything, w.id).
-			Return([]db.UtxoInfo(nil), nil).Once()
+		deps.store.On("LoadWatchSet", mock.Anything, w.id).
+			Return(db.WatchSet{}, nil).Once()
 		deps.chain.On(
 			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 		).Return(nil).Once()
@@ -2315,18 +2307,17 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 			WalletID: w.id, UnminedOnly: true,
 		}).Return(nil, nil).Times(3)
 
-		// Keep both startup and the imported-address scan empty so the
-		// rescan reaches its commit without unrelated derivation setup.
+		// Complete startup from one empty snapshot, then keep historical
+		// scan reads empty so the rescan reaches its failing commit.
+		deps.store.On("LoadWatchSet", mock.Anything, w.id).
+			Return(db.WatchSet{}, nil).Once()
 		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
 			WalletID:      w.id,
 			SkipBalance:   true,
 			ChainSyncOnly: true,
-		}).Return([]db.AccountInfo(nil), nil).Times(3)
-		expectImportedScanAddressPage(
-			deps.store, w.id, page.Result[db.AddressInfo, uint32]{},
-		)
+		}).Return([]db.AccountInfo(nil), nil).Twice()
 		deps.store.On("ListOutputsToWatch", mock.Anything, w.id).
-			Return([]db.UtxoInfo(nil), nil).Twice()
+			Return([]db.UtxoInfo(nil), nil).Once()
 		deps.chain.On(
 			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 		).Return(nil).Once()
