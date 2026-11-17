@@ -282,7 +282,14 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
 		wallets = append(wallets, wallet)
 
-		err = wallet.start(ctx)
+		err = wallet.prepareStart(ctx)
+		if err != nil {
+			return wallets, err
+		}
+
+		// Wallet requests carry their own contexts, independent of startup.
+		//nolint:contextcheck // Activation starts the request-context bridge.
+		err = wallet.start()
 		if err != nil {
 			return wallets, err
 		}
@@ -687,7 +694,11 @@ func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
 		return err
 	}
 
-	err = wallet.start(ctx)
+	err = wallet.prepareStart(ctx)
+	if err == nil {
+		err = wallet.start()
+	}
+
 	if err != nil {
 		// Failed startup needs the same serialized disposal and reply.
 		m.Lock()
