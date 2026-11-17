@@ -232,9 +232,19 @@ type prepareRollbackReq struct {
 	rollbackDone     <-chan struct{}
 }
 
+// watchSet carries Wallet interests for Manager-owned registration. Startup
+// returns this data before a Wallet worker can submit runtime requests.
+type watchSet struct {
+	addresses []address.Address
+	outpoints []*wire.OutPoint
+}
+
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
+	// startupWatches prepares interests without requesting their activation.
+	startupWatches(ctx context.Context) (watchSet, error)
+
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
@@ -318,15 +328,9 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 		return fmt.Errorf("register addresses: %w", err)
 	}
 
-	credits, err := s.storeScanUnspent(ctx)
+	outpoints, err := s.watchedOutpoints(ctx)
 	if err != nil {
 		return err
-	}
-
-	// ListOutputsToWatch already applies the Store's account policy.
-	outpoints := make([]*wire.OutPoint, 0, len(credits))
-	for _, credit := range credits {
-		outpoints = append(outpoints, &credit.OutPoint)
 	}
 
 	if len(outpoints) == 0 {
@@ -334,6 +338,42 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 	}
 
 	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
+}
+
+// watchedOutpoints reads the Store-selected outputs for both startup and
+// background registration, preserving its account synchronization policy.
+func (s *syncer) watchedOutpoints(ctx context.Context) ([]*wire.OutPoint,
+	error) {
+
+	credits, err := s.storeScanUnspent(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Retain each selected output's identity without changing Store policy.
+	outpoints := make([]*wire.OutPoint, 0, len(credits))
+	for _, credit := range credits {
+		outpoints = append(outpoints, &credit.OutPoint)
+	}
+
+	return outpoints, nil
+}
+
+// startupWatches collects persisted interests for the synchronous Manager
+// owner, avoiding a request back into the loop performing Wallet creation.
+func (s *syncer) startupWatches(ctx context.Context) (watchSet, error) {
+	// Startup has no processing worker yet; return data for owner activation.
+	addrs, err := s.storeScanAddresses(ctx)
+	if err != nil {
+		return watchSet{}, fmt.Errorf("read watch addresses: %w", err)
+	}
+
+	outpoints, err := s.watchedOutpoints(ctx)
+	if err != nil {
+		return watchSet{}, err
+	}
+
+	return watchSet{addresses: addrs, outpoints: outpoints}, nil
 }
 
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
