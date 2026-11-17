@@ -1018,7 +1018,9 @@ func TestControllerStop(t *testing.T) {
 
 	// Arrange: Start a Wallet whose sync worker observes shutdown but cannot
 	// return until released. This proves stop waits for complete teardown.
+	// Retain its construction lifetime to observe that scope's cancellation.
 	w, deps := createTestWalletWithMocks(t)
+	lifetime := w.lifetimeCtx
 	draining := make(chan struct{})
 	release := make(chan struct{})
 
@@ -1077,6 +1079,7 @@ func TestControllerStop(t *testing.T) {
 
 	close(release)
 	require.NoError(t, <-stopResult)
+	require.ErrorIs(t, lifetime.Err(), context.Canceled)
 	require.False(t, w.state.isStarted())
 	require.Equal(t, uint32(lifecycleStopped), w.state.lifecycle.Load())
 
@@ -2539,18 +2542,23 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 
 	// Arrange: Fail the existing metadata read before native hint setup, so
 	// startup must preserve the Store error without reaching any backend call.
+	// Retain the construction lifetime to observe cleanup of that scope.
 	w, deps := createTestWalletWithMocks(t)
+	lifetime := w.lifetimeCtx
 	w.cfg.Chain = &chain.NeutrinoClient{}
 
 	deps.store.On(
 		"GetWallet", mock.Anything, mock.Anything,
 	).Return(nil, errDBMock).Once()
 
-	// Act: Attempt to start the wallet.
+	// Act: Start while the persisted metadata lookup fails, before either
+	// background worker can be activated.
 	err := w.start(t.Context())
 
-	// Assert: Verify failure.
+	// Assert: Setup preserves its causal error, cancels the original lifetime
+	// and leaves the Wallet inactive for the terminal restart check below.
 	require.ErrorIs(t, err, errDBMock)
+	require.ErrorIs(t, lifetime.Err(), context.Canceled)
 	require.False(t, w.state.isStarted())
 
 	// Act: Attempt to start again after setup canceled the Wallet-owned

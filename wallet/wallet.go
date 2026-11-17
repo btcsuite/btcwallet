@@ -394,9 +394,8 @@ type Wallet struct {
 	state walletState
 
 	// lifetimeCtx defines the runtime scope of the wallet. It is created
-	// when the wallet starts and canceled when it stops, providing a
-	// standard way to signal shutdown to all context-aware background
-	// routines.
+	// during construction and reused when the Wallet starts, so one cancel
+	// signals every context-aware background routine.
 	//
 	// Storing a context in a struct is generally considered an
 	// anti-pattern because contexts are usually request-scoped. However,
