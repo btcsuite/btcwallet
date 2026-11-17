@@ -167,22 +167,21 @@ type Controller interface {
 		targets []waddrmgr.AccountScope) error
 }
 
-// start starts the background processes owned by a Wallet. Manager is its sole
-// caller and invokes it at most once for each Wallet instance.
-func (w *Wallet) start(startCtx context.Context) error {
-	// 1. Attempt to transition from Stopped to Starting.
+// prepareStart initializes the Wallet runtime without activating its workers.
+// Manager completes required subscriptions before publishing this candidate.
+func (w *Wallet) prepareStart(startCtx context.Context) error {
 	err := w.state.toStarting()
 	if err != nil {
 		return err
 	}
 
-	// 2. Setup background resources.
+	// Set up the lifetime that also covers readiness before activation.
 	//
 	// w.lifetimeCtx governs the lifecycle of all background goroutines.
 	// It is canceled when stop() is called.
 	w.lifetimeCtx, w.cancel = context.WithCancel(context.Background())
 
-	// 3. Perform runtime setup.
+	// Complete runtime reads before any Wallet worker can observe them.
 	//
 	// We use startCtx here because these operations must complete
 	// synchronously before the wallet is considered "started". If
@@ -202,12 +201,15 @@ func (w *Wallet) start(startCtx context.Context) error {
 		return err
 	}
 
-	// 4. Start background goroutines.
+	return nil
+}
+
+// start activates a prepared Wallet after Manager completes publication setup.
+// The owner invokes it once; failed preparation is disposed without workers.
+func (w *Wallet) start() error {
+	// Start the existing request loop and processing worker together.
 	w.wg.Add(1)
 
-	// Requests retain their own contexts; the routed legacy tip accessor still
-	// has no context parameter. Its existing exemption follows the call path.
-	//nolint:contextcheck // SyncedTo takes no context.
 	go w.mainLoop()
 
 	w.wg.Add(1)
@@ -218,8 +220,8 @@ func (w *Wallet) start(startCtx context.Context) error {
 		w.runSyncLoop()
 	}()
 
-	// 5. Mark the wallet as fully started.
-	err = w.state.toStarted()
+	// Publish the lifecycle only after both owned workers are registered.
+	err := w.state.toStarted()
 	if err != nil {
 		return err
 	}
@@ -403,6 +405,12 @@ func (w *Wallet) stop() error {
 		return w.state.toStopped()
 	}
 
+	if lifecycle(w.state.lifecycle.Load()) == lifecycleStarting {
+		// Readiness can fail after preparation, before any worker starts.
+		w.cancel()
+		return w.state.toStopped()
+	}
+
 	// Attempt to transition from Started to Stopping.
 	err := w.state.toStopping()
 	if err != nil {
@@ -412,15 +420,6 @@ func (w *Wallet) stop() error {
 	}
 
 	// Signal all background processes to stop.
-	//
-	// It is safe to call w.cancel() here because the successful transition
-	// to Stopping guarantees that we were previously in the Started state,
-	// which in turn guarantees that start() has completed initialization
-	// of w.lifetimeCtx and w.cancel.
-	//
-	// Additionally, w.cancel() is idempotent, so it is safe to call even
-	// if it has effectively already been called (though the state machine
-	// guarantees we only reach this point once).
 	w.cancel()
 
 	// Terminal teardown cannot be abandoned by a caller deadline. Draining
