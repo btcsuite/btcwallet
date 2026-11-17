@@ -1134,16 +1134,8 @@ func TestInitChainSync(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -1156,9 +1148,12 @@ func TestInitChainSync(t *testing.T) {
 	store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{}, nil).Once()
 
-	// Act & Assert: Verify that the initial chain synchronization
-	// sequence completes successfully.
+	// Act: Initialize against the matching Store tip and empty persisted
+	// interests, allowing the existing worker to enable block notifications.
 	err := s.initChainSync(t.Context())
+
+	// Assert: The coherent read and both native setup calls complete once;
+	// strict expectations also reject the former separate refresh reads.
 	require.NoError(t, err)
 
 	store.AssertExpectations(t)
@@ -2919,16 +2914,8 @@ func TestPutSyncBatchStore(t *testing.T) {
 
 	// The committed scan refreshes the Store's current watch set. This
 	// fixture tests the batch shape; watch contents have separate coverage.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      walletID,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, walletID).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Submit the normal sync batch with unresolved address candidates;
 	// the Store owns receiving admission within its atomic write.
@@ -2967,16 +2954,8 @@ func TestPutTargetedBatchStore(t *testing.T) {
 
 	// The committed scan refreshes the Store's current watch set. This
 	// fixture tests the batch shape; watch contents have separate coverage.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      walletID,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, walletID).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Submit targeted recovery through the existing batch boundary
 	// without converting matched addresses into explicit credits.
@@ -4048,6 +4027,129 @@ func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
 	require.Equal(t, "before-rename", horizons[0].AccountName)
 }
 
+// TestRefreshLiveWatches verifies one persisted snapshot supplies the receiving
+// addresses and outpoints installed by the Wallet's existing live refresh.
+func TestRefreshLiveWatches(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return one receiving script and output from the combined Store
+	// read. Strict mocks require their converted identities at the native
+	// boundary and reject the former separately timed recovery reads.
+	const walletID uint32 = 1
+
+	store := &walletmock.Store{}
+	chainSource := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{
+			Chain:       chainSource,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	paymentScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	outpoint := wire.OutPoint{
+		Hash:  chainhash.Hash{1},
+		Index: 1,
+	}
+	store.On("LoadWatchSet", mock.Anything, walletID).Return(
+		db.WatchSet{
+			AddressScripts: [][]byte{
+				paymentScript,
+			},
+			OutPoints: []wire.OutPoint{
+				outpoint,
+			},
+		}, nil,
+	).Once()
+	chainSource.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr},
+	).Return(nil).Once()
+	chainSource.On("NotifySpent", []*wire.OutPoint{&outpoint}).
+		Return(nil).Once()
+
+	// Act: Refresh through the same method used by initialization and by
+	// the worker after committed scan results introduce new interests.
+	err = s.refreshLiveWatches(t.Context())
+
+	// Assert: Both native calls preserve the Store-selected identities;
+	// expectations verify one coherent read and one installation per group.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+	chainSource.AssertExpectations(t)
+}
+
+// TestRefreshLiveWatchesStoreError verifies a failed coherent read preserves
+// its causal error before either native subscription group is installed.
+func TestRefreshLiveWatchesStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fail the combined Store read. Leave all other reads and native
+	// calls without expectations so installation cannot follow a failed read.
+	const walletID uint32 = 1
+
+	store := &walletmock.Store{}
+	chainSource := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{
+			Chain:       chainSource,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, errDBMock).Once()
+
+	// Act: Attempt the worker's refresh against the failed snapshot lookup.
+	err := s.refreshLiveWatches(t.Context())
+
+	// Assert: Callers can identify the Store failure through error wrapping,
+	// and the strict mocks verify the single read without native activation.
+	require.ErrorIs(t, err, errDBMock)
+	store.AssertExpectations(t)
+	chainSource.AssertExpectations(t)
+}
+
+// TestRefreshLiveWatchesInvalidScript verifies a persisted script without an
+// address is rejected before native interests can be incompletely installed.
+func TestRefreshLiveWatchesInvalidScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return a non-address imported script from the combined read.
+	// Store returns scripts without decoding their receiving addresses, so the
+	// Wallet must reject this row before any registration can begin.
+	const walletID uint32 = 1
+
+	store := &walletmock.Store{}
+	chainSource := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{
+			Chain:       chainSource,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+	script := []byte{txscript.OP_RETURN}
+	store.On("LoadWatchSet", mock.Anything, walletID).Return(
+		db.WatchSet{
+			AddressScripts: [][]byte{
+				script,
+			},
+		}, nil,
+	).Once()
+
+	// Act: Refresh from the snapshot containing no receiving address.
+	err := s.refreshLiveWatches(t.Context())
+
+	// Assert: Preserve the scan reader's identifiable missing-address failure;
+	// strict mocks verify one snapshot read and forbid native activation.
+	require.ErrorIs(t, err, db.ErrAddressNotFound)
+	store.AssertExpectations(t)
+	chainSource.AssertExpectations(t)
+}
+
 // TestStoreScanAddresses verifies scan address reads use paginated store
 // address queries.
 func TestStoreScanAddresses(t *testing.T) {
@@ -4881,16 +4983,8 @@ func TestSyncerFullRun(t *testing.T) {
 	expectMatchingRollbackBatch(store, mockChain)
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -5306,16 +5400,8 @@ func TestInitChainSync_Errors(t *testing.T) {
 		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 
 		// Registration reads an empty watch set before enabling blocks.
-		store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-			WalletID:      0,
-			SkipBalance:   true,
-			ChainSyncOnly: true,
-		}).Return([]db.AccountInfo(nil), nil).Once()
-		expectImportedScanAddressPage(
-			store, 0, page.Result[db.AddressInfo, uint32]{},
-		)
-		store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-			Return([]db.UtxoInfo(nil), nil).Once()
+		store.On("LoadWatchSet", mock.Anything, uint32(0)).
+			Return(db.WatchSet{}, nil).Once()
 		mockChain.On(
 			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 		).Return(nil).Once()
@@ -5808,16 +5894,8 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -7846,19 +7924,13 @@ func TestLiveWatchSyncBatchCancellation(t *testing.T) {
 			cancel()
 		}).Return(nil).Once()
 
-	// Store reads may finish despite cancellation, but both
-	// reads and registration must retain the shutdown signal.
+	// The snapshot read may finish despite cancellation; its context and
+	// native registration must still retain the worker shutdown signal.
 	canceled := mock.MatchedBy(func(ctx context.Context) bool {
 		return errors.Is(ctx.Err(), context.Canceled)
 	})
-	store.On("ListAccounts", canceled, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
+	store.On("LoadWatchSet", canceled, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	client.On(
 		"WatchAddrsFromTip", canceled, []address.Address(nil),
 	).Return(context.Canceled).Once()
@@ -7917,19 +7989,13 @@ func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
 			cancel()
 		}).Return(nil).Once()
 
-	// Store reads may finish despite cancellation, but both
-	// reads and registration must retain the shutdown signal.
+	// The snapshot read may finish despite cancellation; its context and
+	// native registration must still retain the worker shutdown signal.
 	canceled := mock.MatchedBy(func(ctx context.Context) bool {
 		return errors.Is(ctx.Err(), context.Canceled)
 	})
-	store.On("ListAccounts", canceled, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
+	store.On("LoadWatchSet", canceled, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	client.On(
 		"WatchAddrsFromTip", canceled, []address.Address(nil),
 	).Return(context.Canceled).Once()
