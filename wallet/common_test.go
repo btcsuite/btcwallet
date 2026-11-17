@@ -462,8 +462,10 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 
 	expectStopTeardown(deps)
 
-	// Start the wallet.
-	require.NoError(t, w.start(t.Context()))
+	// Prepare persisted runtime state before launching the request and sync
+	// workers, matching the managed startup sequence.
+	require.NoError(t, w.prepareStart(t.Context()))
+	require.NoError(t, w.start())
 
 	t.Cleanup(func() {
 		require.NoError(t, w.stop())
