@@ -4082,6 +4082,126 @@ func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
 	require.Equal(t, "before-rename", horizons[0].AccountName)
 }
 
+// TestLoadWatchSet verifies snapshot conversion preserves persisted interests
+// while leaving native subscription activation to the owning Manager.
+func TestLoadWatchSet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return one receiving script and output from the combined Store
+	// read. Strict mocks reject separate reads or native activation while the
+	// Wallet converts the snapshot into its existing registration format.
+	const walletID uint32 = 1
+
+	store := &walletmock.Store{}
+	chainSource := &bwmock.Chain{}
+	s := newTestSyncer(
+		t, Config{
+			Chain:       chainSource,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	paymentScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	outpoint := wire.OutPoint{
+		Hash:  chainhash.Hash{1},
+		Index: 1,
+	}
+	store.On("LoadWatchSet", mock.Anything, walletID).Return(
+		db.WatchSet{
+			AddressScripts: [][]byte{
+				paymentScript,
+			},
+			OutPoints: []wire.OutPoint{
+				outpoint,
+			},
+		}, nil,
+	).Once()
+
+	// Act: Load and convert the persisted snapshot without starting a worker
+	// or asking the Manager to register the selected interests.
+	watches, err := s.loadWatchSet(t.Context())
+
+	// Assert: Both groups retain the Store-selected identities. Strict mocks
+	// also reject native activation and verify the combined read once.
+	require.NoError(t, err)
+	require.Equal(t, []address.Address{addr}, watches.addresses)
+	require.Equal(t, []*wire.OutPoint{&outpoint}, watches.outpoints)
+	store.AssertExpectations(t)
+	chainSource.AssertExpectations(t)
+}
+
+// TestLoadWatchSetStoreError verifies a failed snapshot read preserves its
+// causal error without activating native subscriptions.
+func TestLoadWatchSetStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fail the combined Store read. Leave all other reads and native
+	// calls without expectations so preparation cannot continue after failure.
+	const walletID uint32 = 1
+
+	store := &walletmock.Store{}
+	chainSource := &bwmock.Chain{}
+	s := newTestSyncer(
+		t, Config{
+			Chain:       chainSource,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, errDBMock).Once()
+
+	// Act: Attempt preparation against the failed snapshot lookup.
+	_, err := s.loadWatchSet(t.Context())
+
+	// Assert: Callers can identify the Store failure through error wrapping,
+	// and the strict mocks verify the single read without native activation.
+	require.ErrorIs(t, err, errDBMock)
+	store.AssertExpectations(t)
+	chainSource.AssertExpectations(t)
+}
+
+// TestLoadWatchSetInvalidScript verifies a persisted script without an address
+// is rejected instead of silently omitted from startup interests.
+func TestLoadWatchSetInvalidScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return a non-address imported script from the combined read.
+	// Store returns scripts without decoding their receiving addresses, so the
+	// Wallet must reject this row before any registration can begin.
+	const walletID uint32 = 1
+
+	store := &walletmock.Store{}
+	chainSource := &bwmock.Chain{}
+	s := newTestSyncer(
+		t, Config{
+			Chain:       chainSource,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+	script := []byte{txscript.OP_RETURN}
+	store.On("LoadWatchSet", mock.Anything, walletID).Return(
+		db.WatchSet{
+			AddressScripts: [][]byte{
+				script,
+			},
+		}, nil,
+	).Once()
+
+	// Act: Convert the snapshot containing a script with no receiving address.
+	_, err := s.loadWatchSet(t.Context())
+
+	// Assert: Preserve the scan reader's identifiable missing-address failure;
+	// strict mocks verify one snapshot read and forbid native activation.
+	require.ErrorIs(t, err, db.ErrAddressNotFound)
+	store.AssertExpectations(t)
+	chainSource.AssertExpectations(t)
+}
+
 // TestStoreScanAddresses verifies scan address reads use paginated store
 // address queries.
 func TestStoreScanAddresses(t *testing.T) {
