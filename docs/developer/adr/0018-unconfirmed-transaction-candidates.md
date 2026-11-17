@@ -169,17 +169,21 @@ the existing backend transaction boundaries. Input lookup supports queries
 for each operation; listings and balances can batch graph facts. Native
 KVDB retains its multiple-spender indexing and backend-specific read mechanisms.
 
-This is the target architecture, not a completed implementation. Integrating
-input lookup with existing conflict and rollback handling must preserve the
-claim interpretation above. The open restoration detail is not resolved here.
+[PR1512](https://github.com/btcsuite/btcwallet/pull/1512) implements independent
+SQL transaction validation, state, conflict and replay handling.
+[PR1516](https://github.com/btcsuite/btcwallet/pull/1516) implements SQL
+credit/funding readers and pointer retirement with coupled writer/lifecycle
+updates. Native KVDB and publication-policy work remain separate. The open
+unconfirmed restoration detail remains unresolved.
 
 ## 8. References
 
 - [ADR 0006: Wallet Transaction Manager SQL Schema](0006-wtxmgr-sql-schema.md).
 - [ADR 0011](0011-no-addresses-used-column.md).
-- [Wallet data model](../utxo_data_model.md) explains this target model.
-- [Invalidation flows](../tx_invalidation_flows.md) describes the current
-  pointer-based implementation, not deletion of retained input relationships.
+- [Wallet data model](../utxo_data_model.md) describes the current SQL credit
+  and retained-input model.
+- [Invalidation flows](../tx_invalidation_flows.md) describes current SQL
+  invalidation and deletion with retained input claims.
 - Bitcoin Core v32.1: [spender lookup][core-spends] and [state][core-state].
 
 [core-spends]: https://github.com/bitcoin/bitcoin/blob/v32.1/src/wallet/wallet.cpp#L789-L853

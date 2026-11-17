@@ -76,5 +76,5 @@ relationship metadata, but do not rewrite its historical decision body.
   with SQL publication readiness and Wallet-owned processing; amends ADR 0015.
 - [ADR 0018: Recording Competing
   Transactions](./0018-unconfirmed-transaction-candidates.md) retains competing
-  history with indexed inputs and derives spend availability; implementation
-  and precise rollback restoration remain outstanding.
+  history with indexed inputs and derives spend availability. SQL implementation
+  is provided by PR1512/PR1516; precise unconfirmed restoration remains open.
