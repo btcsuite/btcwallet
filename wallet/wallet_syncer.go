@@ -232,9 +232,20 @@ type prepareRollbackReq struct {
 	rollbackDone     <-chan struct{}
 }
 
+// watchSet carries Wallet interests for Manager-owned registration. Startup
+// returns this data before a Wallet worker can submit runtime requests.
+type watchSet struct {
+	addresses []address.Address
+	outpoints []*wire.OutPoint
+}
+
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
+	// loadWatchSet prepares persisted interests for Manager-owned
+	// subscription setup without activating watches.
+	loadWatchSet(ctx context.Context) (watchSet, error)
+
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
@@ -334,6 +345,42 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 	}
 
 	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
+}
+
+// loadWatchSet converts one persisted snapshot into Wallet registration data.
+// It performs no native subscription or worker activation.
+func (s *syncer) loadWatchSet(ctx context.Context) (watchSet, error) {
+	persisted, err := s.store.LoadWatchSet(ctx, s.walletID)
+	if err != nil {
+		return watchSet{}, fmt.Errorf("read watch set: %w", err)
+	}
+
+	// Store supplies raw scripts; decode them using this Wallet's network.
+	var watches watchSet
+	for _, script := range persisted.AddressScripts {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			script, s.cfg.ChainParams,
+		)
+		if err != nil {
+			return watchSet{}, fmt.Errorf("watch address script: %w", err)
+		}
+
+		// Imported rows can contain non-address scripts. Reject these
+		// rather than indexing an empty decoded address list.
+		if len(addrs) == 0 {
+			return watchSet{}, fmt.Errorf("watch address script: %w",
+				db.ErrAddressNotFound)
+		}
+
+		watches.addresses = append(watches.addresses, addrs[0])
+	}
+
+	// Keep the existing registration pointer shape over snapshot values.
+	for i := range persisted.OutPoints {
+		watches.outpoints = append(watches.outpoints, &persisted.OutPoints[i])
+	}
+
+	return watches, nil
 }
 
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
