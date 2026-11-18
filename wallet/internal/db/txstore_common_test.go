@@ -694,7 +694,8 @@ func TestNewCreateTxRequest(t *testing.T) {
 func TestCreateTxWithOpsInsert(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Build one prepared CreateTx request and one mock adapter.
+	// Arrange: Normalize a fresh request and arrange one stable row ID.
+	// Input facts, credits and spend claims must use that same identity.
 	req := testCreateTxRequest(t)
 
 	var (
@@ -722,6 +723,8 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 		},
 	).Once()
 
+	ops.On("InsertInputs", mock.Anything, req, int64(11)).
+		Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Run(
 		func(args mock.Arguments) {
 			txID, ok := args.Get(2).(int64)
@@ -743,14 +746,68 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
 
-	// Act: Run CreateTxWithOps.
+	// Act: Execute the shared recording workflow using the arranged adapter.
+	// Unexpected writes or different transaction identities fail the mock.
 	err := CreateTxWithOps(context.Background(), req, ops)
+
+	// Assert: Recording succeeds with all required input and credit writes.
+	// The existing cleanup checks each exact expectation once.
 	require.NoError(t, err)
 
-	// Assert: The shared flow uses the inserted tx ID consistently.
 	require.Equal(t, int64(11), creditsID)
 	require.Equal(t, int64(11), inputsID)
 	require.Equal(t, req.TxHash, insertReq.TxHash)
+}
+
+// TestCreateTxWithOpsCoinbaseSkipsInputFacts verifies that the shared workflow
+// excludes the coinbase's null prevout while preserving its other edge writes.
+func TestCreateTxWithOpsCoinbaseSkipsInputFacts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Normalize a confirmed coinbase and expect its normal recording
+	// writes. Omit InsertInputs so any shared dispatch of the null prevout
+	// fails immediately through the strict adapter mock.
+	req, err := NewCreateTxRequest(CreateTxParams{
+		WalletID: 5,
+		Tx:       testCoinbaseMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadExisting", mock.Anything, req).Return(
+		nil, ErrCreateTxExistingNotFound,
+	).Once()
+
+	ops.On("PrepareBlock", mock.Anything, req).Return(nil).Once()
+	ops.On("Insert", mock.Anything, req).Return(int64(11), nil).Once()
+	ops.On("ListConflictTxns", mock.Anything, req).Return(
+		[]int64(nil), []chainhash.Hash(nil), nil,
+	).Once()
+
+	ops.On("InsertCredits", mock.Anything, req, int64(11)).
+		Return(nil).Once()
+	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).
+		Return(nil).Once()
+	ops.On(
+		"DeleteSpentLeases", mock.Anything, req.Params.WalletID,
+		req.TxHash,
+	).Return(nil).Once()
+
+	// Act: Record the normalized coinbase through the public shared workflow,
+	// which owns the decision to dispatch input-fact writes to either backend.
+	err = CreateTxWithOps(context.Background(), req, ops)
+
+	// Assert: Recording succeeds without input-fact dispatch. Cleanup verifies
+	// each remaining recording operation ran exactly once for the same row.
+	require.NoError(t, err)
 }
 
 // TestCreateTxWithOpsDuplicate verifies that the shared CreateTx helper maps an
@@ -780,6 +837,8 @@ func TestCreateTxWithOpsDuplicate(t *testing.T) {
 func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Return matching stored metadata and arrange edge replay.
+	// Reuse its ID for immutable inputs without inserting another transaction.
 	req := testCreateTxRequest(t)
 	existing := CreateTxExistingTarget{
 		ID:         4,
@@ -794,13 +853,20 @@ func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	})
 
 	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
+	ops.On("InsertInputs", mock.Anything, req, int64(4)).
+		Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
 
+	// Act: Execute the shared recording workflow using the arranged adapter.
+	// Unexpected writes or different transaction identities fail the mock.
 	err := CreateTxWithOps(context.Background(), req, ops)
+
+	// Assert: Recording succeeds with all required input and credit writes.
+	// The existing cleanup checks each exact expectation once.
 	require.NoError(t, err)
 }
 
@@ -929,6 +995,8 @@ func TestCreateTxWithOpsIgnoresUnminedConfirmedDuplicate(t *testing.T) {
 func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Provide a Pending row and its later confirmed observation.
+	// Reuse the row while recording input facts and confirmed credit edges.
 	req, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 5,
 		Tx:       testRegularMsgTx(),
@@ -955,13 +1023,20 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	ops.On("ListConflictTxns", mock.Anything, req).Return(
 		[]int64(nil), []chainhash.Hash(nil), nil,
 	).Once()
+	ops.On("InsertInputs", mock.Anything, req, int64(7)).
+		Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
 
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
 
+	// Act: Execute the shared recording workflow using the arranged adapter.
+	// Unexpected writes or different transaction identities fail the mock.
 	err = CreateTxWithOps(context.Background(), req, ops)
+
+	// Assert: Recording succeeds with all required input and credit writes.
+	// The existing cleanup checks each exact expectation once.
 	require.NoError(t, err)
 }
 
@@ -971,6 +1046,8 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Arrange a confirmed winner and its displaced unmined branch.
+	// The same winner ID must link replacement history and immutable inputs.
 	req, err := NewCreateTxRequest(CreateTxParams{
 		WalletID: 5,
 		Tx:       testRegularMsgTx(),
@@ -1011,6 +1088,8 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	ops.On("InsertReplacementEdges", mock.Anything, int64(5), []int64{5},
 		int64(11)).Return(nil).Once()
 
+	ops.On("InsertInputs", mock.Anything, req, int64(11)).
+		Return(nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
@@ -1018,7 +1097,12 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	ops.On("DeleteSpentLeases", mock.Anything, req.Params.WalletID,
 		req.TxHash).Return(nil).Once()
 
+	// Act: Execute the shared recording workflow using the arranged adapter.
+	// Unexpected writes or different transaction identities fail the mock.
 	err = CreateTxWithOps(context.Background(), req, ops)
+
+	// Assert: Recording succeeds with all required input and credit writes.
+	// The existing cleanup checks each exact expectation once.
 	require.NoError(t, err)
 }
 
@@ -1251,6 +1335,15 @@ func (m *mockCreateTxOps) Insert(ctx context.Context,
 	}
 
 	return txID, args.Error(1)
+}
+
+// InsertInputs exposes the arranged input-write result to the shared flow.
+func (m *mockCreateTxOps) InsertInputs(ctx context.Context,
+	req CreateTxRequest, txID int64) error {
+
+	args := m.Called(ctx, req, txID)
+
+	return args.Error(0)
 }
 
 // InsertCredits implements CreateTxOps.
