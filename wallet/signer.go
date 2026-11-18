@@ -743,8 +743,8 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 // encrypted account material through the same account-secret contract.
 //
 // This resolver is used by the path-driven signer entry points (SignDigest,
-// ECDH, DerivePrivKey and ComputeRawSig/PSBT), which have only a derivation
-// path. Address-driven paths reach the same resolver through
+// kvdb ECDH, DerivePrivKey and ComputeRawSig/PSBT), which have only a
+// derivation path. Address-driven paths reach the same resolver through
 // privKeyForAddressInfo once the store has resolved the address to its
 // derivation info, so both address the account by number.
 //
@@ -777,7 +777,7 @@ func (w *Wallet) derivePathPubKey(ctx context.Context, path BIP32Path) (
 // ECDH performs a scalar multiplication (ECDH-like operation) between a key
 // from the wallet and a remote public key. The output returned will be the
 // sha256 of the resulting shared point serialized in compressed format. The
-// wallet's private key and the shared point never leave the wallet.
+// SQL private-key use and shared-point hashing stay inside the vault.
 func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
@@ -836,6 +836,19 @@ func (w *Wallet) handleECDH(r ecdhReq) {
 func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
+	if w.addrStore == nil {
+		digest, err := w.keyVault.ECDH(
+			ctx, path.KeyScope, path.DerivationPath, pub,
+		)
+		if err != nil {
+			return [32]byte{}, mapAccountSecretErr(err)
+		}
+
+		return digest, nil
+	}
+
+	// kvdb wallets still derive the private key in Wallet through
+	// UnsafeVault. This branch is temporary and is removed with kvdb.
 	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
 		return [32]byte{}, err
@@ -1365,14 +1378,10 @@ func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
 	}
 
 	secret, err := w.cache.GetAccountSecret(ctx, query)
-	switch {
-	case errors.Is(err, db.ErrAccountSecretUnavailable),
-		errors.Is(err, db.ErrAccountNotFound):
-
-		return nil, ErrAccountNotInStore
-
-	case err != nil:
-		return nil, fmt.Errorf("fetch account secret: %w", err)
+	if err != nil {
+		return nil, mapAccountSecretErr(
+			fmt.Errorf("fetch account secret: %w", err),
+		)
 	}
 
 	if len(secret.EncryptedPrivateKey) == 0 {
@@ -1384,10 +1393,31 @@ func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
 	)
 }
 
+// mapAccountSecretErr maps account-secret lookup failures, whether reported by
+// the Store or by a vault operation that performed the lookup, onto the public
+// signer errors. Other errors are returned unchanged.
+func mapAccountSecretErr(err error) error {
+	switch {
+	case errors.Is(err, db.ErrAccountSecretUnavailable),
+		errors.Is(err, db.ErrAccountNotFound):
+
+		return ErrAccountNotInStore
+
+	case errors.Is(err, keyvault.ErrNoPrivateKey):
+		return ErrWatchOnlyAccount
+
+	default:
+		return err
+	}
+}
+
 // deriveStoredAccountChildKey decrypts an account's encrypted private key with
 // the wallet's unsafeVault and derives the leaf private key at path. The
 // decrypted account key is zeroed before the call returns; the caller must
 // zero the returned key.
+//
+// This is the UnsafeVault path that SQL ECDH no longer uses. It remains for
+// kvdb wallets and for SQL signing until that moves behind vault operations.
 func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
 	encAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {

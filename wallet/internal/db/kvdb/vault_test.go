@@ -41,6 +41,20 @@ func TestLegacyWalletVaultDecryptScriptNotImplemented(t *testing.T) {
 	require.ErrorIs(t, err, keyvault.ErrNotImplemented)
 }
 
+// TestLegacyWalletVaultECDHNotImplemented verifies that the legacy vault
+// refuses the typed ECDH operation, so the Wallet keeps its kvdb Store-and-
+// Decrypt key path.
+func TestLegacyWalletVaultECDHNotImplemented(t *testing.T) {
+	t.Parallel()
+
+	vault := &LegacyWalletVault{}
+	digest, err := vault.ECDH(
+		t.Context(), waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, nil,
+	)
+	require.Equal(t, [32]byte{}, digest)
+	require.ErrorIs(t, err, keyvault.ErrNotImplemented)
+}
+
 // TestLegacyWalletVaultTranslatesManagerSentinels verifies that the adapter
 // surfaces keyvault sentinels rather than leaking the underlying waddrmgr
 // sentinels, so callers can handle keyvault.Vault errors backend-independently

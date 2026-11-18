@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -112,6 +113,16 @@ func (v *LegacyWalletVault) DecryptScript(context.Context, []byte) ([]byte,
 	error) {
 
 	return nil, keyvault.ErrNotImplemented
+}
+
+// ECDH returns keyvault.ErrNotImplemented. kvdb callers derive the key through
+// the legacy Store lookup and Decrypt.
+//
+// Deprecated: kvdb support is being removed; delete this method with it.
+func (v *LegacyWalletVault) ECDH(context.Context, waddrmgr.KeyScope,
+	waddrmgr.DerivationPath, *btcec.PublicKey) ([32]byte, error) {
+
+	return [32]byte{}, keyvault.ErrNotImplemented
 }
 
 // crypt forwards a cipher operation to the address manager and maps its

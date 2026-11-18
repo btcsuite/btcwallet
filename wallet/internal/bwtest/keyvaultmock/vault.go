@@ -11,6 +11,7 @@ package keyvaultmock
 import (
 	"context"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
@@ -105,6 +106,17 @@ func (m *Vault) DecryptScript(ctx context.Context,
 	script, _ := args.Get(0).([]byte)
 
 	return script, args.Error(1)
+}
+
+// ECDH forwards to the configured testify expectations.
+func (m *Vault) ECDH(ctx context.Context, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath, remote *btcec.PublicKey) ([32]byte, error) {
+
+	args := m.Called(ctx, scope, path, remote)
+
+	digest, _ := args.Get(0).([32]byte)
+
+	return digest, args.Error(1)
 }
 
 // A compile-time check that the mock satisfies the interface it stands in for.
