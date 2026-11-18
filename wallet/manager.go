@@ -267,7 +267,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		cancel:         cancel,
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.chainSyncer = newChainSyncer(&m.config.ChainParams)
 
 	return m, nil
 }
@@ -287,7 +287,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 			return wallets, err
 		}
 
-		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
+		wallet := newManagedWallet(cfg, walletData, m)
 		wallets = append(wallets, wallet)
 
 		err = wallet.prepareStart(ctx)
@@ -828,7 +828,7 @@ func (m *Manager) createWallet(ctx context.Context,
 		return nil, err
 	}
 
-	return newManagedWallet(walletCfg, data, m.chainSyncer), nil
+	return newManagedWallet(walletCfg, data, m), nil
 }
 
 // validateInitialAccounts checks resolved scope and script ownership before

@@ -305,9 +305,10 @@ type syncer struct {
 	// observations while Wallet retains subscriber state and lifecycle.
 	txManager txManager
 
-	// chainSyncer owns subscriptions and prepares live matches for this
-	// processor; every maintained Wallet receives its Manager's instance.
-	chainSyncer    chainRouter
+	// registry requests subscriptions from Manager without routing access.
+	registry chainRegistry
+
+	// chainEventChan carries the matches prepared by Manager's router.
 	chainEventChan <-chan chainEvent
 }
 
@@ -324,7 +325,7 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 
 	// Wallet shutdown must still cancel registration. A later sync
 	// initialization reads the persisted watch set again.
-	err = s.chainSyncer.watchAddresses(ctx, s.walletID, addrs)
+	err = s.registry.watchAddresses(ctx, s.walletID, addrs)
 	if err != nil {
 		return fmt.Errorf("register addresses: %w", err)
 	}
@@ -344,7 +345,7 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 		return nil
 	}
 
-	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
+	return s.registry.watchOutpoints(ctx, s.walletID, outpoints)
 }
 
 // loadWatchSet converts one persisted snapshot into Wallet registration data.
@@ -386,11 +387,11 @@ func (s *syncer) loadWatchSet(ctx context.Context) (watchSet, error) {
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
 // mandatory: every migrated runtime path reads and writes through the Store,
 // so there is no nil-store fallback. The notifier observes successful commits
-// without owning persistence or scan lifecycle. The Manager's required routing
-// owner and inbox supply prepared live events to this existing worker.
+// without owning persistence or scan lifecycle. Manager supplies a narrow
+// registration boundary and prepared live events to this existing worker.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
-	walletID uint32, chainSyncer chainRouter,
+	walletID uint32, registry chainRegistry,
 	events <-chan chainEvent) *syncer {
 
 	return &syncer{
@@ -401,7 +402,7 @@ func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 		txManager:      txManager,
 		store:          store,
 		walletID:       walletID,
-		chainSyncer:    chainSyncer,
+		registry:       registry,
 		chainEventChan: events,
 	}
 }
@@ -449,7 +450,7 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	// this call a btcd-backed wallet would stop receiving live block
 	// connect/disconnect events. The call is idempotent on the wrappers
 	// that already enabled notifications, so it is safe for all backends.
-	err = s.chainSyncer.notifyBlocks(ctx)
+	err = s.registry.notifyBlocks(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start block "+
 			"notifications: %w", err)
