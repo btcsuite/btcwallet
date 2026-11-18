@@ -292,7 +292,7 @@ func TestManagerChainRollbackStopsOnError(t *testing.T) {
 			w.chainEventChan = events
 			processor := newSyncer(
 				w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
-				m.chainSyncer, events,
+				m, events,
 			)
 
 			processed := make(chan error, 1)
@@ -373,7 +373,7 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		w.id = 1
 		processor := newSyncer(
 			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
-			w.chainSyncer, w.chainEventChan,
+			w.registry, w.chainEventChan,
 		)
 		w.sync = processor
 		w.state = newWalletState(processor)
@@ -1087,9 +1087,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 				},
 			}
 
-			m.chainSyncer = newChainSyncer(
-				m.config.ChainSource, &m.config.ChainParams,
-			)
+			m.chainSyncer = newChainSyncer(&m.config.ChainParams)
 			m.started.Store(true)
 			m.wg.Go(m.mainLoop)
 			t.Cleanup(func() {
@@ -1352,7 +1350,7 @@ func newManagerLifecycleTest(t *testing.T,
 	}
 
 	manager.walletRequests = make(chan watchRegistrationReq)
-	manager.chainSyncer = newChainSyncer(source, &manager.config.ChainParams)
+	manager.chainSyncer = newChainSyncer(&manager.config.ChainParams)
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
 	t.Cleanup(func() {
@@ -3032,13 +3030,14 @@ func TestManagerCreateImportsDeclaredKVDBAccount(t *testing.T) {
 	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
 }
 
-// TestChainSyncerWatchAddresses verifies ownership precedes tip-based
-// activation, including a retry after its native subscription fails.
-func TestChainSyncerWatchAddresses(t *testing.T) {
+// TestManagerWatchAddresses routes activation-time notifications after their
+// accepted declaration, including a retry after native subscription failure.
+func TestManagerWatchAddresses(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The exact native arguments must activate routing inside
-	// the call, before either its causal failure or successful retry.
+	// Arrange: Emit a payment inside both native calls and let the real
+	// owner deliver it to a bounded Wallet input. No sync worker consumes
+	// that input, so the test can inspect its prepared matches directly.
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), &chainParams,
 	)
@@ -3052,21 +3051,30 @@ func TestChainSyncerWatchAddresses(t *testing.T) {
 	require.NoError(t, err)
 
 	addrs := []address.Address{addr}
-	wallets := []*Wallet{{id: 1}}
 	failure := errors.New("subscription failed")
 
-	client := createTestChain(t)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	deps.vault.On("Lock").Return().Once()
 
-	s := newChainSyncer(client, &chainParams)
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
+	backend.On("close").Return(nil).Once()
 
-	var received []TxEntries
+	notifications := make(chan any, 2)
+	client := &bwmock.Chain{}
+	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+	m := newManagerLifecycleTest(t, backend, client)
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
+
+	w.registry = m
+	m.wallets[w.cfg.Name] = w
 
 	callback := func(mock.Arguments) {
-		events := s.routeChainEvent(
-			chain.RelevantTx{TxRecord: rec}, wallets,
-		)
-		received = append(received, events[1].matches)
+		// The backend can emit before returning; only Manager matches it.
+		notifications <- chain.RelevantTx{TxRecord: rec}
 	}
 	client.On("WatchAddrsFromTip", t.Context(), addrs).Run(callback).
 		Return(failure).Once()
@@ -3074,28 +3082,30 @@ func TestChainSyncerWatchAddresses(t *testing.T) {
 		Return(nil).Once()
 
 	// Act: Repeat the identical producer request after native failure.
-	firstErr := s.watchAddresses(t.Context(), 1, addrs)
-	retryErr := s.watchAddresses(t.Context(), 1, addrs)
+	firstErr := m.watchAddresses(t.Context(), w.id, addrs)
+	retryErr := m.watchAddresses(t.Context(), w.id, addrs)
 
-	// Assert: Wrapped errors retain identity; both activations already
-	// have one recipient, and fixture cleanup verifies the exact calls.
+	// Assert: Wrapped errors retain identity and each immediate native
+	// event finds its declared recipient. Constructor cleanup joins the
+	// owner/Wallet before verifying the exact mock calls once.
 	require.ErrorIs(t, firstErr, failure)
 	require.NoError(t, retryErr)
-	require.Len(t, received, 2)
 
-	for _, matches := range received {
-		require.Len(t, matches, 1)
-		require.Same(t, rec, matches[0].Rec)
+	for range 2 {
+		event := <-w.chainEventChan
+		require.Len(t, event.matches, 1)
+		require.Same(t, rec, event.matches[0].Rec)
 	}
 }
 
-// TestChainSyncerWatchOutpoints verifies ownership precedes spent-output
-// activation, including a retry after its native subscription fails.
-func TestChainSyncerWatchOutpoints(t *testing.T) {
+// TestManagerWatchOutpoints routes native spent-output notifications after
+// their accepted declaration, including a retry after subscription failure.
+func TestManagerWatchOutpoints(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The exact native arguments must activate routing inside
-	// the call, before either its causal failure or successful retry.
+	// Arrange: Emit a payment inside both native calls and let the real
+	// owner deliver it to a bounded Wallet input. No sync worker consumes
+	// that input, so the test can inspect its prepared matches directly.
 	point := wire.OutPoint{Index: 7}
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(wire.NewTxIn(&point, nil, nil))
@@ -3103,21 +3113,30 @@ func TestChainSyncerWatchOutpoints(t *testing.T) {
 	require.NoError(t, err)
 
 	points := []*wire.OutPoint{&point}
-	wallets := []*Wallet{{id: 1}}
 	failure := errors.New("subscription failed")
 
-	client := createTestChain(t)
-	client.On("NotifySpent", mock.Anything).Unset()
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	deps.vault.On("Lock").Return().Once()
 
-	s := newChainSyncer(client, &chainParams)
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
+	backend.On("close").Return(nil).Once()
 
-	var received []TxEntries
+	notifications := make(chan any, 2)
+	client := &bwmock.Chain{}
+	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+	m := newManagerLifecycleTest(t, backend, client)
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
+
+	w.registry = m
+	m.wallets[w.cfg.Name] = w
 
 	callback := func(mock.Arguments) {
-		events := s.routeChainEvent(
-			chain.RelevantTx{TxRecord: rec}, wallets,
-		)
-		received = append(received, events[1].matches)
+		// The backend can emit before returning; only Manager matches it.
+		notifications <- chain.RelevantTx{TxRecord: rec}
 	}
 	client.On("NotifySpent", points).Run(callback).
 		Return(failure).Once()
@@ -3125,28 +3144,30 @@ func TestChainSyncerWatchOutpoints(t *testing.T) {
 		Return(nil).Once()
 
 	// Act: Repeat the identical producer request after native failure.
-	firstErr := s.watchOutpoints(t.Context(), 1, points)
-	retryErr := s.watchOutpoints(t.Context(), 1, points)
+	firstErr := m.watchOutpoints(t.Context(), w.id, points)
+	retryErr := m.watchOutpoints(t.Context(), w.id, points)
 
-	// Assert: Wrapped errors retain identity; both activations already
-	// have one recipient, and fixture cleanup verifies the exact calls.
+	// Assert: Wrapped errors retain identity and each immediate native
+	// event finds its declared recipient. Constructor cleanup joins the
+	// owner/Wallet before verifying the exact mock calls once.
 	require.ErrorIs(t, firstErr, failure)
 	require.NoError(t, retryErr)
-	require.Len(t, received, 2)
 
-	for _, matches := range received {
-		require.Len(t, matches, 1)
-		require.Same(t, rec, matches[0].Rec)
+	for range 2 {
+		event := <-w.chainEventChan
+		require.Len(t, event.matches, 1)
+		require.Same(t, rec, event.matches[0].Rec)
 	}
 }
 
-// TestChainSyncerNotifyReceived verifies ownership precedes publication
-// activation, including a retry after its native subscription fails.
-func TestChainSyncerNotifyReceived(t *testing.T) {
+// TestManagerNotifyReceived routes publication-time notifications after
+// their declaration while preserving native failure, retry and cancellation.
+func TestManagerNotifyReceived(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: An accepted publication retains native registration even
-	// after shutdown cancels the lifetime that its caller supplies.
+	// Arrange: An admitted publication keeps its native result despite
+	// caller cancellation. A real owner routes each activation-time payment
+	// into the Wallet input; its sync worker stays disabled for observation.
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), &chainParams,
 	)
@@ -3160,23 +3181,33 @@ func TestChainSyncerNotifyReceived(t *testing.T) {
 	require.NoError(t, err)
 
 	addrs := []address.Address{addr}
-	wallets := []*Wallet{{id: 1}}
 	failure := errors.New("subscription failed")
 
-	client := createTestChain(t)
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	deps.vault.On("Lock").Return().Once()
 
-	s := newChainSyncer(client, &chainParams)
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
+	backend.On("close").Return(nil).Once()
+
+	notifications := make(chan any, 2)
+	client := &bwmock.Chain{}
+	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+	m := newManagerLifecycleTest(t, backend, client)
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
+
+	w.registry = m
+	m.wallets[w.cfg.Name] = w
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	var received []TxEntries
-
 	callback := func(mock.Arguments) {
-		events := s.routeChainEvent(
-			chain.RelevantTx{TxRecord: rec}, wallets,
-		)
-		received = append(received, events[1].matches)
+		// The backend can emit before returning; only Manager matches it.
+		notifications <- chain.RelevantTx{TxRecord: rec}
 	}
 	client.On("NotifyReceived", addrs).Run(callback).
 		Return(failure).Once()
@@ -3184,18 +3215,19 @@ func TestChainSyncerNotifyReceived(t *testing.T) {
 		Return(nil).Once()
 
 	// Act: Register and retry despite the already-canceled lifetime.
-	firstErr := s.notifyReceived(ctx, 1, addrs)
-	retryErr := s.notifyReceived(ctx, 1, addrs)
+	firstErr := m.notifyReceived(ctx, w.id, addrs)
+	retryErr := m.notifyReceived(ctx, w.id, addrs)
 
-	// Assert: Cancellation cannot replace the native result; both calls
-	// find one recipient. Fixture cleanup verifies exact activation.
+	// Assert: Cancellation cannot replace the native result. Both native
+	// events reach the declared Wallet; constructor cleanup verifies calls
+	// once after the real owner and Wallet have joined.
 	require.ErrorIs(t, firstErr, failure)
 	require.NoError(t, retryErr)
-	require.Len(t, received, 2)
 
-	for _, matches := range received {
-		require.Len(t, matches, 1)
-		require.Same(t, rec, matches[0].Rec)
+	for range 2 {
+		event := <-w.chainEventChan
+		require.Len(t, event.matches, 1)
+		require.Same(t, rec, event.matches[0].Rec)
 	}
 }
 
@@ -3207,12 +3239,7 @@ func TestChainSyncerRouting(t *testing.T) {
 	// Arrange: Two Wallets share an address; a third watches nothing. An
 	// input-address spend arrives before recovery learns its funding output.
 	// A later parent has duplicate outputs to check recipient deduplication.
-	client := createTestChain(t)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Twice()
-
-	s := newChainSyncer(client, &chainParams)
+	s := newChainSyncer(&chainParams)
 
 	root, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
 	require.NoError(t, err)
@@ -3226,11 +3253,10 @@ func TestChainSyncerRouting(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, id := range []uint32{1, 2} {
-		require.NoError(
-			t, s.watchAddresses(
-				t.Context(), id, []address.Address{addr},
-			),
-		)
+		s.registerWatchSet(watchRegistrationReq{
+			walletID:  id,
+			addresses: []string{addr.EncodeAddress()},
+		})
 	}
 
 	// The unrelated output must remain the only source of credit metadata;
@@ -3354,7 +3380,7 @@ func TestChainSyncerProgressRouting(t *testing.T) {
 			t.Parallel()
 
 			// Arrange: No watches are needed for block/control recipients.
-			s := newChainSyncer(createTestChain(t), &chainParams)
+			s := newChainSyncer(&chainParams)
 
 			wallets := []*Wallet{{id: 1}, {id: 2}}
 
@@ -3529,7 +3555,7 @@ func TestManagerChainEventMembership(t *testing.T) {
 	manager := &Manager{
 		lifetimeCtx: t.Context(),
 		wallets:     map[string]*Wallet{"first": first},
-		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
+		chainSyncer: newChainSyncer(&chainParams),
 	}
 
 	// Act: Publish between two synchronous owner-turn dispatches.
