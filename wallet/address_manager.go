@@ -414,7 +414,7 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 			"pubkey: %w", err)
 	}
 
-	branchKey, err := deriveChildKey(accountPubKey, params.Branch)
+	branchKey, err := keyvault.DeriveChild(accountPubKey, params.Branch)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive branch: %w", err)
 	}
@@ -460,7 +460,7 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 func deriveStoreAddressChild(branchKey *hdkeychain.ExtendedKey,
 	index uint32) (*hdkeychain.ExtendedKey, error) {
 
-	key, err := deriveChildKey(branchKey, index)
+	key, err := keyvault.DeriveChild(branchKey, index)
 	if errors.Is(err, hdkeychain.ErrInvalidChild) {
 		return nil, fmt.Errorf("%w: %w", db.ErrAddressChildUnavailable, err)
 	}
