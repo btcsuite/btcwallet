@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -115,14 +116,53 @@ func (v *LegacyWalletVault) DecryptScript(context.Context, []byte) ([]byte,
 	return nil, keyvault.ErrNotImplemented
 }
 
-// ECDH returns keyvault.ErrNotImplemented. kvdb callers derive the key through
-// the legacy Store lookup and Decrypt.
+// ECDH implements keyvault.Vault.ECDH for kvdb wallets. It reads the account
+// secret through the kvdb Store and decrypts it with the legacy manager, so the
+// private key never reaches Wallet. Unlike the SQL vault, the manager's Lock
+// does not wait for this use: its lock covers only Decrypt.
 //
 // Deprecated: kvdb support is being removed; delete this method with it.
-func (v *LegacyWalletVault) ECDH(context.Context, waddrmgr.KeyScope,
-	waddrmgr.DerivationPath, *btcec.PublicKey) ([32]byte, error) {
+func (v *LegacyWalletVault) ECDH(ctx context.Context, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath, remote *btcec.PublicKey) ([32]byte, error) {
 
-	return [32]byte{}, keyvault.ErrNotImplemented
+	if remote == nil || !remote.IsOnCurve() {
+		return [32]byte{}, keyvault.ErrInvalidRemoteKey
+	}
+
+	store := NewStore(v.db, nil, v.mgr)
+
+	secret, err := store.GetAccountSecret(ctx, db.GetAccountSecretQuery{
+		Scope:         db.KeyScope(scope),
+		AccountNumber: path.InternalAccount,
+	})
+	if secret != nil {
+		defer clear(secret.EncryptedPrivateKey)
+	}
+
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("fetch account secret: %w", err)
+	}
+
+	if len(secret.EncryptedPrivateKey) == 0 {
+		return [32]byte{}, keyvault.ErrNoPrivateKey
+	}
+
+	accountPriv, err := v.Decrypt(
+		waddrmgr.CKTPrivate, secret.EncryptedPrivateKey,
+	)
+	defer clear(accountPriv)
+
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("decrypt account priv: %w", err)
+	}
+
+	privKey, err := keyvault.DeriveAccountChildKey(accountPriv, path)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	defer privKey.Zero()
+
+	return keyvault.ECDHSecret(privKey, remote), nil
 }
 
 // crypt forwards a cipher operation to the address manager and maps its

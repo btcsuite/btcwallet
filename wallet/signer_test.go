@@ -32,7 +32,6 @@ import (
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -382,9 +381,9 @@ func TestDerivePubKeyMissingAccountPubKey(t *testing.T) {
 // expectedECDHSecret independently computes the ECDH result from the remote
 // side: sha256 of the compressed encoding of remoteKey*walletPub. Agreement
 // with the wallet's own walletKey*remotePub proves both the multiplication and
-// the encoding. It also returns the compressed point's parity prefix.
+// the encoding.
 func expectedECDHSecret(t *testing.T, remoteKey *btcec.PrivateKey,
-	walletPub *btcec.PublicKey) ([32]byte, byte) {
+	walletPub *btcec.PublicKey) [32]byte {
 
 	t.Helper()
 
@@ -395,37 +394,7 @@ func expectedECDHSecret(t *testing.T, remoteKey *btcec.PrivateKey,
 
 	compressed := btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed()
 
-	return sha256.Sum256(compressed), compressed[0]
-}
-
-// TestECDHFails tests the failure case where the key derivation fails during
-// an ECDH operation.
-func TestECDHFails(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Set up the wallet and configure the store account-secret
-	// lookup to fail with an unexpected error.
-	w, mocks := createUnlockedWalletWithMocks(t)
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-
-	remoteKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-
-	remotePubKey := remoteKey.PubKey()
-
-	accountNumber := path.DerivationPath.InternalAccount
-	mocks.store.On("GetAccountSecret", mock.Anything,
-		db.GetAccountSecretQuery{
-			WalletID:      w.id,
-			Scope:         db.KeyScope(path.KeyScope),
-			AccountNumber: accountNumber,
-		}).Return((*db.AccountSecret)(nil), errDerivationFailed).Once()
-
-	// Act: Attempt to perform the ECDH operation.
-	_, err = w.ECDH(t.Context(), path, remotePubKey)
-
-	// Assert: Check that the error is propagated correctly.
-	require.ErrorIs(t, err, errDerivationFailed)
+	return sha256.Sum256(compressed)
 }
 
 // deterministicPrivKey is a helper function that returns a deterministic
@@ -3266,39 +3235,6 @@ func TestDerivePrivKeyFail(t *testing.T) {
 	require.ErrorIs(t, err, ErrWatchOnlyAccount)
 }
 
-// TestECDHFail tests failure modes of ECDH through the store-routed key path.
-func TestECDHFail(t *testing.T) {
-	t.Parallel()
-
-	w, mocks := createUnlockedWalletWithMocks(t)
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	remoteKey, _ := btcec.NewPrivateKey()
-
-	accountNumber := path.DerivationPath.InternalAccount
-	query := db.GetAccountSecretQuery{
-		WalletID:      w.id,
-		Scope:         db.KeyScope(path.KeyScope),
-		AccountNumber: accountNumber,
-	}
-
-	// Test Case 1: The account-secret lookup fails with an unexpected
-	// error, which is propagated.
-	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
-		(*db.AccountSecret)(nil), errPrivKeyMock,
-	).Once()
-
-	_, err := w.ECDH(t.Context(), path, remoteKey.PubKey())
-	require.ErrorIs(t, err, errPrivKeyMock)
-
-	// Test Case 2: The signing account is watch-only.
-	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
-		&db.AccountSecret{}, nil,
-	).Once()
-
-	_, err = w.ECDH(t.Context(), path, remoteKey.PubKey())
-	require.ErrorIs(t, err, ErrWatchOnlyAccount)
-}
-
 // TestSignDigestLocked tests that SignDigest fails when the wallet is locked.
 func TestSignDigestLocked(t *testing.T) {
 	t.Parallel()
@@ -3364,65 +3300,6 @@ func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
 	// infinity, which both sides could agree on while holding no key at all.
 	require.ErrorIs(t, err, ErrInvalidSignParam)
 	require.Equal(t, [32]byte{}, secret)
-}
-
-// TestECDHSharedPointParity verifies that ECDH hashes the full compressed
-// shared point for both Y parities, so its result is neither the raw X
-// coordinate btcec.GenerateSharedSecret returns nor the hash of that X.
-func TestECDHSharedPointParity(t *testing.T) {
-	t.Parallel()
-
-	// The peer scalars are fixed so that, against the fixture wallet key, the
-	// shared points cover both Y parities. wantPrefix pins that coverage.
-	tests := []struct {
-		name       string
-		peerByte   byte
-		wantPrefix byte
-	}{
-		{
-			name:       "odd shared point",
-			peerByte:   0x01,
-			wantPrefix: secp256k1.PubKeyFormatCompressedOdd,
-		},
-		{
-			name:       "even shared point",
-			peerByte:   0x02,
-			wantPrefix: secp256k1.PubKeyFormatCompressedEven,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange: An unlocked wallet serving its fixture key, and a
-			// deterministic peer key.
-			w, mocks := createUnlockedWalletWithMocks(t)
-			path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-
-			privKey, walletPub := expectStoreSignerPrivKey(
-				t, mocks, w.id, path.KeyScope, path.DerivationPath,
-			)
-
-			peerKey, _ := btcec.PrivKeyFromBytes(
-				bytes.Repeat([]byte{test.peerByte}, 32),
-			)
-
-			wantSecret, prefix := expectedECDHSecret(t, peerKey, walletPub)
-			require.Equal(t, test.wantPrefix, prefix)
-
-			rawX := btcec.GenerateSharedSecret(privKey, peerKey.PubKey())
-
-			// Act: Compute the shared secret.
-			secret, err := w.ECDH(t.Context(), path, peerKey.PubKey())
-
-			// Assert: The secret hashes the compressed point, not X alone.
-			require.NoError(t, err)
-			require.Equal(t, wantSecret, secret)
-			require.NotEqual(t, rawX, secret[:])
-			require.NotEqual(t, sha256.Sum256(rawX), secret)
-		})
-	}
 }
 
 // TestSignerRejectsNilArguments verifies that every Signer method taking a

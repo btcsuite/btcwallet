@@ -743,10 +743,10 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 // encrypted account material through the same account-secret contract.
 //
 // This resolver is used by the path-driven signer entry points (SignDigest,
-// kvdb ECDH, DerivePrivKey and ComputeRawSig/PSBT), which have only a
-// derivation path. Address-driven paths reach the same resolver through
-// privKeyForAddressInfo once the store has resolved the address to its
-// derivation info, so both address the account by number.
+// DerivePrivKey and ComputeRawSig/PSBT), which have only a derivation path.
+// Address-driven paths reach the same resolver through privKeyForAddressInfo
+// once the store has resolved the address to its derivation info, so both
+// address the account by number.
 //
 // The returned private key is owned by the caller, who is responsible for
 // zeroing it once signing completes.
@@ -836,26 +836,14 @@ func (w *Wallet) handleECDH(r ecdhReq) {
 func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
-	if w.addrStore == nil {
-		digest, err := w.keyVault.ECDH(
-			ctx, path.KeyScope, path.DerivationPath, pub,
-		)
-		if err != nil {
-			return [32]byte{}, mapAccountSecretErr(err)
-		}
-
-		return digest, nil
-	}
-
-	// kvdb wallets still derive the private key in Wallet through
-	// UnsafeVault. This branch is temporary and is removed with kvdb.
-	privKey, err := w.derivePathPrivKey(ctx, path)
+	digest, err := w.keyVault.ECDH(
+		ctx, path.KeyScope, path.DerivationPath, pub,
+	)
 	if err != nil {
-		return [32]byte{}, err
+		return [32]byte{}, mapAccountSecretErr(err)
 	}
-	defer privKey.Zero()
 
-	return keyvault.ECDHSecret(privKey, pub), nil
+	return digest, nil
 }
 
 // validateSignDigestIntent validates the parameters of a SignDigestIntent.
@@ -1416,8 +1404,8 @@ func mapAccountSecretErr(err error) error {
 // decrypted account key is zeroed before the call returns; the caller must
 // zero the returned key.
 //
-// This is the UnsafeVault path that SQL ECDH no longer uses. It remains for
-// kvdb wallets and for SQL signing until that moves behind vault operations.
+// ECDH no longer uses this UnsafeVault path on either backend. It remains for
+// signing until that moves behind vault operations.
 func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
 	encAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
