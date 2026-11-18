@@ -1247,3 +1247,225 @@ func testPsbtManagerSignRejectMismatchedSignature(h *bwtest.HarnessTest) {
 
 	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
 }
+
+// testPsbtManagerCompleteWorkflow proves the public PSBT methods compose into a
+// publishable transaction. DecorateInputs runs before FundPsbt because funding
+// leases its inputs and decoration refuses leased coins. The final transaction
+// is executed against the funding outputs, mined, and read back after reload.
+func testPsbtManagerCompleteWorkflow(h *bwtest.HarnessTest) {
+	// Arrange: one coin per witness family, a payment to a key outside the
+	// wallet, and change to the funding account.
+	ctx := h.Context()
+	w, native := h.NewWallet(bwtest.WalletFixture{
+		Seed:     h.SeedFromTestName(),
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{100_000},
+		Unlocked: true,
+	})
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, 100_000)
+	nativeOp, taprootOp := native.WalletOutpoints[0], taproot.WalletOutpoints[0]
+	nativeOutput := native.Tx.TxOut[nativeOp.Index]
+	taprootOutput := taproot.Tx.TxOut[taprootOp.Index]
+	nativeOrigin := psbtFundedCoinDerivation(h, w, nativeOutput)
+	taprootOrigin := psbtFundedCoinDerivation(h, w, taprootOutput)
+
+	scope, err := waddrmgr.WitnessPubKey.KeyScope()
+	require.NoError(h, err)
+
+	const witnessProgramSize = 20
+
+	recipient, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, witnessProgramSize), h.NetParams(),
+	)
+	require.NoError(h, err)
+	paymentScript, err := txscript.PayToAddrScript(recipient)
+	require.NoError(h, err)
+
+	payment := wire.TxOut{Value: 150_000, PkScript: paymentScript}
+	template := newPaymentPacket(h, payment, nativeOp, taprootOp)
+	require.NoError(h, psbt.InPlaceSort(template))
+
+	// Reverse the sorted inputs so funding's sort must move each record
+	// with its outpoint.
+	txIns := template.UnsignedTx.TxIn
+	txIns[0], txIns[1] = txIns[1], txIns[0]
+
+	nativeIdx := 0
+	if txIns[0].PreviousOutPoint != nativeOp {
+		nativeIdx = 1
+	}
+
+	taprootIdx := 1 - nativeIdx
+
+	// The wallet never records a Taproot input's parent, so only a step
+	// that keeps the caller's records can hand this one on.
+	template.Inputs[taprootIdx].NonWitnessUtxo = taproot.Tx
+
+	// Act: decorate the caller-built template.
+	decorated, err := w.DecorateInputs(ctx, template, false)
+
+	// Assert: both inputs carry the wallet's prevouts and origins, and the
+	// Taproot input keeps the caller's parent.
+	require.NoError(h, err)
+	require.Equal(h, psbt.PInput{
+		NonWitnessUtxo:  native.Tx,
+		WitnessUtxo:     nativeOutput,
+		SighashType:     txscript.SigHashAll,
+		Bip32Derivation: []*psbt.Bip32Derivation{nativeOrigin},
+	}, decorated.Inputs[nativeIdx])
+	require.Equal(h, psbt.PInput{
+		NonWitnessUtxo:     taproot.Tx,
+		WitnessUtxo:        taprootOutput,
+		TaprootInternalKey: taprootOrigin.PubKey[1:],
+		TaprootBip32Derivation: []*psbt.TaprootBip32Derivation{{
+			XOnlyPubKey:          taprootOrigin.PubKey[1:],
+			MasterKeyFingerprint: taprootOrigin.MasterKeyFingerprint,
+			Bip32Path:            taprootOrigin.Bip32Path,
+		}},
+	}, decorated.Inputs[taprootIdx])
+
+	// Act: fund the decorated packet, adding only change.
+	beforeFund := psbtTestSnapshot(h.T, decorated)
+	funded, err := w.FundPsbt(ctx, &wallet.FundIntent{
+		Packet: decorated,
+		ChangeSource: &wallet.ScopedAccount{
+			AccountName: waddrmgr.DefaultAccountName,
+			KeyScope:    scope,
+		},
+		FeeRate: relayFeeRate,
+	})
+
+	// Assert: the caller's packet is untouched, the funded packet keeps
+	// the decorated inputs and the payment, and change carries its origin.
+	require.NoError(h, err)
+	require.Equal(h, beforeFund, psbtTestSnapshot(h.T, decorated))
+
+	// Funding sorts the inputs back, moving each record with its outpoint.
+	packet := funded.Packet
+	require.Equal(h, []*wire.TxIn{
+		decorated.UnsignedTx.TxIn[1], decorated.UnsignedTx.TxIn[0],
+	}, packet.UnsignedTx.TxIn)
+	require.Equal(h, []psbt.PInput{
+		decorated.Inputs[1], decorated.Inputs[0],
+	}, packet.Inputs)
+	require.Len(h, packet.UnsignedTx.TxOut, 2)
+
+	// Later steps index the funded packet.
+	nativeIdx, taprootIdx = taprootIdx, nativeIdx
+
+	require.GreaterOrEqual(h, funded.ChangeIndex, int32(0))
+	paymentIdx := 1 - funded.ChangeIndex
+	require.Equal(h, &payment, packet.UnsignedTx.TxOut[paymentIdx])
+	require.Equal(h, psbt.POutput{}, packet.Outputs[paymentIdx])
+
+	change := packet.UnsignedTx.TxOut[funded.ChangeIndex]
+	_, changeAddrs, _, err := txscript.ExtractPkScriptAddrs(
+		change.PkScript, h.NetParams(),
+	)
+	require.NoError(h, err)
+	changeOrigin, err := w.GetDerivationInfo(ctx, changeAddrs[0])
+	require.NoError(h, err)
+	require.Equal(h, psbt.POutput{
+		Bip32Derivation: []*psbt.Bip32Derivation{changeOrigin},
+	}, packet.Outputs[funded.ChangeIndex])
+
+	// Act: sign the funded packet.
+	beforeSign := psbtTestSnapshot(h.T, packet)
+	signed, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: packet})
+
+	// Assert: both inputs are signed by their decorated keys, and the
+	// packet is otherwise unchanged.
+	require.NoError(h, err)
+	require.ElementsMatch(h, []uint32{0, 1}, signed.SignedInputs)
+
+	nativeSigs := packet.Inputs[nativeIdx].PartialSigs
+	require.Len(h, nativeSigs, 1)
+	require.Equal(h, nativeOrigin.PubKey, nativeSigs[0].PubKey)
+
+	keySpendSig := packet.Inputs[taprootIdx].TaprootKeySpendSig
+	require.Len(h, keySpendSig, schnorr.SignatureSize)
+
+	unsigned := *packet
+	unsigned.Inputs = slices.Clone(packet.Inputs)
+	unsigned.Inputs[nativeIdx].PartialSigs = nil
+	unsigned.Inputs[taprootIdx].TaprootKeySpendSig = nil
+	require.Equal(h, beforeSign, psbtTestSnapshot(h.T, &unsigned))
+
+	// Arrange: drop the input derivations so finalization can only use
+	// SignPsbt's signatures.
+	for i := range packet.Inputs {
+		packet.Inputs[i].Bip32Derivation = nil
+		packet.Inputs[i].TaprootBip32Derivation = nil
+	}
+
+	// Act: finalize the signed packet and extract the transaction.
+	err = w.FinalizePsbt(ctx, packet)
+	require.NoError(h, err)
+	tx, err := psbt.Extract(packet)
+	require.NoError(h, err)
+
+	// Assert: the witnesses carry SignPsbt's signatures, and every input
+	// executes against the funding outputs rather than packet records.
+	require.Equal(h, wire.TxWitness{
+		nativeSigs[0].Signature, nativeSigs[0].PubKey,
+	}, tx.TxIn[nativeIdx].Witness)
+	require.Equal(h, wire.TxWitness{keySpendSig},
+		tx.TxIn[taprootIdx].Witness)
+
+	fetcher := txscript.NewMultiPrevOutFetcher(map[wire.OutPoint]*wire.TxOut{
+		nativeOp:  nativeOutput,
+		taprootOp: taprootOutput,
+	})
+	hashes := txscript.NewTxSigHashes(tx, fetcher)
+
+	for i, txIn := range tx.TxIn {
+		prevOut := fetcher.FetchPrevOutput(txIn.PreviousOutPoint)
+		engine, err := txscript.NewEngine(
+			prevOut.PkScript, tx, i, txscript.StandardVerifyFlags,
+			nil, hashes, prevOut.Value, fetcher,
+		)
+		require.NoError(h, err)
+		require.NoError(h, engine.Execute(), "input %d", i)
+	}
+
+	var rawTx bytes.Buffer
+	require.NoError(h, tx.Serialize(&rawTx))
+
+	// Act: publish and mine the transaction.
+	require.NoError(h, w.Broadcast(ctx, tx, ""))
+	txid := tx.TxHash()
+	block := h.MineBlockWithTx(tx)
+	_, height := h.GetBestBlock()
+
+	// Assert: the reader reports the exact confirmed spend and its change.
+	mined, err := w.GetTx(ctx, txid)
+	require.NoError(h, err)
+	require.Equal(h, rawTx.Bytes(), mined.RawTx)
+	require.Equal(h, &wallet.BlockDetails{
+		Hash:      block.BlockHash(),
+		Height:    height,
+		Timestamp: block.Header.Timestamp.Unix(),
+	}, mined.Block)
+	require.Equal(h, int32(1), mined.Confirmations)
+	require.True(h, mined.Outputs[funded.ChangeIndex].IsOurs)
+	require.False(h, mined.Outputs[paymentIdx].IsOurs)
+
+	changeOp := wire.OutPoint{Hash: txid, Index: uint32(funded.ChangeIndex)}
+	changeCoin, err := w.GetUtxo(ctx, changeOp)
+	require.NoError(h, err)
+	require.Equal(h, btcutil.Amount(change.Value), changeCoin.Amount)
+	require.Equal(h, change.PkScript, changeCoin.PkScript)
+	require.Equal(h, int32(1), changeCoin.Confirmations)
+
+	// Act: replace the Manager with a fresh one over the same database.
+	w = h.ReloadWallet(w)
+
+	// Assert: the transaction and change are unchanged after reload.
+	reloaded, err := w.GetTx(ctx, txid)
+	require.NoError(h, err)
+	require.Equal(h, mined, reloaded)
+
+	reloadedChange, err := w.GetUtxo(ctx, changeOp)
+	require.NoError(h, err)
+	require.Equal(h, changeCoin, reloadedChange)
+}
