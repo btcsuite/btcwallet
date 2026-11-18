@@ -1387,6 +1387,97 @@ func testPsbtManagerFinalizeRejectUnsignedTapscript(h *bwtest.HarnessTest) {
 	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
 }
 
+// testPsbtManagerFinalizeRejectPacket verifies that FinalizePsbt validates the
+// packet as SignPsbt does: a previous output that disagrees with its parent
+// transaction is refused, and the caller's packet is left unchanged.
+func testPsbtManagerFinalizeRejectPacket(h *bwtest.HarnessTest) {
+	// Arrange: The Wallet's SegWit spend, with a witness UTXO claiming one
+	// satoshi more than its parent pays.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(h, w, funding.WalletOutpoints[0])
+	prevOut := packet.Inputs[0].WitnessUtxo
+	packet.Inputs[0].WitnessUtxo = wire.NewTxOut(
+		prevOut.Value+1, prevOut.PkScript,
+	)
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Finalize the packet.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The conflict is named and the caller's packet is intact.
+	require.ErrorIs(h, err, wallet.ErrConflictingUtxo)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
+
+// testPsbtManagerFinalizeRejectMismatchedSignature verifies that FinalizePsbt
+// refuses another signer's signature that does not cover the packet's amount.
+func testPsbtManagerFinalizeRejectMismatchedSignature(h *bwtest.HarnessTest) {
+	// Arrange: The other signer signs, then the packet claims one satoshi
+	// more.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet := psbtTestPacket(h.T, unknownOutpoint())
+	scriptCode := addExternalPsbtInput(h, &packet.Inputs[0])
+	addExternalPsbtSig(h, packet, 0, scriptCode)
+	packet.Inputs[0].WitnessUtxo.Value++
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Finalize the packet.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The signature is named invalid and the packet is intact.
+	require.ErrorIs(h, err, wallet.ErrInvalidSignatureRecord)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
+
+// testPsbtManagerFinalizeRejectFinalWitness verifies that FinalizePsbt
+// refuses a final witness that does not execute, rather than returning it as
+// complete.
+func testPsbtManagerFinalizeRejectFinalWitness(h *bwtest.HarnessTest) {
+	// Arrange: The final witness names the other signer's key with no valid
+	// signature, so only executing the script can refuse it.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet := psbtTestPacket(h.T, unknownOutpoint())
+	addExternalPsbtInput(h, &packet.Inputs[0])
+
+	witness := new(bytes.Buffer)
+	err := psbt.WriteTxWitness(witness, wire.TxWitness{
+		{0x01}, psbtExternalKey().PubKey().SerializeCompressed(),
+	})
+	require.NoError(h, err)
+
+	packet.Inputs[0].FinalScriptWitness = witness.Bytes()
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Finalize the packet.
+	err = w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The script is named invalid and the packet is intact.
+	require.ErrorIs(h, err, wallet.ErrInvalidFinalScript)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+}
+
+// testPsbtManagerFinalizeRejectNil verifies that FinalizePsbt refuses a
+// missing packet.
+func testPsbtManagerFinalizeRejectNil(h *bwtest.HarnessTest) {
+	// Arrange: An unlocked Wallet, so only the missing packet is refused.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	// Act: Finalize without a packet.
+	err := w.FinalizePsbt(h.Context(), nil)
+
+	// Assert: The missing packet is named.
+	require.ErrorIs(h, err, wallet.ErrPacketNil)
+}
+
 // testPsbtManagerSigningRejectLocked verifies that a locked Wallet refuses both
 // signing entry points and leaves the caller's packet unchanged.
 func testPsbtManagerSigningRejectLocked(h *bwtest.HarnessTest) {

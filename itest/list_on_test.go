@@ -718,6 +718,22 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerFinalizeRejectUnsignedTapscript,
 	},
 	{
+		Name:     "psbtmanager finalize reject packet",
+		TestFunc: testPsbtManagerFinalizeRejectPacket,
+	},
+	{
+		Name:     "psbtmanager finalize reject mismatched signature",
+		TestFunc: testPsbtManagerFinalizeRejectMismatchedSignature,
+	},
+	{
+		Name:     "psbtmanager finalize reject final witness",
+		TestFunc: testPsbtManagerFinalizeRejectFinalWitness,
+	},
+	{
+		Name:     "psbtmanager finalize reject nil",
+		TestFunc: testPsbtManagerFinalizeRejectNil,
+	},
+	{
 		Name:     "psbtmanager signing reject locked",
 		TestFunc: testPsbtManagerSigningRejectLocked,
 	},
