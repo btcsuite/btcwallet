@@ -1433,13 +1433,13 @@ func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
 
 	defer acctPriv.Zero()
 
-	branchKey, err := deriveChildKey(acctPriv, path.Branch)
+	branchKey, err := keyvault.DeriveChild(acctPriv, path.Branch)
 	if err != nil {
 		return nil, fmt.Errorf("derive branch: %w", err)
 	}
 	defer branchKey.Zero()
 
-	addrKey, err := deriveChildKey(branchKey, path.Index)
+	addrKey, err := keyvault.DeriveChild(branchKey, path.Index)
 	if err != nil {
 		return nil, fmt.Errorf("derive index: %w", err)
 	}
@@ -1519,13 +1519,13 @@ func deriveStoredAccountChildPubKey(accountPubKey []byte,
 	}
 	defer acctPub.Zero()
 
-	branchKey, err := deriveChildKey(acctPub, path.Branch)
+	branchKey, err := keyvault.DeriveChild(acctPub, path.Branch)
 	if err != nil {
 		return nil, fmt.Errorf("derive branch: %w", err)
 	}
 	defer branchKey.Zero()
 
-	addrKey, err := deriveChildKey(branchKey, path.Index)
+	addrKey, err := keyvault.DeriveChild(branchKey, path.Index)
 	if err != nil {
 		return nil, fmt.Errorf("derive index: %w", err)
 	}
