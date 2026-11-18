@@ -177,7 +177,8 @@ type Manager struct {
 	// chainEvents borrows the already-started source's one native stream.
 	chainEvents <-chan any
 
-	// requestChan transfers creation to the same owner as native delivery.
+	// requestChan defers creation to the outer loop so delivery and rollback
+	// operate on fixed Wallet membership.
 	requestChan chan createWalletReq
 
 	// walletRequests is unbuffered: receipt selects an owner turn that applies
@@ -509,7 +510,7 @@ func (m *Manager) mainLoop() {
 				return
 			}
 
-			chainErr = m.dispatchChainEvent(m.lifetimeCtx, event)
+			chainErr = m.dispatchChainEvent(event)
 		}
 
 		if chainErr != nil {
@@ -530,15 +531,15 @@ func (m *Manager) chainRecipients() []*Wallet {
 }
 
 // dispatchChainEvent admits source-ordered events to existing Wallet workers.
-// Capacity-one mailboxes deliberately backpressure the sole reader; Wallet
-// and reader cancellation both release delivery during terminal shutdown.
+// Capacity-one mailboxes deliberately backpressure the sole reader; child
+// registration must still progress so the worker can consume earlier input.
 // Shared storage disconnects settle rollback before the next source event.
-func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
+func (m *Manager) dispatchChainEvent(n any) error {
 	// A disconnect changes the history that Wallet workers are writing.
 	// Settle their earlier writes and rewind Store once before the next
 	// source event; independent Wallet delivery cannot order that rewind.
 	if disconnect, ok := n.(chain.BlockDisconnected); ok {
-		return m.handleRollbackEvent(ctx, disconnect)
+		return m.handleRollbackEvent(disconnect)
 	}
 
 	wallets := m.chainRecipients()
@@ -552,24 +553,7 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-w.lifetimeCtx.Done():
-		case w.chainEventChan <- event:
-		}
-	}
-
-	return nil
-}
-
-// prepareWalletsForRollback waits for earlier sync writes on every Wallet.
-// The caller keeps the Wallet set fixed while each worker pauses for rollback.
-func (m *Manager) prepareWalletsForRollback(ctx context.Context,
-	resume <-chan struct{}) error {
-
-	for _, wallet := range m.wallets {
-		err := wallet.pauseForRollback(ctx, resume)
+		err := m.deliverChainEvent(w, event)
 		if err != nil {
 			return err
 		}
@@ -578,12 +562,76 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 	return nil
 }
 
+// deliverChainEvent preserves source order while serving watch declarations.
+// A worker may need registration before it can consume its bounded input.
+// This owner-loop operation uses only Manager's lifetime for cancellation.
+func (m *Manager) deliverChainEvent(wallet *Wallet, event chainEvent) error {
+	for {
+		select {
+		case wallet.chainEventChan <- event:
+			return nil
+
+		case req := <-m.walletRequests:
+			// The worker may need this send accepted before it can drain
+			// its earlier work and consume our queued input.
+			m.chainSyncer.registerWatchSet(req)
+
+		case <-m.lifetimeCtx.Done():
+			return m.lifetimeCtx.Err()
+		}
+	}
+}
+
+// prepareWalletsForRollback waits for earlier sync writes on every Wallet.
+// The caller keeps the Wallet set fixed while each worker pauses for rollback.
+func (m *Manager) prepareWalletsForRollback(resume <-chan struct{}) error {
+	for _, wallet := range m.wallets {
+		// Keep preparation on the worker's ordered input while allowing its
+		// registration to progress before it acknowledges earlier writes.
+		req := prepareRollbackReq{
+			readyForRollback: make(chan struct{}),
+			rollbackDone:     resume,
+		}
+
+		err := m.deliverChainEvent(wallet, chainEvent{notification: req})
+		if err != nil {
+			return err
+		}
+
+		err = m.awaitRollbackAck(req.readyForRollback)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// awaitRollbackAck lets a worker finish registration before acknowledging its
+// pause, without admitting Create into the fixed rollback membership.
+// This wait belongs to Manager's lifetime, not a Wallet caller's context.
+func (m *Manager) awaitRollbackAck(ready <-chan struct{}) error {
+	for {
+		select {
+		case <-ready:
+			return nil
+
+		case req := <-m.walletRequests:
+			// Sending the pause only queued it. An earlier scan can still
+			// be registering watches; accepting that send lets this same
+			// worker reach the pause and acknowledge it instead of deadlocking.
+			m.chainSyncer.registerWatchSet(req)
+
+		case <-m.lifetimeCtx.Done():
+			return m.lifetimeCtx.Err()
+		}
+	}
+}
+
 // handleRollbackEvent settles published writers around one backend rollback.
 // Success releases workers and lets the source reader dispatch its next event.
 // A rollback error stops every Wallet before any worker can write again.
-func (m *Manager) handleRollbackEvent(ctx context.Context,
-	event chain.BlockDisconnected) error {
-
+func (m *Manager) handleRollbackEvent(event chain.BlockDisconnected) error {
 	// Preserve hash and time as well as height for storage that needs to
 	// distinguish a stale disconnect from a replacement at the same height.
 	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
@@ -595,7 +643,7 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 	// workers first, so a failed rewind cannot resume old writes.
 	rollbackDone := make(chan struct{})
 
-	err = m.prepareWalletsForRollback(ctx, rollbackDone)
+	err = m.prepareWalletsForRollback(rollbackDone)
 	if err != nil {
 		// Only Stop's lifetime cancellation interrupts preparation. Leave
 		// completion held and cleanup to that waiting caller so it receives
@@ -603,9 +651,11 @@ func (m *Manager) handleRollbackEvent(ctx context.Context,
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 
-	// Accepted persistence settles even if its caller or Stop cancels.
-	// The owner keeps Store open until this one rollback completes.
-	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
+	// Stop can release the pause waits above, but an accepted Store rewind
+	// must settle. Keep Store open and join this write before closing it.
+	err = m.backend.rollbackToBlock(
+		context.WithoutCancel(m.lifetimeCtx), *block,
+	)
 	if err != nil {
 		err = fmt.Errorf("rollback chain: %w", err)
 		// Leave paused workers to the owner, which drains them on failure
