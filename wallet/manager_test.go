@@ -3786,3 +3786,123 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	require.Nil(t, orphan.Block)
 	require.Len(t, orphan.OwnedOutputs, 1)
 }
+
+// TestManagerWatchRegistrationDuringDelivery keeps child requests live under
+// bounded source delivery without consuming the pending Wallet input first.
+func TestManagerWatchRegistrationDuringDelivery(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Publish a Wallet with no processing worker so two source
+		// events fill its input and block the owner on the second delivery.
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+		deps.vault.On("Lock").Return().Once()
+
+		backend := &managerBackendMock{}
+		backend.On("listWallets", mock.Anything).
+			Return([]*walletData{}, nil).Once()
+		backend.On("close").Return(nil).Once()
+
+		notifications := make(chan any, 2)
+		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(notifications)).Once()
+		m := newManagerLifecycleTest(t, backend, source)
+		_, err := m.Start(t.Context())
+		require.NoError(t, err)
+
+		w.registry = m
+		m.wallets[w.cfg.Name] = w
+		addr, err := address.NewAddressWitnessPubKeyHash(
+			make([]byte, 20), &chainParams,
+		)
+		require.NoError(t, err)
+
+		addrs := []address.Address{addr}
+		source.On("WatchAddrsFromTip", t.Context(), addrs).Return(nil).Once()
+
+		for range 2 {
+			notifications <- chain.BlockConnected{}
+		}
+
+		synctest.Wait()
+		require.Len(t, w.chainEventChan, 1)
+
+		// Act: The child asks its Manager to register while neither event
+		// can leave the full input; missing control service would deadlock.
+		err = w.registry.watchAddresses(t.Context(), w.id, addrs)
+
+		// Assert: Registration finishes before input capacity is released.
+		// Drain the two events afterward so normal shutdown can join.
+		require.NoError(t, err)
+		require.Len(t, w.chainEventChan, 1)
+
+		for range 2 {
+			<-w.chainEventChan
+		}
+
+		require.NoError(t, m.Stop())
+	})
+}
+
+// TestManagerWatchRegistrationDuringRollback keeps a paused worker's watch
+// request live before it acknowledges the existing shared rollback barrier.
+func TestManagerWatchRegistrationDuringRollback(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Receive preparation through the actual Wallet input,
+		// but hold its acknowledgement while the owner waits for the worker.
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+		deps.vault.On("Lock").Return().Once()
+
+		backend := &managerBackendMock{}
+		backend.On("listWallets", mock.Anything).
+			Return([]*walletData{}, nil).Once()
+		backend.On("rollbackToBlock", mock.Anything, db.Block{Height: 8}).
+			Return(nil).Once()
+		backend.On("close").Return(nil).Once()
+
+		notifications := make(chan any, 1)
+		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(notifications)).Once()
+		m := newManagerLifecycleTest(t, backend, source)
+		_, err := m.Start(t.Context())
+		require.NoError(t, err)
+
+		w.registry = m
+		m.wallets[w.cfg.Name] = w
+		addr, err := address.NewAddressWitnessPubKeyHash(
+			make([]byte, 20), &chainParams,
+		)
+		require.NoError(t, err)
+
+		addrs := []address.Address{addr}
+		source.On("WatchAddrsFromTip", t.Context(), addrs).Return(nil).Once()
+
+		notifications <- chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 8},
+		}
+
+		event := <-w.chainEventChan
+		req, ok := event.notification.(prepareRollbackReq)
+		require.True(t, ok)
+		synctest.Wait()
+
+		// Act: Register before acknowledging the pause. Blocking this child
+		// request would prevent the same worker from ever releasing Manager.
+		err = w.registry.watchAddresses(t.Context(), w.id, addrs)
+
+		// Assert: The request completes, then the original acknowledgement
+		// lets the backend rewind and release the existing resume signal.
+		require.NoError(t, err)
+		close(req.readyForRollback)
+		<-req.rollbackDone
+		require.NoError(t, m.Stop())
+	})
+}
