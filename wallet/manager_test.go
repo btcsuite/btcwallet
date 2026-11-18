@@ -199,13 +199,13 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 
 		// Act: One source caller accepts the prior event before rollback;
 		// each simulated worker acknowledges only after that event is read.
-		require.NoError(t, m.dispatchChainEvent(t.Context(), event))
+		require.NoError(t, m.dispatchChainEvent(event))
 		require.Equal(t, event, (<-firstEvents).notification)
 		require.Equal(t, event, (<-secondEvents).notification)
 
 		rolled := make(chan error, 1)
 		go func() {
-			rolled <- m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+			rolled <- m.dispatchChainEvent(chain.BlockDisconnected{
 				Block: wtxmgr.Block{Height: 8, Hash: expected.Hash},
 				Time:  expected.Timestamp,
 			})
@@ -230,7 +230,7 @@ func TestManagerChainRollbackOrder(t *testing.T) {
 		// expectation, and later full fanout still succeeds.
 		require.NoError(t, <-rolled)
 		require.True(t, m.started.Load())
-		require.NoError(t, m.dispatchChainEvent(t.Context(), event))
+		require.NoError(t, m.dispatchChainEvent(event))
 		require.Equal(t, event, (<-firstEvents).notification)
 		require.Equal(t, event, (<-secondEvents).notification)
 	})
@@ -346,7 +346,7 @@ func TestManagerChainRollbackWithoutWallet(t *testing.T) {
 	m := testKVDBManager(t)
 
 	// Act: Dispatch a valid disconnect through the normal Manager entry point.
-	err := m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+	err := m.dispatchChainEvent(chain.BlockDisconnected{
 		Block: wtxmgr.Block{Height: 1},
 	})
 
@@ -410,14 +410,13 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		// Act: Queue a filtered event before the disconnect, then let the
 		// same worker enter retry. No second initialization is permitted by
 		// the strict mocks; it must drain this mailbox in its existing wait.
-		require.NoError(t, m.dispatchChainEvent(t.Context(),
-			chain.FilteredBlockConnected{
-				Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 3}},
-			}))
+		require.NoError(t, m.dispatchChainEvent(chain.FilteredBlockConnected{
+			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 3}},
+		}))
 		w.wg.Go(w.runSyncLoop)
 		synctest.Wait()
 
-		err := m.dispatchChainEvent(t.Context(), chain.BlockDisconnected{
+		err := m.dispatchChainEvent(chain.BlockDisconnected{
 			Block: wtxmgr.Block{Height: int32(tip.Height), Hash: tip.Hash},
 		})
 
@@ -3528,23 +3527,20 @@ func TestManagerChainEventMembership(t *testing.T) {
 	}
 
 	manager := &Manager{
+		lifetimeCtx: t.Context(),
 		wallets:     map[string]*Wallet{"first": first},
 		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
 	}
 
 	// Act: Publish between two synchronous owner-turn dispatches.
 	require.NoError(
-		t, manager.dispatchChainEvent(
-			t.Context(), chain.BlockConnected{},
-		),
+		t, manager.dispatchChainEvent(chain.BlockConnected{}),
 	)
 	manager.wallets["second"] = second
 
 	<-first.chainEventChan
 	require.NoError(
-		t, manager.dispatchChainEvent(
-			t.Context(), chain.ClientConnected{},
-		),
+		t, manager.dispatchChainEvent(chain.ClientConnected{}),
 	)
 
 	// Assert: Both current members receive the next control event unchanged.
@@ -3724,9 +3720,7 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	require.Equal(t, stamp, mgr.SyncedTo())
 
 	// Act on the disconnect while the manager is still below the orphan.
-	require.NoError(t, m.dispatchChainEvent(
-		t.Context(), chain.BlockDisconnected(old),
-	))
+	require.NoError(t, m.dispatchChainEvent(chain.BlockDisconnected(old)))
 
 	// Assert the orphan and its credit are already unmined before any
 	// replacement or later rescan; its earlier full sync stamp is unchanged.
@@ -3748,9 +3742,7 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 		},
 		matches: liveMatches(newTx),
 	}))
-	require.NoError(t, m.dispatchChainEvent(
-		t.Context(), chain.BlockDisconnected(old),
-	))
+	require.NoError(t, m.dispatchChainEvent(chain.BlockDisconnected(old)))
 
 	// Assert one complete history query resolves the replacement, while the
 	// old transaction remains in the unmined pool with its credit intact.
