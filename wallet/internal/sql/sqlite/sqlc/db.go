@@ -210,6 +210,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertTransactionStmt, err = db.PrepareContext(ctx, InsertTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTransaction: %w", err)
 	}
+	if q.insertTxInputStmt, err = db.PrepareContext(ctx, InsertTxInput); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertTxInput: %w", err)
+	}
 	if q.insertTxReplacementEdgeStmt, err = db.PrepareContext(ctx, InsertTxReplacementEdge); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTxReplacementEdge: %w", err)
 	}
@@ -645,6 +648,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertTransactionStmt: %w", cerr)
 		}
 	}
+	if q.insertTxInputStmt != nil {
+		if cerr := q.insertTxInputStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertTxInputStmt: %w", cerr)
+		}
+	}
 	if q.insertTxReplacementEdgeStmt != nil {
 		if cerr := q.insertTxReplacementEdgeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertTxReplacementEdgeStmt: %w", cerr)
@@ -946,6 +954,7 @@ type Queries struct {
 	insertDatabaseIdentityStmt                    *sql.Stmt
 	insertKeyScopeSecretsStmt                     *sql.Stmt
 	insertTransactionStmt                         *sql.Stmt
+	insertTxInputStmt                             *sql.Stmt
 	insertTxReplacementEdgeStmt                   *sql.Stmt
 	insertTxReplacementEdgeByHashStmt             *sql.Stmt
 	insertUtxoStmt                                *sql.Stmt
@@ -1054,6 +1063,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertDatabaseIdentityStmt:                    q.insertDatabaseIdentityStmt,
 		insertKeyScopeSecretsStmt:                     q.insertKeyScopeSecretsStmt,
 		insertTransactionStmt:                         q.insertTransactionStmt,
+		insertTxInputStmt:                             q.insertTxInputStmt,
 		insertTxReplacementEdgeStmt:                   q.insertTxReplacementEdgeStmt,
 		insertTxReplacementEdgeByHashStmt:             q.insertTxReplacementEdgeByHashStmt,
 		insertUtxoStmt:                                q.insertUtxoStmt,
