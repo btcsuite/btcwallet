@@ -14,11 +14,38 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// chainRegistry lets Wallets request subscriptions from Manager without
+// exposing its internal routing state or lifecycle authority.
+// Wallet and its processor hold references to the same Manager through it;
+// the actual watch ownership data stays in Manager's private chainSyncer.
+type chainRegistry interface {
+	// watchAddresses hands live address interests to Manager and performs
+	// tip-based native registration.
+	watchAddresses(ctx context.Context, id uint32,
+		addrs []address.Address) error
+
+	// watchOutpoints hands input-only interests to Manager for native
+	// spent-output notifications.
+	watchOutpoints(ctx context.Context, id uint32,
+		points []*wire.OutPoint) error
+
+	// notifyReceived preserves accepted publication's native subscription.
+	notifyReceived(ctx context.Context, id uint32,
+		addrs []address.Address) error
+
+	// notifyBlocks enables the backend's existing block/control notifications.
+	notifyBlocks(ctx context.Context) error
+}
+
 // chainRouter supplies live subscriptions and prepared events. Manager owns
 // native delivery and each Wallet owns transaction persistence.
 type chainRouter interface {
 	// routeChainEvent prepares matches for the current membership snapshot.
 	routeChainEvent(n any, wallets []*Wallet) map[uint32]chainEvent
+
+	// registerWatchSet records ownership on Manager's loop before the
+	// owner can route another notification.
+	registerWatchSet(req watchRegistrationReq)
 
 	// watchAddresses records recipients before native tip-based activation.
 	watchAddresses(ctx context.Context, id uint32,
@@ -34,6 +61,16 @@ type chainRouter interface {
 
 	// notifyBlocks enables the backend's existing block/control notifications.
 	notifyBlocks(ctx context.Context) error
+}
+
+// watchRegistrationReq owns address keys and outpoint values sent through
+// Manager's unbuffered inbox, without retaining caller-owned script memory.
+// Receipt commits an update that the owner applies before returning to any
+// select that can route notifications, so native activation needs no reply.
+type watchRegistrationReq struct {
+	addresses []string
+	outpoints []wire.OutPoint
+	walletID  uint32
 }
 
 // chainSyncer owns live subscriptions and matching for a Manager's Wallets.
@@ -81,6 +118,24 @@ func newChainSyncer(source chain.Interface,
 	}
 }
 
+// registerWatchSet installs copied keys and values in one Manager owner turn.
+// Routing cannot interleave with this update, even if native I/O has started.
+func (s *chainSyncer) registerWatchSet(req watchRegistrationReq) {
+	registry := s.watches
+
+	for _, key := range req.addresses {
+		if registry.addresses[key] == nil {
+			registry.addresses[key] = make(map[uint32]struct{})
+		}
+
+		registry.addresses[key][req.walletID] = struct{}{}
+	}
+
+	for _, point := range req.outpoints {
+		registry.recordOutpoint(req.walletID, point)
+	}
+}
+
 // recordAddresses associates recipients before backend activation can emit
 // events. The registry lock never spans backend I/O or Wallet processing.
 func (r *watchRegistry) recordAddresses(id uint32, addrs []address.Address) {
@@ -108,7 +163,44 @@ func (r *watchRegistry) recordOutpoints(id uint32, points []*wire.OutPoint) {
 	}
 }
 
-// watchAddresses records ownership before delegating tip-based registration.
+// registerWatches hands a declaration to Manager's loop from a Wallet caller.
+// ctx belongs to that caller, not the owner; receipt commits the update before
+// the owner can route subsequent notifications.
+func (m *Manager) registerWatches(ctx context.Context, id uint32,
+	watches watchSet) {
+
+	req := watchRegistrationReq{
+		walletID:  id,
+		addresses: make([]string, len(watches.addresses)),
+		outpoints: make([]wire.OutPoint, len(watches.outpoints)),
+	}
+
+	// An address can reference a PSBT script returned to its caller, who may
+	// then mutate those bytes. Copy index inputs before handoff so the owner
+	// reads only request-owned data while finishing this declaration.
+	for i, addr := range watches.addresses {
+		req.addresses[i] = addr.EncodeAddress()
+	}
+
+	for i, point := range watches.outpoints {
+		req.outpoints[i] = *point
+	}
+
+	select {
+	case m.walletRequests <- req:
+		// Unbuffered receipt selects the owner case, which applies watches
+		// inline before selecting any native event. No reply is needed.
+
+	case <-ctx.Done():
+		// Release an unaccepted send when its Wallet/caller stops waiting.
+
+	case <-m.lifetimeCtx.Done():
+		// Publication strips caller cancellation. Once the owner stops
+		// receiving, release its send so Wallet can finish joined native I/O.
+	}
+}
+
+// watchAddresses retains tip-based native registration and its causal errors.
 // A retry always reaches the backend, even if the association already exists.
 func (s *chainSyncer) watchAddresses(ctx context.Context, id uint32,
 	addrs []address.Address) error {
@@ -123,7 +215,7 @@ func (s *chainSyncer) watchAddresses(ctx context.Context, id uint32,
 	return nil
 }
 
-// watchOutpoints preserves input-only routing before NotifySpent can emit.
+// watchOutpoints subscribes to input-only spends using native NotifySpent.
 // Native subscription errors remain on the existing processor retry path.
 func (s *chainSyncer) watchOutpoints(ctx context.Context, id uint32,
 	points []*wire.OutPoint) error {
@@ -145,8 +237,8 @@ func (s *chainSyncer) watchOutpoints(ctx context.Context, id uint32,
 	return nil
 }
 
-// notifyReceived retains publication's native subscription semantics while
-// installing recipients before the backend can deliver its first event.
+// notifyReceived preserves accepted publication's native completion semantics.
+// Caller cancellation cannot interrupt that API; Wallet shutdown joins it.
 func (s *chainSyncer) notifyReceived(_ context.Context, id uint32,
 	addrs []address.Address) error {
 
