@@ -347,6 +347,9 @@ type Querier interface {
 	// - Single-row insert. The cost is dominated by the wallet/hash uniqueness
 	//   checks and any optional block foreign-key validation.
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
+	// Retain immutable prevout facts independently of wallet credit discovery.
+	// Replaying the same input position preserves the existing indexed fact.
+	InsertTxInput(ctx context.Context, arg InsertTxInputParams) error
 	// Records a replacement edge between two wallet-scoped transactions.
 	//
 	// How:
