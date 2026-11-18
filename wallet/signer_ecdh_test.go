@@ -110,7 +110,7 @@ func TestECDHSQLContained(t *testing.T) {
 	peer, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{5}, 32))
 	defer peer.Zero()
 
-	want, _ := expectedECDHSecret(t, peer, f.public)
+	want := expectedECDHSecret(t, peer, f.public)
 
 	// Act: Use only the public safe signer contract.
 	var signer Signer = f.wallet
@@ -270,7 +270,7 @@ func TestECDHSQLCancellationJoinsStop(t *testing.T) {
 		peer, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{5}, 32))
 		defer peer.Zero()
 
-		want, _ := expectedECDHSecret(t, peer, f.public)
+		want := expectedECDHSecret(t, peer, f.public)
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()

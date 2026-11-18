@@ -5,9 +5,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,18 +44,146 @@ func TestLegacyWalletVaultDecryptScriptNotImplemented(t *testing.T) {
 	require.ErrorIs(t, err, keyvault.ErrNotImplemented)
 }
 
-// TestLegacyWalletVaultECDHNotImplemented verifies that the legacy vault
-// refuses the typed ECDH operation, so the Wallet keeps its kvdb Store-and-
-// Decrypt key path.
-func TestLegacyWalletVaultECDHNotImplemented(t *testing.T) {
+// TestLegacyWalletVaultECDH verifies that the legacy vault computes the same
+// secret the peer derives from the wallet's public key, so kvdb ECDH no longer
+// needs a Wallet-side private key.
+func TestLegacyWalletVaultECDH(t *testing.T) {
 	t.Parallel()
 
-	vault := &LegacyWalletVault{}
-	digest, err := vault.ECDH(
-		t.Context(), waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, nil,
+	// Arrange: An unlocked legacy vault, the public key at m/84'/1'/0'/0/1
+	// read from the account xpub, and a peer key.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	vault := NewLegacyWalletVault(dbConn, mgr)
+	require.NoError(t, vault.Unlock(t.Context(), testPrivPass))
+	t.Cleanup(vault.Lock)
+
+	path := waddrmgr.DerivationPath{Branch: 0, Index: 1}
+	walletPub := legacyAccountChildPubKey(
+		t, dbConn, mgr, waddrmgr.KeyScopeBIP0084, path,
 	)
-	require.Equal(t, [32]byte{}, digest)
-	require.ErrorIs(t, err, keyvault.ErrNotImplemented)
+
+	peer, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	// Act: Compute the shared secret with the wallet key.
+	got, err := vault.ECDH(
+		t.Context(), waddrmgr.KeyScopeBIP0084, path, peer.PubKey(),
+	)
+
+	// Assert: The peer computes the same secret from the public key.
+	require.NoError(t, err)
+	require.Equal(t, keyvault.ECDHSecret(peer, walletPub), got)
+}
+
+// TestLegacyWalletVaultECDHErrors verifies the error identities the Wallet
+// maps to its public ECDH errors, in the order the SQL vault reports them.
+func TestLegacyWalletVaultECDHErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		account   uint32
+		unlock    bool
+		nilRemote bool
+		wantErr   error
+	}{
+		{
+			name:      "invalid remote",
+			unlock:    true,
+			nilRemote: true,
+			wantErr:   keyvault.ErrInvalidRemoteKey,
+		},
+		{
+			name:    "missing account while locked",
+			account: 99,
+			wantErr: db.ErrAccountNotFound,
+		},
+		{
+			name:    "locked",
+			wantErr: keyvault.ErrVaultLocked,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: A legacy vault in the row's lock state.
+			dbConn, cleanup := newTestDB(t)
+			t.Cleanup(cleanup)
+
+			mgr := newSpendableAddrMgr(t, dbConn)
+			vault := NewLegacyWalletVault(dbConn, mgr)
+
+			if test.unlock {
+				require.NoError(
+					t, vault.Unlock(t.Context(), testPrivPass),
+				)
+				t.Cleanup(vault.Lock)
+			}
+
+			peer, err := btcec.NewPrivateKey()
+			require.NoError(t, err)
+
+			remote := peer.PubKey()
+			if test.nilRemote {
+				remote = nil
+			}
+
+			// Act: Request the secret for the row's account.
+			got, err := vault.ECDH(
+				t.Context(), waddrmgr.KeyScopeBIP0084,
+				waddrmgr.DerivationPath{
+					InternalAccount: test.account,
+				}, remote,
+			)
+
+			// Assert: The row's error identity and no secret.
+			require.ErrorIs(t, err, test.wantErr)
+			require.Equal(t, [32]byte{}, got)
+		})
+	}
+}
+
+// legacyAccountChildPubKey derives the public key at path from the stored
+// account xpub, independently of the vault's private derivation.
+func legacyAccountChildPubKey(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) *btcec.PublicKey {
+
+	t.Helper()
+
+	scoped, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var props *waddrmgr.AccountProperties
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var viewErr error
+
+		props, viewErr = scoped.AccountProperties(
+			ns, path.InternalAccount,
+		)
+
+		return viewErr
+	})
+	require.NoError(t, err)
+
+	branch, err := keyvault.DeriveChild(props.AccountPubKey, path.Branch)
+	require.NoError(t, err)
+
+	leaf, err := keyvault.DeriveChild(branch, path.Index)
+	require.NoError(t, err)
+
+	pubKey, err := leaf.ECPubKey()
+	require.NoError(t, err)
+
+	return pubKey
 }
 
 // TestLegacyWalletVaultTranslatesManagerSentinels verifies that the adapter
