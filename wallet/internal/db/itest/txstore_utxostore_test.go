@@ -38,6 +38,8 @@ import (
 func TestCreateTxStoresWalletCredit(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Resolve one owned output and two distinct external prevouts.
+	// A nonzero prevout index must be retained without parent credit rows.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-create-tx-credit")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -46,11 +48,15 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 
+	first, second := randomOutPoint(), randomOutPoint()
+	second.Index = 3
 	tx := newRegularTx(
-		[]wire.OutPoint{randomOutPoint()},
+		[]wire.OutPoint{first, second},
 		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
 	)
 
+	// Act: Record the transaction through the public Store write boundary.
+	// Its input facts and requested credit must commit with the same row.
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       tx,
@@ -58,6 +64,9 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 		Status:   db.TxStatusPending,
 		Credits:  map[uint32]address.Address{0: nil},
 	})
+
+	// Assert: The history and credit exist, and each stored input position
+	// points to its original external outpoint without reversal or shifting.
 	require.NoError(t, err)
 
 	_, ok := txIDByHash(t, store, walletID, tx.TxHash())
@@ -65,6 +74,10 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
 		Hash: tx.TxHash(), Index: 0,
 	}))
+	require.Equal(t, map[int64]wire.OutPoint{
+		0: first,
+		1: second,
+	}, txInputOutPoints(t, store, walletID, tx.TxHash()))
 }
 
 // TestCreateTxCreditBareMultisigMember verifies that CreateTx records a
@@ -341,6 +354,8 @@ func TestCreateTxCreditAddrMismatch(t *testing.T) {
 func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Build an actual coinbase credit anchored to a stored block.
+	// Its wire null prevout identifies coinbase rather than an ordinary spend.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-create-confirmed-coinbase")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
@@ -351,6 +366,8 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	block := CreateBlockFixture(t, store.Queries(), 210)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 
+	// Act: Record the confirmed coinbase through the same public Store API.
+	// Credit creation must succeed while input indexing skips the null prevout.
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       coinbaseTx,
@@ -359,6 +376,9 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 		Status:   db.TxStatusPublished,
 		Credits:  map[uint32]address.Address{0: nil},
 	})
+
+	// Assert: Coinbase history and its credit are retained without inventing
+	// an input claim for the null outpoint.
 	require.NoError(t, err)
 
 	_, ok := txIDByHash(t, store, walletID, coinbaseTx.TxHash())
@@ -366,6 +386,7 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
 		Hash: coinbaseTx.TxHash(), Index: 0,
 	}))
+	require.Empty(t, txInputOutPoints(t, store, walletID, coinbaseTx.TxHash()))
 }
 
 // TestCreateTxRejectsInvalidParentWalletOutput verifies that CreateTx rejects a
