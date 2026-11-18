@@ -399,3 +399,48 @@ func rejectBranchRowDelete(t *testing.T, store *sqlite.Store,
 	)
 	require.NoError(t, err)
 }
+
+// txInputOutPoints reads the documented input facts through the existing DB
+// fixture, preserving stored positions so mapping errors cannot hide in order.
+func txInputOutPoints(t *testing.T, store *sqlite.Store, walletID uint32,
+	txHash chainhash.Hash) map[int64]wire.OutPoint {
+
+	t.Helper()
+
+	txID, ok := txIDByHash(t, store, walletID, txHash)
+	require.True(t, ok)
+
+	rows, err := store.DB().QueryContext(t.Context(), `
+		SELECT input_index, prev_tx_hash, prev_output_index FROM tx_inputs
+		WHERE wallet_id = ? AND tx_id = ? ORDER BY input_index
+	`, walletID, txID)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, rows.Close()) }()
+
+	inputs := make(map[int64]wire.OutPoint)
+	for rows.Next() {
+		var (
+			index       int64
+			prevHash    []byte
+			outputIndex int64
+		)
+
+		require.NoError(t, rows.Scan(&index, &prevHash, &outputIndex))
+
+		hash, err := chainhash.NewHash(prevHash)
+		require.NoError(t, err)
+
+		output, err := db.Int64ToUint32(outputIndex)
+		require.NoError(t, err)
+
+		inputs[index] = wire.OutPoint{
+			Hash:  *hash,
+			Index: output,
+		}
+	}
+
+	require.NoError(t, rows.Err())
+
+	return inputs
+}
