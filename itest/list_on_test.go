@@ -694,6 +694,10 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerSignRejectMismatchedSignature,
 	},
 	{
+		Name:     "psbtmanager complete workflow",
+		TestFunc: testPsbtManagerCompleteWorkflow,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
