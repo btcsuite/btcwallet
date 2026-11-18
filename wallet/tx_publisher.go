@@ -823,7 +823,7 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// We'll also ask to be notified of the tx once it confirms on-chain.
 	// This is done outside of the database tx to prevent backend
 	// interaction within it.
-	err := w.chainSyncer.notifyReceived(w.lifetimeCtx, w.id, ourAddrs)
+	err := w.registry.notifyReceived(w.lifetimeCtx, w.id, ourAddrs)
 	if err != nil {
 		return err
 	}

@@ -66,7 +66,9 @@ func newTestSyncer(tb testing.TB, cfg Config, addrStore waddrmgr.AddrStore,
 
 	return newSyncer(
 		cfg, addrStore, txStore, manager, store, walletID,
-		newChainSyncer(cfg.Chain, params), make(chan chainEvent, 1),
+		newTestRegistrationManager(
+			tb, store, cfg.Chain, params,
+		), make(chan chainEvent, 1),
 	)
 }
 
@@ -1698,7 +1700,7 @@ func TestAdvanceChainSync(t *testing.T) {
 // liveMatches builds Manager-prepared event data for processor tests using
 // the real output parser without subscribing a chain source.
 func liveMatches(recs ...*wtxmgr.TxRecord) TxEntries {
-	return newChainSyncer(nil, &chainParams).prepareTxMatches(recs)
+	return newChainSyncer(&chainParams).prepareTxMatches(recs)
 }
 
 // TestHandleChainUpdate verifies notification handling.
@@ -4625,7 +4627,7 @@ func TestExtractAddrEntries(t *testing.T) {
 
 	txOut := &wire.TxOut{Value: 1000, PkScript: pkScript}
 
-	s := newChainSyncer(nil, &chainParams)
+	s := newChainSyncer(&chainParams)
 
 	// Act: Extract address entries from the output.
 	entries := s.extractAddrEntries([]*wire.TxOut{txOut})
@@ -4835,7 +4837,9 @@ func TestWaitForEventTargetedScanResults(t *testing.T) {
 
 			mockChain := &bwmock.Chain{}
 			s.cfg.Chain = mockChain
-			s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
+			s.registry = newTestRegistrationManager(
+				t, s.store, mockChain, s.cfg.ChainParams,
+			)
 
 			mockChain.On("GetBestBlock").Run(func(mock.Arguments) {
 				require.Equal(
@@ -6079,12 +6083,16 @@ func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
 			defer mockChain.AssertExpectations(t)
 
 			s.cfg.Chain = mockChain
-			s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
+			s.registry = newTestRegistrationManager(
+				t, s.store, mockChain, s.cfg.ChainParams,
+			)
 			s.cfg.SyncMethod = SyncMethodAuto
 			s.cfg.MaxCFilterItems = 100
 			s.cfg.RecoveryWindow = testScanRecoveryWindow
 			other.cfg.Chain = mockChain
-			other.chainSyncer = newChainSyncer(mockChain, other.cfg.ChainParams)
+			other.registry = newTestRegistrationManager(
+				t, other.store, mockChain, other.cfg.ChainParams,
+			)
 
 			syncedToBefore, err := s.syncedTo(t.Context())
 			require.NoError(t, err)
@@ -6205,7 +6213,9 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	defer mockChain.AssertExpectations(t)
 
 	s.cfg.Chain = mockChain
-	s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
+	s.registry = newTestRegistrationManager(
+		t, s.store, mockChain, s.cfg.ChainParams,
+	)
 	s.cfg.SyncMethod = SyncMethodAuto
 	s.cfg.MaxCFilterItems = 100
 	s.cfg.RecoveryWindow = testScanRecoveryWindow
@@ -6421,7 +6431,9 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
-		s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
+		s.registry = newTestRegistrationManager(
+			t, s.store, mockChain, s.cfg.ChainParams,
+		)
 		s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 		req := &scanReq{
@@ -6454,7 +6466,9 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
-		s.chainSyncer = newChainSyncer(mockChain, s.cfg.ChainParams)
+		s.registry = newTestRegistrationManager(
+			t, s.store, mockChain, s.cfg.ChainParams,
+		)
 		s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 		req := &scanReq{
@@ -7572,7 +7586,7 @@ func TestExtractAddrEntries_NonStd(t *testing.T) {
 		},
 	}
 
-	s := newChainSyncer(nil, &chainParams)
+	s := newChainSyncer(&chainParams)
 
 	// Act: Extract address entries.
 	entries := s.extractAddrEntries(txOuts)
@@ -8548,7 +8562,7 @@ func TestTxSubscriptionPostCommitRead(t *testing.T) {
 			w, deps := createStartedWalletWithMocks(t)
 			s := newSyncer(
 				w.cfg, w.addrStore, w.txStore, w,
-				deps.store, w.id, w.chainSyncer, w.chainEventChan,
+				deps.store, w.id, w.registry, w.chainEventChan,
 			)
 			events, _, err := w.SubscribeTxns(t.Context())
 			require.NoError(t, err)
@@ -8607,7 +8621,7 @@ func TestTxSubscriptionCommitFailure(t *testing.T) {
 	w, deps := createStartedWalletWithMocks(t)
 	s := newSyncer(
 		w.cfg, w.addrStore, w.txStore, w,
-		deps.store, w.id, w.chainSyncer, w.chainEventChan,
+		deps.store, w.id, w.registry, w.chainEventChan,
 	)
 	events, _, err := w.SubscribeTxns(t.Context())
 	require.NoError(t, err)
