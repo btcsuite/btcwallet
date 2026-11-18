@@ -1407,50 +1407,21 @@ func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
 }
 
 // deriveStoredAccountChildKey decrypts an account's encrypted private key with
-// the wallet's unsafeVault and walks the branch and index derivation to produce
-// the leaf private key. The decrypted byte slice and intermediate HD keys are
-// zeroed before the call returns. Note that hdkeychain/base58 parsing allocates
-// a transient immutable string copy of the decrypted bytes that cannot be
-// wiped and is left to the garbage collector.
+// the wallet's unsafeVault and derives the leaf private key at path. The
+// decrypted account key is zeroed before the call returns; the caller must
+// zero the returned key.
 func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
-	encryptedAccountPriv []byte,
+	encAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
-	plaintext, err := vault.Decrypt(
-		waddrmgr.CKTPrivate, encryptedAccountPriv,
-	)
+	accountPriv, err := vault.Decrypt(waddrmgr.CKTPrivate, encAccountPriv)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt account priv: %w", err)
 	}
+	defer zero.Bytes(accountPriv)
 
-	acctPriv, err := hdkeychain.NewKeyFromString(string(plaintext))
-	if err != nil {
-		zero.Bytes(plaintext)
-		return nil, fmt.Errorf("parse account priv: %w", err)
-	}
-
-	zero.Bytes(plaintext)
-
-	defer acctPriv.Zero()
-
-	branchKey, err := keyvault.DeriveChild(acctPriv, path.Branch)
-	if err != nil {
-		return nil, fmt.Errorf("derive branch: %w", err)
-	}
-	defer branchKey.Zero()
-
-	addrKey, err := keyvault.DeriveChild(branchKey, path.Index)
-	if err != nil {
-		return nil, fmt.Errorf("derive index: %w", err)
-	}
-	defer addrKey.Zero()
-
-	privKey, err := addrKey.ECPrivKey()
-	if err != nil {
-		return nil, fmt.Errorf("derive private key: %w", err)
-	}
-
-	return privKey, nil
+	//nolint:wrapcheck // Derivation errors carry their own context.
+	return keyvault.DeriveAccountChildKey(accountPriv, path)
 }
 
 // handleDerivePubKey delivers the result of an accepted component request.
