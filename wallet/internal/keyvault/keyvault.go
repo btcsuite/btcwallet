@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -29,6 +30,10 @@ var ErrScriptNotFound = errors.New("no encrypted script")
 // legacy kvdb vault returns it, for operations that its callers still run
 // through UnsafeVault during the kvdb migration.
 var ErrNotImplemented = errors.New("vault operation not implemented")
+
+// ErrNoPrivateKey reports that the selected account stores no encrypted private
+// key, as for watch-only accounts.
+var ErrNoPrivateKey = errors.New("account has no private key")
 
 // ErrVaultUnlocked reports that an unlock operation was attempted while the
 // vault was already unlocked.
@@ -61,6 +66,14 @@ type Vault interface {
 	// returns ErrVaultLocked if already locked, or ErrScriptNotFound when
 	// no script is stored.
 	DecryptScript(ctx context.Context, scriptPubKey []byte) ([]byte, error)
+
+	// ECDH returns SHA256(compressed(d*remote)), where d is the private key
+	// at path within scope and path.InternalAccount is the BIP44 account
+	// number. The private key and shared point never leave the vault. An
+	// account without a private key returns ErrNoPrivateKey.
+	ECDH(ctx context.Context, scope waddrmgr.KeyScope,
+		path waddrmgr.DerivationPath,
+		remote *btcec.PublicKey) ([32]byte, error)
 
 	// ChangePassphrase re-wraps the persisted wallet secrets according to
 	// params.
