@@ -16,8 +16,8 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
-// CreateTx atomically records a wallet-scoped transaction row, its
-// wallet-owned credits, and any spend edges created by its inputs.
+// CreateTx atomically records a wallet-scoped transaction row, its wallet-owned
+// credits, immutable input facts, and any current spend edges.
 //
 // The full write runs inside the shared write helper so the transaction row,
 // created UTXOs, spent-parent markers, and any required invalidation are
@@ -280,6 +280,27 @@ func (o *createTxOps) Insert(ctx context.Context,
 	}
 
 	return txID, nil
+}
+
+// InsertInputs indexes actual prevouts without requiring parent credit rows.
+// The input-position key makes recording and replay share one immutable fact.
+func (o *createTxOps) InsertInputs(ctx context.Context,
+	req db.CreateTxRequest, txID int64) error {
+
+	for index, input := range req.Params.Tx.TxIn {
+		err := o.qtx.InsertTxInput(ctx, sqlc.InsertTxInputParams{
+			WalletID:        int64(req.Params.WalletID),
+			TxID:            txID,
+			InputIndex:      int64(index),
+			PrevTxHash:      input.PreviousOutPoint.Hash[:],
+			PrevOutputIndex: int64(input.PreviousOutPoint.Index),
+		})
+		if err != nil {
+			return fmt.Errorf("index input %d: %w", index, err)
+		}
+	}
+
+	return nil
 }
 
 // InsertCredits stores any wallet-owned outputs created by the transaction.
