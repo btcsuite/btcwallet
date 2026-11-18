@@ -3,7 +3,6 @@ package wallet
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -843,28 +842,7 @@ func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 	}
 	defer privKey.Zero()
 
-	// Perform the scalar multiplication and hash all 33 bytes of the
-	// compressed result. The leading byte carries the Y parity, so this
-	// differs from hashing the X coordinate alone.
-	point := compressedSharedPoint(privKey, pub)
-	defer zero.Bytes(point)
-
-	return sha256.Sum256(point), nil
-}
-
-// compressedSharedPoint multiplies pub by privKey and returns the 33-byte
-// compressed encoding of the product. The caller must supply an on-curve
-// pub and a nonzero privKey, so the product is never the point at infinity,
-// and must zero the returned point once it has derived its result.
-func compressedSharedPoint(privKey *btcec.PrivateKey,
-	pub *btcec.PublicKey) []byte {
-
-	var remote, shared btcec.JacobianPoint
-	pub.AsJacobian(&remote)
-	btcec.ScalarMultNonConst(&privKey.Key, &remote, &shared)
-	shared.ToAffine()
-
-	return btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed()
+	return keyvault.ECDHSecret(privKey, pub), nil
 }
 
 // validateSignDigestIntent validates the parameters of a SignDigestIntent.
