@@ -187,6 +187,7 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 		},
 	}
 
+	m.walletRequests = make(chan watchRegistrationReq)
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
 	// This Store fixture has no native input; the owner serves Create.
 	m.started.Store(true)

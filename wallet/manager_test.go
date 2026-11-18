@@ -1352,6 +1352,7 @@ func newManagerLifecycleTest(t *testing.T,
 		},
 	}
 
+	manager.walletRequests = make(chan watchRegistrationReq)
 	manager.chainSyncer = newChainSyncer(source, &manager.config.ChainParams)
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.

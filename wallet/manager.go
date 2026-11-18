@@ -180,6 +180,12 @@ type Manager struct {
 	// requestChan transfers creation to the same owner as native delivery.
 	requestChan chan createWalletReq
 
+	// walletRequests is unbuffered: receipt selects an owner turn that applies
+	// the watches before another native event can be routed. It stays live
+	// during delivery/rollback waits; Create stays on requestChan so those
+	// waits retain a fixed recipient set.
+	walletRequests chan watchRegistrationReq
+
 	// wg joins the runtime before normal Stop disposes Wallets and storage.
 	wg sync.WaitGroup
 }
@@ -250,13 +256,14 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
 	m := &Manager{
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
-		chainEvents: cfg.ChainSource.Notifications(),
-		backend:     backend,
-		config:      cfg,
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
+		wallets:        make(map[string]*Wallet),
+		requestChan:    make(chan createWalletReq),
+		walletRequests: make(chan watchRegistrationReq),
+		chainEvents:    cfg.ChainSource.Notifications(),
+		backend:        backend,
+		config:         cfg,
+		lifetimeCtx:    lifetimeCtx,
+		cancel:         cancel,
 	}
 
 	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
@@ -488,10 +495,10 @@ func (m *Manager) mainLoop() {
 			return
 
 		case req := <-m.requestChan:
-			err := m.handleCreateWalletReq(req)
-			if err != nil {
-				return
-			}
+			chainErr = m.handleCreateWalletReq(req)
+
+		case req := <-m.walletRequests:
+			m.chainSyncer.registerWatchSet(req)
 
 		case event, ok := <-m.chainEvents:
 			if !ok {
@@ -503,10 +510,11 @@ func (m *Manager) mainLoop() {
 			}
 
 			chainErr = m.dispatchChainEvent(m.lifetimeCtx, event)
-			if chainErr != nil {
-				// Failed rewind can leave workers paused; exit to cleanup.
-				return
-			}
+		}
+
+		if chainErr != nil {
+			// Failed work can leave writers paused; exit to joined cleanup.
+			return
 		}
 	}
 }
