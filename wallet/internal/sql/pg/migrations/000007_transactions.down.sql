@@ -3,5 +3,7 @@
 -- unexpected state.
 DROP TRIGGER IF EXISTS trg_set_coinbase_orphaned_on_disconnect ON transactions;
 DROP FUNCTION IF EXISTS set_coinbase_orphaned_on_disconnect();
+-- Drop input facts before their parent transaction relation.
+DROP TABLE IF EXISTS tx_inputs;
 DROP TABLE IF EXISTS transactions;
 DROP SEQUENCE IF EXISTS transactions_confirmed_order_seq;
