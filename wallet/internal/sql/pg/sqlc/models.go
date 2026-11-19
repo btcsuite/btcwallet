@@ -65,6 +65,11 @@ type BtcwalletDatabaseIdentity struct {
 	SignetChallengeDigest []byte
 }
 
+type ConflictAffectedTransaction struct {
+	WalletID int64
+	ID       int64
+}
+
 type DerivedAddress struct {
 	AddressID     int64
 	WalletID      int64
@@ -124,13 +129,11 @@ type TxReplacement struct {
 }
 
 type Utxo struct {
-	ID              int64
-	TxID            int64
-	OutputIndex     int32
-	Amount          int64
-	AddressID       int64
-	SpentByTxID     sql.NullInt64
-	SpentInputIndex sql.NullInt32
+	ID          int64
+	TxID        int64
+	OutputIndex int32
+	Amount      int64
+	AddressID   int64
 }
 
 type UtxoLease struct {

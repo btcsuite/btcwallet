@@ -72,6 +72,16 @@ type Utxo struct {
 	// Spendable indicates whether the output is considered spendable.
 	Spendable bool
 
+	// HasConflictingTx reports a known unconfirmed double spend involving
+	// this output's transaction or an unconfirmed ancestor in wallet history.
+	//
+	// For example, if A and B spend the same output, their change and
+	// unconfirmed descendants are flagged until the conflict is resolved.
+	//
+	// Balances and automatic input selection skip flagged outputs. Explicit
+	// inputs may choose one compatible branch. Balances can understate funds.
+	HasConflictingTx bool
+
 	// Address is the address associated with the output.
 	Address address.Address
 
@@ -136,9 +146,9 @@ type UtxoQuery struct {
 // UtxoManager provides an interface for querying and managing the wallet's
 // UTXO set.
 type UtxoManager interface {
-	// ListUnspent returns a slice of all unspent transaction outputs that
-	// match the query. The returned UTXOs are sorted by amount in
-	// ascending order.
+	// ListUnspent returns matching unspent outputs sorted by amount in
+	// ascending order. Discovery may omit local Pending credits; use
+	// GetUtxo for explicit chaining before publication.
 	ListUnspent(ctx context.Context, query UtxoQuery) ([]*Utxo, error)
 
 	// GetUtxo returns the output information for a given outpoint.
@@ -227,7 +237,9 @@ type leasedOutputsResp struct {
 	err     error
 }
 
-// ListUnspent returns the wallet-owned UTXOs that match the provided query.
+// ListUnspent returns matching wallet-owned UTXOs for discovery. Local
+// Pending credits may be omitted; use GetUtxo for explicit chaining before
+// publication.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
 func (w *Wallet) ListUnspent(ctx context.Context,
@@ -369,15 +381,16 @@ func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 	}
 
 	return &Utxo{
-		OutPoint:      info.OutPoint,
-		Amount:        info.Amount,
-		PkScript:      info.PkScript,
-		Confirmations: confirmations,
-		Spendable:     spendable,
-		Address:       addr,
-		Account:       accountName,
-		AddressType:   walletAddrType,
-		Locked:        info.IsLocked,
+		OutPoint:         info.OutPoint,
+		Amount:           info.Amount,
+		PkScript:         info.PkScript,
+		Confirmations:    confirmations,
+		Spendable:        spendable,
+		Address:          addr,
+		Account:          accountName,
+		AddressType:      walletAddrType,
+		Locked:           info.IsLocked,
+		HasConflictingTx: info.HasConflictingTx,
 	}, nil
 }
 

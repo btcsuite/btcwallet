@@ -41,8 +41,19 @@ WHERE
     t.wallet_id = sqlc.arg('wallet_id')
     AND t.tx_hash = sqlc.arg('tx_hash')
     AND u.output_index = sqlc.arg('output_index')
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
     AND sqlc.arg('now_utc') IS NOT NULL
 ON CONFLICT (utxo_id) DO UPDATE
 SET
@@ -117,8 +128,19 @@ INNER JOIN transactions AS t ON u.tx_id = t.id
 WHERE
     l.wallet_id = ?1
     AND (l.expires_at IS NULL OR l.expires_at > sqlc.arg('now_utc'))
-    AND u.spent_by_tx_id IS NULL
-    AND t.tx_status IN (0, 1)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- All eligible claimants reserve the credit, even without prior ownership.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN eligible_transactions AS claimant
+            ON claim.wallet_id = claimant.wallet_id AND claim.tx_id = claimant.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index
+    )
 ORDER BY l.expires_at IS NULL, l.expires_at;
 
 -- name: DeleteExpiredUtxoLeases :execrows
@@ -142,14 +164,17 @@ WHERE wallet_id = ?1 AND expires_at <= sqlc.arg('now_utc');
 -- - Applies to timed leases and leases without expiry alike.
 -- Performance:
 -- - Resolves the spender through its unique hash and reaches its inputs
---   through the spent_by index.
+--   through the input-position and prevout indexes.
 DELETE FROM utxo_leases
 WHERE
     utxo_leases.wallet_id = sqlc.arg('wallet_id')
     AND utxo_leases.utxo_id IN (
         SELECT u.id
         FROM transactions AS t
-        INNER JOIN utxos AS u ON t.id = u.spent_by_tx_id
+        INNER JOIN tx_inputs AS claim ON t.wallet_id = claim.wallet_id AND t.id = claim.tx_id
+        INNER JOIN transactions AS parent
+            ON claim.wallet_id = parent.wallet_id AND claim.prev_tx_hash = parent.tx_hash
+        INNER JOIN utxos AS u ON parent.id = u.tx_id AND claim.prev_output_index = u.output_index
         WHERE
             t.wallet_id = sqlc.arg('wallet_id')
             AND t.tx_hash = sqlc.arg('tx_hash')

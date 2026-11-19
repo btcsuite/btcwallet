@@ -23,6 +23,13 @@ func (s *Store) LeaseOutput(ctx context.Context,
 	var lease *db.LeasedOutput
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Take the wallet lock so this lease decision waits for concurrent
+		// transaction recording, confirmation and lease cleanup.
+		err := lockTxGraph(ctx, qtx, int64(params.WalletID))
+		if err != nil {
+			return err
+		}
+
 		acquiredLease, err := db.LeaseOutputWithOps(
 			ctx, params, &leaseOutputOps{qtx: qtx},
 		)

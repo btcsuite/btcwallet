@@ -11,10 +11,8 @@ import (
 
 // ListUTXOs lists all current wallet-owned UTXOs matching the caller filters.
 //
-// The result set is already constrained to outputs whose creating
-// transactions are still in `pending` or `published` status. Enrichment
-// columns (account name, address type, has-script bit, lease status) are
-// populated by the same query.
+// Only outputs from published transactions are listed. Unpublished outputs
+// can be retrieved with GetUtxo for explicit transaction chaining.
 func (s *Store) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
@@ -122,6 +120,9 @@ func applyListRowEnrichment(utxo *db.UtxoInfo,
 	utxo.AddrType = addrType
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked != 0
+
+	// Conflict metadata describes branch compatibility, not custody or leasing.
+	utxo.HasConflictingTx = row.HasConflictingTx
 
 	if hasScope {
 		utxo.KeyScope = keyScope
