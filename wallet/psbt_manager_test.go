@@ -3525,8 +3525,8 @@ func TestCreateBip32SpendDetails(t *testing.T) {
 	}
 }
 
-// TestSignPsbtFailNilParams tests that SignPsbt returns ErrNilSignPsbtParams
-// when provided with nil parameters.
+// TestSignPsbtFailNilParams tests that SignPsbt returns ErrNilArguments and no
+// result when provided with nil parameters.
 func TestSignPsbtFailNilParams(t *testing.T) {
 	t.Parallel()
 
@@ -3534,10 +3534,11 @@ func TestSignPsbtFailNilParams(t *testing.T) {
 	w, _ := createUnlockedWalletWithMocks(t)
 
 	// Act: Call SignPsbt with nil params.
-	_, err := w.SignPsbt(t.Context(), nil)
+	result, err := w.SignPsbt(t.Context(), nil)
 
 	// Assert: Verify error.
 	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, result)
 }
 
 // TestSignPsbt tests the high-level SignPsbt method, ensuring it correctly
@@ -3653,7 +3654,8 @@ func TestSignPsbt(t *testing.T) {
 }
 
 // TestSignPsbtInputsNotReady tests that SignPsbt fails if inputs are not ready
-// (missing WitnessUtxo/NonWitnessUtxo).
+// (missing WitnessUtxo/NonWitnessUtxo), returning no result and leaving the
+// caller's packet unchanged.
 func TestSignPsbtInputsNotReady(t *testing.T) {
 	t.Parallel()
 
@@ -3666,13 +3668,25 @@ func TestSignPsbtInputsNotReady(t *testing.T) {
 	signParams := &SignPsbtParams{Packet: packet}
 	w, _ := createUnlockedWalletWithMocks(t)
 
-	_, err = w.SignPsbt(t.Context(), signParams)
+	// JSON keeps the transaction witnesses PSBT serialization drops.
+	before, err := json.Marshal(packet)
+	require.NoError(t, err)
 
+	// Act: Sign the packet.
+	result, err := w.SignPsbt(t.Context(), signParams)
+
+	// Assert: The refusal returns nothing and leaves the packet intact.
 	require.ErrorContains(t, err, "psbt inputs not ready")
+	require.Nil(t, result)
+
+	after, err := json.Marshal(packet)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 // TestSignPsbtInvalidDerivationPath tests that SignPsbt returns a fatal error
-// if the derivation path is invalid.
+// and no result if the derivation path is invalid, leaving the caller's packet
+// unchanged.
 func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 	t.Parallel()
 
@@ -3696,9 +3710,20 @@ func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 	signParams := &SignPsbtParams{Packet: packet}
 	w, _ := createUnlockedWalletWithMocks(t)
 
-	_, err = w.SignPsbt(t.Context(), signParams)
+	// JSON keeps the transaction witnesses PSBT serialization drops.
+	before, err := json.Marshal(packet)
+	require.NoError(t, err)
 
+	// Act: Sign the packet.
+	result, err := w.SignPsbt(t.Context(), signParams)
+
+	// Assert: The refusal returns nothing and leaves the packet intact.
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
+	require.Nil(t, result)
+
+	after, err := json.Marshal(packet)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 // TestSignPsbtClassifiesSignError tests that SignPsbt skips explicit ownership
