@@ -2868,3 +2868,62 @@ func (s *syncer) loadWalletScanData(ctx context.Context) ([]storeScanAccount,
 
 	return s.loadStoreScanData(ctx, nil)
 }
+
+// canonicalDisconnectFork skips pruned Wallet hashes and fetches headers only
+// after proving canonical membership; Neutrino may already delete old headers.
+func (s *syncer) canonicalDisconnectFork(ctx context.Context,
+	height int32, synced waddrmgr.BlockStamp) (waddrmgr.BlockStamp, error) {
+
+	for ; height >= 0; height-- {
+		// The loop bounds prove this Wallet height is non-negative.
+		h := uint32(height)
+
+		blocks, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				WalletID: s.walletID, StartHeight: h, EndHeight: h,
+			},
+		)
+		if err != nil {
+			if errors.Is(err, db.ErrBlockNotFound) {
+				continue
+			}
+
+			var managerErr waddrmgr.ManagerError
+			if errors.As(err, &managerErr) &&
+				managerErr.ErrorCode == waddrmgr.ErrBlockNotFound {
+
+				continue
+			}
+
+			return waddrmgr.BlockStamp{}, err
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(height))
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork hash: %w", err,
+			)
+		}
+
+		if *hash != blocks[0].Hash {
+			continue
+		}
+
+		if height == synced.Height {
+			return synced, nil
+		}
+
+		header, err := s.cfg.Chain.GetBlockHeader(hash)
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork header: %w", err,
+			)
+		}
+
+		return waddrmgr.BlockStamp{
+			Height: height, Hash: *hash, Timestamp: header.Timestamp,
+		}, nil
+	}
+
+	return waddrmgr.BlockStamp{Height: -1}, nil
+}
