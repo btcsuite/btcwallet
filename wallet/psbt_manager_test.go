@@ -2763,6 +2763,16 @@ func TestShouldSkipInput(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "final script sig should be skipped",
+			pInput: &psbt.PInput{
+				FinalScriptSig: []byte{},
+				Bip32Derivation: []*psbt.Bip32Derivation{{
+					PubKey: []byte{0x01},
+				}},
+			},
+			expected: true,
+		},
+		{
 			name: "no derivation info should be skipped",
 			pInput: &psbt.PInput{
 				FinalScriptWitness:     nil,
