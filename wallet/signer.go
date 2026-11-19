@@ -3,7 +3,6 @@ package wallet
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -744,10 +743,10 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 // encrypted account material through the same account-secret contract.
 //
 // This resolver is used by the path-driven signer entry points (SignDigest,
-// ECDH, DerivePrivKey and ComputeRawSig/PSBT), which have only a derivation
-// path. Address-driven paths reach the same resolver through
-// privKeyForAddressInfo once the store has resolved the address to its
-// derivation info, so both address the account by number.
+// DerivePrivKey and ComputeRawSig/PSBT), which have only a derivation path.
+// Address-driven paths reach the same resolver through privKeyForAddressInfo
+// once the store has resolved the address to its derivation info, so both
+// address the account by number.
 //
 // The returned private key is owned by the caller, who is responsible for
 // zeroing it once signing completes.
@@ -778,7 +777,7 @@ func (w *Wallet) derivePathPubKey(ctx context.Context, path BIP32Path) (
 // ECDH performs a scalar multiplication (ECDH-like operation) between a key
 // from the wallet and a remote public key. The output returned will be the
 // sha256 of the resulting shared point serialized in compressed format. The
-// wallet's private key and the shared point never leave the wallet.
+// SQL private-key use and shared-point hashing stay inside the vault.
 func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
@@ -837,34 +836,14 @@ func (w *Wallet) handleECDH(r ecdhReq) {
 func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
-	privKey, err := w.derivePathPrivKey(ctx, path)
+	digest, err := w.keyVault.ECDH(
+		ctx, path.KeyScope, path.DerivationPath, pub,
+	)
 	if err != nil {
-		return [32]byte{}, err
+		return [32]byte{}, mapAccountSecretErr(err)
 	}
-	defer privKey.Zero()
 
-	// Perform the scalar multiplication and hash all 33 bytes of the
-	// compressed result. The leading byte carries the Y parity, so this
-	// differs from hashing the X coordinate alone.
-	point := compressedSharedPoint(privKey, pub)
-	defer zero.Bytes(point)
-
-	return sha256.Sum256(point), nil
-}
-
-// compressedSharedPoint multiplies pub by privKey and returns the 33-byte
-// compressed encoding of the product. The caller must supply an on-curve
-// pub and a nonzero privKey, so the product is never the point at infinity,
-// and must zero the returned point once it has derived its result.
-func compressedSharedPoint(privKey *btcec.PrivateKey,
-	pub *btcec.PublicKey) []byte {
-
-	var remote, shared btcec.JacobianPoint
-	pub.AsJacobian(&remote)
-	btcec.ScalarMultNonConst(&privKey.Key, &remote, &shared)
-	shared.ToAffine()
-
-	return btcec.NewPublicKey(&shared.X, &shared.Y).SerializeCompressed()
+	return digest, nil
 }
 
 // validateSignDigestIntent validates the parameters of a SignDigestIntent.
@@ -1387,14 +1366,10 @@ func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
 	}
 
 	secret, err := w.cache.GetAccountSecret(ctx, query)
-	switch {
-	case errors.Is(err, db.ErrAccountSecretUnavailable),
-		errors.Is(err, db.ErrAccountNotFound):
-
-		return nil, ErrAccountNotInStore
-
-	case err != nil:
-		return nil, fmt.Errorf("fetch account secret: %w", err)
+	if err != nil {
+		return nil, mapAccountSecretErr(
+			fmt.Errorf("fetch account secret: %w", err),
+		)
 	}
 
 	if len(secret.EncryptedPrivateKey) == 0 {
@@ -1406,51 +1381,43 @@ func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
 	)
 }
 
+// mapAccountSecretErr maps account-secret lookup failures, whether reported by
+// the Store or by a vault operation that performed the lookup, onto the public
+// signer errors. Other errors are returned unchanged.
+func mapAccountSecretErr(err error) error {
+	switch {
+	case errors.Is(err, db.ErrAccountSecretUnavailable),
+		errors.Is(err, db.ErrAccountNotFound):
+
+		return ErrAccountNotInStore
+
+	case errors.Is(err, keyvault.ErrNoPrivateKey):
+		return ErrWatchOnlyAccount
+
+	default:
+		return err
+	}
+}
+
 // deriveStoredAccountChildKey decrypts an account's encrypted private key with
-// the wallet's unsafeVault and walks the branch and index derivation to produce
-// the leaf private key. The decrypted byte slice and intermediate HD keys are
-// zeroed before the call returns. Note that hdkeychain/base58 parsing allocates
-// a transient immutable string copy of the decrypted bytes that cannot be
-// wiped and is left to the garbage collector.
+// the wallet's unsafeVault and derives the leaf private key at path. The
+// decrypted account key is zeroed before the call returns; the caller must
+// zero the returned key.
+//
+// ECDH no longer uses this UnsafeVault path on either backend. It remains for
+// signing until that moves behind vault operations.
 func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
-	encryptedAccountPriv []byte,
+	encAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
-	plaintext, err := vault.Decrypt(
-		waddrmgr.CKTPrivate, encryptedAccountPriv,
-	)
+	accountPriv, err := vault.Decrypt(waddrmgr.CKTPrivate, encAccountPriv)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt account priv: %w", err)
 	}
+	defer zero.Bytes(accountPriv)
 
-	acctPriv, err := hdkeychain.NewKeyFromString(string(plaintext))
-	if err != nil {
-		zero.Bytes(plaintext)
-		return nil, fmt.Errorf("parse account priv: %w", err)
-	}
-
-	zero.Bytes(plaintext)
-
-	defer acctPriv.Zero()
-
-	branchKey, err := deriveChildKey(acctPriv, path.Branch)
-	if err != nil {
-		return nil, fmt.Errorf("derive branch: %w", err)
-	}
-	defer branchKey.Zero()
-
-	addrKey, err := deriveChildKey(branchKey, path.Index)
-	if err != nil {
-		return nil, fmt.Errorf("derive index: %w", err)
-	}
-	defer addrKey.Zero()
-
-	privKey, err := addrKey.ECPrivKey()
-	if err != nil {
-		return nil, fmt.Errorf("derive private key: %w", err)
-	}
-
-	return privKey, nil
+	//nolint:wrapcheck // Derivation errors carry their own context.
+	return keyvault.DeriveAccountChildKey(accountPriv, path)
 }
 
 // handleDerivePubKey delivers the result of an accepted component request.
@@ -1519,13 +1486,13 @@ func deriveStoredAccountChildPubKey(accountPubKey []byte,
 	}
 	defer acctPub.Zero()
 
-	branchKey, err := deriveChildKey(acctPub, path.Branch)
+	branchKey, err := keyvault.DeriveChild(acctPub, path.Branch)
 	if err != nil {
 		return nil, fmt.Errorf("derive branch: %w", err)
 	}
 	defer branchKey.Zero()
 
-	addrKey, err := deriveChildKey(branchKey, path.Index)
+	addrKey, err := keyvault.DeriveChild(branchKey, path.Index)
 	if err != nil {
 		return nil, fmt.Errorf("derive index: %w", err)
 	}
