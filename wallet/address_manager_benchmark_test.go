@@ -1,10 +1,19 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
+	"math"
+	"runtime"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -108,6 +117,47 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	// Preserve native workflows; the report states scope/balance differences.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Include the original caller's address and receipt reads.
+				return func() error {
+					result, err := listAddressesDeprecated(
+						w, waddrmgr.DefaultAccountNum,
+					)
+
+					// Retain the result without inspecting its contents.
+					runtime.KeepAlive(result)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.ListAddresses(
+						ctx, "default", waddrmgr.TaprootPubKey,
+					)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkGetAddressInfoAPI benchmarks GetAddressInfo API and its deprecated
@@ -203,6 +253,43 @@ func BenchmarkGetAddressInfoAPI(b *testing.B) {
 			}
 		})
 	}
+
+	// Use shared node data alongside the original growth matrix.
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				addr := KVDBBenchmarkTarget(b, w, true).Address
+
+				return func() error {
+					_, err := w.AddressInfoDeprecated(addr)
+
+					return err
+				}
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				// Resolve request inputs before timing;
+				// repeat only the native API operation.
+				addr := KVDBBenchmarkTarget(b, w, false).Address
+				ctx := b.Context()
+
+				return func() error {
+					_, err := w.GetAddressInfo(ctx, addr)
+
+					return err
+				}
+			},
+		)
+	})
 }
 
 // BenchmarkNewAddressUsedRotationAPI benchmarks NewAddress, marking each
@@ -766,4 +853,187 @@ func BenchmarkScriptForOutputAPI(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkGetAddressInfoDifferentAPI reads a different existing item
+// on each call.
+func BenchmarkGetAddressInfoDifferentAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAddressInfoRequests(b, w, true, false)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAddressInfoRequests(b, w, false, false)
+			},
+		)
+	})
+}
+
+// BenchmarkGetAddressInfoNotFoundAPI reads a different missing item
+// on each call.
+func BenchmarkGetAddressInfoNotFoundAPI(b *testing.B) {
+	b.Run("matched", func(b *testing.B) {
+		RunKVDBBenchmark(b,
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAddressInfoRequests(b, w, true, true)
+			},
+			func(b *testing.B, w *Wallet,
+				workload bwtest.NodeBenchmarkWorkload) func() error {
+
+				b.Helper()
+
+				return benchmarkGetAddressInfoRequests(b, w, false, true)
+			},
+		)
+	})
+}
+
+// benchmarkGetAddressInfoRequests prepares different inputs before timing.
+// BenchmarkRead uses the first input for its separate untimed call.
+func benchmarkGetAddressInfoRequests(b *testing.B, w *Wallet, legacy,
+	missing bool) func() error {
+
+	b.Helper()
+
+	// Keep native enumeration outside measurement; canonical keys match SQL.
+	// Reserve a different item for BenchmarkRead's untimed first call.
+	count := bwtest.BenchmarkReadCount(b) + 1
+
+	var targets []*Utxo
+	if missing {
+		targets = benchmarkMissingReadTargets(b, count)
+	} else {
+		targets = benchmarkPointReadTargets(b, w, legacy, count)
+	}
+
+	ctx := b.Context()
+	// The first item is for warmup; measured calls read the rest once.
+	index := 0
+
+	// Resolve the native operation inside each call, without request data
+	// generation, result validation or interaction-recording mocks.
+	read := func() error {
+		target := targets[index]
+		index++
+		// Keep native result types so benchmark bookkeeping does not
+		// box the modern value into an interface and add allocations.
+		var err error
+		if legacy {
+			result, readErr := w.AddressInfoDeprecated(target.Address)
+			runtime.KeepAlive(result)
+
+			err = readErr
+		} else {
+			result, readErr := w.GetAddressInfo(ctx, target.Address)
+			runtime.KeepAlive(result)
+
+			err = readErr
+		}
+
+		if !missing {
+			return err
+		}
+
+		// Different native APIs expose different miss identities. Only
+		// that expected response completes this request successfully.
+		if (legacy && isAddrMgrErr(err, waddrmgr.ErrAddressNotFound)) ||
+			(!legacy && errors.Is(err, ErrAddressNotFound)) {
+
+			return nil
+		}
+
+		return errors.Join(
+			errors.New("expected not-found response"), err,
+		)
+	}
+
+	return read
+}
+
+// benchmarkPointReadTargets normalizes request keys from native kvdb listings.
+// Shared selection keeps the output order equal to the SQL suite.
+func benchmarkPointReadTargets(tb testing.TB, w *Wallet,
+	legacy bool, count int) []*Utxo {
+
+	tb.Helper()
+
+	if legacy {
+		utxos, err := w.ListUnspentDeprecated(0, math.MaxInt32, "")
+		require.NoError(tb, err)
+
+		// Select native JSON results by shared policy before decoding only
+		// the request fields needed by the legacy point reads.
+		selected := bwtest.SelectNodeBenchmarkTargets(
+			tb, utxos, count,
+			func(utxo *btcjson.ListUnspentResult) (btcutil.Amount,
+				string, uint32) {
+
+				amount, err := btcutil.NewAmount(utxo.Amount)
+				require.NoError(tb, err)
+
+				return amount, utxo.TxID, utxo.Vout
+			},
+		)
+		targets := make([]*Utxo, len(selected))
+
+		for i, utxo := range selected {
+			hash, err := chainhash.NewHashFromStr(utxo.TxID)
+			require.NoError(tb, err)
+			addr, err := address.DecodeAddress(utxo.Address, &chainParams)
+			require.NoError(tb, err)
+
+			targets[i] = &Utxo{
+				OutPoint: wire.OutPoint{
+					Hash:  *hash,
+					Index: utxo.Vout,
+				},
+				Address: addr,
+			}
+		}
+
+		return targets
+	}
+
+	utxos, err := w.ListUnspent(tb.Context(), UtxoQuery{
+		MaxConfs: math.MaxInt32,
+	})
+	require.NoError(tb, err)
+
+	// Maintained kvdb keeps its native result type through selection.
+	return bwtest.SelectNodeBenchmarkTargets(
+		tb, utxos, count, func(utxo *Utxo) (btcutil.Amount, string, uint32) {
+			return utxo.Amount, utxo.OutPoint.Hash.String(),
+				utxo.OutPoint.Index
+		},
+	)
+}
+
+// benchmarkMissingReadTargets prepares the same absent keys as the SQL suite.
+// Deterministic public keys keep address requests valid without fixture writes.
+func benchmarkMissingReadTargets(tb testing.TB, count int) []*Utxo {
+	tb.Helper()
+
+	// The shared generator owns keys and order; this adapter retains the
+	// native request shape used by the three point APIs in this suite.
+	return bwtest.NodeBenchmarkMissingReadTargets(
+		tb, count, func(point wire.OutPoint, addr address.Address) *Utxo {
+			return &Utxo{
+				OutPoint: point,
+				Address:  addr,
+			}
+		},
+	)
 }
