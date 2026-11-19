@@ -86,6 +86,12 @@ the same prevout without choosing one preferred spender.
 | Confirmation | `transactions.block_height` references the best-chain block |
 | Lease | `(utxo_leases.wallet_id, utxo_leases.utxo_id)` |
 
+The [Wallet-owned history proposal](adr/0017-manager-chain-routing.md#3-decision)
+uses `(transactions.wallet_id, transactions.block_height)` to reference
+`wallet_blocks(wallet_id, block_height)`. The
+[SQL preparation](adr/0006-wtxmgr-sql-schema.md#24-implementation-overview)
+still uses `blocks(block_height)` for confirmations.
+
 Credits derive wallet ownership by joining `utxos.tx_id` to
 `transactions.id` and reading `transactions.wallet_id`.
 
@@ -258,6 +264,11 @@ removal, and its unconfirmed descendants become `failed`. Losing confirmation
 alone does not release an otherwise eligible regular spend or revive its
 terminal competitors. Reads recompute eligibility and conflict flags from the
 resulting state.
+
+With Wallet-owned SQL history, a disconnect atomically detaches the Wallet's
+affected transactions and orphans its coinbases. Other Wallets keep their
+checkpoints and confirmations. Canonical observations below the disconnected
+height are preserved.
 
 Reconfirmation associates the retained transaction hash with the current block.
 Coinbase restoration atomically sets its block and `published` status, then

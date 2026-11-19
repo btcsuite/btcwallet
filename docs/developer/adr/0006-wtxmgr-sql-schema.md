@@ -10,9 +10,11 @@
 - **Amends:** None.
 - **Supersedes:** None.
 - **Amended by:** [ADR 0015](0015-sql-shared-chain-ownership.md) for SQL block
-  identity and canonical-frontier semantics;
-  [ADR 0018](0018-unconfirmed-transaction-candidates.md) for input
-  relationships, derived spend availability and competing transaction history.
+  identity and canonical-frontier semantics, proposed
+  [ADR 0017](0017-manager-chain-routing.md) for Wallet-owned block identity
+  and references, and [ADR 0018](0018-unconfirmed-transaction-candidates.md)
+  for input relationships, derived spend availability and competing
+  transaction history.
 - **Superseded by:** None.
 
 ## 1. Context
@@ -93,11 +95,11 @@ Recommended operational defaults:
     *   **Reconfirmation:** If an orphaned coinbase transaction re-enters the best chain, restoring it requires setting `block_height` and `tx_status = 1` (`published`) atomically.
 *   **RBF:** Handled by updating the `utxos.spent_by_tx_id` pointer to the new transaction and marking the old transaction as `replaced`.
 
-### 2.4 Implementation Notes
+### 2.4 Implementation Overview
 
 This ADR includes a reference schema. The implementation keeps the same
 invariants, but makes a few deliberate schema choices to match the existing
-conventions in `wallet/internal/db/migrations/`.
+conventions in `wallet/internal/sql/{sqlite,pg}/migrations/`.
 
 **Primary keys and wallet scoping**
 
@@ -126,16 +128,11 @@ key and defines manual pruning as an explicit, application-driven operation
 that clears `utxos.spent_by_*` before deleting/pruning the spending
 transaction, all within a single SQL transaction.
 
-**SQLite coinbase disconnect handling**
+**Block identity**
 
-PostgreSQL can rely on the transaction-row trigger alone when a block delete
-causes `transactions.block_height` to become `NULL`.
-
-SQLite evaluates child-row checks before an `AFTER UPDATE` trigger on the child
-table can normalize the row. To preserve the coinbase orphaning invariant, the
-implementation adds a `BEFORE DELETE ON blocks` trigger that rewrites affected
-transactions into their final disconnected state before the block row is
-removed.
+SQL has storage for Wallet-owned block history. Confirmation, birthday and
+checkpoint references still use shared blocks. See
+[ADR 0017](0017-manager-chain-routing.md#3-decision) for the Wallet-owned design.
 
 **Transaction labels**
 
@@ -155,8 +152,8 @@ Both PostgreSQL and SQLite now follow the same timestamp contract:
 
 ## 3. Implemented Schema Notes
 
-The SQL migrations under `wallet/internal/db/migrations/postgres` and
-`wallet/internal/db/migrations/sqlite` are the source of truth for the concrete
+The SQL migrations under `wallet/internal/sql/pg/migrations` and
+`wallet/internal/sql/sqlite/migrations` are the source of truth for the concrete
 schema. This section captures the important design decisions without duplicating
 full reference DDL that can drift from the live migrations.
 
