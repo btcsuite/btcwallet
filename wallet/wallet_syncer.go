@@ -232,9 +232,20 @@ type prepareRollbackReq struct {
 	rollbackDone     <-chan struct{}
 }
 
+// watchSet carries Wallet interests for Manager-owned registration. Startup
+// returns this data before a Wallet worker can submit runtime requests.
+type watchSet struct {
+	addresses []address.Address
+	outpoints []*wire.OutPoint
+}
+
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
+	// loadWatchSet prepares persisted interests for Manager-owned
+	// subscription setup without activating watches.
+	loadWatchSet(ctx context.Context) (watchSet, error)
+
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
@@ -334,6 +345,50 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 	}
 
 	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
+}
+
+// loadWatchSet converts one persisted snapshot into Wallet registration data.
+// It performs no native subscription or worker activation.
+func (s *syncer) loadWatchSet(ctx context.Context) (watchSet, error) {
+	persisted, err := s.store.LoadWatchSet(ctx, s.walletID)
+	if err != nil {
+		return watchSet{}, fmt.Errorf("read watch set: %w", err)
+	}
+
+	// Store supplies raw scripts; decode them using this Wallet's network.
+	var watches watchSet
+	for _, script := range persisted.AddressScripts {
+		addr, err := s.watchAddress(script)
+		if err != nil {
+			return watchSet{}, fmt.Errorf("watch address script: %w", err)
+		}
+
+		watches.addresses = append(watches.addresses, addr)
+	}
+
+	// Keep the existing registration pointer shape over snapshot values.
+	for i := range persisted.OutPoints {
+		watches.outpoints = append(watches.outpoints, &persisted.OutPoints[i])
+	}
+
+	return watches, nil
+}
+
+// watchAddress decodes a receiving script for startup and recovery watches.
+// Both paths select the first address using this Wallet's network.
+func (s *syncer) watchAddress(script []byte) (address.Address, error) {
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, s.cfg.ChainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	// Imported rows can contain non-address scripts. Reject these rather
+	// than indexing an empty decoded address list in either watch loader.
+	if len(addrs) == 0 {
+		return nil, db.ErrAddressNotFound
+	}
+
+	return addrs[0], nil
 }
 
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
@@ -2567,19 +2622,12 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 				continue
 			}
 
-			_, scriptAddrs, _, err := txscript.ExtractPkScriptAddrs(
-				info.ScriptPubKey, s.cfg.ChainParams,
-			)
+			addr, err := s.watchAddress(info.ScriptPubKey)
 			if err != nil {
 				return nil, fmt.Errorf("scan address script: %w", err)
 			}
 
-			if len(scriptAddrs) == 0 {
-				return nil, fmt.Errorf("scan address script: %w",
-					db.ErrAddressNotFound)
-			}
-
-			addrs = append(addrs, scriptAddrs[0])
+			addrs = append(addrs, addr)
 		}
 
 		if result.Next == nil {
