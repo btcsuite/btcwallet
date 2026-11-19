@@ -9026,3 +9026,121 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	require.Len(t, history, 1)
 	require.Equal(t, coinbase.Hash, history[0].Hash)
 }
+
+// TestSyncerStartInitCommitUncertainty preserves an unknown native write during
+// backend initialization even when its adapter error wraps cancellation.
+func TestSyncerStartInitCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Keep the backend behind and queue one real observation.
+		// The runnable mailbox precedes polling, so its ambiguous Store write
+		// must end initialization before another backend check or retry.
+		client := &bwmock.Chain{}
+		store := &walletmock.Store{}
+		s := newTestSyncer(t, Config{Chain: client}, nil, nil, nil, store, 0)
+		record, err := wtxmgr.NewTxRecordFromMsgTx(
+			subscriptionTx([]byte{txscript.OP_TRUE}, 423), time.Now(),
+		)
+		require.NoError(t, err)
+
+		client.On("IsCurrent").Return(false).Once()
+		store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+			Return(&dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			}).Once()
+
+		events := make(chan chainEvent, 1)
+		s.chainEventChan = events
+
+		events <- chainEvent{
+			notification: chain.RelevantTx{TxRecord: record},
+			matches:      liveMatches(record),
+		}
+
+		// Act: Run the actual initialization and retry owner with a live
+		// context, leaving error classification to the production path.
+		err = s.start(t.Context())
+
+		// Assert: The unknown write escapes as indeterminate, rather than
+		// successful cancellation or a retry; verify each required call once.
+		require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+		client.AssertExpectations(t)
+		store.AssertExpectations(t)
+	})
+}
+
+// TestSyncerBackoffCommitUncertainty stops retry waiting after unknown effects.
+func TestSyncerBackoffCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Queue an actual write while only the retry mailbox can run.
+	// Its live context prevents wrapped cancellation from hiding uncertainty.
+	store := &walletmock.Store{}
+	s := newTestSyncer(t, Config{}, nil, nil, nil, store, 0)
+	record, err := wtxmgr.NewTxRecordFromMsgTx(
+		subscriptionTx([]byte{txscript.OP_TRUE}, 423), time.Now(),
+	)
+	require.NoError(t, err)
+	store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Return(&dbruntime.AmbiguousTxCommitError{
+			Err: context.Canceled,
+		}).Once()
+
+	events := make(chan chainEvent, 1)
+
+	s.chainEventChan = events
+	events <- chainEvent{
+		notification: chain.RelevantTx{TxRecord: record},
+		matches:      liveMatches(record),
+	}
+
+	// Act: Keep the retry timer blocked so only the mailbox write can exit.
+	_, err = s.waitForBackoff(
+		t.Context(), time.Now(), time.Hour,
+		func(time.Duration) <-chan time.Time { return make(chan time.Time) },
+	)
+
+	// Assert: The failure escapes before another attempt or a second write.
+	require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+	store.AssertExpectations(t)
+}
+
+// TestSyncerStartRetriesInitError retries a definite preparation failure.
+func TestSyncerStartRetriesInitError(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Fail the first committed-tip read during initialization.
+		// Cancel at the second read to prove retry without entering catch-up
+		// or relying on wall-clock time. No uncertain write is involved.
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		client := &bwmock.Chain{}
+		store := &walletmock.Store{}
+		s := newTestSyncer(t, Config{
+			Chain:                   client,
+			WalletSyncRetryInterval: time.Millisecond,
+		}, nil, nil, nil, store, 0)
+		client.On("IsCurrent").Return(true).Twice()
+		store.On("GetWallet", mock.Anything, "").
+			Return((*db.WalletInfo)(nil), errDBMock).Once()
+		store.On("GetWallet", mock.Anything, "").
+			Run(func(mock.Arguments) { cancel() }).
+			Return((*db.WalletInfo)(nil), context.Canceled).Once()
+
+		// Act: Let the same processing lifetime retry its initialization.
+		err := s.start(ctx)
+
+		// Assert: A definite read failure retries exactly once, then normal
+		// lifetime cancellation completes without a terminal failure report.
+		require.NoError(t, err)
+		store.AssertExpectations(t)
+		client.AssertExpectations(t)
+	})
+}

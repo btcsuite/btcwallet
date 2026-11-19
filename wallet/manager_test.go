@@ -3957,3 +3957,109 @@ func TestManagerWatchRegistrationDuringRollback(t *testing.T) {
 		require.NoError(t, m.Stop())
 	})
 }
+
+// TestManagerWorkerFailureStops joins failed workers at each owner wait site.
+func TestManagerWorkerFailureStops(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		event         any
+		events        int
+		pendingSource int
+		pendingWallet int
+	}{
+		{
+			name: "IdleLoop",
+		},
+		{
+			name:          "BlockedDelivery",
+			event:         chain.BlockConnected{},
+			events:        3,
+			pendingSource: 1,
+			pendingWallet: 1,
+		},
+		{
+			name: "PendingRollbackAck",
+			event: chain.BlockDisconnected{
+				Block: wtxmgr.Block{
+					Height: 1,
+				},
+			},
+			events:        1,
+			pendingWallet: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				t.Helper()
+
+				// Arrange: Hold the production Wallet worker before its
+				// terminal result. Source data leaves Manager idle, blocked
+				// on delivery, or waiting for a rollback acknowledgement.
+				w, deps := createTestWalletWithMocks(t)
+				failWorker := make(chan struct{})
+				deps.syncer.On("start", mock.Anything).
+					Run(func(mock.Arguments) {
+						<-failWorker
+					}).Return(&dbruntime.AmbiguousTxCommitError{
+					Err: errDBMock,
+				}).Once()
+				deps.store.On("GetWallet", mock.Anything, w.cfg.Name).
+					Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).
+					Once()
+				deps.store.On("ListAccounts", mock.Anything,
+					db.ListAccountsQuery{WalletID: w.id}).
+					Return([]db.AccountInfo{}, nil).Once()
+				deps.store.On("DeleteExpiredLeases", mock.Anything, w.id).
+					Return(nil).Once()
+				vaultLock := deps.vault.On("Lock").Return().Once()
+
+				notifications := make(chan any, 3)
+				backend := &managerBackendMock{}
+				backend.On("close").Return(nil).Once().NotBefore(vaultLock)
+
+				source := &bwmock.Chain{}
+				source.On("Notifications").
+					Return((<-chan any)(notifications)).Once()
+				manager := newManagerLifecycleTest(t, backend, source)
+
+				// Release failed setup before fixture cleanup joins the held
+				// worker. Act uses the same gate without a public Stop rescue.
+				releaseFailure := sync.OnceFunc(func() { close(failWorker) })
+				t.Cleanup(releaseFailure)
+
+				w.registry = manager
+				manager.wallets[w.cfg.Name] = w
+				manager.started.Store(true)
+				require.NoError(t, w.prepareStart(t.Context()))
+				require.NoError(t, w.start(manager.workerErrors))
+				manager.wg.Go(manager.mainLoop)
+
+				for range tc.events {
+					notifications <- tc.event
+				}
+
+				synctest.Wait()
+				require.Len(t, notifications, tc.pendingSource)
+				require.Len(t, w.chainEventChan, tc.pendingWallet)
+
+				// Act: Report an uncertain write through the actual Wallet
+				// worker while the selected owner wait is durably blocked.
+				releaseFailure()
+				manager.wg.Wait()
+
+				// Assert: Disposal cancels and joins the Wallet before one
+				// Store close. No rewind expectation is permitted: a failed
+				// worker cannot acknowledge that its earlier writes settled.
+				require.ErrorIs(t, manager.lifetimeCtx.Err(), context.Canceled)
+				require.Equal(t, lifecycleStopped,
+					lifecycle(w.state.lifecycle.Load()))
+			})
+		})
+	}
+}
