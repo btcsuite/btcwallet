@@ -1,4 +1,4 @@
-# ADR 0017: Manager Chain Routing
+# ADR 0017: Direct Wallet Chain Subscriptions
 
 ## Status
 
@@ -7,175 +7,139 @@
 
 ## Relationships
 
-- **Amends:** [ADR 0015](0015-sql-shared-chain-ownership.md), section 3.4's
-  live-matching ownership and the startup watch-readiness boundary.
+- **Amends:** [ADR 0006](0006-wtxmgr-sql-schema.md) for Wallet-owned block
+  identity and references, and [ADR 0015](0015-sql-shared-chain-ownership.md)
+  for direct Wallet subscriptions, publication watch readiness and
+  Wallet-owned history and rollback.
 - **Supersedes:** None.
 - **Amended by:** None.
 - **Superseded by:** None.
 
 ## 1. Problem
 
-SQL Wallets share one native notification stream. Independent readers compete
-for events; broadcasting every transaction repeats parsing and relevance work
-in each Wallet. Manager must select recipients before their workers persist
-the transactions, while retaining early payments and source order.
-
-Publication must establish SQL live watches while each Wallet catches up
-independently. A successful Start or Create does not promise completed
-historical recovery.
+Wallets need ordered chain events to advance separate checkpoints and recover
+independently. Installing a watch can produce an immediate observation, so the
+Wallet needs a way to receive it before the watch takes effect.
 
 ## 2. Context
 
-Manager owns membership, the native reader, shared rollback and Store
-lifetime. Wallet owns its request loop, processing worker and committed tip.
-Stored addresses and outputs reconstruct live interests; matching also learns
-queued funding outputs before their Wallet has committed them.
+The caller owns one chain client and its connection. Manager reads the native
+notification stream, uses its chain syncer to match events, and forwards work
+to Wallets. Manager also owns membership, shared rollback and Store lifetime.
+Each Wallet owns its processing, transactions, checkpoint and historical
+recovery.
 
 ### Constraints
 
-- Borrow the caller's running chain client without starting or stopping it.
-- Keep existing workers, bounded Wallet input and source ordering.
-- Serialize mutable watch ownership with native routing in Manager.
-- Preserve native subscription results, scoped scans and per-Wallet checkpoints.
-- Preserve KVDB's single-Wallet isolation and background initialization.
-- Assume aligned committed Wallet checkpoints for shared startup.
+- The caller owns the chain client's lifetime.
+- Each Wallet receives events in source order and enrolls before installing
+  its watches.
+- KVDB keeps its isolated single-Wallet scope and background initialization.
+  See [ADR 0015](0015-sql-shared-chain-ownership.md#36-lease-and-scope).
 
 ## 3. Decision
 
-Manager and Wallet are the two component owners. Their loops are internal
-mechanisms, and each owner's helpers remain private.
+The chain client supplies a separate ordered stream to each Wallet and shares
+native address and outpoint watch interests across subscriptions. Each Wallet
+enrolls in its stream before installing those watches and matches its own
+transactions. Filtered blocks advance it even when no transaction matches.
+Header-only notifications wake its historical catch-up.
+
+Manager starts, publishes and joins Wallets. SQL Start and Create publish a
+Wallet after its stream enrollment and watch installation. Historical catch-up
+proceeds independently of publication. Manager observes source loss even with
+no active Wallets. On Stop or source loss, it stops and joins Wallet workers
+before closing Store. The chain client stays with its caller.
 
 ```mermaid
-flowchart TB
-    %% One native stream enters Manager, which selects Wallet recipients.
-    C["Caller-owned chain client"]
+flowchart LR
+    %% Lifecycle and events follow separate edges so Manager can observe
+    %% source loss independently of Wallet enrollment and event delivery.
+    C["Caller-owned chain client<br/>Shared native watch interests"]
+    D["Shared Store"]
     subgraph M["Manager"]
-        R["Match and route"]
+        L["Start, publish, and join Wallets"]
     end
-
-    %% Each Wallet owns its bounded input and processing worker.
-    subgraph W1["Wallet A"]
-        Q1["Bounded input"] --> P1["Process and persist"]
+    subgraph W["Each Wallet"]
+        S["Subscribe, match, and recover"]
     end
-    subgraph W2["Wallet B"]
-        Q2["Bounded input"] --> P2["Process and persist"]
-    end
-
-    C -->|"Native notifications"| R
-    R -->|"Ordered events"| Q1
-    R -->|"Ordered events"| Q2
+    L -->|"start and join"| S
+    C -->|"separate ordered events"| S
+    S -->|"enroll, then install watches"| C
+    C -->|"source loss, even with no Wallets"| L
+    S -->|"own history and checkpoint"| D
+    L -->|"close after workers exit"| D
 ```
 
-Manager owns native input, published membership, watch ownership and shared
-rollback. Wallet owns transaction persistence, synchronization, retry, scoped
-scans and its workers. Cross-component operations go through the owner;
-children receive only the services they need.
-
-SQL Start and Create prepare Wallet state and install persisted address/outpoint
-interests before activating and publishing the Wallet. The native source keeps
-early observations until delivery can begin. Historical catch-up remains
-independent of publication. KVDB retains background watch initialization.
-
-Manager records watch ownership before native subscription activation can emit
-an event. Wallet-initiated subscription I/O remains part of the calling
-Wallet's owned work, with the backend's actual completion and error semantics.
-Later initialization and committed scans refresh interests through the same
-owner boundary. Interests remain registered after a spend so replacement and
-reorg spends stay routable; watched addresses can also receive again.
-
-Manager matches transactions once and delivers immutable prepared events in
-source order. Matching learns funding outpoints before later records can spend
-them. Each transaction observation reaches each interested Wallet once.
-Filtered blocks reach every published Wallet, even without matching
-transactions; header-only notifications wake historical catch-up. Bounded
-Wallet input applies backpressure; Manager must still accept the control work
-that lets a blocked Wallet make progress.
-
-For a native disconnect, Manager pauses Wallet writers, waits for earlier
-writes, rewinds shared storage once, then resumes processing. Wallet creation
-and Store closure wait for the rewind to settle. Any rewind error, including
-an uncertain commit, stops all Wallets before writers resume. Wallet request
-handling remains available during the pause.
-
-An uncertain write terminates retry: Wallet reports the error and finishes its
-worker, and Manager joins owned work before closing storage. Closure of the
-required notification stream also stops Manager. Normal Stop uses the same
-joined disposal. The borrowed chain connection remains caller-owned.
+SQL block observations are keyed by Wallet and height. Confirmation, birthday
+and checkpoint references carry the same Wallet identity. The Wallet worker
+advances its checkpoint in stream order and atomically rewinds its own history
+on disconnect. It clears affected confirmations and orphans disconnected
+coinbases before deleting their block rows, then discards stale fetched work.
+Canonical observations below the disconnect remain valid even when the saved
+checkpoint lags. Indeterminate writes follow the aggregate shutdown policy.
 
 ## 4. Rationale
 
-Manager owns source order, so it can serialize watch changes without
-cross-owner locking. Installing ownership before native activation prevents a
-delivery gap. Keeping native I/O in the Wallet's owned work avoids blocking the
-Manager loop on an uncancelable backend call. Control progress during delivery
-and pause waits prevents a Wallet from waiting behind its own worker.
+Direct subscriptions keep enrollment and matching with the Wallet that owns
+the watches, while the chain client shares the native subscriptions. Local
+history lets Wallets progress at different heights and limits each rewind to
+one Wallet. Manager keeps aggregate lifecycle and Store ownership.
 
 ## 5. Alternatives Considered
 
-### Independent SQL backend readers
+### Keep Manager as the single reader
 
-Competing receives cannot broadcast one source channel to several Wallets.
+Native notifications arrive on one channel. Multiple readers would compete
+for events. Manager reads the channel once and forwards work to bounded
+Wallet inboxes. This preserves source order and avoids repeated matching.
+A full inbox can stall forwarding.
 
-### Broadcast all transactions and match in each Wallet
+### Shared history with Manager-wide reconciliation
 
-Each Wallet repeats parsing and relevance work that Manager can perform once.
+A shared history required aggregate coordination to rewind independently
+advancing Wallets. Wallet-owned history removes that coordination at the cost
+of duplicating block metadata. Each Wallet still needs local fork detection.
 
-### Caller-fed fanout with Wallet filtering
+### Shared block tree keyed by hash
 
-The [caller-fed proposal](https://github.com/btcsuite/btcwallet/pull/1434)
-leaves source consumption and delivery with the caller and repeats filtering
-in each Wallet. Manager-owned consumption and watch declarations put recipient
-selection beside source ordering while Wallets retain persistence and recovery.
-
-### Query Store for recipients at delivery
-
-A funding transaction can still be queued when its spend arrives. Durable
-ownership cannot identify that spend's recipient before the funding commits.
-
-### Share routing state with Wallet
-
-This mixes matching, subscription and aggregate lifecycle responsibilities and
-requires synchronization outside the owner loop.
-
-### Block Manager control work during delivery
-
-A worker can need registration before draining its input. Manager must preserve
-ordered delivery while allowing that registration to complete.
-
-### Add a forwarding worker or unbounded recipient queues
-
-These add lifecycle and scheduling policy without removing the need to order
-writes and rollback. Existing bounded input and joined workers suffice.
+A shared table can retain competing blocks at the same height while
+each Wallet rewinds its own references. A Wallet can observe a block
+before its parent is known or before its checkpoint reaches that
+height. The tree would still need Wallet-local observations to recover
+that history. Those rows and indexes reduce the storage savings, and
+reading block metadata from them adds a join.
 
 ## 6. Consequences
 
 ### Positive
 
-- SQL publication establishes live interests before historical catch-up.
-- Routing and aggregate failure policy stay inside Manager.
-- Wallet retains processing, retry, scans and worker disposal.
+- Each Wallet matches events and recovers independently. Its rewind affects
+  only its own history.
 
 ### Negative and Risks
 
-- A slow Wallet backpressures the shared reader, and retained watch interests
-  accumulate for the Manager lifetime.
-- Native RPCs without cancellation must finish before owned work can be joined.
-- Aligned-checkpoint startup does not define recovery from unequal checkpoints
-  or retained orphan history.
+- Matching an event in more than one Wallet can repeat filtering work.
+- With bounded delivery at the shared chain client, a full Wallet mailbox can
+  delay later events for other Wallets.
+- Storage grows with the sum of the Wallets' retained block histories.
+  Wallets retaining the same range each store its block metadata and
+  indexes. Recovery of retained orphan observations above a canonical
+  checkpoint remains a separate concern.
 
 ## 7. Implementation Overview
 
-Manager coordinates subscription ownership, routing and shared rollback.
-Wallet startup supplies persisted interests before processing is activated;
-subsequent synchronization refreshes them through Manager. Wallet continues to
-own processing and retry, while Manager joins Wallet disposal before releasing
-shared storage.
+The [SQL schema](0006-wtxmgr-sql-schema.md#24-implementation-overview)
+includes storage for Wallet-owned block history. Manager still coordinates
+shared rollback.
+
+Runtime adoption requires a separate ordered stream for each Wallet and a
+source-loss signal for Manager. Block references and rollback move to the
+owning Wallet together.
 
 ## 8. References
 
-- [ADR 0015: Manager Lifecycle and SQL Shared-Chain
-  Ownership](0015-sql-shared-chain-ownership.md).
-- [ADR 0004: Targeted Rescan vs. Global
-  Rewind](0004-targeted-rescan-vs-rewind.md).
-- [ADR 0005: Explicit Rescan on Import](0005-no-auto-rescan-on-import.md).
-- [Scanning and synchronization](../scanning_sync_architecture.md).
+- [ADR 0015: Manager lifecycle and SQL shared-chain
+  ownership](0015-sql-shared-chain-ownership.md).
+- [ADR 0006: SQL schema](0006-wtxmgr-sql-schema.md).
+- [ADR 0004: Targeted recovery](0004-targeted-rescan-vs-rewind.md).
