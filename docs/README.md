@@ -14,6 +14,8 @@ Guides and tutorials for end-users and operators of `btcwallet`. This section co
 
 Information for contributors and developers working on `btcwallet`. This includes contribution guidelines, code formatting rules, architectural deep-dives, and implementation guides.
 
+See [Benchmarks](./developer/benchmark/README.md) for methodology and results.
+
 **[➡️ Go to Developer Guides](./developer/)**
 
 ---

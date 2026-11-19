@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -46,6 +47,8 @@ func reorgCoinbase(t *testing.T, tag byte) *wtxmgr.TxRecord {
 func TestDisconnectCoinbaseSpends(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a real legacy database with the credited spend graph and
+	// explicit chain responses needed by this rollback scenario.
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
 		w.StopDeprecated()
@@ -53,15 +56,25 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		require.NoError(t, w.db.Close())
 	})
 
-	w.chainClient = &reorgChainClient{
-		mockChainClient: &mockChainClient{
-			getBestBlockHeight: 200,
-			getBlockHeader:     &wire.BlockHeader{Timestamp: time.Unix(1, 0)},
-		},
-		blockHashes: map[int64]chainhash.Hash{
-			1: {9}, 2: {2}, 3: {9}, 102: {102},
-		},
+	// Arrange the shared chain mock with exact calls for each rollback.
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+	client.On("Stop").Return().Once()
+	client.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(200), nil,
+	).Twice()
+	client.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&wire.BlockHeader{Timestamp: time.Unix(1, 0)}, nil).Once()
+
+	for height, hash := range map[int64]chainhash.Hash{
+		1: {9}, 2: {2}, 3: {9}, 102: {102},
+	} {
+		client.On("GetBlockHash", height).Return(&hash, nil).Twice()
 	}
+
+	w.chainClient = client
+	defer w.StopDeprecated()
+
 	old := reorgRecord(t, 60)
 	coinbaseMsg := reorgCoinbase(t, 61).MsgTx
 	// Output 0 stays spent, output 1 becomes unspent when the mixed
@@ -140,6 +153,8 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		notify(hash, index)
 	}
 
+	// Act first with an aborted database update, then retry the same
+	// disconnect so notification delivery is checked at commit time.
 	// An error after successful replay must discard queued notifications
 	// along with the database changes. Retry against the same history.
 	abortErr := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
@@ -159,6 +174,8 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 
 			return err
 		}))
+	// Assert persisted credit/debit metadata, ancestry cleanup, labels,
+	// duration leases, and only committed spentness notifications.
 	// Only removing the mixed-ancestry spend changes spentness. Unchanged
 	// spent and unspent credits must not produce replay notifications.
 	require.ElementsMatch(t, []wire.OutPoint{
@@ -239,6 +256,8 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 func TestDisconnectConflictingSpends(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a real legacy database with the credited spend graph and
+	// explicit chain responses needed by this rollback scenario.
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
 		w.StopDeprecated()
@@ -246,13 +265,23 @@ func TestDisconnectConflictingSpends(t *testing.T) {
 		require.NoError(t, w.db.Close())
 	})
 
-	w.chainClient = &reorgChainClient{
-		mockChainClient: &mockChainClient{
-			getBestBlockHeight: 2,
-			getBlockHeader:     &wire.BlockHeader{Timestamp: time.Unix(1, 0)},
-		},
-		blockHashes: map[int64]chainhash.Hash{1: {9}, 2: {2}},
+	// Arrange the shared chain mock with exact calls for each rollback.
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+	client.On("Stop").Return().Once()
+	client.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(2), nil,
+	).Once()
+	client.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&wire.BlockHeader{Timestamp: time.Unix(1, 0)}, nil).Once()
+
+	for height, hash := range map[int64]chainhash.Hash{1: {9}, 2: {2}} {
+		client.On("GetBlockHash", height).Return(&hash, nil).Once()
 	}
+
+	w.chainClient = client
+	defer w.StopDeprecated()
+
 	funding := reorgRecord(t, 70)
 	orphan := reorgSpend(t, funding, 900)
 	orphanChild := reorgSpend(t, orphan, 800)
@@ -268,10 +297,13 @@ func TestDisconnectConflictingSpends(t *testing.T) {
 
 			return w.connectBlock(tx, oldBlock)
 		}))
+	// Act by disconnecting the stored orphan through one legacy update.
 	require.NoError(t, walletdb.Update(w.db,
 		func(tx walletdb.ReadWriteTx) error {
 			return w.disconnectBlock(tx, oldBlock)
 		}))
+	// Assert canonical debits and balances survive while the conflicting
+	// orphan spend and its unmined descendants disappear.
 	require.NoError(t, walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		for _, rec := range []*wtxmgr.TxRecord{orphan, orphanChild} {
@@ -332,6 +364,8 @@ func (b failingReorgBucket) Put(key, value []byte) error {
 func TestDisconnectReplayFailure(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a real legacy database with the credited spend graph and
+	// explicit chain responses needed by this rollback scenario.
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
 		w.StopDeprecated()
@@ -339,10 +373,21 @@ func TestDisconnectReplayFailure(t *testing.T) {
 		require.NoError(t, w.db.Close())
 	})
 
-	w.chainClient = &reorgChainClient{
-		mockChainClient: &mockChainClient{getBestBlockHeight: 3},
-		blockHashes:     map[int64]chainhash.Hash{1: {9}, 2: {2}, 3: {3}},
+	// Arrange the shared chain mock with exact calls for each rollback.
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+	client.On("Stop").Return().Once()
+	client.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(3), nil,
+	).Once()
+
+	for height, hash := range map[int64]chainhash.Hash{1: {9}, 2: {2}, 3: {3}} {
+		client.On("GetBlockHash", height).Return(&hash, nil).Once()
 	}
+
+	w.chainClient = client
+	defer w.StopDeprecated()
+
 	records := []*wtxmgr.TxRecord{
 		reorgRecord(t, 80), reorgRecord(t, 81), reorgRecord(t, 82),
 	}
@@ -356,6 +401,7 @@ func TestDisconnectReplayFailure(t *testing.T) {
 
 			return nil
 		}))
+	// Act with a bucket that rejects restoration after rollback begins.
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := failingReorgBucket{
 			ReadWriteBucket: tx.ReadWriteBucket(wtxmgrNamespaceKey),
@@ -364,6 +410,8 @@ func TestDisconnectReplayFailure(t *testing.T) {
 
 		return w.rollbackBlockHistory(ns, 1)
 	})
+	// Assert the failed update preserves every original transaction and
+	// balance rather than leaving a partially replayed history.
 	require.ErrorIs(t, err, errReorgWrite)
 	assertReorgHistory(t, w, records, heights)
 }
@@ -373,6 +421,8 @@ func TestDisconnectReplayFailure(t *testing.T) {
 func TestDisconnectOrphanCoinbaseSpend(t *testing.T) {
 	t.Parallel()
 
+	// Arrange a real legacy database with the credited spend graph and
+	// explicit chain responses needed by this rollback scenario.
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
 		w.StopDeprecated()
@@ -380,13 +430,25 @@ func TestDisconnectOrphanCoinbaseSpend(t *testing.T) {
 		require.NoError(t, w.db.Close())
 	})
 
-	w.chainClient = &reorgChainClient{
-		mockChainClient: &mockChainClient{
-			getBestBlockHeight: 102,
-			getBlockHeader:     &wire.BlockHeader{Timestamp: time.Unix(1, 0)},
-		},
-		blockHashes: map[int64]chainhash.Hash{1: {9}, 2: {2}, 102: {9}},
+	// Arrange the shared chain mock with exact calls for each rollback.
+	client := &bwmock.Chain{}
+	t.Cleanup(func() { client.AssertExpectations(t) })
+	client.On("Stop").Return().Once()
+	client.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(102), nil,
+	).Once()
+	client.On("GetBlockHeader", chainParams.GenesisHash).
+		Return(&wire.BlockHeader{Timestamp: time.Unix(1, 0)}, nil).Once()
+
+	for height, hash := range map[int64]chainhash.Hash{
+		1: {9}, 2: {2}, 102: {9},
+	} {
+		client.On("GetBlockHash", height).Return(&hash, nil).Once()
 	}
+
+	w.chainClient = client
+	defer w.StopDeprecated()
+
 	old := reorgRecord(t, 90)
 	coinbase := reorgCoinbase(t, 91)
 	spend := reorgSpend(t, coinbase, 900)
@@ -402,10 +464,13 @@ func TestDisconnectOrphanCoinbaseSpend(t *testing.T) {
 		return w.connectBlock(tx, oldBlock)
 	})
 	require.NoError(t, err)
+	// Act by removing the orphan block and its confirmed descendants.
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		return w.disconnectBlock(tx, oldBlock)
 	})
 	require.NoError(t, err)
+	// Assert the valid coinbase remains mined and its detached spend
+	// chain survives as unmined with its credited balance intact.
 	require.NoError(t, walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		for _, rec := range []*wtxmgr.TxRecord{spend, child} {

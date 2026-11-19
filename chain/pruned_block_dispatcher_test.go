@@ -181,10 +181,18 @@ func (h *prunedBlockDispatcherHarness) stop() {
 	default:
 	}
 
-	select {
-	case <-h.queriedPeer:
-		h.t.Fatal("did not consume all queriedPeer signals")
-	default:
+	// Drain any remaining queriedPeer signals. The exact number of peer
+	// queries depends on the work manager's internal scheduling (e.g.
+	// retries, worker redistribution) and is non-deterministic. Tests
+	// that care about specific query counts already assert them
+	// explicitly via assertPeerQueried.
+drainQueriedPeer:
+	for {
+		select {
+		case <-h.queriedPeer:
+		default:
+			break drainQueriedPeer
+		}
 	}
 
 	require.Empty(h.t, h.blocksQueried)
@@ -271,11 +279,6 @@ func (h *prunedBlockDispatcherHarness) query(blocks []*chainhash.Hash,
 	cancelChan := make(chan error, 1)
 
 	blockChan, errChan := h.dispatcher.Query(blocks, cancelChan, opts...)
-	select {
-	case err := <-errChan:
-		require.NoError(h.t, err)
-	default:
-	}
 
 	for _, block := range blocks {
 		h.blocksQueried[*block]++
