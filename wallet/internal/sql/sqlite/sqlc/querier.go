@@ -304,6 +304,9 @@ type Querier interface {
 	// - Targets one wallet-scoped outpoint through the unique `(tx_id,
 	//   output_index)` key after the parent hash lookup.
 	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
+	// Block identity belongs to one Wallet, including during replacement replay.
+	GetWalletBlockByHeight(ctx context.Context, arg GetWalletBlockByHeightParams) (GetWalletBlockByHeightRow, error)
+	GetWalletBlocksInRange(ctx context.Context, arg GetWalletBlocksInRangeParams) ([]GetWalletBlocksInRangeRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
@@ -381,6 +384,8 @@ type Querier interface {
 	// - Single-row insert. The main cost is the wallet-ownership validation join
 	//   plus FK and uniqueness checks.
 	InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error)
+	// Verify conflicts through requireBlockMatches in the same write transaction.
+	InsertWalletBlock(ctx context.Context, arg InsertWalletBlockParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
 	// Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
