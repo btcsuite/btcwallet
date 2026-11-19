@@ -359,7 +359,21 @@ func testManagerLiveWatchReplay(h *bwtest.HarnessTest) {
 
 	w = wallets[0]
 	h.RegisterWallet(manager, w)
+
+	// Start restores live watches before historical readiness on every
+	// database, so this payment cannot rely on a later background refresh.
+
+	paymentScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to construct payment script")
+
+	// Act: Pay the restored address before waiting for catch-up, then
+	// publish the external spend. Neither observation can come from a block.
+	payment := h.SendOutput(&wire.TxOut{
+		Value:    oneBTC,
+		PkScript: paymentScript,
+	}, bwtest.MinerFeeRate)
 	h.AssertWalletSynced(w)
+
 	h.UnlockWallet(w)
 
 	// Keep outputs external as well, so only the outpoint watch can deliver
@@ -382,16 +396,7 @@ func testManagerLiveWatchReplay(h *bwtest.HarnessTest) {
 		},
 	})
 
-	paymentScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(h, err, "failed to construct payment script")
-
-	// Act: Pay the persisted address and broadcast the external spend after
-	// reopening. Neither transaction can be discovered by a mined block yet.
-	payment := h.SendOutput(&wire.TxOut{
-		Value:    oneBTC,
-		PkScript: paymentScript,
-	}, bwtest.MinerFeeRate)
-
+	// Broadcast outside Wallet so only the restored outpoint watch can match.
 	_, err = h.ChainClient.SendRawTransaction(tx, false)
 	require.NoError(h, err, "failed to broadcast external spend")
 
