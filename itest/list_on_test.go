@@ -646,6 +646,10 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerCombineRejectInternalKey,
 	},
 	{
+		Name:     "psbtmanager complete workflow",
+		TestFunc: testPsbtManagerCompleteWorkflow,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
