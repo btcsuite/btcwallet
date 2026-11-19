@@ -1147,16 +1147,8 @@ func TestInitChainSync(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -2949,16 +2941,8 @@ func TestPutSyncBatchStore(t *testing.T) {
 
 	// The committed scan refreshes the Store's current watch set. This
 	// fixture tests the batch shape; watch contents have separate coverage.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      walletID,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, walletID).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Submit the normal sync batch with unresolved address candidates;
 	// the Store owns receiving admission within its atomic write.
@@ -2998,16 +2982,8 @@ func TestPutTargetedBatchStore(t *testing.T) {
 
 	// The committed scan refreshes the Store's current watch set. This
 	// fixture tests the batch shape; watch contents have separate coverage.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      walletID,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, walletID).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Submit targeted recovery through the existing batch boundary
 	// without converting matched addresses into explicit credits.
@@ -4930,16 +4906,8 @@ func TestSyncerFullRun(t *testing.T) {
 	expectMatchingRollbackBatch(store, mockChain)
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -5365,16 +5333,8 @@ func TestInitChainSync_Errors(t *testing.T) {
 		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 
 		// Registration reads an empty watch set before enabling blocks.
-		store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-			WalletID:      0,
-			SkipBalance:   true,
-			ChainSyncOnly: true,
-		}).Return([]db.AccountInfo(nil), nil).Once()
-		expectImportedScanAddressPage(
-			store, 0, page.Result[db.AddressInfo, uint32]{},
-		)
-		store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-			Return([]db.UtxoInfo(nil), nil).Once()
+		store.On("LoadWatchSet", mock.Anything, uint32(0)).
+			Return(db.WatchSet{}, nil).Once()
 		mockChain.On(
 			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 		).Return(nil).Once()
@@ -5874,16 +5834,8 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -7949,19 +7901,13 @@ func TestLiveWatchSyncBatchCancellation(t *testing.T) {
 			cancel()
 		}).Return(nil).Once()
 
-	// Store reads may finish despite cancellation, but both
-	// reads and registration must retain the shutdown signal.
+	// A storage read can finish through cancellation; its context and
+	// the following registration must retain the worker shutdown signal.
 	canceled := mock.MatchedBy(func(ctx context.Context) bool {
 		return errors.Is(ctx.Err(), context.Canceled)
 	})
-	store.On("ListAccounts", canceled, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
+	store.On("LoadWatchSet", canceled, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	client.On(
 		"WatchAddrsFromTip", canceled, []address.Address(nil),
 	).Return(context.Canceled).Once()
@@ -8020,19 +7966,13 @@ func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
 			cancel()
 		}).Return(nil).Once()
 
-	// Store reads may finish despite cancellation, but both
-	// reads and registration must retain the shutdown signal.
+	// A storage read can finish through cancellation; its context and
+	// the following registration must retain the worker shutdown signal.
 	canceled := mock.MatchedBy(func(ctx context.Context) bool {
 		return errors.Is(ctx.Err(), context.Canceled)
 	})
-	store.On("ListAccounts", canceled, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
+	store.On("LoadWatchSet", canceled, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	client.On(
 		"WatchAddrsFromTip", canceled, []address.Address(nil),
 	).Return(context.Canceled).Once()

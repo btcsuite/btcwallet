@@ -314,67 +314,60 @@ type syncer struct {
 // A compile-time assertion to ensure that syncer implements chainProcessor.
 var _ chainProcessor = (*syncer)(nil)
 
-// refreshLiveWatches registers stored addresses and outpoints for transaction
-// notifications. The Store selects the addresses and outputs to watch.
+// refreshLiveWatches activates the persisted interests selected by Store.
+// A retry reloads the complete set after any committed scan or failed watch.
 func (s *syncer) refreshLiveWatches(ctx context.Context) error {
-	addrs, err := s.storeScanAddresses(ctx)
-	if err != nil {
-		return fmt.Errorf("read watch addresses: %w", err)
-	}
-
-	// Wallet shutdown must still cancel registration. A later sync
-	// initialization reads the persisted watch set again.
-	err = s.registry.watchAddresses(ctx, s.walletID, addrs)
-	if err != nil {
-		return fmt.Errorf("register addresses: %w", err)
-	}
-
-	outpoints, err := s.watchedOutpoints(ctx)
+	watches, err := s.loadWatchSet(ctx)
 	if err != nil {
 		return err
 	}
 
-	if len(outpoints) == 0 {
+	// Keep registration cancelable by the existing Wallet worker lifetime.
+	err = s.registry.watchAddresses(ctx, s.walletID, watches.addresses)
+	if err != nil {
+		return fmt.Errorf("register addresses: %w", err)
+	}
+
+	if len(watches.outpoints) == 0 {
 		return nil
 	}
 
-	return s.registry.watchOutpoints(ctx, s.walletID, outpoints)
+	return s.registry.watchOutpoints(ctx, s.walletID, watches.outpoints)
 }
 
-// watchedOutpoints reads the Store-selected outputs for both startup and
-// background registration, preserving its account synchronization policy.
-func (s *syncer) watchedOutpoints(ctx context.Context) ([]*wire.OutPoint,
-	error) {
-
-	credits, err := s.storeScanUnspent(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Retain each selected output's identity without changing Store policy.
-	outpoints := make([]*wire.OutPoint, 0, len(credits))
-	for _, credit := range credits {
-		outpoints = append(outpoints, &credit.OutPoint)
-	}
-
-	return outpoints, nil
-}
-
-// loadWatchSet collects persisted interests for the synchronous Manager
-// owner, avoiding a request back into the loop performing Wallet creation.
+// loadWatchSet converts one persisted snapshot into native registration data.
+// Store owns backend selection; this processor only decodes network addresses.
 func (s *syncer) loadWatchSet(ctx context.Context) (watchSet, error) {
-	// Startup has no processing worker yet; return data for owner activation.
-	addrs, err := s.storeScanAddresses(ctx)
+	stored, err := s.store.LoadWatchSet(ctx, s.walletID)
 	if err != nil {
-		return watchSet{}, fmt.Errorf("read watch addresses: %w", err)
+		return watchSet{}, fmt.Errorf("load watch set: %w", err)
 	}
 
-	outpoints, err := s.watchedOutpoints(ctx)
-	if err != nil {
-		return watchSet{}, err
+	// Preserve the receiving address selected by each stored script, as the
+	// existing scan reader does, without reading accounts in this layer.
+	var watches watchSet
+	for _, script := range stored.AddressScripts {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			script, s.cfg.ChainParams,
+		)
+		if err != nil {
+			return watchSet{}, fmt.Errorf("watch address script: %w", err)
+		}
+
+		if len(addrs) == 0 {
+			return watchSet{}, fmt.Errorf("watch address script: %w",
+				db.ErrAddressNotFound)
+		}
+
+		watches.addresses = append(watches.addresses, addrs[0])
 	}
 
-	return watchSet{addresses: addrs, outpoints: outpoints}, nil
+	// These pointers retain the returned storage values for native APIs.
+	for i := range stored.OutPoints {
+		watches.outpoints = append(watches.outpoints, &stored.OutPoints[i])
+	}
+
+	return watches, nil
 }
 
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
