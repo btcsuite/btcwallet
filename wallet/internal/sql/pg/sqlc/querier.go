@@ -283,6 +283,9 @@ type Querier interface {
 	// - Uses the wallet-scoped transaction hash lookup first, then narrows to the
 	//   unique `(tx_id, output_index)` outpoint.
 	GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpointParams) (int64, error)
+	// Block identity belongs to one Wallet, including during replacement replay.
+	GetWalletBlockByHeight(ctx context.Context, arg GetWalletBlockByHeightParams) (GetWalletBlockByHeightRow, error)
+	GetWalletBlocksInRange(ctx context.Context, arg GetWalletBlocksInRangeParams) ([]GetWalletBlocksInRangeRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	// Credit replay checks immutable ownership even after a credit has been spent.
@@ -357,6 +360,8 @@ type Querier interface {
 	// - Single-row insert. The main cost is the wallet-ownership validation join
 	//   plus FK and uniqueness checks.
 	InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error)
+	// Verify conflicts through requireBlockMatches in the same write transaction.
+	InsertWalletBlock(ctx context.Context, arg InsertWalletBlockParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
 	// InspectDatabaseIdentityNamespace permits first adoption only when the fixed
