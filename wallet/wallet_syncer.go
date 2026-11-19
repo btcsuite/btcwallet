@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -2926,4 +2927,49 @@ func (s *syncer) canonicalDisconnectFork(ctx context.Context,
 	}
 
 	return waddrmgr.BlockStamp{Height: -1}, nil
+}
+
+// canonicalDisconnectHistory snapshots each affected mined height once before
+// the Store write. Explicit nil entries classify heights beyond the source tip.
+func (s *syncer) canonicalDisconnectHistory(ctx context.Context,
+	height, sourceHeight int32) (map[uint32]*chainhash.Hash, error) {
+
+	start, err := db.Int64ToUint32(int64(height))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history start: %w", err)
+	}
+
+	tip, err := db.Int64ToUint32(int64(sourceHeight))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history tip: %w", err)
+	}
+
+	history, err := s.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID: s.walletID, StartHeight: start, EndHeight: math.MaxInt32,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history: %w", err)
+	}
+
+	canonical := make(map[uint32]*chainhash.Hash)
+	for _, info := range history {
+		h := info.Block.Height
+		if _, known := canonical[h]; known {
+			continue
+		}
+
+		if h > tip {
+			canonical[h] = nil
+			continue
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(h))
+		if err != nil {
+			return nil, fmt.Errorf("disconnect history hash: %w", err)
+		}
+
+		canonical[h] = hash
+	}
+
+	return canonical, nil
 }
