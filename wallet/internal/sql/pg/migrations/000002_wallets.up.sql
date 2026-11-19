@@ -128,6 +128,16 @@ BEFORE UPDATE ON wallet_secrets
 FOR EACH ROW
 EXECUTE FUNCTION assert_watch_only_wallet_secrets();
 
+-- Wallet-relative observations have identity independent of shared metadata.
+CREATE TABLE wallet_blocks (
+    wallet_id BIGINT NOT NULL REFERENCES wallets (id) ON DELETE RESTRICT,
+    block_height INTEGER NOT NULL CHECK (block_height >= 0),
+    header_hash BYTEA NOT NULL CHECK (octet_length(header_hash) = 32),
+    block_timestamp BIGINT NOT NULL CHECK (block_timestamp >= 0),
+    PRIMARY KEY (wallet_id, block_height),
+    UNIQUE (wallet_id, header_hash)
+);
+
 -- Wallet Sync States table to store the synchronization state of each wallet.
 -- This is kept separate from the wallets table to avoid write amplification on
 -- frequently updated sync data. Each wallet has exactly one sync state record.
