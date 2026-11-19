@@ -118,9 +118,9 @@ type mockChainProcessor struct {
 // chainProcessor interface.
 var _ chainProcessor = (*mockChainProcessor)(nil)
 
-// startupWatches exposes preparation without letting a mocked processor own
+// loadWatchSet exposes preparation without letting a mocked processor own
 // native registration or Manager startup policy.
-func (m *mockChainProcessor) startupWatches(ctx context.Context) (watchSet,
+func (m *mockChainProcessor) loadWatchSet(ctx context.Context) (watchSet,
 	error) {
 
 	args := m.Called(ctx)

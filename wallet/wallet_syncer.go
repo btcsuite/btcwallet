@@ -242,8 +242,8 @@ type watchSet struct {
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
-	// startupWatches prepares interests without requesting their activation.
-	startupWatches(ctx context.Context) (watchSet, error)
+	// loadWatchSet prepares interests without requesting their activation.
+	loadWatchSet(ctx context.Context) (watchSet, error)
 
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
@@ -360,9 +360,9 @@ func (s *syncer) watchedOutpoints(ctx context.Context) ([]*wire.OutPoint,
 	return outpoints, nil
 }
 
-// startupWatches collects persisted interests for the synchronous Manager
+// loadWatchSet collects persisted interests for the synchronous Manager
 // owner, avoiding a request back into the loop performing Wallet creation.
-func (s *syncer) startupWatches(ctx context.Context) (watchSet, error) {
+func (s *syncer) loadWatchSet(ctx context.Context) (watchSet, error) {
 	// Startup has no processing worker yet; return data for owner activation.
 	addrs, err := s.storeScanAddresses(ctx)
 	if err != nil {
