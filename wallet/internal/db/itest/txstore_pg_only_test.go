@@ -91,8 +91,8 @@ func TestRollbackToBlockRejectsHeightOverflowPostgres(t *testing.T) {
 func TestTxGraphChildBeforeConflictPostgres(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A spends F. B spends A:0 and independent input Q. Hold Q so
-	// B stops after its graph reads, while W can still try to replace A.
+	// Arrange: A spends F. B spends A:0 and independent Q. Hold their owned
+	// address so B pauses at credit insertion after its graph reads.
 	store, childParams, winnerParams := newTxGraphConflict(t)
 	walletID := childParams.WalletID
 	child := childParams.Tx
@@ -103,10 +103,10 @@ func TestTxGraphChildBeforeConflictPostgres(t *testing.T) {
 	otherID := newWallet(t, store, "other")
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
-	barrier := lockTxGraphOutput(t, ctx, store.DB(), walletID, q)
+	barrier := lockTxGraphCreditAddress(t, ctx, store.DB(), walletID, q)
 
-	// Act: Pause B at Q, then start W. Another Wallet must still accept a
-	// graph write. Release Q and join both writes before reading results.
+	// Act: Pause B at its credit FK, then start W. Another Wallet still
+	// accepts a graph write. Release the address and join both calls.
 	childCall := startTxGraphCall(
 		t, cancel, func() error {
 			return store.CreateTx(ctx, childParams)
@@ -179,8 +179,8 @@ func TestTxGraphChildBeforeConflictPostgres(t *testing.T) {
 func TestTxGraphConflictBeforeChildPostgres(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: A spends F and B spends A:0 plus Q. Hold F so W stops after
-	// reading A's descendants, before it can mark A as replaced.
+	// Arrange: A spends F and B spends A:0 plus Q. Hold A's row so W stops
+	// after descendant discovery while marking the direct root replaced.
 	store, childParams, winnerParams := newTxGraphConflict(t)
 	walletID := childParams.WalletID
 	child := childParams.Tx
@@ -191,10 +191,12 @@ func TestTxGraphConflictBeforeChildPostgres(t *testing.T) {
 	winnerParams.Received = time.Unix(3, 0)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
-	barrier := lockTxGraphOutput(t, ctx, store.DB(), walletID, f)
+	barrier := lockTxGraphTransaction(
+		t, ctx, store.DB(), walletID, child.TxIn[0].PreviousOutPoint.Hash,
+	)
 
-	// Act: Pause W at F, then start B against the same Wallet. Release F
-	// after both calls reach SQL and join them before reading the graph.
+	// Act: Pause W at A's status update, then start B against the same
+	// Wallet. Release A and join both calls before reading their results.
 	winnerCall := startTxGraphCall(
 		t, cancel, func() error {
 			return store.CreateTx(ctx, winnerParams)
@@ -375,10 +377,10 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 			},
 		),
 	)
-	barrier := lockTxGraphOutput(t, ctx, store.DB(), walletID, q)
+	barrier := lockTxGraphCreditAddress(t, ctx, store.DB(), walletID, q)
 
-	// Act: Pause B at Q, then start rollback. Release Q after both calls
-	// reach SQL. Cancellation and joining also run if an assertion fails.
+	// Act: Pause B at its credit FK, then start rollback. Release the address
+	// after both calls reach SQL. Cleanup cancels and joins on failure too.
 	childCall := startTxGraphCall(
 		t, cancel, func() error {
 			return store.CreateTx(
@@ -437,9 +439,9 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// lockTxGraphOutput holds a UTXO row in a separate SQL transaction. This
-// pauses a graph write after its reads, without changing its commit path.
-func lockTxGraphOutput(t *testing.T, ctx context.Context, raw *sql.DB,
+// lockTxGraphCreditAddress pauses credit insertion at its existing address FK.
+// This remains a write boundary after input claims no longer update UTXO rows.
+func lockTxGraphCreditAddress(t *testing.T, ctx context.Context, raw *sql.DB,
 	walletID uint32, output wire.OutPoint) *sql.Tx {
 
 	t.Helper()
@@ -450,10 +452,11 @@ func lockTxGraphOutput(t *testing.T, ctx context.Context, raw *sql.DB,
 	t.Cleanup(func() { _ = barrier.Rollback() })
 
 	_, err = barrier.ExecContext(
-		ctx, `SELECT u.id FROM utxos AS u
+		ctx, `SELECT a.id FROM utxos AS u
 		JOIN transactions AS t ON t.id = u.tx_id
+		JOIN addresses AS a ON a.id = u.address_id
 		WHERE t.wallet_id = $1 AND t.tx_hash = $2 AND u.output_index = $3
-		FOR UPDATE OF u`, walletID, output.Hash[:], output.Index,
+		FOR UPDATE OF a`, walletID, output.Hash[:], output.Index,
 	)
 	require.NoError(t, err)
 
@@ -716,4 +719,116 @@ func TestUpdateTxConcurrentConfirmationPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, winner.Block)
 	require.Equal(t, db.TxStatusPublished, winner.Status)
+}
+
+// TestLeaseAcquisitionConcurrentConfirmationPostgres verifies an acquisition
+// racing confirmation cannot resurrect a lease after the spend is disconnected.
+func TestLeaseAcquisitionConcurrentConfirmationPostgres(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		set  bool
+	}{
+		{
+			name: "single output",
+		},
+		{
+			name: "output set",
+			set:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				// Arrange: Hold a funded credit after eligibility is read.
+				// Both public routes use the same history and row barrier.
+				store := NewTestStore(t)
+				walletID, funding := newLeaseSetFixture(
+					t, store, "lease-race", 1,
+				)
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				t.Cleanup(cancel)
+
+				barrier, err := store.DB().BeginTx(ctx, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = barrier.Rollback() })
+
+				_, err = barrier.ExecContext(
+					ctx, `
+				SELECT u.id FROM utxos AS u
+				JOIN transactions AS t ON t.id = u.tx_id
+				WHERE t.wallet_id = $1 AND t.tx_hash = $2
+				AND u.output_index = $3 FOR UPDATE OF u
+			`, walletID, funding[0].Hash[:], funding[0].Index,
+				)
+				require.NoError(t, err)
+
+				spend := newRegularTx(
+					funding, []*wire.TxOut{
+						{Value: 5000, PkScript: []byte{0x51}},
+					},
+				)
+				block := CreateBlockFixture(t, store.Queries(), 600)
+
+				// Act: Start acquisition before confirmation. Release the
+				// credit once recording commits or waits behind acquisition.
+				leaseCall := startTxGraphCall(
+					t, cancel, func() error {
+						if test.set {
+							_, err := store.LeaseOutputs(
+								ctx, db.LeaseOutputsParams{
+									WalletID: walletID, OutPoints: funding,
+									ID: db.LockID{1}, NoExpiry: true,
+								},
+							)
+
+							return err
+						}
+
+						_, err := store.LeaseOutput(
+							ctx, db.LeaseOutputParams{
+								WalletID: walletID, OutPoint: funding[0],
+								ID: db.LockID{1}, NoExpiry: true,
+							},
+						)
+
+						return err
+					},
+				)
+				waitTxGraphCall(t, ctx, store.DB(), leaseCall, 1)
+				confirmation := startTxGraphCall(
+					t, cancel, func() error {
+						return store.CreateTx(
+							ctx, db.CreateTxParams{
+								WalletID: walletID,
+								Tx:       spend,
+								Received: time.Unix(1, 0),
+								Status:   db.TxStatusPublished, Block: &block,
+							},
+						)
+					},
+				)
+				waitTxGraphCall(t, ctx, store.DB(), confirmation, 2)
+				require.NoError(t, barrier.Rollback())
+				require.NoError(t, <-leaseCall)
+				require.NoError(t, <-confirmation)
+				require.NoError(t, store.RollbackToBlock(ctx, block.Height))
+				require.NoError(
+					t, store.DeleteTx(
+						ctx, db.DeleteTxParams{
+							WalletID: walletID, Txid: spend.TxHash(),
+						},
+					),
+				)
+
+				// Assert: Both routes leave available funding without the
+				// lease that confirmation already removed.
+				require.True(
+					t, walletUtxoExists(t, store, walletID, funding[0]),
+				)
+				require.Empty(t, leasedByID(t, store, walletID))
+			},
+		)
+	}
 }

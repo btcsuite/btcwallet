@@ -588,3 +588,65 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 		[]address.Address{info.Addr},
 	)
 }
+
+// TestPendingOutputVisibilitySQLite verifies SQL discovery and automatic
+// account selection hide local credits while factual accounting retains them.
+func TestPendingOutputVisibilitySQLite(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse the synced SQLite funding fixture, retaining two local
+	// credits under the same owned account without publishing their creator.
+	chain := bwmock.NewGenesisChain(t, true)
+	chain.On("BlockStamp").Return(&waddrmgr.BlockStamp{
+		Hash: *chainParams.GenesisHash,
+	}, nil).Maybe()
+	w := createSQLiteWallet(t, chain)
+	require.Eventually(
+		t, func() bool {
+			info, err := w.Info(t.Context())
+			return err == nil && info.Synced
+		}, 5*time.Second, time.Millisecond,
+	)
+	script, _, _ := storeFundingCredits(t, w)
+	source := &ScopedAccount{
+		KeyScope: waddrmgr.KeyScopeBIP0084, AccountName: "funding",
+	}
+
+	// Act: Read public discovery and accounting, then request automatic
+	// selection from the actual funded account rather than an absent default.
+	utxos, err := w.ListUnspent(t.Context(), UtxoQuery{})
+	require.NoError(t, err)
+	addresses, err := w.ListAddresses(
+		t.Context(), "funding", waddrmgr.WitnessPubKey,
+	)
+	require.NoError(t, err)
+	account, err := w.GetAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, "funding",
+	)
+	require.NoError(t, err)
+	funded, fundErr := w.FundPsbt(t.Context(), &FundIntent{
+		Packet: newFundingPacket(t, script, 10_000),
+		Policy: &InputsPolicy{
+			Source: source,
+		},
+		FeeRate:      defaultFeeRate,
+		ChangeSource: source,
+	})
+	leases, err := w.ListLeasedOutputs(t.Context())
+	require.NoError(t, err)
+
+	// Assert: Only discovery projections hide the local funds. The factual
+	// account retains their amount, and failed selection acquires no lease.
+	// Existing reservation coverage owns successful explicit Pending funding.
+	require.Empty(t, utxos)
+	require.NotEmpty(t, addresses)
+
+	for _, property := range addresses {
+		require.Zero(t, property.Balance)
+	}
+
+	require.EqualValues(t, 50_000, account.UnconfirmedBalance)
+	require.ErrorIs(t, fundErr, insufficientFundsError(t))
+	require.Nil(t, funded)
+	require.Empty(t, leases)
+}
