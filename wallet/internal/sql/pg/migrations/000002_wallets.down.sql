@@ -7,4 +7,5 @@ DROP TRIGGER IF EXISTS trg_assert_watch_only_wallet_secrets_update ON wallet_sec
 DROP FUNCTION IF EXISTS assert_watch_only_wallet_secrets();
 DROP TABLE IF EXISTS wallet_sync_states;
 DROP TABLE IF EXISTS wallet_secrets;
+DROP TABLE IF EXISTS wallet_blocks;
 DROP TABLE IF EXISTS wallets;
