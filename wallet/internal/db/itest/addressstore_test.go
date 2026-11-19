@@ -1340,9 +1340,12 @@ func TestNewImportedAddressConcurrentDuplicates(t *testing.T) {
 // TestNewImportedAddressDuplicateAcrossWallets verifies that wallet-scoped
 // uniqueness allows the same script pubkey to be imported into different
 // wallets.
+// LoadWatchSet must isolate each Wallet's raw imports without spend watches.
 func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Share one imported script across two wallets and give the
+	// second wallet another script so a wallet-wide read cannot leak peers.
 	store := NewTestStore(t)
 	// ADR 0012: imported addresses without private-key material require
 	// watch-only wallets to satisfy the symmetric invariant.
@@ -1365,6 +1368,19 @@ func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	otherScript := RandomBytes(32)
+	_, err = store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     secondWalletID,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: otherScript,
+		},
+	)
+	require.NoError(t, err)
+
+	// Act: Import the shared script into the second wallet, then observe
+	// each wallet's persisted interests through the combined read.
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     secondWalletID,
@@ -1374,9 +1390,22 @@ func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+	firstSet, err := store.LoadWatchSet(t.Context(), firstWalletID)
+	require.NoError(t, err)
+	secondSet, err := store.LoadWatchSet(t.Context(), secondWalletID)
+	require.NoError(t, err)
+
+	// Assert: The repeated import remains accountless and each watch read
+	// includes exactly its own scripts, without synthesizing spend watches.
 	require.NotZero(t, info.ID)
 	require.Nil(t, info.AccountID)
 	require.Nil(t, info.AccountNumber)
+	require.ElementsMatch(t, [][]byte{scriptPubKey}, firstSet.AddressScripts)
+	require.ElementsMatch(
+		t, [][]byte{scriptPubKey, otherScript}, secondSet.AddressScripts,
+	)
+	require.Empty(t, firstSet.OutPoints)
+	require.Empty(t, secondSet.OutPoints)
 }
 
 // TestCreateImportedAddressRawIsAccountless verifies that direct raw imported
