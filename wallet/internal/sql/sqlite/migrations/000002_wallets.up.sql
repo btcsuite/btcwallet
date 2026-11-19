@@ -140,6 +140,16 @@ BEGIN
     );
 END;
 
+-- Wallet-relative observations have identity independent of shared metadata.
+CREATE TABLE wallet_blocks (
+    wallet_id INTEGER NOT NULL REFERENCES wallets (id) ON DELETE RESTRICT,
+    block_height INTEGER NOT NULL CHECK (block_height >= 0),
+    header_hash BLOB NOT NULL CHECK (length(header_hash) = 32),
+    block_timestamp INTEGER NOT NULL CHECK (block_timestamp >= 0),
+    PRIMARY KEY (wallet_id, block_height),
+    UNIQUE (wallet_id, header_hash)
+);
+
 -- Wallet Sync States table to store the synchronization state of each wallet.
 -- This is kept separate from the wallets table to avoid write amplification on
 -- frequently updated sync data. Each wallet has exactly one sync state record.
