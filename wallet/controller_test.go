@@ -2873,15 +2873,14 @@ func TestControllerLock_StateError(t *testing.T) {
 }
 
 // TestWaitForBackoffStableRun verifies a stable sync run resets to the
-// Wallet-local retry policy instead of an independent controller constant.
+// syncer retry policy instead of an independent controller constant.
 func TestWaitForBackoffStableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Give a Wallet a distinctive Manager-owned retry interval and a
+	// Arrange: Give a syncer a distinctive Manager-owned retry interval and a
 	// timer seam that records the reset value while firing immediately.
 	retryInterval := 3 * time.Second
-	w := &Wallet{
-		lifetimeCtx: context.Background(),
+	s := &syncer{
 		cfg: Config{
 			WalletSyncRetryInterval: retryInterval,
 		},
@@ -2898,11 +2897,13 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 	}
 
 	// Act: Apply retry backoff after a run long enough to be stable.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	nextBackoff, err := s.waitForBackoff(
+		t.Context(), startTime, currentBackoff, timerFn,
+	)
 
 	// Assert: Verify the configured interval was used and exponential growth
 	// continues from that Manager-owned reset point.
-	require.True(t, ok)
+	require.NoError(t, err)
 	require.Equal(t, retryInterval*2, nextBackoff)
 }
 
@@ -2911,10 +2912,8 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 func TestWaitForBackoff_UnstableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet.
-	w := &Wallet{
-		lifetimeCtx: context.Background(),
-	}
+	// Arrange: Keep a recent attempt and an immediately firing timer.
+	s := &syncer{}
 
 	// Mock a start time that is recent (unstable).
 	startTime := time.Now()
@@ -2931,11 +2930,13 @@ func TestWaitForBackoff_UnstableRun(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	// Act: Apply the retry delay using the controlled timer and lifetime.
+	nextBackoff, err := s.waitForBackoff(
+		t.Context(), startTime, currentBackoff, timerFn,
+	)
 
-	// Assert: Verify that the operation continued and backoff doubled.
-	require.True(t, ok)
+	// Assert: The timer completes normally and doubles the unstable delay.
+	require.NoError(t, err)
 	require.Equal(t, currentBackoff*2, nextBackoff)
 }
 
@@ -2944,10 +2945,8 @@ func TestWaitForBackoff_UnstableRun(t *testing.T) {
 func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet.
-	w := &Wallet{
-		lifetimeCtx: context.Background(),
-	}
+	// Arrange: Keep a recent attempt and an immediately firing timer.
+	s := &syncer{}
 
 	startTime := time.Now()
 	// Current backoff is already high enough that doubling it would exceed
@@ -2963,11 +2962,13 @@ func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	// Act: Apply the retry delay using the controlled timer and lifetime.
+	nextBackoff, err := s.waitForBackoff(
+		t.Context(), startTime, currentBackoff, timerFn,
+	)
 
-	// Assert: Verify that the backoff is capped.
-	require.True(t, ok)
+	// Assert: Successful timer completion retains the configured upper bound.
+	require.NoError(t, err)
 	require.Equal(t, maxBackoff, nextBackoff)
 }
 
@@ -2976,13 +2977,11 @@ func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
 func TestWaitForBackoff_Shutdown(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet with a canceled context.
+	// Arrange: Cancel the lifetime and keep the retry timer blocked.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	w := &Wallet{
-		lifetimeCtx: ctx,
-	}
+	s := &syncer{}
 
 	startTime := time.Now()
 	currentBackoff := time.Second
@@ -2992,11 +2991,13 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 		return make(chan time.Time)
 	}
 
-	// Act: Wait for backoff.
-	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+	// Act: Apply the retry delay using the controlled timer and lifetime.
+	nextBackoff, err := s.waitForBackoff(
+		ctx, startTime, currentBackoff, timerFn,
+	)
 
-	// Assert: Verify that the operation was aborted.
-	require.False(t, ok)
+	// Assert: Cancellation completes normally without another retry delay.
+	require.NoError(t, err)
 	require.Equal(t, time.Duration(0), nextBackoff)
 }
 

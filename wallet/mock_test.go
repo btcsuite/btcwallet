@@ -127,6 +127,12 @@ func (m *mockChainProcessor) loadWatchSet(ctx context.Context) (watchSet,
 	return args.Get(0).(watchSet), args.Error(1)
 }
 
+// start implements the owned processing lifetime.
+func (m *mockChainProcessor) start(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
 // run implements the chainProcessor interface.
 func (m *mockChainProcessor) run(ctx context.Context) error {
 	args := m.Called(ctx)

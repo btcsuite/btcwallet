@@ -571,9 +571,9 @@ func TestSyncerRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	// Assert: The run loop should exit without error.
+	// Assert: The attempt preserves cancellation for its lifetime owner.
 	err := s.run(ctx)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestSyncerRollbackDuringBackendSync keeps rollback admission live before
@@ -4938,9 +4938,9 @@ func TestSyncerFullRun(t *testing.T) {
 	// transition, using the persisted Store tip for the rollback check.
 	err := s.run(ctx)
 
-	// Assert: Initialization and idle processing finish cleanly when the
-	// context ends, consuming each required Store and backend operation.
-	require.NoError(t, err)
+	// Assert: Initialization consumes every required operation; cancellation
+	// reaches the lifetime owner instead of being classified by the attempt.
+	require.ErrorIs(t, err, context.Canceled)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
 }
