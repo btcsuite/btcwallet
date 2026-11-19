@@ -702,7 +702,7 @@ func TestControllerStart(t *testing.T) {
 	// currency or activate scanning. Compare with the public setter's result
 	// and report to the test goroutine, which owns all assertions.
 	deps.syncer.On(
-		"run", mock.Anything,
+		"start", mock.Anything,
 	).Return(nil).Run(func(mock.Arguments) {
 		birthdayReady <- reflect.DeepEqual(expected, native)
 	}).Once()
@@ -712,7 +712,7 @@ func TestControllerStart(t *testing.T) {
 
 	// Act: Prepare runtime state, then activate the existing workers.
 	require.NoError(t, w.prepareStart(t.Context()))
-	err := w.start()
+	err := w.start(make(chan error))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, w.stop())
@@ -1033,7 +1033,7 @@ func TestControllerStop(t *testing.T) {
 
 	// Keep the worker alive after it observes Wallet cancellation so the test
 	// can distinguish shutdown initiation from complete teardown.
-	deps.syncer.On("run", mock.Anything).Run(func(args mock.Arguments) {
+	deps.syncer.On("start", mock.Anything).Run(func(args mock.Arguments) {
 		ctx, ok := args.Get(0).(context.Context)
 		if !ok {
 			return
@@ -1045,7 +1045,7 @@ func TestControllerStop(t *testing.T) {
 	}).Return(nil).Once()
 
 	require.NoError(t, w.prepareStart(t.Context()))
-	require.NoError(t, w.start())
+	require.NoError(t, w.start(make(chan error)))
 	require.True(t, w.state.isStarted())
 
 	// Put the wallet in the unlocked state, mirroring a wallet that holds
@@ -1133,10 +1133,10 @@ func TestControllerLock(t *testing.T) {
 		Return([]db.AccountInfo(nil), nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.prepareStart(t.Context()))
-	require.NoError(t, w.start())
+	require.NoError(t, w.start(make(chan error)))
 
 	// Transition the wallet to the 'Unlocked' state for testing.
 	w.state.toUnlocked()
@@ -1179,10 +1179,10 @@ func TestControllerUnlock(t *testing.T) {
 		Return([]db.AccountInfo(nil), nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.prepareStart(t.Context()))
-	require.NoError(t, w.start())
+	require.NoError(t, w.start(make(chan error)))
 	require.False(t, w.state.isUnlocked())
 
 	pass := []byte("password")
@@ -1356,10 +1356,10 @@ func TestControllerChangePassphrase(t *testing.T) {
 		Return([]db.AccountInfo(nil), nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.prepareStart(t.Context()))
-	require.NoError(t, w.start())
+	require.NoError(t, w.start(make(chan error)))
 
 	req := ChangePassphraseRequest{
 		ChangePrivate: true,
@@ -1498,14 +1498,14 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	// Allow Stop to clear secret material.
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
 	require.NoError(t, w.prepareStart(t.Context()))
-	err := w.start()
+	err := w.start(make(chan error))
 
 	// Assert: Verify success.
 	require.NoError(t, err)
@@ -1940,7 +1940,7 @@ func TestControllerInfo(t *testing.T) {
 		Return([]db.AccountInfo(nil), nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	// Mock the chain backend to return a specific name.
 	deps.chain.On("BackEnd").Return("mock")
@@ -1954,7 +1954,7 @@ func TestControllerInfo(t *testing.T) {
 	expectStopTeardown(deps)
 
 	require.NoError(t, w.prepareStart(t.Context()))
-	require.NoError(t, w.start())
+	require.NoError(t, w.start(make(chan error)))
 
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{SyncedTo: syncedTo}, nil,
@@ -2254,7 +2254,12 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 		}).Return(nil, errDBMock).Once()
 
 		startLoadedWalletForTest(t, w)
-		w.wg.Go(w.runSyncLoop)
+		w.wg.Go(func() {
+			err := w.sync.start(w.lifetimeCtx)
+			if err != nil {
+				t.Errorf("processing worker failed: %v", err)
+			}
+		})
 
 		synctest.Wait()
 
@@ -2359,7 +2364,12 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		}).Return(nil).Once()
 
 		startLoadedWalletForTest(t, w)
-		w.wg.Go(w.runSyncLoop)
+		w.wg.Go(func() {
+			err := w.sync.start(w.lifetimeCtx)
+			if err != nil {
+				t.Errorf("processing worker failed: %v", err)
+			}
+		})
 		synctest.Wait()
 
 		// Act: Finish the failed scan before delivering the next block.
@@ -2631,14 +2641,14 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 		Return([]db.AccountInfo(nil), nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	// Allow Stop to clear secret material.
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
 	require.NoError(t, w.prepareStart(t.Context()))
-	err := w.start()
+	err := w.start(make(chan error))
 
 	// Assert: Verify success.
 	require.NoError(t, err)

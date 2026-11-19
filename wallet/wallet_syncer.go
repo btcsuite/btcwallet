@@ -248,13 +248,6 @@ type chainProcessor interface {
 	// start owns initialization, processing, retries and normal cancellation.
 	start(ctx context.Context) error
 
-	// run executes the main synchronization loop.
-	run(ctx context.Context) error
-
-	// processChainEventBeforeSync services ordered observations and rollback
-	// preparation without advancing a checkpoint before watches are ready.
-	processChainEventBeforeSync(ctx context.Context, event chainEvent) error
-
 	// requestScan submits a rescan job to the syncer.
 	requestScan(ctx context.Context, req *scanReq) error
 

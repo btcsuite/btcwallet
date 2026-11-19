@@ -413,7 +413,12 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		require.NoError(t, m.dispatchChainEvent(chain.FilteredBlockConnected{
 			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 3}},
 		}))
-		w.wg.Go(w.runSyncLoop)
+		w.wg.Go(func() {
+			err := w.sync.start(w.lifetimeCtx)
+			if err != nil {
+				t.Errorf("processing worker failed: %v", err)
+			}
+		})
 		synctest.Wait()
 
 		err := m.dispatchChainEvent(chain.BlockDisconnected{
@@ -1337,12 +1342,13 @@ func newManagerLifecycleTest(t *testing.T,
 	// Manager owns the service lifetime; fixture Stop joins before assertions.
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
-		chainEvents: source.Notifications(),
-		backend:     backend,
+		lifetimeCtx:  lifetimeCtx,
+		cancel:       cancel,
+		wallets:      make(map[string]*Wallet),
+		requestChan:  make(chan createWalletReq),
+		workerErrors: make(chan error),
+		chainEvents:  source.Notifications(),
+		backend:      backend,
 		config: ManagerConfig{
 			ChainSource: source,
 			ChainParams: chainParams,
@@ -2010,17 +2016,15 @@ func TestManagerCreatePreservesInitialAccountIdentity(t *testing.T) {
 }
 
 // TestManagerCreateLifecycleSerializesStop verifies accepted creation finishes
-// startup before Stop can close storage, and real chain work drains first.
+// startup before Stop can close storage.
 func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block the candidate's runtime read and its chain worker at
-	// separate dependencies. Storage closure checks that both have returned.
+	// Arrange: Hold the accepted runtime read before Wallet activation.
+	// Storage closure must follow its completion and the Wallet join.
 	_, deps := createTestWalletWithMocks(t)
 	startupEntered := make(chan struct{})
 	releaseStartup := make(chan struct{})
-	chainEntered := make(chan struct{})
-	releaseChain := make(chan struct{})
 
 	deps.store.On("GetWallet", mock.Anything, "created").
 		Run(func(mock.Arguments) {
@@ -2032,6 +2036,7 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
+
 	vaultLock := deps.vault.On("Lock").Return().Once()
 
 	backend := &managerBackendMock{}
@@ -2054,10 +2059,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
-	chain.On("IsCurrent").Run(func(mock.Arguments) {
-		close(chainEntered)
-		<-releaseChain
-	}).Return(false).Once()
+	// Stop may cancel the worker before its first backend attempt.
+	chain.On("IsCurrent").Return(false).Maybe()
 
 	_, err := manager.Start(t.Context())
 	require.NoError(t, err)
@@ -2070,8 +2073,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Accept creation, start Stop while startup is held, then let the
-	// real chain dependency finish before shutdown can dispose storage.
+	// Act: Accept Create, wait for Stop cancellation while setup is held,
+	// then release setup so creation and joined disposal can both finish.
 	go func() {
 		w, err := manager.Create(params)
 		created <- createOutcome{
@@ -2084,12 +2087,10 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 
 	go func() { stopped <- manager.Stop() }()
 
+	<-manager.lifetimeCtx.Done()
 	close(releaseStartup)
 
 	outcome := <-created
-
-	<-chainEntered
-	close(releaseChain)
 
 	stopErr := <-stopped
 

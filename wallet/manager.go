@@ -187,6 +187,10 @@ type Manager struct {
 	// waits retain a fixed recipient set.
 	walletRequests chan watchRegistrationReq
 
+	// workerErrors carries terminal exits from the existing Wallet workers.
+	// The loop also receives it during delivery and rollback readiness waits.
+	workerErrors chan error
+
 	// wg joins the runtime before normal Stop disposes Wallets and storage.
 	wg sync.WaitGroup
 }
@@ -260,6 +264,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		wallets:        make(map[string]*Wallet),
 		requestChan:    make(chan createWalletReq),
 		walletRequests: make(chan watchRegistrationReq),
+		workerErrors:   make(chan error),
 		chainEvents:    cfg.ChainSource.Notifications(),
 		backend:        backend,
 		config:         cfg,
@@ -297,7 +302,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 
 		// Wallet requests carry their own contexts, independent of startup.
 		//nolint:contextcheck // Activation starts the request-context bridge.
-		err = wallet.start()
+		err = wallet.start(m.workerErrors)
 		if err != nil {
 			return wallets, err
 		}
@@ -470,12 +475,9 @@ type createWalletResp struct {
 func (m *Manager) mainLoop() {
 	var chainErr error
 
-	// Fatal exits need private cleanup: public Stop would self-join.
+	// Uncanceled exits carry a terminal error and need private cleanup:
+	// public Stop would self-join. Cancellation is checked under the lock.
 	defer func() {
-		if chainErr == nil {
-			return
-		}
-
 		// Serialize Start's lifetime check and CAS with terminal cleanup.
 		m.Lock()
 		defer m.Unlock()
@@ -487,7 +489,7 @@ func (m *Manager) mainLoop() {
 		}
 
 		chainErr = errors.Join(chainErr, m.stopWallets(nil))
-		log.Errorf("Chain notification processing stopped: %v", chainErr)
+		log.Errorf("Manager processing stopped: %v", chainErr)
 	}()
 
 	for {
@@ -500,6 +502,10 @@ func (m *Manager) mainLoop() {
 
 		case req := <-m.walletRequests:
 			m.chainSyncer.registerWatchSet(req)
+
+		case err := <-m.workerErrors:
+			// Common cleanup joins every Wallet before shared Store closure.
+			chainErr = err
 
 		case event, ok := <-m.chainEvents:
 			if !ok {
@@ -576,6 +582,11 @@ func (m *Manager) deliverChainEvent(wallet *Wallet, event chainEvent) error {
 			// its earlier work and consume our queued input.
 			m.chainSyncer.registerWatchSet(req)
 
+		case err := <-m.workerErrors:
+			// The exited worker cannot drain this input; abort for
+			// joined cleanup.
+			return err
+
 		case <-m.lifetimeCtx.Done():
 			return m.lifetimeCtx.Err()
 		}
@@ -622,6 +633,11 @@ func (m *Manager) awaitRollbackAck(ready <-chan struct{}) error {
 			// worker reach the pause and acknowledge it instead of deadlocking.
 			m.chainSyncer.registerWatchSet(req)
 
+		case err := <-m.workerErrors:
+			// An exited worker cannot acknowledge this pause; abort
+			// before rewind.
+			return err
+
 		case <-m.lifetimeCtx.Done():
 			return m.lifetimeCtx.Err()
 		}
@@ -645,9 +661,9 @@ func (m *Manager) handleRollbackEvent(event chain.BlockDisconnected) error {
 
 	err = m.prepareWalletsForRollback(rollbackDone)
 	if err != nil {
-		// Only Stop's lifetime cancellation interrupts preparation. Leave
-		// completion held and cleanup to that waiting caller so it receives
-		// close errors; prepared workers exit through Wallet cancellation.
+		// Cancellation or a terminal worker error leaves completion held.
+		// Owner cleanup cancels prepared workers; an accepted Stop retains
+		// disposal and receives its close errors.
 		return fmt.Errorf("wait for rollback writers: %w", err)
 	}
 
@@ -754,7 +770,7 @@ func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
 
 	err = wallet.prepareStart(ctx)
 	if err == nil {
-		err = wallet.start()
+		err = wallet.start(m.workerErrors)
 	}
 
 	if err != nil {
