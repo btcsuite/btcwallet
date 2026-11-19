@@ -17,7 +17,7 @@ import (
 // handling local.
 type UpdateWalletOps interface {
 	// EnsureBlock inserts the provided block if it does not already exist.
-	EnsureBlock(ctx context.Context, block *Block) error
+	EnsureBlock(ctx context.Context, walletID uint32, block *Block) error
 
 	// UpdateWalletSyncState writes the prepared backend-local sync-state
 	// update.
@@ -30,14 +30,14 @@ func UpdateWalletWithOps(ctx context.Context, params UpdateWalletParams,
 	ops UpdateWalletOps) error {
 
 	if params.SyncedTo != nil {
-		err := ops.EnsureBlock(ctx, params.SyncedTo)
+		err := ops.EnsureBlock(ctx, params.WalletID, params.SyncedTo)
 		if err != nil {
 			return fmt.Errorf("ensure synced block: %w", err)
 		}
 	}
 
 	if params.BirthdayBlock != nil {
-		err := ops.EnsureBlock(ctx, params.BirthdayBlock)
+		err := ops.EnsureBlock(ctx, params.WalletID, params.BirthdayBlock)
 		if err != nil {
 			return fmt.Errorf("ensure birthday block: %w", err)
 		}

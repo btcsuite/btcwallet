@@ -37,7 +37,7 @@ func TestListTxDetailsReturnsRowsWithoutBlock(t *testing.T) {
 	}
 
 	err = store.execWrite(t.Context(), func(qtx *sqlc.Queries) error {
-		return ensureBlockExists(t.Context(), qtx, confirmedBlock)
+		return ensureBlockExists(t.Context(), qtx, wallet.ID, confirmedBlock)
 	})
 	require.NoError(t, err)
 

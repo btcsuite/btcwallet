@@ -110,16 +110,15 @@ type Querier interface {
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
-	DeleteBlock(ctx context.Context, blockHeight int32) error
 	// Deletes blocks at and after the provided height.
 	//
 	// How:
-	// - Deletes directly from blocks by the natural height key.
+	// - Deletes only the owning Wallet range in wallet_blocks.
 	// - Relies on FK/trigger side effects to null transaction block references and
 	//   orphan coinbase rows.
 	// Performance:
 	// - Executes as a range delete over the block-height primary key.
-	DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int32) (int64, error)
+	DeleteBlocksAtOrAboveHeight(ctx context.Context, arg DeleteBlocksAtOrAboveHeightParams) (int64, error)
 	// Deletes all expired lease rows for a wallet.
 	//
 	// How:
@@ -223,8 +222,6 @@ type Querier interface {
 	// Atomically gets the next internal/change address index and increments the counter.
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
-	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
-	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
 	// GetDatabaseIdentity reads the canonical row only after startup has proved
 	// that exactly one row exists.
 	GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error)
@@ -335,9 +332,6 @@ type Querier interface {
 	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
-	// InsertBlock arbitrates both unique keys when wallets insert a shared block.
-	// ensureBlockExists still verifies the stored hash and timestamp afterward.
-	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	// InsertDatabaseIdentity writes the only permitted row after the namespace
 	// probe proves the fixed schema is absent and safe to claim.
 	InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error
@@ -551,7 +545,7 @@ type Querier interface {
 	//   block" listing query.
 	// Performance:
 	// - Uses the block-height index to bound the scan to the rollback range.
-	ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int32) ([]ListRollbackCoinbaseRootsRow, error)
+	ListRollbackCoinbaseRoots(ctx context.Context, arg ListRollbackCoinbaseRootsParams) ([]ListRollbackCoinbaseRootsRow, error)
 	// Lists direct child transaction IDs for one parent transaction ID.
 	//
 	// How:
@@ -671,7 +665,7 @@ type Querier interface {
 	// Performance:
 	// - Touches only wallet_sync_states rows whose heights are at or above the
 	//   rollback boundary.
-	RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int32) (int64, error)
+	RewindWalletSyncStateHeightsForRollback(ctx context.Context, arg RewindWalletSyncStateHeightsForRollbackParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and current name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames a derived account identified by wallet id, scope tuple, and number.

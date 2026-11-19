@@ -170,7 +170,7 @@ func TestListSyncedBlocksBuildsBlock(t *testing.T) {
 	blockHash := chainhash.Hash{11, 12, 13}
 	timestamp := time.Unix(1710003600, 0)
 
-	// A single-row range result drives the :many GetBlocksInRange scan path
+	// A single-row range result drives the :many owned-block scan path
 	// without standing up a real postgres store.
 	rows := &mockRows{}
 	rows.On("Next").Return(true).Once()
@@ -248,7 +248,7 @@ func TestEnsureBlockExistsRejectsConflictingBlock(t *testing.T) {
 	qtx := sqlc.New(dbtx)
 
 	// Act: Ensure the requested block exists after the insert affects no row.
-	err := ensureBlockExists(t.Context(), qtx, block)
+	err := ensureBlockExists(t.Context(), qtx, 7, block)
 
 	// Assert: Conflicting persisted metadata returns the block-mismatch
 	// sentinel after one insert and one verification read.

@@ -118,7 +118,9 @@ func (o *createTxOps) ConfirmExisting(ctx context.Context,
 	req db.CreateTxRequest,
 	_ db.CreateTxExistingTarget) error {
 
-	blockHeight, err := requireBlockMatches(ctx, o.qtx, req.Params.Block)
+	blockHeight, err := requireBlockMatches(
+		ctx, o.qtx, req.Params.WalletID, req.Params.Block,
+	)
 	if err != nil {
 		return fmt.Errorf("require confirming block: %w", err)
 	}
@@ -153,7 +155,9 @@ func (o *createTxOps) PrepareBlock(ctx context.Context,
 		return nil
 	}
 
-	height, err := requireBlockMatches(ctx, o.qtx, req.Params.Block)
+	height, err := requireBlockMatches(
+		ctx, o.qtx, req.Params.WalletID, req.Params.Block,
+	)
 	if err != nil {
 		return err
 	}

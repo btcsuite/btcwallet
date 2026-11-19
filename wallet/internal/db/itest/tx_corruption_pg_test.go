@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -81,7 +82,9 @@ func corruptTransactionHash(t *testing.T, store *pgTestStore,
 
 // forceRollbackBlockDeleteFailure installs a trigger that fails the rollback
 // block-deletion stage after sync-state rewind has run.
-func forceRollbackBlockDeleteFailure(t *testing.T, store *pgTestStore) {
+func forceRollbackBlockDeleteFailure(t *testing.T, store *pgTestStore,
+	walletID uint32) {
+
 	t.Helper()
 
 	statements := []string{
@@ -89,9 +92,10 @@ func forceRollbackBlockDeleteFailure(t *testing.T, store *pgTestStore) {
 			"RETURNS trigger LANGUAGE plpgsql AS $$ " +
 			"BEGIN RAISE EXCEPTION " +
 			"'forced rollback block delete failure'; END; $$",
-		"CREATE TRIGGER fail_rollback_block_delete " +
-			"BEFORE DELETE ON blocks FOR EACH ROW EXECUTE FUNCTION " +
-			"fail_rollback_block_delete()",
+		fmt.Sprintf("CREATE TRIGGER fail_rollback_block_delete "+
+			"BEFORE DELETE ON wallet_blocks FOR EACH ROW "+
+			"WHEN (old.wallet_id = %d) EXECUTE FUNCTION "+
+			"fail_rollback_block_delete()", walletID),
 	}
 	for _, stmt := range statements {
 		_, err := store.DB().ExecContext(t.Context(), stmt)
@@ -110,20 +114,21 @@ func corruptTransactionBlockHeight(t *testing.T, store *pgTestStore,
 
 	_, err := store.DB().ExecContext(
 		t.Context(),
-		"ALTER TABLE blocks DROP CONSTRAINT IF EXISTS "+
-			"blocks_block_height_check",
+		"ALTER TABLE wallet_blocks DROP CONSTRAINT IF EXISTS "+
+			"wallet_blocks_block_height_check",
 	)
 	require.NoError(t, err)
 
 	blockHash := RandomHash()
 	_, err = store.DB().ExecContext(
 		t.Context(),
-		"INSERT INTO blocks (block_height, header_hash, block_timestamp) "+
-			"VALUES ($1, $2, $3) "+
-			"ON CONFLICT (block_height) DO UPDATE SET "+
+		"INSERT INTO wallet_blocks "+
+			"(wallet_id, block_height, header_hash, block_timestamp) "+
+			"VALUES ($1, $2, $3, $4) "+
+			"ON CONFLICT (wallet_id, block_height) DO UPDATE SET "+
 			"header_hash = EXCLUDED.header_hash, "+
 			"block_timestamp = EXCLUDED.block_timestamp",
-		height, blockHash[:], time.Now().Unix(),
+		int64(walletID), height, blockHash[:], time.Now().Unix(),
 	)
 	require.NoError(t, err)
 
