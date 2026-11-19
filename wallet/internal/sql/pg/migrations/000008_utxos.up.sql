@@ -111,3 +111,28 @@ CREATE TRIGGER trg_assert_utxo_wallet_consistency_update
 BEFORE UPDATE OF tx_id, address_id, spent_by_tx_id ON utxos
 FOR EACH ROW
 EXECUTE FUNCTION assert_utxo_wallet_consistency();
+
+-- Share persisted spend eligibility between recovery and the combined read.
+-- Leased outputs still need watches. A confirmed spend or inactive funding
+-- transaction removes the watch, and accountless imports remain eligible.
+CREATE VIEW outputs_to_watch AS
+SELECT
+    t.wallet_id,
+    t.tx_hash,
+    u.output_index,
+    t.raw_tx
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
+LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+WHERE
+    (acc.id IS NULL OR NOT acc.no_chain_sync)
+    AND t.tx_status IN (0, 1)
+    AND (
+        u.spent_by_tx_id IS NULL
+        OR (
+            spend.block_height IS NULL
+            AND spend.tx_status IN (0, 1)
+        )
+    );

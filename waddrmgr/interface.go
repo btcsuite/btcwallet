@@ -5,6 +5,7 @@
 package waddrmgr
 
 import (
+	"context"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -124,6 +125,12 @@ type AddrStore interface {
 	// ForEachRelevantActiveAddress invokes the given closure on each active
 	// address relevant to the wallet.
 	ForEachRelevantActiveAddress(ns walletdb.ReadBucket,
+		fn func(addr address.Address) error) error
+
+	// ForEachWatchAddress visits eligible addresses from the supplied
+	// snapshot, including imported addresses in custom scopes.
+	// Cancellation stops the scan between address rows.
+	ForEachWatchAddress(ctx context.Context, ns walletdb.ReadBucket,
 		fn func(addr address.Address) error) error
 
 	// Unlock derives the master private key from the specified passphrase.
