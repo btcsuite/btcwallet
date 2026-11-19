@@ -26,8 +26,16 @@ var (
 // SQLite constraint constants expose exact extended codes to shared tests.
 const (
 	driverConstraintNotNull   = sqlite3.SQLITE_CONSTRAINT_NOTNULL
+	driverConstraintCheck     = sqlite3.SQLITE_CONSTRAINT_CHECK
 	driverConstraintImmutable = sqlite3.SQLITE_CONSTRAINT_TRIGGER
 )
+
+// insertWalletBlockParams lets the shared test use SQLite's native height type.
+type insertWalletBlockParams = sqlc.InsertWalletBlockParams
+
+// getWalletBlocksInRangeParams keeps SQLite's int64 bounds so the shared
+// regression can check the stored block through the native query.
+type getWalletBlocksInRangeParams = sqlc.GetWalletBlocksInRangeParams
 
 // testBackend returns the SQL backend expected by SQLite itests.
 func testBackend() dberr.Backend {
