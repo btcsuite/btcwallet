@@ -159,6 +159,13 @@ type Wallet struct {
 	MasterHdPubKey []byte
 }
 
+type WalletBlock struct {
+	WalletID       int64
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
 type WalletSecret struct {
 	WalletID                 int64
 	MasterPrivParams         []byte
