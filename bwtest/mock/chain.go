@@ -51,10 +51,8 @@ func NewGenesisChain(tb testing.TB, current bool) *Chain {
 	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
 	chain.On("IsCurrent").Return(current).Maybe()
 
-	// Only a current backend subscribes after completing startup sync.
-	if current {
-		chain.On("NotifyBlocks").Return(nil).Maybe()
-	}
+	// Publication subscribes before background backend synchronization.
+	chain.On("NotifyBlocks").Return(nil).Maybe()
 
 	chain.On("GetBestBlock").Return(
 		params.GenesisHash, int32(0), nil,

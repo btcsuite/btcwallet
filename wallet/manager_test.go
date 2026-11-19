@@ -72,6 +72,9 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 			Return([]db.AccountInfo{}, nil).Once()
 		store.On("DeleteExpiredLeases", mock.Anything, walletID).
 			Return(nil).Once()
+
+		store.On("LoadWatchSet", mock.Anything, walletID).
+			Return(db.WatchSet{}, nil).Once()
 	}
 
 	manager := testSQLManager(t, store)
@@ -503,10 +506,16 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 		Return([]db.AccountInfo{}, nil).Once()
 	createdDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
 		Return(nil).Once()
+
+	createdDeps.store.On("LoadWatchSet", mock.Anything, uint32(2)).
+		Return(db.WatchSet{}, nil).Once()
 	createdDeps.vault.On("Lock").Return().Once()
 
 	chainSource, ok := m.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chainSource.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chainSource.On("NotifyBlocks").Return(nil).Once()
 	chainSource.On("IsCurrent").Return(false).Maybe()
 
 	// Act: Race public Create against the held shared rewind. Its strict
@@ -1391,6 +1400,9 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 		}).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+
+		deps.store.On("LoadWatchSet", mock.Anything, id).
+			Return(db.WatchSet{}, nil).Once()
 		deps.vault.On("Lock").Return().Once()
 		data = append(data, &walletData{
 			id:    id,
@@ -1409,6 +1421,9 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	chain.On("NotifyBlocks").Return(nil).Twice()
 	chain.On("IsCurrent").Return(false).Maybe()
 
 	// Act: Publish the durable set, then reject another Start without
@@ -1460,12 +1475,12 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The second Wallet fails its birthday read. Hold the first
+	// Arrange: The second Wallet fails its watch read. Hold the first
 	// Wallet's real vault cleanup so the primary error cannot escape before
 	// the original call finishes cleaning up its partially started set.
 	_, firstDeps := createTestWalletWithMocks(t)
 	_, secondDeps := createTestWalletWithMocks(t)
-	startErr := errors.New("birthday unavailable")
+	startErr := errors.New("watch set unavailable")
 
 	firstDeps.store.On("GetWallet", mock.Anything, "first").Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
@@ -1475,8 +1490,19 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	firstDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
-	secondDeps.store.On("GetWallet", mock.Anything, "second").
-		Return(nil, startErr).Once()
+
+	firstDeps.store.On("LoadWatchSet", mock.Anything, uint32(1)).
+		Return(db.WatchSet{}, nil).Once()
+	secondDeps.store.On("GetWallet", mock.Anything, "second").Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	secondDeps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 2,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	secondDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
+		Return(nil).Once()
+	secondDeps.store.On("LoadWatchSet", mock.Anything, uint32(2)).
+		Return(db.WatchSet{}, startErr).Once()
 
 	cleanupEntered := make(chan struct{})
 	releaseCleanup := make(chan struct{})
@@ -1507,6 +1533,9 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chain.On("NotifyBlocks").Return(nil).Once()
 	chain.On("IsCurrent").Return(false).Maybe()
 
 	// Preserve both return values to detect any partial Wallet publication
@@ -2037,6 +2066,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
 
+	deps.store.On("LoadWatchSet", mock.Anything, uint32(1)).
+		Return(db.WatchSet{}, nil).Once()
 	vaultLock := deps.vault.On("Lock").Return().Once()
 
 	backend := &managerBackendMock{}
@@ -2059,6 +2090,10 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chain.On("NotifyBlocks").Return(nil).Once()
+
 	// Stop may cancel the worker before its first backend attempt.
 	chain.On("IsCurrent").Return(false).Maybe()
 
@@ -2505,6 +2540,9 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 				Return([]db.AccountInfo{}, nil).Once()
 			deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 				Return(nil).Once()
+
+			deps.store.On("LoadWatchSet", mock.Anything, uint32(1)).
+				Return(db.WatchSet{}, nil).Once()
 			deps.vault.On("Lock").Return().Once()
 
 			var observedRoot *hdkeychain.ExtendedKey
@@ -2532,6 +2570,9 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			manager.wg.Go(manager.mainLoop)
 			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 			require.True(t, ok)
+			chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+				Return(nil).Once()
+			chain.On("NotifyBlocks").Return(nil).Once()
 			chain.On("IsCurrent").Return(false).Maybe()
 
 			// Act: Complete public creation, including private runtime startup,
@@ -2870,6 +2911,9 @@ func TestManagerCreateRejectsActiveDuplicate(t *testing.T) {
 		WalletID: 1,
 	}).Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).Return(nil).Once()
+
+	store.On("LoadWatchSet", mock.Anything, uint32(1)).
+		Return(db.WatchSet{}, nil).Once()
 	m := testSQLManager(t, store)
 	first, err := m.Create(params)
 	require.NoError(t, err)
@@ -3422,6 +3466,9 @@ func TestManagerChainSourceClosed(t *testing.T) {
 		).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+
+		deps.store.On("LoadWatchSet", mock.Anything, id).
+			Return(db.WatchSet{}, nil).Once()
 		deps.vault.On("Lock").Return().Once()
 		data = append(
 			data, &walletData{
@@ -3450,6 +3497,9 @@ func TestManagerChainSourceClosed(t *testing.T) {
 	client, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	client.On("NotifyBlocks").Return(nil).Twice()
 	client.On("IsCurrent").Return(false).Maybe()
 
 	wallets, err := manager.Start(t.Context())

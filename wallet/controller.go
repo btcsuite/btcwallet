@@ -282,6 +282,12 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	return nil
 }
 
+// loadWatchSet obtains interests from the Wallet-owned processor.
+// Collection precedes activation so background preparation cannot overlap.
+func (w *Wallet) loadWatchSet(ctx context.Context) (watchSet, error) {
+	return w.sync.loadWatchSet(ctx)
+}
+
 // stop performs the Wallet's complete terminal teardown synchronously. The
 // Manager serializes lifecycle operations, so this method never runs alongside
 // start or another stop and needs no additional synchronization primitive.

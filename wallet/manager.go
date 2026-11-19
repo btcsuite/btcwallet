@@ -295,14 +295,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		wallet := newManagedWallet(cfg, walletData, m)
 		wallets = append(wallets, wallet)
 
-		err = wallet.prepareStart(ctx)
-		if err != nil {
-			return wallets, err
-		}
-
-		// Wallet requests carry their own contexts, independent of startup.
-		//nolint:contextcheck // Activation starts the request-context bridge.
-		err = wallet.start(m.workerErrors)
+		err = m.startWallet(ctx, wallet)
 		if err != nil {
 			return wallets, err
 		}
@@ -313,6 +306,63 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 	}
 
 	return wallets, nil
+}
+
+// startWallet establishes live interests before any worker can run.
+// Start calls it before the reader and Create calls it on the owner loop, so
+// neither path submits a request to itself.
+func (m *Manager) startWallet(ctx context.Context, wallet *Wallet) error {
+	err := wallet.prepareStart(ctx)
+	if err != nil {
+		return err
+	}
+
+	watches, err := wallet.loadWatchSet(ctx)
+	if err != nil {
+		return fmt.Errorf("prepare wallet watches: %w", err)
+	}
+
+	// Both entry paths already own this turn. Install all recipients before
+	// native activation can enqueue the first payment for this candidate.
+	req := watchRegistrationReq{walletID: wallet.id}
+	for _, addr := range watches.addresses {
+		req.addresses = append(req.addresses, addr.EncodeAddress())
+	}
+
+	for _, point := range watches.outpoints {
+		req.outpoints = append(req.outpoints, *point)
+	}
+
+	m.chainSyncer.registerWatchSet(req)
+
+	err = m.config.ChainSource.WatchAddrsFromTip(
+		ctx, watches.addresses,
+	)
+	if err != nil {
+		return fmt.Errorf("watch wallet addresses: %w", err)
+	}
+
+	if len(watches.outpoints) != 0 {
+		// The native RPC cannot cancel once admitted; honor setup cancellation.
+		err = ctx.Err()
+		if err != nil {
+			return err
+		}
+
+		err = m.config.ChainSource.NotifySpent(watches.outpoints)
+		if err != nil {
+			return fmt.Errorf("watch wallet outpoints: %w", err)
+		}
+	}
+
+	err = m.notifyBlocks(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Wallet requests carry their own contexts, independent of startup.
+	//nolint:contextcheck // Activation starts the request-context bridge.
+	return wallet.start(m.workerErrors)
 }
 
 // stopWallets stops all Wallets before closing storage. The slice holds Wallets
@@ -768,11 +818,7 @@ func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
 		return err
 	}
 
-	err = wallet.prepareStart(ctx)
-	if err == nil {
-		err = wallet.start(m.workerErrors)
-	}
-
+	err = m.startWallet(ctx, wallet)
 	if err != nil {
 		// Failed startup needs the same serialized disposal and reply.
 		m.Lock()
