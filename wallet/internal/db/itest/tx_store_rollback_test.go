@@ -326,3 +326,89 @@ func TestDisconnectBlockIdentities(t *testing.T) {
 		})
 	}
 }
+
+// TestDisconnectBlockPreservesCanonicalHistory protects live observations above
+// a lagging checkpoint from an unrelated later block's disconnection.
+func TestDisconnectBlockPreservesCanonicalHistory(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Catch-up is committed only through 419, but a live canonical
+	// coinbase at 420 and its pending spend are already recorded. The orphan
+	// at 421 must not give a rewind authority over that earlier valid history.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "canonical-live-history")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	fork := CreateBlockFixture(t, store.Queries(), walletID, 419)
+	canonical := CreateBlockFixture(t, store.Queries(), walletID, 420)
+	orphan := CreateBlockFixture(t, store.Queries(), walletID, 421)
+	coinbase := newCoinbaseTx(addr.ScriptPubKey)
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       coinbase,
+		Block:    &canonical,
+		Status:   db.TxStatusPublished,
+		Received: time.Unix(1710004200, 0),
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	spend := newRegularTx(
+		[]wire.OutPoint{{Hash: coinbase.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 1000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       spend,
+		Status:   db.TxStatusPublished,
+		Received: time.Unix(1710004201, 0),
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+	err = store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: walletID, SyncedTo: &fork,
+	})
+	require.NoError(t, err)
+	coinbaseBefore, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: coinbase.TxHash(),
+	})
+	require.NoError(t, err)
+	spendBefore, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: spend.TxHash(),
+	})
+	require.NoError(t, err)
+
+	// Act: The source detached 421; its earlier proven checkpoint fork does
+	// not imply that canonical observations between 419 and 421 are abandoned.
+	err = store.DisconnectBlock(t.Context(), walletID, orphan, &fork,
+		map[uint32]*chainhash.Hash{
+			canonical.Height: &canonical.Hash,
+			orphan.Height:    nil,
+		})
+
+	// Assert: Keep both the valid pending graph and canonical confirmation.
+	// The empty orphan disappears without moving the committed checkpoint.
+	require.NoError(t, err)
+	coinbaseAfter, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: coinbase.TxHash(),
+	})
+	require.NoError(t, err)
+	spendAfter, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: spend.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, spendBefore, spendAfter)
+	require.Equal(t, coinbaseBefore, coinbaseAfter)
+	current, err := store.GetWallet(t.Context(), "canonical-live-history")
+	require.NoError(t, err)
+	require.Equal(t, fork.Height, current.SyncedTo.Height)
+	require.Equal(t, fork.Hash, current.SyncedTo.Hash)
+	_, err = store.ListSyncedBlocks(t.Context(), db.ListSyncedBlocksQuery{
+		WalletID:    walletID,
+		StartHeight: orphan.Height,
+		EndHeight:   orphan.Height,
+	})
+	require.ErrorIs(t, err, db.ErrBlockNotFound)
+}
