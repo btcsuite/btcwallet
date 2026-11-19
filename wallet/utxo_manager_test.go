@@ -395,6 +395,11 @@ func TestLeaseOutputErr(t *testing.T) {
 			expectedErr: ErrOutputAlreadyLocked,
 		},
 		{
+			name:        "invalid parameter",
+			storeErr:    db.ErrInvalidParam,
+			expectedErr: ErrInvalidParam,
+		},
+		{
 			name:          "ambiguous commit",
 			storeErr:      db.ErrIndeterminateCommit,
 			expectedErr:   ErrIndeterminateCommit,
@@ -508,7 +513,8 @@ func TestReleaseOutputErr(t *testing.T) {
 	}
 }
 
-// TestListLeasedOutputs tests the ListLeasedOutputs method.
+// TestListLeasedOutputs tests that ListLeasedOutputs reports timed leases and
+// leases without expiry.
 func TestListLeasedOutputs(t *testing.T) {
 	t.Parallel()
 
@@ -530,6 +536,10 @@ func TestListLeasedOutputs(t *testing.T) {
 			OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 			LockID:     db.LockID{1},
 			Expiration: leasedOutput.Expiration,
+		}, {
+			OutPoint: wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+			LockID:   db.LockID{2},
+			NoExpiry: true,
 		}}, nil,
 	)
 
@@ -539,34 +549,9 @@ func TestListLeasedOutputs(t *testing.T) {
 		OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 		LockID:     wtxmgr.LockID{1},
 		Expiration: leasedOutput.Expiration,
-	}}, leasedOutputs)
-}
-
-// TestListLeasedOutputsNoExpiry verifies that ListLeasedOutputs reports a
-// store lease without expiry.
-func TestListLeasedOutputsNoExpiry(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Return one store lease without expiry.
-	w, mocks := createStartedWalletWithMocks(t)
-	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
-
-	mocks.store.On("ListLeasedOutputs", mock.Anything, w.id).Return(
-		[]db.LeasedOutput{{
-			OutPoint: outPoint,
-			LockID:   db.LockID{1},
-			NoExpiry: true,
-		}}, nil,
-	).Once()
-
-	// Act: List the leased outputs.
-	leasedOutputs, err := w.ListLeasedOutputs(t.Context())
-
-	// Assert: The lease reports no expiry.
-	require.NoError(t, err)
-	require.Equal(t, []*LeasedOutput{{
-		OutPoint: outPoint,
-		LockID:   wtxmgr.LockID{1},
+	}, {
+		OutPoint: wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		LockID:   wtxmgr.LockID{2},
 		NoExpiry: true,
 	}}, leasedOutputs)
 }
