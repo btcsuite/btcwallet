@@ -1,10 +1,11 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"math"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -107,33 +108,75 @@ func rewindWalletTransactions(ctx context.Context, qtx *sqlc.Queries,
 	)
 }
 
-// RollbackToBlock atomically removes every block at or above the provided
-// height and rewrites wallet sync-state references so the block delete can
-// succeed.
+// RollbackToBlock atomically rewinds only the owning Wallet, including its
+// confirmations and sync-state references before history deletion.
 func (s *Store) RollbackToBlock(ctx context.Context,
-	height uint32) error {
+	walletID, height uint32) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		// Rollback changes all Wallets. Read their IDs in ascending order
-		// so concurrent rollbacks take the graph locks in the same order.
-		wallets, err := qtx.ListWallets(
-			ctx, sqlc.ListWalletsParams{
-				PageLimit: math.MaxInt64,
-			},
-		)
+		// Serialize this Wallet's graph mutation without blocking other
+		// Wallets' independent rewind transactions.
+		err := lockTxGraph(ctx, qtx, int64(walletID))
 		if err != nil {
-			return fmt.Errorf("list rollback wallets: %w", err)
-		}
-
-		for _, wallet := range wallets {
-			err := lockTxGraph(ctx, qtx, wallet.ID)
-			if err != nil {
-				return err
-			}
+			return err
 		}
 
 		return db.RollbackToBlockWithOps(ctx, height,
-			rollbackToBlockOps{qtx: qtx})
+			rollbackToBlockOps{qtx: qtx, walletID: walletID})
+	})
+}
+
+// DisconnectBlock validates the queued identity inside the Wallet's rewind
+// transaction, so a stale notification cannot delete an installed replacement.
+func (s *Store) DisconnectBlock(ctx context.Context, walletID uint32,
+	block db.Block, _ *db.Block,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	// An empty disconnected height may have no transaction from which the
+	// caller could infer membership. Unknown is not evidence of a fork.
+	hash, known := canonical[block.Height]
+	if !known {
+		return fmt.Errorf("unknown canonical block at %d: %w",
+			block.Height, db.ErrInvalidParam)
+	}
+
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return fmt.Errorf("disconnect height: %w", err)
+	}
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Keep identity validation and the graph rewind under the same lock.
+		err := lockTxGraph(ctx, qtx, int64(walletID))
+		if err != nil {
+			return err
+		}
+
+		stored, err := qtx.GetWalletBlockByHeight(
+			ctx, sqlc.GetWalletBlockByHeightParams{
+				WalletID: int64(walletID), BlockHeight: height,
+			},
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("get disconnected block: %w", err)
+		}
+
+		// Only a matching orphan can remove owned history. A delayed event
+		// for another hash, or one still canonical, has no rewind authority.
+		if !bytes.Equal(stored.HeaderHash, block.Hash[:]) ||
+			(hash != nil && *hash == block.Hash) {
+
+			return nil
+		}
+
+		// Each native disconnect names its own boundary. A lower
+		// checkpoint does not prove later recorded blocks are orphaned.
+		return db.RollbackToBlockWithOps(ctx, block.Height,
+			rollbackToBlockOps{qtx: qtx, walletID: walletID})
 	})
 }
 
@@ -141,6 +184,9 @@ func (s *Store) RollbackToBlock(ctx context.Context,
 // sequence.
 type rollbackToBlockOps struct {
 	qtx *sqlc.Queries
+
+	// walletID binds the existing sequence to the request's history.
+	walletID uint32
 }
 
 var _ db.RollbackToBlockOps = (*rollbackToBlockOps)(nil)
@@ -155,7 +201,11 @@ func (o rollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
 		return nil, fmt.Errorf("convert rollback height: %w", err)
 	}
 
-	rows, err := o.qtx.ListRollbackCoinbaseRoots(ctx, rollbackHeight)
+	rows, err := o.qtx.ListRollbackCoinbaseRoots(
+		ctx, sqlc.ListRollbackCoinbaseRootsParams{
+			WalletID: int64(o.walletID), RollbackHeight: rollbackHeight,
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("query rollback coinbase roots: %w", err)
 	}
@@ -182,7 +232,9 @@ func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	}
 
 	_, err = o.qtx.RewindWalletSyncStateHeightsForRollback(
-		ctx, rollbackHeight,
+		ctx, sqlc.RewindWalletSyncStateHeightsForRollbackParams{
+			WalletID: int64(o.walletID), RollbackHeight: rollbackHeight,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("rewind wallet sync state heights query: %w", err)
@@ -191,7 +243,7 @@ func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	return nil
 }
 
-// DeleteBlocksAtOrAboveHeight removes the shared block rows after sync-state
+// DeleteBlocksAtOrAboveHeight removes the Wallet's block rows after sync-state
 // references have been rewound.
 func (o rollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
 	ctx context.Context, height uint32) error {
@@ -201,7 +253,11 @@ func (o rollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
 		return fmt.Errorf("convert rollback height: %w", err)
 	}
 
-	_, err = o.qtx.DeleteBlocksAtOrAboveHeight(ctx, rollbackHeight)
+	_, err = o.qtx.DeleteBlocksAtOrAboveHeight(
+		ctx, sqlc.DeleteBlocksAtOrAboveHeightParams{
+			WalletID: int64(o.walletID), RollbackHeight: rollbackHeight,
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("delete blocks at or above height query: %w", err)
 	}

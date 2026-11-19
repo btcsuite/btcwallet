@@ -22,7 +22,7 @@ func TestUpdateWalletSyncedTo(t *testing.T) {
 	created, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
 
-	block := CreateBlockFixture(t, queries, 100)
+	block := CreateBlockFixture(t, queries, created.ID, 100)
 
 	updateParams := db.UpdateWalletParams{
 		WalletID: created.ID,
@@ -60,7 +60,7 @@ func TestUpdateWalletBirthdayBlock(t *testing.T) {
 	// Initially, BirthdayBlock should be nil.
 	require.Nil(t, created.BirthdayBlock)
 
-	block := CreateBlockFixture(t, queries, 50)
+	block := CreateBlockFixture(t, queries, created.ID, 50)
 
 	updateParams := db.UpdateWalletParams{
 		WalletID:      created.ID,

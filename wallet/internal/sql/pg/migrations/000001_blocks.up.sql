@@ -1,4 +1,7 @@
 -- Wallet identity precedes owned block metadata so its foreign key can bind.
+--
+-- Migration note: Intentionally NOT idempotent (no "IF NOT EXISTS").
+-- This ensures migration tracking stays accurate and fails loudly if run twice.
 CREATE TABLE wallets (
     -- DB ID of the wallet, primary key. Only used for DB level relations.
     id BIGSERIAL PRIMARY KEY,
@@ -44,25 +47,8 @@ BEFORE UPDATE OF is_watch_only ON wallets
 FOR EACH ROW
 EXECUTE FUNCTION assert_wallet_is_watch_only_immutable();
 
--- Block metadata - tracks blocks containing wallet transactions
---
--- Migration note: Intentionally NOT idempotent (no "IF NOT EXISTS").
--- This ensures migration tracking stays accurate and fails loudly if run twice.
-CREATE TABLE blocks (
-    -- Natural key - blockchain height (genesis = 0).
-    -- The height value itself is immutable (100 is always 100),
-    -- but during reorgs the block at this height can be replaced
-    -- (DELETE old row, INSERT new row with same height, different hash).
-    block_height INTEGER PRIMARY KEY CHECK (block_height >= 0),
-
-    -- Block header hash - unique identifier for this specific block (32 bytes).
-    header_hash BYTEA NOT NULL UNIQUE CHECK (length(header_hash) = 32),
-
-    -- Unix timestamp - when the block was mined (seconds since epoch).
-    block_timestamp BIGINT NOT NULL CHECK (block_timestamp >= 0)
-);
-
--- Wallet-relative observations have identity independent of shared metadata.
+-- Each Wallet retains its own chain view until its worker processes reorgs.
+-- A replacement at one height must not overwrite another Wallet's history.
 CREATE TABLE wallet_blocks (
     wallet_id BIGINT NOT NULL REFERENCES wallets (id) ON DELETE RESTRICT,
     block_height INTEGER NOT NULL CHECK (block_height >= 0),

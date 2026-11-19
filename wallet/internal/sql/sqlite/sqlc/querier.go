@@ -109,16 +109,15 @@ type Querier interface {
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
-	DeleteBlock(ctx context.Context, blockHeight int64) error
 	// Deletes blocks at and after the provided height.
 	//
 	// How:
-	// - Deletes directly from blocks by the natural height key.
+	// - Deletes only the owning Wallet range in wallet_blocks.
 	// - Relies on FK/trigger side effects to null transaction block references and
 	//   orphan coinbase rows.
 	// Performance:
 	// - Executes as a range delete over the block-height primary key.
-	DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int64) (int64, error)
+	DeleteBlocksAtOrAboveHeight(ctx context.Context, arg DeleteBlocksAtOrAboveHeightParams) (int64, error)
 	// Deletes all expired lease rows for a wallet.
 	//
 	// How:
@@ -220,8 +219,6 @@ type Querier interface {
 	// Atomically gets the next internal/change address index and increments the counter.
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
-	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
-	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
 	// GetDatabaseIdentity reads only a canonical SQLite value tuple so dynamic
 	// storage classes and out-of-range integers become a malformed missing row.
 	GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error)
@@ -329,7 +326,6 @@ type Querier interface {
 	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
-	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	// InsertDatabaseIdentity writes the only permitted row after catalog checks
 	// prove that an unmarked SQLite file is empty and safe to claim.
 	InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error
@@ -539,7 +535,7 @@ type Querier interface {
 	//   block" listing query.
 	// Performance:
 	// - Uses the block-height index to bound the scan to the rollback range.
-	ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int64) ([]ListRollbackCoinbaseRootsRow, error)
+	ListRollbackCoinbaseRoots(ctx context.Context, arg ListRollbackCoinbaseRootsParams) ([]ListRollbackCoinbaseRootsRow, error)
 	// Lists direct child transaction IDs for one parent transaction ID.
 	//
 	// How:
@@ -569,7 +565,7 @@ type Querier interface {
 	// - Includes the active unmined set (`pending` and `published`) together with
 	//   retained invalid history such as `failed`, `replaced`, or `orphaned`
 	//   rows.
-	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	// - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 	//   so sqlc preserves the nullable block columns while the row shape stays
 	//   aligned with the confirmed query below.
 	// Performance:
@@ -582,7 +578,7 @@ type Querier interface {
 	//   in unmined `pending` or `published` status.
 	// - Excludes orphaned/replaced/failed history so delete and rollback logic do
 	//   not treat retained invalid rows as active mempool spends.
-	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	// - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 	//   so sqlc preserves the nullable block columns while the row shape stays
 	//   aligned with other transaction queries.
 	// Performance:
@@ -654,7 +650,7 @@ type Querier interface {
 	// Performance:
 	// - Touches only wallet_sync_states rows whose heights are at or above the
 	//   rollback boundary.
-	RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int64) (int64, error)
+	RewindWalletSyncStateHeightsForRollback(ctx context.Context, arg RewindWalletSyncStateHeightsForRollbackParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and current name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames a derived account identified by wallet id, scope tuple, and number.

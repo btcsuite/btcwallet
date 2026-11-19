@@ -25,7 +25,7 @@ func TestDeleteUnminedTxRemovesBranch(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 410)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 410)
 
 	// The funding tx pays the wallet twice: one output for the branch, one
 	// for an unrelated spend that must survive it.
@@ -149,7 +149,7 @@ func TestDeleteUnminedTxRejectsConfirmedAndMissing(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 420)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 420)
 	confirmed := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 5200, PkScript: addr.ScriptPubKey}},
@@ -206,7 +206,7 @@ func TestDeleteUnminedTxRemovesInvalidatedDescendant(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 450)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 450)
 
 	funding := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -277,7 +277,7 @@ func TestDeleteUnminedTxRemovesInvalidatedDescendant(t *testing.T) {
 	}
 
 	// With no rows left behind, the chain can record both again.
-	confirming := CreateBlockFixture(t, store.Queries(), 451)
+	confirming := CreateBlockFixture(t, store.Queries(), walletID, 451)
 	for i, tx := range []*wire.MsgTx{parent, child} {
 		err = store.CreateTx(
 			t.Context(),
@@ -307,7 +307,7 @@ func TestDeleteUnminedTxClearsLeaseAndReplacement(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 460)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 460)
 
 	funding := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -401,7 +401,7 @@ func TestDeleteUnminedTxRollsBackOnFailure(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 470)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 470)
 
 	funding := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -490,7 +490,7 @@ func TestDeleteUnminedTxRejectsTerminalRoot(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 460)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 460)
 
 	funding := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},

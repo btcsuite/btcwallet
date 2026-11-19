@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -224,14 +225,6 @@ type scanResult struct {
 	parentHash chainhash.Hash
 }
 
-// prepareRollbackReq asks the worker to finish earlier chain writes before
-// Manager rewinds shared storage. The worker closes readyForRollback and waits
-// for rollbackDone, which Manager closes after success or terminal cleanup.
-type prepareRollbackReq struct {
-	readyForRollback chan struct{}
-	rollbackDone     <-chan struct{}
-}
-
 // watchSet carries Wallet interests for Manager-owned registration. Startup
 // returns this data before a Wallet worker can submit runtime requests.
 type watchSet struct {
@@ -249,8 +242,8 @@ type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
-	// processChainEventBeforeSync services ordered observations and rollback
-	// preparation without advancing a checkpoint before watches are ready.
+	// processChainEventBeforeSync services ordered observations without
+	// advancing a checkpoint before watches are ready.
 	processChainEventBeforeSync(ctx context.Context, event chainEvent) error
 
 	// requestScan submits a rescan job to the syncer.
@@ -475,8 +468,8 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 	for {
 		select {
 		case event := <-s.chainEventChan:
-			// Initialization cannot depend on a rollback that is itself
-			// waiting for this worker. Preserve mailbox order on this owner.
+			// Process disconnections on this worker even while waiting for
+			// the backend, so queued reorgs cannot block later source input.
 			err := s.processChainEventBeforeSync(ctx, event)
 			if err != nil {
 				return err
@@ -642,7 +635,7 @@ func (s *syncer) rewindToBlock(ctx context.Context,
 	// tip rewound while transaction state still references the abandoned
 	// chain. RollbackToBlock derives the new sync tip from the stored
 	// fork-point block, so the caller only supplies the rollback boundary.
-	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	err = s.store.RollbackToBlock(ctx, s.walletID, rollbackHeight)
 	if err != nil {
 		return fmt.Errorf("rollback to block: %w", err)
 	}
@@ -727,6 +720,7 @@ func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 
 	blocks, err := s.store.ListSyncedBlocks(
 		ctx, db.ListSyncedBlocksQuery{
+			WalletID:    s.walletID,
 			StartHeight: start,
 			EndHeight:   end,
 		},
@@ -988,6 +982,7 @@ func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
 	if int64(block.Height) < int64(current.Height) {
 		blocks, err := s.store.ListSyncedBlocks(
 			ctx, db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: block.Height,
 				EndHeight:   block.Height,
 			},
@@ -1992,23 +1987,13 @@ func (s *syncer) processChainEventBeforeSync(ctx context.Context,
 }
 
 // processChainEvent applies Manager-prepared matches without parsing them
-// again. Rollback preparation waits for Manager to settle shared persistence.
+// again.
 func (s *syncer) processChainEvent(ctx context.Context,
 	event chainEvent) error {
 
 	switch n := event.notification.(type) {
-	case prepareRollbackReq:
-		// Acknowledge only from the worker so historical and live writes
-		// are both quiescent until Manager releases this operation.
-		close(n.readyForRollback)
-
-		select {
-		case <-n.rollbackDone:
-			return nil
-
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	case chain.BlockDisconnected:
+		return s.disconnectBlock(ctx, n)
 
 	case chain.RelevantTx:
 		return s.putTxNotifications(ctx, event.matches, n.Block)
@@ -2041,7 +2026,7 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	return s.scanWithRewind(ctx, req)
 }
 
-// checkForRollbackBeforeCommit handles pending rollback preparation before a
+// checkForRollbackBeforeCommit handles an ordered disconnection before a
 // scan commits. It returns ordinary queued events unprocessed; callers apply
 // them after the batch attempt, preserving prepared matches and result order.
 func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
@@ -2049,7 +2034,7 @@ func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
 
 	select {
 	case event := <-s.chainEventChan:
-		if _, ok := event.notification.(prepareRollbackReq); !ok {
+		if _, ok := event.notification.(chain.BlockDisconnected); !ok {
 			return event, nil
 		}
 
@@ -2867,4 +2852,168 @@ func (s *syncer) loadWalletScanData(ctx context.Context) ([]storeScanAccount,
 	[]address.Address, []wtxmgr.Credit, error) {
 
 	return s.loadStoreScanData(ctx, nil)
+}
+
+// canonicalDisconnectFork skips pruned Wallet hashes and fetches headers only
+// after proving canonical membership; Neutrino may already delete old headers.
+func (s *syncer) canonicalDisconnectFork(ctx context.Context,
+	height int32, synced waddrmgr.BlockStamp) (waddrmgr.BlockStamp, error) {
+
+	for ; height >= 0; height-- {
+		// The loop bounds prove this Wallet height is non-negative.
+		h := uint32(height)
+
+		blocks, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				WalletID: s.walletID, StartHeight: h, EndHeight: h,
+			},
+		)
+		if err != nil {
+			if errors.Is(err, db.ErrBlockNotFound) {
+				continue
+			}
+
+			var managerErr waddrmgr.ManagerError
+			if errors.As(err, &managerErr) &&
+				managerErr.ErrorCode == waddrmgr.ErrBlockNotFound {
+
+				continue
+			}
+
+			return waddrmgr.BlockStamp{}, err
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(height))
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork hash: %w", err,
+			)
+		}
+
+		if *hash != blocks[0].Hash {
+			continue
+		}
+
+		if height == synced.Height {
+			return synced, nil
+		}
+
+		header, err := s.cfg.Chain.GetBlockHeader(hash)
+		if err != nil {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"disconnect fork header: %w", err,
+			)
+		}
+
+		return waddrmgr.BlockStamp{
+			Height: height, Hash: *hash, Timestamp: header.Timestamp,
+		}, nil
+	}
+
+	return waddrmgr.BlockStamp{Height: -1}, nil
+}
+
+// canonicalDisconnectHistory snapshots each affected mined height once before
+// the Store write. Explicit nil entries classify heights beyond the source tip.
+func (s *syncer) canonicalDisconnectHistory(ctx context.Context,
+	height, sourceHeight int32) (map[uint32]*chainhash.Hash, error) {
+
+	start, err := db.Int64ToUint32(int64(height))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history start: %w", err)
+	}
+
+	tip, err := db.Int64ToUint32(int64(sourceHeight))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history tip: %w", err)
+	}
+
+	history, err := s.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID: s.walletID, StartHeight: start, EndHeight: math.MaxInt32,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history: %w", err)
+	}
+
+	canonical := make(map[uint32]*chainhash.Hash)
+	for _, info := range history {
+		h := info.Block.Height
+		if _, known := canonical[h]; known {
+			continue
+		}
+
+		if h > tip {
+			canonical[h] = nil
+			continue
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(h))
+		if err != nil {
+			return nil, fmt.Errorf("disconnect history hash: %w", err)
+		}
+
+		canonical[h] = hash
+	}
+
+	return canonical, nil
+}
+
+// disconnectBlock resolves canonical evidence before atomically rewinding this
+// Wallet. Its single worker orders this operation with live and scanned writes.
+func (s *syncer) disconnectBlock(ctx context.Context,
+	event chain.BlockDisconnected) error {
+
+	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
+	if err != nil {
+		return fmt.Errorf("disconnect block: %w", err)
+	}
+
+	synced, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, sourceHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("disconnect source tip: %w", err)
+	}
+
+	fork, err := s.canonicalDisconnectFork(
+		ctx, min(synced.Height, event.Height-1, sourceHeight), synced,
+	)
+	if err != nil {
+		return err
+	}
+
+	canonical, err := s.canonicalDisconnectHistory(
+		ctx, max(0, fork.Height+1), sourceHeight,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Empty blocks have no mined record from which to infer membership.
+	// Include the observed height explicitly before asking Store to rewind.
+	if _, known := canonical[block.Height]; !known {
+		canonical[block.Height] = nil
+		if event.Height <= sourceHeight {
+			hash, err := s.cfg.Chain.GetBlockHash(int64(event.Height))
+			if err != nil {
+				return fmt.Errorf("disconnect block hash: %w", err)
+			}
+
+			canonical[block.Height] = hash
+		}
+	}
+
+	err = s.store.DisconnectBlock(ctx, s.walletID, *block,
+		db.OptionalBlockFromBlockStamp(fork), canonical)
+	if err != nil {
+		return fmt.Errorf("disconnect Wallet history: %w", err)
+	}
+
+	// A committed rewind needs catch-up before this worker can be current.
+	s.state.Store(uint32(syncStateSyncing))
+
+	return nil
 }

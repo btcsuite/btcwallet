@@ -18,9 +18,9 @@ var _ UpdateWalletOps = (*mockUpdateWalletOps)(nil)
 
 // EnsureBlock implements UpdateWalletOps.
 func (m *mockUpdateWalletOps) EnsureBlock(ctx context.Context,
-	block *Block) error {
+	walletID uint32, block *Block) error {
 
-	args := m.Called(ctx, block)
+	args := m.Called(ctx, walletID, block)
 	return args.Error(0)
 }
 
@@ -53,7 +53,9 @@ func TestUpdateWalletWithOps(t *testing.T) {
 	)
 
 	// Verify call order: EnsureBlock for SyncedTo -> UpdateWalletSyncState.
-	ensureCall := ops.On("EnsureBlock", mock.Anything, syncedBlock).
+	ensureCall := ops.On(
+		"EnsureBlock", mock.Anything, params.WalletID, syncedBlock,
+	).
 		Return(nil).Once()
 	updateCall := ops.On("UpdateWalletSyncState", mock.Anything, params).
 		Return(nil).Once()
@@ -93,9 +95,13 @@ func TestUpdateWalletWithOpsEnsuresBlocksBeforeUpdate(t *testing.T) {
 
 	// Verify call order: EnsureBlock for SyncedTo -> EnsureBlock for
 	// BirthdayBlock -> UpdateWalletSyncState.
-	ensureSyncCall := ops.On("EnsureBlock", mock.Anything, syncedBlock).
+	ensureSyncCall := ops.On(
+		"EnsureBlock", mock.Anything, params.WalletID, syncedBlock,
+	).
 		Return(nil).Once()
-	ensureBirthdayCall := ops.On("EnsureBlock", mock.Anything, birthdayBlock).
+	ensureBirthdayCall := ops.On(
+		"EnsureBlock", mock.Anything, params.WalletID, birthdayBlock,
+	).
 		Return(nil).Once()
 	updateCall := ops.On("UpdateWalletSyncState", mock.Anything, params).
 		Return(nil).Once()

@@ -84,12 +84,12 @@ func (o *updateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 // PrepareState validates any referenced confirming block and captures the
 // postgres-specific state params for the later row update.
 func (o *updateTxOps) PrepareState(ctx context.Context,
-	state db.UpdateTxState) error {
+	walletID uint32, state db.UpdateTxState) error {
 
 	blockHeight := sql.NullInt32{}
 
 	if state.Block != nil {
-		height, err := requireBlockMatches(ctx, o.qtx, state.Block)
+		height, err := requireBlockMatches(ctx, o.qtx, walletID, state.Block)
 		if err != nil {
 			return fmt.Errorf("require confirming block: %w", err)
 		}

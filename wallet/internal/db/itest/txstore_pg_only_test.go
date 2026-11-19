@@ -82,7 +82,8 @@ func TestRollbackToBlockRejectsHeightOverflowPostgres(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	err := store.RollbackToBlock(t.Context(), ^uint32(0))
+	walletID := newWallet(t, store, "rollback-overflow")
+	err := store.RollbackToBlock(t.Context(), walletID, ^uint32(0))
 	require.ErrorContains(t, err, "convert rollback height")
 }
 
@@ -281,7 +282,7 @@ func newTxGraphConflict(t *testing.T) (*pgTestStore, db.CreateTxParams,
 		[]wire.OutPoint{f},
 		[]*wire.TxOut{{Value: 5500, PkScript: []byte{0x51}}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 1)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 1)
 	require.NoError(
 		t, store.CreateTx(
 			t.Context(), db.CreateTxParams{
@@ -349,7 +350,7 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 		[]wire.OutPoint{{Hash: root.TxHash()}, q},
 		[]*wire.TxOut{{Value: 11000, PkScript: addr.ScriptPubKey}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 1)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	require.NoError(
@@ -395,7 +396,7 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 	waitTxGraphCall(t, ctx, store.DB(), childCall, 1)
 	rollbackCall := startTxGraphCall(
 		t, cancel, func() error {
-			return store.RollbackToBlock(ctx, 1)
+			return store.RollbackToBlock(ctx, walletID, 1)
 		},
 	)
 	waitTxGraphCall(t, ctx, store.DB(), rollbackCall, 2)

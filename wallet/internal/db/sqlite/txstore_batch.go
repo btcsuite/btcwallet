@@ -87,7 +87,7 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 	// block row; advancing the wallet sync tip stays the sole
 	// responsibility of applyBatchSyncTip.
 	if params.Block != nil {
-		err = ensureBlockExists(ctx, qtx, params.Block)
+		err = ensureBlockExists(ctx, qtx, params.WalletID, params.Block)
 		if err != nil {
 			return fmt.Errorf("ensure tx block: %w", err)
 		}
@@ -311,7 +311,7 @@ func applyBatchSyncTip(ctx context.Context, qtx *sqlc.Queries,
 		return nil
 	}
 
-	err := ensureBlockExists(ctx, qtx, params.SyncedTo)
+	err := ensureBlockExists(ctx, qtx, params.WalletID, params.SyncedTo)
 	if err != nil {
 		return fmt.Errorf("ensure synced block: %w", err)
 	}

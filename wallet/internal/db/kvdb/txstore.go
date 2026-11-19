@@ -1420,7 +1420,9 @@ func (s *Store) RewindWallet(_ context.Context,
 // block below the rollback boundary. Each field is only rewound when it points
 // at or above the rollback boundary, matching the SQL backends, which clamp
 // only affected wallet sync-state heights.
-func (s *Store) RollbackToBlock(_ context.Context, height uint32) error {
+func (s *Store) RollbackToBlock(_ context.Context, _ uint32,
+	height uint32) error {
+
 	height32, err := db.Uint32ToInt32(height)
 	if err != nil {
 		return fmt.Errorf("kvdb.Store.RollbackToBlock: height: %w", err)
@@ -2374,7 +2376,7 @@ func nonNegativeInt32ToUint32(value int32) uint32 {
 // before the write: present nil means above the source tip, while an absent
 // affected height is unknown and aborts before mutation. Stale mined identities
 // are preserved independently of an exact manager-only rewind.
-func (s *Store) DisconnectBlock(_ context.Context, block db.Block,
+func (s *Store) DisconnectBlock(_ context.Context, _ uint32, block db.Block,
 	previous *db.Block, canonical map[uint32]*chainhash.Hash) error {
 
 	height, err := db.Uint32ToInt32(block.Height)

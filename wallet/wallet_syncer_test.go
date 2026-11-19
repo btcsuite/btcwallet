@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -73,50 +74,50 @@ func newTestSyncer(t *testing.T, cfg Config, addrStore waddrmgr.AddrStore,
 }
 
 // TestSyncerRollbackRejectsStaleBatch rejects old-branch facts fetched before
-// the historical sync commit path acknowledges a database-wide rollback.
+// the historical sync worker processes its queued disconnection.
 func TestSyncerRollbackRejectsStaleBatch(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		t.Helper()
 
-		// Arrange: Keep an already fetched credit outside Store, then block
-		// a rollback-preparation request before the sync write.
-		store := &walletmock.Store{}
-		s := newTestSyncer(t, Config{}, nil, nil, nil, store, 7)
-		fixture := newStoreScanBatchFixture(t)
-		state := NewRecoveryState(0, &chainParams, nil)
-		rollbackDone := make(chan struct{})
+	// Arrange: An already fetched batch has an ordered disconnect ahead of
+	// its commit. The same worker must rewind before rejecting those facts.
+	store := &walletmock.Store{}
+	backend := &bwmock.Chain{}
+	s := newTestSyncer(t, Config{Chain: backend}, nil, nil, nil, store, 7)
+	fixture := newStoreScanBatchFixture(t)
+	state := NewRecoveryState(0, &chainParams, nil)
+	fork := db.Block{}
+	disconnected := db.Block{Height: 100}
+	events := make(chan chainEvent, 1)
 
-		readyForRollback := make(chan struct{})
-		events := make(chan chainEvent, 1)
-		s.chainEventChan = events
+	s.chainEventChan = events
 
-		events <- chainEvent{notification: prepareRollbackReq{
-			readyForRollback: readyForRollback,
-			rollbackDone:     rollbackDone,
-		}}
+	events <- chainEvent{notification: chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 100},
+	}}
 
-		store.On("RollbackToBlock", mock.Anything, uint32(100)).
-			Return(nil).Once()
-		t.Cleanup(func() { store.AssertExpectations(t) })
-
-		// Act: The batch prepares for rollback before conversion or
-		// persistence. Roll back after readiness, then release the worker.
-		batch := make(chan error, 1)
-		go func() {
-			batch <- s.putSyncBatch(t.Context(), state,
-				[]scanResult{fixture.result})
-		}()
-
-		<-readyForRollback
-		require.Empty(t, batch)
-		require.NoError(t, store.RollbackToBlock(t.Context(), 100))
-		close(rollbackDone)
-
-		// Assert: No ApplyScanBatch call is permitted by the mock;
-		// neither old credit nor its old checkpoint can reappear.
-		require.ErrorIs(t, <-batch, ErrStateChanged)
+	store.On("GetWallet", mock.Anything, s.cfg.Name).
+		Return(&db.WalletInfo{SyncedTo: &fork}, nil).Once()
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID: 7, StartHeight: 0, EndHeight: 0,
+	}).Return([]db.Block{fork}, nil).Once()
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: 7, StartHeight: 1, EndHeight: math.MaxInt32,
+	}).Return([]db.TxInfo(nil), nil).Once()
+	backend.On("GetBestBlock").Return(&fork.Hash, int32(0), nil).Once()
+	backend.On("GetBlockHash", int64(0)).Return(&fork.Hash, nil).Once()
+	store.On("DisconnectBlock", mock.Anything, uint32(7), disconnected,
+		&fork, map[uint32]*chainhash.Hash{100: nil}).Return(nil).Once()
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		backend.AssertExpectations(t)
 	})
+
+	// Act: Attempt persistence on the actual worker commit boundary.
+	err := s.putSyncBatch(t.Context(), state, []scanResult{fixture.result})
+
+	// Assert: No ApplyScanBatch call is permitted. Old credit and checkpoint
+	// facts cannot be reapplied after the worker's own successful rewind.
+	require.ErrorIs(t, err, ErrStateChanged)
 }
 
 // TestSyncerRollbackTargetedBatch keeps an accepted targeted request alive
@@ -147,7 +148,7 @@ func TestSyncerRollbackTargetedBatch(t *testing.T) {
 		store.On("ListOutputsToWatch", mock.Anything, uint32(7)).
 			Return([]db.UtxoInfo(nil), nil).Twice()
 		backend.On("GetBestBlock").
-			Return(&chainhash.Hash{2}, int32(1), nil).Twice()
+			Return(&chainhash.Hash{2}, int32(1), nil).Times(3)
 
 		read, release := make(chan struct{}), make(chan struct{})
 		for _, hash := range []chainhash.Hash{{1}, {2}} {
@@ -166,8 +167,22 @@ func TestSyncerRollbackTargetedBatch(t *testing.T) {
 			}
 		}
 
-		store.On("RollbackToBlock", mock.Anything, uint32(1)).
-			Return(nil).Once()
+		fork := db.Block{}
+		store.On("GetWallet", mock.Anything, s.cfg.Name).
+			Return(&db.WalletInfo{SyncedTo: &fork}, nil).Once()
+		store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+			WalletID: 7, StartHeight: 0, EndHeight: 0,
+		}).Return([]db.Block{fork}, nil).Once()
+		store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID: 7, StartHeight: 1, EndHeight: math.MaxInt32,
+		}).Return([]db.TxInfo(nil), nil).Once()
+		backend.On("GetBlockHash", int64(0)).Return(&fork.Hash, nil).Once()
+		backend.On("GetBlockHash", int64(1)).Return(
+			&chainhash.Hash{2}, nil,
+		).Once()
+		store.On("DisconnectBlock", mock.Anything, uint32(7),
+			db.Block{Height: 1, Hash: chainhash.Hash{1}}, &fork,
+			map[uint32]*chainhash.Hash{1: {2}}).Return(nil).Once()
 		store.On("ApplyScanBatch", mock.Anything, mock.MatchedBy(
 			func(params db.ScanBatchParams) bool {
 				return params.WalletID == 7 &&
@@ -189,20 +204,13 @@ func TestSyncerRollbackTargetedBatch(t *testing.T) {
 
 		<-read
 
-		// Act: Request rollback preparation after reading the old branch, then
-		// wait for the worker to stop chain writes before rolling back.
-		rollbackDone := make(chan struct{})
-		readyForRollback := make(chan struct{})
-
-		events <- chainEvent{notification: prepareRollbackReq{
-			readyForRollback: readyForRollback,
-			rollbackDone:     rollbackDone,
+		// Act: Queue the disconnect after reading the old branch. Releasing
+		// the read lets that same worker rewind and refetch its target range.
+		events <- chainEvent{notification: chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 1, Hash: chainhash.Hash{1}},
 		}}
 
 		close(release)
-		<-readyForRollback
-		require.NoError(t, store.RollbackToBlock(t.Context(), 1))
-		close(rollbackDone)
 
 		// Assert: A fresh state and replacement header precede the sole
 		// targeted commit; the request completes instead of being dropped.
@@ -633,7 +641,8 @@ func TestSyncerRollbackDuringBackendSync(t *testing.T) {
 		client.On("IsCurrent").Return(true).Once()
 		client.On("NotifyBlocks").Return(nil).Once()
 		client.On("GetBestBlock").Unset()
-		client.On("GetBestBlock").Return(&hash, int32(1), nil).Once()
+		client.On("GetBestBlock").Return(&hash, int32(1), nil).Twice()
+		client.On("GetBlockHash", int64(1)).Return(&hash, nil).Once()
 		client.On("GetBlockHashes", int64(1), int64(1)).
 			Return([]chainhash.Hash{hash}, nil).Once()
 		client.On("GetBlocks", []chainhash.Hash{hash}).
@@ -641,20 +650,18 @@ func TestSyncerRollbackDuringBackendSync(t *testing.T) {
 
 		events := make(chan chainEvent, 1)
 		s.chainEventChan = events
-		ready, done := make(chan struct{}), make(chan struct{})
 		initialized := make(chan error, 1)
 		workerDone := make(chan struct{})
 		ctx, cancel := context.WithCancel(t.Context())
 		// Join before the fixture closes Store, including assertion failures
-		// while preparation is held and only cancellation can release it.
+		// while initialization waits for backend readiness.
 		defer func() {
 			cancel()
 			<-workerDone
 		}()
 
-		// Act: Feed the ordinary observation before preparation on the same
-		// mailbox while initialization waits for backend readiness. Receiving
-		// the acknowledgement proves the earlier observation was processed.
+		// Act: Feed the ordinary observation and a stale disconnect through
+		// the same worker while initialization waits for backend readiness.
 		go func() {
 			defer close(workerDone)
 
@@ -668,18 +675,16 @@ func TestSyncerRollbackDuringBackendSync(t *testing.T) {
 			},
 		}}
 
-		events <- chainEvent{notification: prepareRollbackReq{
-			readyForRollback: ready,
-			rollbackDone:     done,
+		events <- chainEvent{notification: chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 1, Hash: chainhash.Hash{99}},
 		}}
 
-		<-ready
+		synctest.Wait()
 
 		current, err := s.store.GetWallet(t.Context(), s.cfg.Name)
 		require.NoError(t, err)
 		require.Equal(t, before.SyncedTo, current.SyncedTo)
 		require.Empty(t, initialized)
-		close(done)
 		require.NoError(t, <-initialized)
 		finished, err := s.advanceChainSync(t.Context())
 
@@ -772,6 +777,7 @@ func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {
 		&db.WalletInfo{SyncedTo: &db.Block{Hash: tip.Hash, Height: 100}}, nil,
 	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(nil, db.ErrBlockNotFound).Once()
@@ -779,6 +785,7 @@ func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {
 	// The individual tip is unavailable too; retain the existing remote
 	// identity proof rather than treating the whole range as corrupt.
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 100,
 		EndHeight:   100,
 	}).Return(nil, db.ErrBlockNotFound).Once()
@@ -873,6 +880,7 @@ func TestCheckRollbackDetected(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
@@ -905,7 +913,7 @@ func TestCheckRollbackDetected(t *testing.T) {
 	// rolls transaction state back and rewinds the sync tip together via
 	// RollbackToBlock for the rollback boundary (fork height 95 + 1).
 	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
+		"RollbackToBlock", mock.Anything, s.walletID, uint32(96),
 	).Return(nil).Once()
 
 	// Act: Compare the committed Store history against the diverging branch.
@@ -938,11 +946,13 @@ func TestCheckRollbackSparseFork(t *testing.T) {
 	for _, height := range []uint32{100, 99, 98} {
 		store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: height - 9,
 				EndHeight:   height,
 			}).Return([]db.Block(nil), db.ErrBlockNotFound).Once()
 		store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: height,
 				EndHeight:   height,
 			}).Return([]db.Block{
@@ -958,7 +968,8 @@ func TestCheckRollbackSparseFork(t *testing.T) {
 	client.On("GetBestBlock").Return(&tip.Hash, int32(100), nil).Times(3)
 	client.On("GetBlockHeader", &forkHash).
 		Return(&wire.BlockHeader{Timestamp: time.Unix(98, 0)}, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(99)).Return(nil).Once()
+	store.On("RollbackToBlock", mock.Anything, s.walletID, uint32(99)).
+		Return(nil).Once()
 
 	// Act: Recover against the diverging sparse history using Store reads.
 	err := s.checkRollback(t.Context())
@@ -997,6 +1008,7 @@ func TestCheckRollbackShorterTip(t *testing.T) {
 
 		store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: end - 9,
 				EndHeight:   end,
 			}).Return(blocks, nil).Once()
@@ -1012,7 +1024,8 @@ func TestCheckRollbackShorterTip(t *testing.T) {
 		Return(remoteHashes, nil).Once()
 	client.On("GetBlockHeader", &forkHash).
 		Return(&wire.BlockHeader{Timestamp: time.Unix(90, 0)}, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(91)).Return(nil).Once()
+	store.On("RollbackToBlock", mock.Anything, s.walletID, uint32(91)).
+		Return(nil).Once()
 
 	// Act: Compare the stored tip against the shorter current chain.
 	err := s.checkRollback(t.Context())
@@ -1047,10 +1060,12 @@ func TestCheckRollbackGenesisFork(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 1,
 		EndHeight:   10,
 	}).Return(blocks, nil).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 0,
 		EndHeight:   0,
 	}).Return([]db.Block{
@@ -1065,7 +1080,8 @@ func TestCheckRollbackGenesisFork(t *testing.T) {
 		Return([]chainhash.Hash{*chainParams.GenesisHash}, nil).Once()
 	client.On("GetBlockHeader", chainParams.GenesisHash).
 		Return(&chainParams.GenesisBlock.Header, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(1)).Return(nil).Once()
+	store.On("RollbackToBlock", mock.Anything, s.walletID, uint32(1)).
+		Return(nil).Once()
 
 	// Act: Search backwards beyond the mismatching first batch.
 	err := s.checkRollback(t.Context())
@@ -1100,10 +1116,12 @@ func TestCheckRollbackNoRecordedAncestor(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 1,
 		EndHeight:   10,
 	}).Return(blocks, nil).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 0,
 		EndHeight:   0,
 	}).Return([]db.Block{
@@ -2574,6 +2592,7 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		&db.WalletInfo{SyncedTo: &db.Block{Height: 102}}, nil,
 	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 101,
 		EndHeight:   101,
 	}).Return([]db.Block{
@@ -2723,6 +2742,7 @@ func TestProcessFilteredBlockHistoryIdentity(t *testing.T) {
 			).Once()
 			store.On("ListSyncedBlocks", mock.Anything,
 				db.ListSyncedBlocksQuery{
+					WalletID:    s.walletID,
 					StartHeight: 101,
 					EndHeight:   101,
 				},
@@ -5933,6 +5953,7 @@ func TestCheckRollback_RemoteError(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
@@ -6112,6 +6133,7 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 92,
 		EndHeight:   101,
 	}).Return(localBlocks, nil).Once()
@@ -6852,6 +6874,7 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 		},
 	}
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 100,
 		EndHeight:   101,
 	}).Return(blocks, nil).Once()
@@ -6887,7 +6910,7 @@ func TestRewindToBlockRoutesStore(t *testing.T) {
 	}
 
 	store.On(
-		"RollbackToBlock", mock.Anything, uint32(101),
+		"RollbackToBlock", mock.Anything, s.walletID, uint32(101),
 	).Return(nil).Once()
 
 	err := s.rewindToBlock(t.Context(), fork)
@@ -7901,6 +7924,7 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
@@ -7926,7 +7950,7 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	// the stored fork-point block, so the caller only supplies the rollback
 	// boundary.
 	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
+		"RollbackToBlock", mock.Anything, s.walletID, uint32(96),
 	).Return(nil).Once()
 
 	// Act: Check the saved tip against the shorter current branch.
@@ -8810,11 +8834,7 @@ func TestManagerRollbackKvdbSparseFork(t *testing.T) {
 	client := &bwmock.Chain{}
 	t.Cleanup(func() { client.AssertExpectations(t) })
 
-	backend := &kvdbManagerBackend{
-		store:       kvdb.NewStore(conn, s.txStore, mgr),
-		addressMgr:  mgr,
-		chainSource: client,
-	}
+	s.cfg.Chain = client
 	client.On("GetBestBlock").Return(&tip.Hash, int32(4), nil).Once()
 	client.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
 	client.On("GetBlockHeader", &fork.Hash).Return(
@@ -8824,10 +8844,17 @@ func TestManagerRollbackKvdbSparseFork(t *testing.T) {
 		&chainhash.Hash{22}, nil,
 	).Once()
 
+	client.On("GetBlockHash", int64(4)).Return(
+		&chainhash.Hash{44}, nil,
+	).Once()
+
 	// Act on a known empty disconnected tip. Missing hashes must not hide
 	// the older mined orphan or require any discarded orphan header.
-	err = backend.rollbackToBlock(t.Context(), db.Block{
-		Height: 4, Hash: tip.Hash,
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 4, Hash: tip.Hash},
+			Time:  tip.Timestamp,
+		},
 	})
 
 	// Assert the full canonical fork stamp is retained and the older mined
@@ -8880,11 +8907,7 @@ func TestManagerRollbackKvdbHeaderFailure(t *testing.T) {
 	client := &bwmock.Chain{}
 	t.Cleanup(func() { client.AssertExpectations(t) })
 
-	backend := &kvdbManagerBackend{
-		store:       kvdb.NewStore(conn, s.txStore, mgr),
-		addressMgr:  mgr,
-		chainSource: client,
-	}
+	s.cfg.Chain = client
 	client.On("GetBestBlock").Return(&tip.Hash, int32(4), nil).Once()
 	client.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
 
@@ -8895,8 +8918,11 @@ func TestManagerRollbackKvdbHeaderFailure(t *testing.T) {
 
 	// Act on a known empty disconnected tip. Missing hashes must not hide
 	// the older mined orphan or require any discarded orphan header.
-	err = backend.rollbackToBlock(t.Context(), db.Block{
-		Height: 4, Hash: tip.Hash,
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 4, Hash: tip.Hash},
+			Time:  tip.Timestamp,
+		},
 	})
 
 	// Assert the original causal error escapes and neither persistence nor
@@ -8943,21 +8969,21 @@ func TestManagerRollbackKvdbEmptyAboveTip(t *testing.T) {
 	client := &bwmock.Chain{}
 	t.Cleanup(func() { client.AssertExpectations(t) })
 
-	backend := &kvdbManagerBackend{
-		store:       kvdb.NewStore(conn, s.txStore, mgr),
-		addressMgr:  mgr,
-		chainSource: client,
-	}
+	s.cfg.Chain = client
 	client.On("GetBestBlock").Return(&chainhash.Hash{33}, int32(3), nil).Twice()
 	client.On("GetBlockHash", int64(1)).Return(&stamp.Hash, nil).Twice()
 	client.On("GetBlockHash", int64(2)).Return(&chainhash.Hash{22}, nil).Twice()
 
+	client.On("GetBlockHash", int64(3)).Return(
+		&chainhash.Hash{33}, nil,
+	).Once()
+
 	// Act on the unknown empty block first, then on the actual mined orphan.
-	require.NoError(t, backend.rollbackToBlock(t.Context(), db.Block{
-		Height: 3, Hash: reorgBlock(3).Hash,
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockDisconnected(reorgBlock(3)),
 	}))
-	require.NoError(t, backend.rollbackToBlock(t.Context(), db.Block{
-		Height: uint32(old.Height), Hash: old.Hash, Timestamp: old.Time,
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockDisconnected(old),
 	}))
 
 	// Assert the lower matching notification detached its history without
@@ -9031,11 +9057,7 @@ func TestManagerRollbackKvdbCoinbaseDescendants(t *testing.T) {
 	client := &bwmock.Chain{}
 	t.Cleanup(func() { client.AssertExpectations(t) })
 
-	backend := &kvdbManagerBackend{
-		store:       kvdb.NewStore(conn, s.txStore, mgr),
-		addressMgr:  mgr,
-		chainSource: client,
-	}
+	s.cfg.Chain = client
 	client.On("GetBestBlock").Return(&canonical.Hash, int32(2), nil).Once()
 	client.On("GetBlockHash", int64(0)).Return(
 		chaincfg.SimNetParams.GenesisHash, nil,
@@ -9046,9 +9068,9 @@ func TestManagerRollbackKvdbCoinbaseDescendants(t *testing.T) {
 	client.On("GetBlockHash", int64(1)).Return(&chainhash.Hash{11}, nil).Once()
 	client.On("GetBlockHash", int64(2)).Return(&canonical.Hash, nil).Once()
 
-	// Act through the backend operation used while Manager holds workers ready.
-	require.NoError(t, backend.rollbackToBlock(t.Context(), db.Block{
-		Height: uint32(old.Height), Hash: old.Hash, Timestamp: old.Time,
+	// Act through the owning worker, which resolves and persists its rewind.
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockDisconnected(old),
 	}))
 
 	// Assert pending records and credits survive immediately, the canonical
@@ -9139,11 +9161,7 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	client := &bwmock.Chain{}
 	t.Cleanup(func() { client.AssertExpectations(t) })
 
-	backend := &kvdbManagerBackend{
-		store:       kvdb.NewStore(conn, s.txStore, mgr),
-		addressMgr:  mgr,
-		chainSource: client,
-	}
+	s.cfg.Chain = client
 	client.On("GetBestBlock").Return(
 		&chainhash.Hash{99}, int32(102), nil,
 	).Once()
@@ -9159,10 +9177,10 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 		&chainhash.Hash{99}, nil,
 	).Once()
 
-	// Act through the Manager backend operation so partitioning and replay
+	// Act through the Wallet worker so partitioning and replay
 	// must distinguish the two branches within the same atomic recovery.
-	err = backend.rollbackToBlock(t.Context(), db.Block{
-		Height: uint32(old.Height), Hash: old.Hash, Timestamp: old.Time,
+	err = s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.BlockDisconnected(old),
 	})
 
 	// Assert the full manager stamp survives, the canonical coinbase stays
