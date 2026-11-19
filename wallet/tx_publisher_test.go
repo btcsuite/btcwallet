@@ -1212,52 +1212,80 @@ func TestPublishTx(t *testing.T) {
 func TestBroadcastSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Reuse the started Wallet and owned-address helpers for the
-	// PoC's mixed-output publication. Ownership still resolves both scripts;
-	// recorded credits and receiving watches must contain ordinary change only.
-	w, m := createStartedWalletWithMocks(t)
-	addr := mustNewStandalonePubKeyAddr(t)
-	keyOnly := mustNewStandalonePubKeyAddr(t)
-	script := mustPayToAddrScript(addr)
-	keyScript := mustPayToAddrScript(keyOnly)
-	tx := subscriptionTx(script, 92)
-	tx.AddTxOut(wire.NewTxOut(1000, keyScript))
-
-	m.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
-		Return(nil, chain.ErrUnimplemented).Once()
-	m.store.On("ResolveOwnedAddresses", mock.Anything,
-		matchResolveOwnedAddressesQuery(w.id, script, keyScript),
-	).Return(map[string]*db.AddressInfo{
-		string(script): {},
-		string(keyScript): {
-			NoChainSync: true,
+	cases := []struct {
+		name     string
+		excluded db.AddressInfo
+	}{
+		{
+			name: "excluded account",
+			excluded: db.AddressInfo{
+				NoChainSync: true,
+			},
 		},
-	}, nil).Once()
-	m.store.On("CreateTx", mock.Anything,
-		matchCreateTxParams(
-			w.id, tx, testTxLabel,
-			map[uint32]address.Address{0: addr},
-		),
-	).Return(nil).Once()
-	// Preserve the parent's immutable-byte read after the mixed-output write.
-	m.store.On("GetTx", mock.Anything, db.GetTxQuery{
-		WalletID: w.id,
-		Txid:     tx.TxHash(),
-	}).Return(&db.TxInfo{
-		SerializedTx: serializeTx(t, tx),
-		Status:       db.TxStatusPublished,
-		Label:        testTxLabel,
-	}, nil).Once()
-	m.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
-	m.chain.On("SendRawTransaction", tx, false).Return(nil, nil).Once()
+		{
+			name: "native imported external key",
+			excluded: db.AddressInfo{
+				IsImported:        true,
+				HasDerivationPath: true,
+				KeyScope: db.KeyScope{
+					Purpose: 1017,
+					Coin:    1,
+				},
+			},
+		},
+	}
 
-	// Act: Publish through the public Wallet entry point with both owned
-	// scripts present, using their stored receiving policy during admission.
-	err := w.Broadcast(t.Context(), tx, testTxLabel)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Assert: The send succeeds with only eligible credits and watch data;
-	// existing fixture cleanup verifies all exact mock expectations once.
-	require.NoError(t, err)
+			// Arrange a started Wallet owning both output scripts. Only
+			// ordinary change belongs in receiving credits and watches;
+			// each case supplies the excluded key's actual metadata.
+			w, m := createStartedWalletWithMocks(t)
+			addr := mustNewStandalonePubKeyAddr(t)
+			keyOnly := mustNewStandalonePubKeyAddr(t)
+			script := mustPayToAddrScript(addr)
+			keyScript := mustPayToAddrScript(keyOnly)
+			tx := subscriptionTx(script, 92)
+			tx.AddTxOut(wire.NewTxOut(1000, keyScript))
+
+			m.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+				Return(nil, chain.ErrUnimplemented).Once()
+			m.store.On("ResolveOwnedAddresses", mock.Anything,
+				matchResolveOwnedAddressesQuery(w.id, script, keyScript),
+			).Return(map[string]*db.AddressInfo{
+				string(script):    {},
+				string(keyScript): &tc.excluded,
+			}, nil).Once()
+			m.store.On("CreateTx", mock.Anything,
+				matchCreateTxParams(
+					w.id, tx, testTxLabel,
+					map[uint32]address.Address{0: addr},
+				),
+			).Return(nil).Once()
+			// Preserve the prerequisite's immutable-byte read after admission.
+			m.store.On("GetTx", mock.Anything, db.GetTxQuery{
+				WalletID: w.id,
+				Txid:     tx.TxHash(),
+			}).Return(&db.TxInfo{
+				SerializedTx: serializeTx(t, tx),
+				Status:       db.TxStatusPublished,
+				Label:        testTxLabel,
+			}, nil).Once()
+			m.chain.On("NotifyReceived", []address.Address{addr}).
+				Return(nil).Once()
+			m.chain.On("SendRawTransaction", tx, false).Return(nil, nil).Once()
+
+			// Act through public Broadcast so admission applies receiving
+			// policy with both owned scripts still present.
+			err := w.Broadcast(t.Context(), tx, testTxLabel)
+
+			// Assert publication succeeds with eligible credits and watches.
+			// Fixture cleanup verifies the exact mock expectations once.
+			require.NoError(t, err)
+		})
+	}
 }
 
 // TestBroadcastAlreadyBroadcastedAtPublish tests that Broadcast treats an
