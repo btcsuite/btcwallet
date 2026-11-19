@@ -596,6 +596,11 @@ type Querier interface {
 	// from the beginning; otherwise returns wallets with id > cursor_id. Returns up
 	// to page_limit rows.
 	ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error)
+	// Loads address and outpoint interests from one snapshot before publication.
+	// The row kind separates the two collections without multiplying them; NULLs
+	// occupy fields that do not apply. Accountless imports remain eligible, and
+	// output selection preserves ListOutputsToWatch's active/unmined policy.
+	LoadWatchSet(ctx context.Context, walletID int64) ([]LoadWatchSetRow, error)
 	// Marks a wallet-owned UTXO as spent by a transaction.
 	//
 	// How:

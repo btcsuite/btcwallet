@@ -300,6 +300,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
 	}
+	if q.loadWatchSetStmt, err = db.PrepareContext(ctx, LoadWatchSet); err != nil {
+		return nil, fmt.Errorf("error preparing query LoadWatchSet: %w", err)
+	}
 	if q.markUtxoSpentStmt, err = db.PrepareContext(ctx, MarkUtxoSpent); err != nil {
 		return nil, fmt.Errorf("error preparing query MarkUtxoSpent: %w", err)
 	}
@@ -795,6 +798,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
+	if q.loadWatchSetStmt != nil {
+		if cerr := q.loadWatchSetStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing loadWatchSetStmt: %w", cerr)
+		}
+	}
 	if q.markUtxoSpentStmt != nil {
 		if cerr := q.markUtxoSpentStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing markUtxoSpentStmt: %w", cerr)
@@ -976,6 +984,7 @@ type Queries struct {
 	listUnminedTransactionsStmt                   *sql.Stmt
 	listUtxosStmt                                 *sql.Stmt
 	listWalletsStmt                               *sql.Stmt
+	loadWatchSetStmt                              *sql.Stmt
 	markUtxoSpentStmt                             *sql.Stmt
 	releaseUtxoLeaseStmt                          *sql.Stmt
 	rewindWalletSyncStateHeightsForRollbackStmt   *sql.Stmt
@@ -1084,6 +1093,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUnminedTransactionsStmt:                   q.listUnminedTransactionsStmt,
 		listUtxosStmt:                                 q.listUtxosStmt,
 		listWalletsStmt:                               q.listWalletsStmt,
+		loadWatchSetStmt:                              q.loadWatchSetStmt,
 		markUtxoSpentStmt:                             q.markUtxoSpentStmt,
 		releaseUtxoLeaseStmt:                          q.releaseUtxoLeaseStmt,
 		rewindWalletSyncStateHeightsForRollbackStmt:   q.rewindWalletSyncStateHeightsForRollbackStmt,

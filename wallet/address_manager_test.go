@@ -2644,11 +2644,10 @@ func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
 func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Keep the first backend non-current so only the public batch
-	// call registers; its failure captures the committed destinations.
+	// Arrange: Finish empty startup registration, then fail public batch
+	// delivery to capture the committed destinations for a later reopen.
 	path := filepath.Join(t.TempDir(), "reopen.sqlite")
 	chainMock := createTestChain(t)
-	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 
 	openManager := func(chainSource chain.Interface) *Manager {
 		m, err := NewManager(t.Context(), ManagerConfig{
@@ -2669,6 +2668,7 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	params := sqliteCreateParams(t)
 	w, err := m.Create(params)
 	require.NoError(t, err)
+	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 	require.NoError(t, w.keyVault.Unlock(
 		t.Context(), params.PrivatePassphrase,
 	))
@@ -2702,13 +2702,12 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	replayed := make(chan []address.Address, 1)
 
 	freshChain := createTestChain(t)
-	freshChain.On("IsCurrent").Unset()
-	freshChain.On("IsCurrent").Return(true).Maybe()
 	freshChain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 	freshChain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			restored, _ = args.Get(1).([]address.Address)
 		}).Return(nil).Once()
+	freshChain.On("NotifyBlocks").Unset()
 	freshChain.On("NotifyBlocks").Run(func(mock.Arguments) {
 		replayed <- restored
 	}).Return(nil).Once()
@@ -2728,8 +2727,7 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Assert: Delivery exposed no batch but both committed addresses
-	// survived closing the database and were replayed by sync initialization.
-	// Start itself need not join replay; bound the wait for the fresh worker.
+	// survived closing the database and were registered before Start returned.
 	require.ErrorIs(t, deliveryErr, errDBMock)
 	require.Nil(t, batch)
 	require.Len(t, committed, 2)
@@ -2739,8 +2737,8 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	case got := <-replayed:
 		require.Equal(t, committed, got)
 
-	case <-time.After(5 * time.Second):
-		t.Fatal("committed batch was not replayed after reopening")
+	default:
+		t.Fatal("Start returned before committed batch registration")
 	}
 }
 
@@ -3253,10 +3251,11 @@ func TestNewAddressSQLiteConcurrentEmptyBranch(t *testing.T) {
 	// Arrange: hold the first registration until every later caller has
 	// returned; later registrations succeed immediately.
 	chainMock := createTestChain(t)
-	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 
 	path := filepath.Join(t.TempDir(), "concurrent.sqlite")
 	_, w := newReceivingSQLiteWallet(t, path, chainMock)
+	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+
 	selector := NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "recv")
 
 	enteredChan := make(chan struct{})

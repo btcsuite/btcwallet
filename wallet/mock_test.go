@@ -118,27 +118,18 @@ type mockChainProcessor struct {
 // chainProcessor interface.
 var _ chainProcessor = (*mockChainProcessor)(nil)
 
-// startupWatches exposes preparation without letting a mocked processor own
+// loadWatchSet exposes preparation without letting a mocked processor own
 // native registration or Manager startup policy.
-func (m *mockChainProcessor) startupWatches(ctx context.Context) (watchSet,
+func (m *mockChainProcessor) loadWatchSet(ctx context.Context) (watchSet,
 	error) {
 
 	args := m.Called(ctx)
 	return args.Get(0).(watchSet), args.Error(1)
 }
 
-// run implements the chainProcessor interface.
-func (m *mockChainProcessor) run(ctx context.Context) error {
+// start implements the owned processing lifetime.
+func (m *mockChainProcessor) start(ctx context.Context) error {
 	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// processChainEventBeforeSync records ordered mailbox work during startup or
-// retry so controller tests can require its exact acceptance and result.
-func (m *mockChainProcessor) processChainEventBeforeSync(ctx context.Context,
-	event chainEvent) error {
-
-	args := m.Called(ctx, event)
 	return args.Error(0)
 }
 

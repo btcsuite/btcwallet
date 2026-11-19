@@ -72,6 +72,9 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 			Return([]db.AccountInfo{}, nil).Once()
 		store.On("DeleteExpiredLeases", mock.Anything, walletID).
 			Return(nil).Once()
+
+		store.On("LoadWatchSet", mock.Anything, walletID).
+			Return(db.WatchSet{}, nil).Once()
 	}
 
 	manager := testSQLManager(t, store)
@@ -413,7 +416,12 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		require.NoError(t, m.dispatchChainEvent(chain.FilteredBlockConnected{
 			Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 3}},
 		}))
-		w.wg.Go(w.runSyncLoop)
+		w.wg.Go(func() {
+			err := w.sync.start(w.lifetimeCtx)
+			if err != nil {
+				t.Errorf("processing worker failed: %v", err)
+			}
+		})
 		synctest.Wait()
 
 		err := m.dispatchChainEvent(chain.BlockDisconnected{
@@ -498,10 +506,16 @@ func TestManagerChainRollbackCreate(t *testing.T) {
 		Return([]db.AccountInfo{}, nil).Once()
 	createdDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
 		Return(nil).Once()
+
+	createdDeps.store.On("LoadWatchSet", mock.Anything, uint32(2)).
+		Return(db.WatchSet{}, nil).Once()
 	createdDeps.vault.On("Lock").Return().Once()
 
 	chainSource, ok := m.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chainSource.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chainSource.On("NotifyBlocks").Return(nil).Once()
 	chainSource.On("IsCurrent").Return(false).Maybe()
 
 	// Act: Race public Create against the held shared rewind. Its strict
@@ -1337,12 +1351,13 @@ func newManagerLifecycleTest(t *testing.T,
 	// Manager owns the service lifetime; fixture Stop joins before assertions.
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
-		chainEvents: source.Notifications(),
-		backend:     backend,
+		lifetimeCtx:  lifetimeCtx,
+		cancel:       cancel,
+		wallets:      make(map[string]*Wallet),
+		requestChan:  make(chan createWalletReq),
+		workerErrors: make(chan error),
+		chainEvents:  source.Notifications(),
+		backend:      backend,
 		config: ManagerConfig{
 			ChainSource: source,
 			ChainParams: chainParams,
@@ -1385,6 +1400,9 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 		}).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+
+		deps.store.On("LoadWatchSet", mock.Anything, id).
+			Return(db.WatchSet{}, nil).Once()
 		deps.vault.On("Lock").Return().Once()
 		data = append(data, &walletData{
 			id:    id,
@@ -1403,6 +1421,9 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	chain.On("NotifyBlocks").Return(nil).Twice()
 	chain.On("IsCurrent").Return(false).Maybe()
 
 	// Act: Publish the durable set, then reject another Start without
@@ -1454,12 +1475,12 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The second Wallet fails its birthday read. Hold the first
+	// Arrange: The second Wallet fails its watch read. Hold the first
 	// Wallet's real vault cleanup so the primary error cannot escape before
 	// the original call finishes cleaning up its partially started set.
 	_, firstDeps := createTestWalletWithMocks(t)
 	_, secondDeps := createTestWalletWithMocks(t)
-	startErr := errors.New("birthday unavailable")
+	startErr := errors.New("watch set unavailable")
 
 	firstDeps.store.On("GetWallet", mock.Anything, "first").Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
@@ -1469,8 +1490,19 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	firstDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
-	secondDeps.store.On("GetWallet", mock.Anything, "second").
-		Return(nil, startErr).Once()
+
+	firstDeps.store.On("LoadWatchSet", mock.Anything, uint32(1)).
+		Return(db.WatchSet{}, nil).Once()
+	secondDeps.store.On("GetWallet", mock.Anything, "second").Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	secondDeps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 2,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	secondDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(2)).
+		Return(nil).Once()
+	secondDeps.store.On("LoadWatchSet", mock.Anything, uint32(2)).
+		Return(db.WatchSet{}, startErr).Once()
 
 	cleanupEntered := make(chan struct{})
 	releaseCleanup := make(chan struct{})
@@ -1501,6 +1533,9 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chain.On("NotifyBlocks").Return(nil).Once()
 	chain.On("IsCurrent").Return(false).Maybe()
 
 	// Preserve both return values to detect any partial Wallet publication
@@ -2010,17 +2045,15 @@ func TestManagerCreatePreservesInitialAccountIdentity(t *testing.T) {
 }
 
 // TestManagerCreateLifecycleSerializesStop verifies accepted creation finishes
-// startup before Stop can close storage, and real chain work drains first.
+// startup before Stop can close storage.
 func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block the candidate's runtime read and its chain worker at
-	// separate dependencies. Storage closure checks that both have returned.
+	// Arrange: Hold the accepted runtime read before Wallet activation.
+	// Storage closure must follow its completion and the Wallet join.
 	_, deps := createTestWalletWithMocks(t)
 	startupEntered := make(chan struct{})
 	releaseStartup := make(chan struct{})
-	chainEntered := make(chan struct{})
-	releaseChain := make(chan struct{})
 
 	deps.store.On("GetWallet", mock.Anything, "created").
 		Run(func(mock.Arguments) {
@@ -2032,6 +2065,9 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	}).Return([]db.AccountInfo{}, nil).Once()
 	deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 		Return(nil).Once()
+
+	deps.store.On("LoadWatchSet", mock.Anything, uint32(1)).
+		Return(db.WatchSet{}, nil).Once()
 	vaultLock := deps.vault.On("Lock").Return().Once()
 
 	backend := &managerBackendMock{}
@@ -2054,10 +2090,12 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
-	chain.On("IsCurrent").Run(func(mock.Arguments) {
-		close(chainEntered)
-		<-releaseChain
-	}).Return(false).Once()
+	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Once()
+	chain.On("NotifyBlocks").Return(nil).Once()
+
+	// Stop may cancel the worker before its first backend attempt.
+	chain.On("IsCurrent").Return(false).Maybe()
 
 	_, err := manager.Start(t.Context())
 	require.NoError(t, err)
@@ -2070,8 +2108,8 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	created := make(chan createOutcome, 1)
 	stopped := make(chan error, 1)
 
-	// Act: Accept creation, start Stop while startup is held, then let the
-	// real chain dependency finish before shutdown can dispose storage.
+	// Act: Accept Create, wait for Stop cancellation while setup is held,
+	// then release setup so creation and joined disposal can both finish.
 	go func() {
 		w, err := manager.Create(params)
 		created <- createOutcome{
@@ -2084,12 +2122,10 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 
 	go func() { stopped <- manager.Stop() }()
 
+	<-manager.lifetimeCtx.Done()
 	close(releaseStartup)
 
 	outcome := <-created
-
-	<-chainEntered
-	close(releaseChain)
 
 	stopErr := <-stopped
 
@@ -2504,6 +2540,9 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 				Return([]db.AccountInfo{}, nil).Once()
 			deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
 				Return(nil).Once()
+
+			deps.store.On("LoadWatchSet", mock.Anything, uint32(1)).
+				Return(db.WatchSet{}, nil).Once()
 			deps.vault.On("Lock").Return().Once()
 
 			var observedRoot *hdkeychain.ExtendedKey
@@ -2531,6 +2570,9 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			manager.wg.Go(manager.mainLoop)
 			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 			require.True(t, ok)
+			chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+				Return(nil).Once()
+			chain.On("NotifyBlocks").Return(nil).Once()
 			chain.On("IsCurrent").Return(false).Maybe()
 
 			// Act: Complete public creation, including private runtime startup,
@@ -2869,6 +2911,9 @@ func TestManagerCreateRejectsActiveDuplicate(t *testing.T) {
 		WalletID: 1,
 	}).Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).Return(nil).Once()
+
+	store.On("LoadWatchSet", mock.Anything, uint32(1)).
+		Return(db.WatchSet{}, nil).Once()
 	m := testSQLManager(t, store)
 	first, err := m.Create(params)
 	require.NoError(t, err)
@@ -3421,6 +3466,9 @@ func TestManagerChainSourceClosed(t *testing.T) {
 		).Return([]db.AccountInfo{}, nil).Once()
 		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
 			Return(nil).Once()
+
+		deps.store.On("LoadWatchSet", mock.Anything, id).
+			Return(db.WatchSet{}, nil).Once()
 		deps.vault.On("Lock").Return().Once()
 		data = append(
 			data, &walletData{
@@ -3449,6 +3497,9 @@ func TestManagerChainSourceClosed(t *testing.T) {
 	client, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
 
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+	client.On("NotifyBlocks").Return(nil).Twice()
 	client.On("IsCurrent").Return(false).Maybe()
 
 	wallets, err := manager.Start(t.Context())
@@ -3904,5 +3955,348 @@ func TestManagerWatchRegistrationDuringRollback(t *testing.T) {
 		close(req.readyForRollback)
 		<-req.rollbackDone
 		require.NoError(t, m.Stop())
+	})
+}
+
+// TestManagerWorkerFailureStops joins failed workers at each owner wait site.
+func TestManagerWorkerFailureStops(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		event         any
+		events        int
+		pendingSource int
+		pendingWallet int
+	}{
+		{
+			name: "IdleLoop",
+		},
+		{
+			name:          "BlockedDelivery",
+			event:         chain.BlockConnected{},
+			events:        3,
+			pendingSource: 1,
+			pendingWallet: 1,
+		},
+		{
+			name: "PendingRollbackAck",
+			event: chain.BlockDisconnected{
+				Block: wtxmgr.Block{
+					Height: 1,
+				},
+			},
+			events:        1,
+			pendingWallet: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				t.Helper()
+
+				// Arrange: Hold the production Wallet worker before its
+				// terminal result. Source data leaves Manager idle, blocked
+				// on delivery, or waiting for a rollback acknowledgement.
+				w, deps := createTestWalletWithMocks(t)
+				failWorker := make(chan struct{})
+				deps.syncer.On("start", mock.Anything).
+					Run(func(mock.Arguments) {
+						<-failWorker
+					}).Return(&dbruntime.AmbiguousTxCommitError{
+					Err: errDBMock,
+				}).Once()
+				deps.store.On("GetWallet", mock.Anything, w.cfg.Name).
+					Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).
+					Once()
+				deps.store.On("ListAccounts", mock.Anything,
+					db.ListAccountsQuery{WalletID: w.id}).
+					Return([]db.AccountInfo{}, nil).Once()
+				deps.store.On("DeleteExpiredLeases", mock.Anything, w.id).
+					Return(nil).Once()
+				vaultLock := deps.vault.On("Lock").Return().Once()
+
+				notifications := make(chan any, 3)
+				backend := &managerBackendMock{}
+				backend.On("close").Return(nil).Once().NotBefore(vaultLock)
+
+				source := &bwmock.Chain{}
+				source.On("Notifications").
+					Return((<-chan any)(notifications)).Once()
+				manager := newManagerLifecycleTest(t, backend, source)
+
+				// Release failed setup before fixture cleanup joins the held
+				// worker. Act uses the same gate without a public Stop rescue.
+				releaseFailure := sync.OnceFunc(func() { close(failWorker) })
+				t.Cleanup(releaseFailure)
+
+				w.registry = manager
+				manager.wallets[w.cfg.Name] = w
+				manager.started.Store(true)
+				require.NoError(t, w.prepareStart(t.Context()))
+				require.NoError(t, w.start(manager.workerErrors))
+				manager.wg.Go(manager.mainLoop)
+
+				for range tc.events {
+					notifications <- tc.event
+				}
+
+				synctest.Wait()
+				require.Len(t, notifications, tc.pendingSource)
+				require.Len(t, w.chainEventChan, tc.pendingWallet)
+
+				// Act: Report an uncertain write through the actual Wallet
+				// worker while the selected owner wait is durably blocked.
+				releaseFailure()
+				manager.wg.Wait()
+
+				// Assert: Disposal cancels and joins the Wallet before one
+				// Store close. No rewind expectation is permitted: a failed
+				// worker cannot acknowledge that its earlier writes settled.
+				require.ErrorIs(t, manager.lifetimeCtx.Err(), context.Canceled)
+				require.Equal(t, lifecycleStopped,
+					lifecycle(w.state.lifecycle.Load()))
+			})
+		})
+	}
+}
+
+// managerWatchHandoffFixture holds invariant watch and delivery dependencies.
+// Each test owns its distinct Manager admission and joins its public call.
+type managerWatchHandoffFixture struct {
+	data          *walletData
+	backend       *managerBackendMock
+	source        *bwmock.Chain
+	payment       chain.RelevantTx
+	spend         chain.RelevantTx
+	preparing     chan struct{}
+	prepared      chan struct{}
+	workerEntered chan struct{}
+	workerRelease chan struct{}
+}
+
+// newManagerWatchHandoffFixture supplies the same persisted watch and native
+// gates without selecting Start/Create or hiding their backend expectations.
+func newManagerWatchHandoffFixture(t *testing.T) *managerWatchHandoffFixture {
+	t.Helper()
+
+	_, deps := createTestWalletWithMocks(t)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+	record, err := wtxmgr.NewTxRecordFromMsgTx(
+		subscriptionTx(script, 423), time.Now(),
+	)
+	require.NoError(t, err)
+
+	// Spend a persisted output unrelated to the payment. Empty input scripts
+	// cannot reveal its address, so delivery requires the startup outpoint.
+	point := wire.OutPoint{Hash: chainhash.Hash{42}, Index: 2}
+	spend := wire.NewMsgTx(2)
+	spend.AddTxIn(wire.NewTxIn(&point, nil, nil))
+	spend.AddTxOut(&wire.TxOut{PkScript: []byte{txscript.OP_TRUE}})
+	spent, err := wtxmgr.NewTxRecordFromMsgTx(spend, time.Now())
+	require.NoError(t, err)
+
+	f := &managerWatchHandoffFixture{
+		data: &walletData{
+			id:    1,
+			name:  "watched",
+			store: deps.store,
+			vault: deps.vault,
+		},
+		backend:       &managerBackendMock{},
+		source:        &bwmock.Chain{},
+		payment:       chain.RelevantTx{TxRecord: record},
+		spend:         chain.RelevantTx{TxRecord: spent},
+		preparing:     make(chan struct{}),
+		prepared:      make(chan struct{}),
+		workerEntered: make(chan struct{}),
+		workerRelease: make(chan struct{}),
+	}
+
+	// Store reads are identical; each caller declares discovery or creation.
+	deps.store.On("GetWallet", mock.Anything, f.data.name).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: f.data.id,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything, f.data.id).
+		Return(nil).Once()
+	deps.store.On("LoadWatchSet", mock.Anything, f.data.id).
+		Return(db.WatchSet{
+			AddressScripts: [][]byte{
+				script,
+			},
+			OutPoints: []wire.OutPoint{
+				point,
+			},
+		}, nil).Once()
+	vaultLock := deps.vault.On("Lock").Return().Once()
+	f.backend.On("close").Return(nil).Once().NotBefore(vaultLock)
+
+	// Emit before readiness returns; keep the worker from consuming delivery.
+	notifications := make(chan any, 2)
+	f.source.On("Notifications").Return((<-chan any)(notifications)).Once()
+	f.source.On("WatchAddrsFromTip", mock.Anything, []address.Address{addr}).
+		Run(func(mock.Arguments) {
+			notifications <- f.payment
+			close(f.preparing)
+			<-f.prepared
+		}).Return(nil).Once()
+	f.source.On("NotifySpent", []*wire.OutPoint{&point}).
+		Run(func(mock.Arguments) {
+			notifications <- f.spend
+		}).Return(nil).Once()
+	f.source.On("NotifyBlocks").Return(nil).Once()
+	f.source.On("IsCurrent").Run(func(mock.Arguments) {
+		close(f.workerEntered)
+		<-f.workerRelease
+	}).Return(false).Once()
+
+	return f
+}
+
+// TestManagerStartWatchHandoff retains payments and spends during publication.
+func TestManagerStartWatchHandoff(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Discover one watched Wallet; no Create request is expected.
+		// Cleanup releases both native gates and joins the public call first.
+		f := newManagerWatchHandoffFixture(t)
+		f.backend.On("listWallets", mock.Anything).
+			Return([]*walletData{f.data}, nil).Once()
+		m := newManagerLifecycleTest(t, f.backend, f.source)
+		finishPreparation := sync.OnceFunc(func() { close(f.prepared) })
+		done := make(chan struct{})
+		t.Cleanup(func() {
+			finishPreparation()
+			close(f.workerRelease)
+			<-done
+		})
+
+		// Act: Hold required watch preparation while Start runs, then allow
+		// publication with address and outpoint events in the source queue.
+		var wallets []*Wallet
+
+		var err error
+
+		go func() {
+			wallets, err = m.Start(t.Context())
+
+			close(done)
+		}()
+
+		<-f.preparing
+
+		select {
+		case <-done:
+			t.Fatal("Start returned before watch readiness")
+		default:
+		}
+
+		finishPreparation()
+		<-done
+
+		// Assert: Start returns the watched Wallet and delivers both events
+		// using prepared watches before its worker can refresh the index.
+		require.NoError(t, err)
+		require.Len(t, wallets, 1)
+		<-f.workerEntered
+
+		for _, notification := range []chain.RelevantTx{
+			f.payment,
+			f.spend,
+		} {
+			synctest.Wait()
+
+			select {
+			case event := <-wallets[0].chainEventChan:
+				require.Equal(t, notification, event.notification)
+				require.NotEmpty(t, event.matches)
+			default:
+				t.Fatal("notification lost during Start handoff")
+			}
+		}
+	})
+}
+
+// TestManagerCreateWatchHandoff retains payments and spends for a new Wallet.
+func TestManagerCreateWatchHandoff(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Start empty, then accept one creation with the fixed watch.
+		// Cleanup releases both native gates and joins the public call first.
+		f := newManagerWatchHandoffFixture(t)
+		params := managerLifecycleCreateParams(f.data.name)
+		f.backend.On("listWallets", mock.Anything).
+			Return([]*walletData{}, nil).Once()
+		f.backend.On("create", mock.Anything, params, mock.Anything).
+			Return(f.data, nil).Once()
+		m := newManagerLifecycleTest(t, f.backend, f.source)
+		_, err := m.Start(t.Context())
+		require.NoError(t, err)
+
+		finishPreparation := sync.OnceFunc(func() { close(f.prepared) })
+		done := make(chan struct{})
+		t.Cleanup(func() {
+			finishPreparation()
+			close(f.workerRelease)
+			<-done
+		})
+
+		// Act: Hold readiness inside accepted Create, then let that same loop
+		// publish the new Wallet before dispatching its retained notifications.
+		var w *Wallet
+
+		go func() {
+			w, err = m.Create(params)
+
+			close(done)
+		}()
+
+		<-f.preparing
+
+		select {
+		case <-done:
+			t.Fatal("Create returned before watch readiness")
+		default:
+		}
+
+		finishPreparation()
+		<-done
+
+		// Assert: Both unchanged events arrive while catch-up is held, so
+		// address and outpoint handoff cannot rely on a background refresh.
+		require.NoError(t, err)
+		<-f.workerEntered
+
+		for _, notification := range []chain.RelevantTx{
+			f.payment,
+			f.spend,
+		} {
+			synctest.Wait()
+
+			select {
+			case event := <-w.chainEventChan:
+				require.Equal(t, notification, event.notification)
+				require.NotEmpty(t, event.matches)
+			default:
+				t.Fatal("notification lost during Create handoff")
+			}
+		}
 	})
 }

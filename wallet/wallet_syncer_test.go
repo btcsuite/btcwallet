@@ -571,9 +571,9 @@ func TestSyncerRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	// Assert: The run loop should exit without error.
+	// Assert: The attempt preserves cancellation for its lifetime owner.
 	err := s.run(ctx)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestSyncerRollbackDuringBackendSync keeps rollback admission live before
@@ -631,6 +631,7 @@ func TestSyncerRollbackDuringBackendSync(t *testing.T) {
 		client.On("IsCurrent").Unset()
 		client.On("IsCurrent").Return(false).Once()
 		client.On("IsCurrent").Return(true).Once()
+		client.On("NotifyBlocks").Unset()
 		client.On("NotifyBlocks").Return(nil).Once()
 		client.On("GetBestBlock").Unset()
 		client.On("GetBestBlock").Return(&hash, int32(1), nil).Once()
@@ -1147,16 +1148,8 @@ func TestInitChainSync(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -2949,16 +2942,8 @@ func TestPutSyncBatchStore(t *testing.T) {
 
 	// The committed scan refreshes the Store's current watch set. This
 	// fixture tests the batch shape; watch contents have separate coverage.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      walletID,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, walletID).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Submit the normal sync batch with unresolved address candidates;
 	// the Store owns receiving admission within its atomic write.
@@ -2998,16 +2983,8 @@ func TestPutTargetedBatchStore(t *testing.T) {
 
 	// The committed scan refreshes the Store's current watch set. This
 	// fixture tests the batch shape; watch contents have separate coverage.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      walletID,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, walletID).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Submit targeted recovery through the existing batch boundary
 	// without converting matched addresses into explicit credits.
@@ -4930,16 +4907,8 @@ func TestSyncerFullRun(t *testing.T) {
 	expectMatchingRollbackBatch(store, mockChain)
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -4970,9 +4939,9 @@ func TestSyncerFullRun(t *testing.T) {
 	// transition, using the persisted Store tip for the rollback check.
 	err := s.run(ctx)
 
-	// Assert: Initialization and idle processing finish cleanly when the
-	// context ends, consuming each required Store and backend operation.
-	require.NoError(t, err)
+	// Assert: Initialization consumes every required operation; cancellation
+	// reaches the lifetime owner instead of being classified by the attempt.
+	require.ErrorIs(t, err, context.Canceled)
 	store.AssertExpectations(t)
 	mockChain.AssertExpectations(t)
 }
@@ -5365,16 +5334,8 @@ func TestInitChainSync_Errors(t *testing.T) {
 		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 
 		// Registration reads an empty watch set before enabling blocks.
-		store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-			WalletID:      0,
-			SkipBalance:   true,
-			ChainSyncOnly: true,
-		}).Return([]db.AccountInfo(nil), nil).Once()
-		expectImportedScanAddressPage(
-			store, 0, page.Result[db.AddressInfo, uint32]{},
-		)
-		store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-			Return([]db.UtxoInfo(nil), nil).Once()
+		store.On("LoadWatchSet", mock.Anything, uint32(0)).
+			Return(db.WatchSet{}, nil).Once()
 		mockChain.On(
 			"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 		).Return(nil).Once()
@@ -5874,16 +5835,8 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	// Registration reads an empty watch set before enabling blocks.
-	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
-	store.On("ListOutputsToWatch", mock.Anything, uint32(0)).
-		Return([]db.UtxoInfo(nil), nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	mockChain.On(
 		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
 	).Return(nil).Once()
@@ -7949,19 +7902,13 @@ func TestLiveWatchSyncBatchCancellation(t *testing.T) {
 			cancel()
 		}).Return(nil).Once()
 
-	// Store reads may finish despite cancellation, but both
-	// reads and registration must retain the shutdown signal.
+	// A storage read can finish through cancellation; its context and
+	// the following registration must retain the worker shutdown signal.
 	canceled := mock.MatchedBy(func(ctx context.Context) bool {
 		return errors.Is(ctx.Err(), context.Canceled)
 	})
-	store.On("ListAccounts", canceled, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
+	store.On("LoadWatchSet", canceled, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	client.On(
 		"WatchAddrsFromTip", canceled, []address.Address(nil),
 	).Return(context.Canceled).Once()
@@ -8020,19 +7967,13 @@ func TestLiveWatchTargetedBatchCancellation(t *testing.T) {
 			cancel()
 		}).Return(nil).Once()
 
-	// Store reads may finish despite cancellation, but both
-	// reads and registration must retain the shutdown signal.
+	// A storage read can finish through cancellation; its context and
+	// the following registration must retain the worker shutdown signal.
 	canceled := mock.MatchedBy(func(ctx context.Context) bool {
 		return errors.Is(ctx.Err(), context.Canceled)
 	})
-	store.On("ListAccounts", canceled, db.ListAccountsQuery{
-		WalletID:      0,
-		SkipBalance:   true,
-		ChainSyncOnly: true,
-	}).Return([]db.AccountInfo(nil), nil).Once()
-	expectImportedScanAddressPage(
-		store, 0, page.Result[db.AddressInfo, uint32]{},
-	)
+	store.On("LoadWatchSet", canceled, uint32(0)).
+		Return(db.WatchSet{}, nil).Once()
 	client.On(
 		"WatchAddrsFromTip", canceled, []address.Address(nil),
 	).Return(context.Canceled).Once()
@@ -8104,12 +8045,15 @@ func newLiveWatchManager(t *testing.T) (*Manager, *bwmock.Chain, *Wallet,
 	client.On("Notifications").Unset()
 	client.On("Notifications").Return((<-chan any)(notifications)).Once()
 	manager := testSQLiteManagerWithChain(t, client)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
-	client.On("NotifySpent", mock.Anything).Unset()
 
 	params := sqliteCreateParams(t)
 	w, err := manager.Create(params)
 	require.NoError(t, err)
+
+	// Startup consumes default subscriptions before runtime failures are set.
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	client.On("NotifySpent", mock.Anything).Unset()
+	client.On("NotifyBlocks").Unset()
 
 	// SQL creation persists the root but no receiving account. Prepare one
 	// through the maintained API before exercising address commits.
@@ -9081,4 +9025,122 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, coinbase.Hash, history[0].Hash)
+}
+
+// TestSyncerStartInitCommitUncertainty preserves an unknown native write during
+// backend initialization even when its adapter error wraps cancellation.
+func TestSyncerStartInitCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Keep the backend behind and queue one real observation.
+		// The runnable mailbox precedes polling, so its ambiguous Store write
+		// must end initialization before another backend check or retry.
+		client := &bwmock.Chain{}
+		store := &walletmock.Store{}
+		s := newTestSyncer(t, Config{Chain: client}, nil, nil, nil, store, 0)
+		record, err := wtxmgr.NewTxRecordFromMsgTx(
+			subscriptionTx([]byte{txscript.OP_TRUE}, 423), time.Now(),
+		)
+		require.NoError(t, err)
+
+		client.On("IsCurrent").Return(false).Once()
+		store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+			Return(&dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			}).Once()
+
+		events := make(chan chainEvent, 1)
+		s.chainEventChan = events
+
+		events <- chainEvent{
+			notification: chain.RelevantTx{TxRecord: record},
+			matches:      liveMatches(record),
+		}
+
+		// Act: Run the actual initialization and retry owner with a live
+		// context, leaving error classification to the production path.
+		err = s.start(t.Context())
+
+		// Assert: The unknown write escapes as indeterminate, rather than
+		// successful cancellation or a retry; verify each required call once.
+		require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+		client.AssertExpectations(t)
+		store.AssertExpectations(t)
+	})
+}
+
+// TestSyncerBackoffCommitUncertainty stops retry waiting after unknown effects.
+func TestSyncerBackoffCommitUncertainty(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Queue an actual write while only the retry mailbox can run.
+	// Its live context prevents wrapped cancellation from hiding uncertainty.
+	store := &walletmock.Store{}
+	s := newTestSyncer(t, Config{}, nil, nil, nil, store, 0)
+	record, err := wtxmgr.NewTxRecordFromMsgTx(
+		subscriptionTx([]byte{txscript.OP_TRUE}, 423), time.Now(),
+	)
+	require.NoError(t, err)
+	store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Return(&dbruntime.AmbiguousTxCommitError{
+			Err: context.Canceled,
+		}).Once()
+
+	events := make(chan chainEvent, 1)
+
+	s.chainEventChan = events
+	events <- chainEvent{
+		notification: chain.RelevantTx{TxRecord: record},
+		matches:      liveMatches(record),
+	}
+
+	// Act: Keep the retry timer blocked so only the mailbox write can exit.
+	_, err = s.waitForBackoff(
+		t.Context(), time.Now(), time.Hour,
+		func(time.Duration) <-chan time.Time { return make(chan time.Time) },
+	)
+
+	// Assert: The failure escapes before another attempt or a second write.
+	require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+	store.AssertExpectations(t)
+}
+
+// TestSyncerStartRetriesInitError retries a definite preparation failure.
+func TestSyncerStartRetriesInitError(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Fail the first committed-tip read during initialization.
+		// Cancel at the second read to prove retry without entering catch-up
+		// or relying on wall-clock time. No uncertain write is involved.
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		client := &bwmock.Chain{}
+		store := &walletmock.Store{}
+		s := newTestSyncer(t, Config{
+			Chain:                   client,
+			WalletSyncRetryInterval: time.Millisecond,
+		}, nil, nil, nil, store, 0)
+		client.On("IsCurrent").Return(true).Twice()
+		store.On("GetWallet", mock.Anything, "").
+			Return((*db.WalletInfo)(nil), errDBMock).Once()
+		store.On("GetWallet", mock.Anything, "").
+			Run(func(mock.Arguments) { cancel() }).
+			Return((*db.WalletInfo)(nil), context.Canceled).Once()
+
+		// Act: Let the same processing lifetime retry its initialization.
+		err := s.start(ctx)
+
+		// Assert: A definite read failure retries exactly once, then normal
+		// lifetime cancellation completes without a terminal failure report.
+		require.NoError(t, err)
+		store.AssertExpectations(t)
+		client.AssertExpectations(t)
+	})
 }

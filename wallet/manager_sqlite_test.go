@@ -328,9 +328,10 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	).Once()
 	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
 		WalletID: 7,
-	}).
-		Return([]db.AccountInfo{}, nil).Once()
+	}).Return([]db.AccountInfo{}, nil).Once()
 	store.On("DeleteExpiredLeases", mock.Anything, uint32(7)).Return(nil).Once()
+	store.On("LoadWatchSet", mock.Anything, uint32(7)).
+		Return(db.WatchSet{}, nil).Once()
 
 	// Act: Create through Manager, including its mandatory runtime startup,
 	// with a birthday row that cannot supply the committed identity.

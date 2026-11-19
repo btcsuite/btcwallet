@@ -3597,6 +3597,7 @@ func TestListOutputsToWatchBareMultisigUsesOutputScript(t *testing.T) {
 
 // TestListOutputsToWatchExcludesNoChainSync verifies recovery keeps eligible
 // credits while omitting outputs owned by accounts that opt out of chain sync.
+// LoadWatchSet must also exclude those accounts' receiving addresses.
 func TestListOutputsToWatchExcludesNoChainSync(t *testing.T) {
 	t.Parallel()
 
@@ -3650,16 +3651,24 @@ func TestListOutputsToWatchExcludesNoChainSync(t *testing.T) {
 		Hash: tx.TxHash(), Index: 1,
 	}))
 
-	// Act: Read the same wallet-wide output set used by both recovery modes.
+	// Act: Read the legacy output list and the combined publication watch set
+	// from the same stored eligible and opted-out accounts.
 	utxos, err := store.ListOutputsToWatch(t.Context(), walletID)
+	require.NoError(t, err)
+	watches, err := store.LoadWatchSet(t.Context(), walletID)
 
 	// Assert: Exactly the eligible credit remains; the existing conformance
 	// tests separately cover leases, unmined spends, and accountless imports.
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
-	require.Equal(
-		t, wire.OutPoint{Hash: tx.TxHash(), Index: 0}, utxos[0].OutPoint,
-	)
+
+	expectedPoint := wire.OutPoint{
+		Hash:  tx.TxHash(),
+		Index: 0,
+	}
+	require.Equal(t, expectedPoint, utxos[0].OutPoint)
+	require.Equal(t, [][]byte{outputs[0].PkScript}, watches.AddressScripts)
+	require.Equal(t, []wire.OutPoint{expectedPoint}, watches.OutPoints)
 }
 
 // TestApplyTxBatchChildBeforeParent verifies that ApplyTxBatch records the

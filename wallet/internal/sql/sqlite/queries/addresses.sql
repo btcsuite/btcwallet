@@ -332,3 +332,43 @@ WHERE
     )
 ORDER BY a.id
 LIMIT sqlc.arg('page_limit');
+
+-- name: LoadWatchSet :many
+-- Loads address and outpoint interests from one snapshot before publication.
+-- The row kind separates the two collections without multiplying them; NULLs
+-- occupy fields that do not apply. Accountless imports remain eligible, and
+-- output selection preserves ListOutputsToWatch's active/unmined policy.
+SELECT
+    FALSE AS is_outpoint,
+    a.script_pub_key,
+    cast(NULL AS BLOB) AS tx_hash,
+    -- sqlc maps this column to int64, so the unused address-row index is 0.
+    0 AS output_index
+FROM addresses AS a
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+WHERE
+    a.wallet_id = sqlc.arg('wallet_id')
+    AND (NOT a.is_derived OR NOT acc.no_chain_sync)
+UNION ALL
+SELECT
+    TRUE AS is_outpoint,
+    cast(NULL AS BLOB) AS script_pub_key,
+    t.tx_hash,
+    u.output_index
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
+LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+WHERE
+    t.wallet_id = sqlc.arg('wallet_id')
+    AND (acc.id IS NULL OR NOT acc.no_chain_sync)
+    AND t.tx_status IN (0, 1)
+    AND (
+        u.spent_by_tx_id IS NULL
+        OR (
+            spend.block_height IS NULL
+            AND spend.tx_status IN (0, 1)
+        )
+    );

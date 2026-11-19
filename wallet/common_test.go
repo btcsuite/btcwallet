@@ -188,10 +188,11 @@ func newTestRegistrationManager(tb testing.TB, store db.Store,
 	// Match the service lifetime; the existing Stop cleanup cancels and joins.
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
+		lifetimeCtx:  lifetimeCtx,
+		cancel:       cancel,
+		wallets:      make(map[string]*Wallet),
+		requestChan:  make(chan createWalletReq),
+		workerErrors: make(chan error),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },
@@ -474,13 +475,13 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 		Once()
 
 	// Mock the syncer run.
-	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+	deps.syncer.On("start", mock.Anything).Return(nil).Once()
 
 	expectStopTeardown(deps)
 
 	// Start the wallet.
 	require.NoError(t, w.prepareStart(t.Context()))
-	require.NoError(t, w.start())
+	require.NoError(t, w.start(make(chan error)))
 
 	t.Cleanup(func() {
 		require.NoError(t, w.stop())
