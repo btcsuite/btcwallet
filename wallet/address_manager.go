@@ -932,7 +932,7 @@ func (w *Wallet) deliverStoreAddresses(ctx context.Context,
 	}
 
 	//nolint:contextcheck // Only the Wallet lifetime may cancel registration.
-	err := w.chainSyncer.watchAddresses(w.lifetimeCtx, w.id, addrs)
+	err := w.registry.watchAddresses(w.lifetimeCtx, w.id, addrs)
 	if err != nil {
 		return nil, err
 	}
@@ -1083,8 +1083,9 @@ func (w *Wallet) newKVDBAddress(ctx context.Context, selector AccountSelector,
 		return AddressInfo{}, err
 	}
 
-	// Declare ownership before native activation can emit the new payment.
-	err = w.chainSyncer.notifyReceived(
+	// Hand ownership to Manager before activation; its loop installs the watch
+	// before it can route a payment emitted by the native call.
+	err = w.registry.notifyReceived(
 		ctx, w.id, []address.Address{info.Addr},
 	)
 	if err != nil {

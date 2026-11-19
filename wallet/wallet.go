@@ -383,9 +383,11 @@ type Wallet struct {
 	// chain loop, scanning, and reorganization handling.
 	sync chainProcessor
 
-	// chainSyncer is the Manager's required routing owner for every backend.
-	// The Wallet and its processor share it and the bounded event inbox.
-	chainSyncer    chainRouter
+	// registry requests subscriptions without exposing Manager's router.
+	// Unbuffered handoff commits ownership before Manager routes later events.
+	registry chainRegistry
+
+	// chainEventChan bounds delivery to the Wallet's existing worker.
 	chainEventChan chan chainEvent
 
 	// state maintains the wallet's atomic, three-dimensional status:
