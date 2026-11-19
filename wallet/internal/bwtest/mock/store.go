@@ -33,6 +33,15 @@ func (m *Store) StatsSnapshot() dbruntime.StatsSnapshot {
 	return dbruntime.StatsSnapshot{}
 }
 
+// LoadWatchSet implements the combined persisted-interest read.
+func (m *Store) LoadWatchSet(ctx context.Context, walletID uint32) (db.WatchSet,
+	error) {
+
+	args := m.Called(ctx, walletID)
+
+	return args.Get(0).(db.WatchSet), args.Error(1)
+}
+
 // CreateWallet implements the db.WalletStore interface.
 func (m *Store) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (*db.WalletInfo, error) {
