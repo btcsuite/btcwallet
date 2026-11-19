@@ -25,8 +25,16 @@ var (
 // PostgreSQL constraint constants expose exact SQLSTATE values to shared tests.
 const (
 	driverConstraintNotNull   = "23502"
-	driverConstraintImmutable = "23514"
+	driverConstraintCheck     = "23514"
+	driverConstraintImmutable = driverConstraintCheck
 )
+
+// insertWalletBlockParams lets the shared test use PostgreSQL's native height.
+type insertWalletBlockParams = sqlc.InsertWalletBlockParams
+
+// getWalletBlocksInRangeParams keeps PostgreSQL's int32 bounds so the shared
+// regression can check the stored block through the native query.
+type getWalletBlocksInRangeParams = sqlc.GetWalletBlocksInRangeParams
 
 // testBackend returns the SQL backend expected by PostgreSQL itests.
 func testBackend() dberr.Backend {
