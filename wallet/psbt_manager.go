@@ -1888,16 +1888,15 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 // skipped during the signing process.
 //
 // It checks for two conditions:
-//  1. If the input already has a final script witness, it is considered
-//     complete and is skipped.
+//  1. If the input already has a final script sig or witness, it is
+//     considered complete and is skipped.
 //  2. If the input lacks any derivation information (both Taproot and BIP32),
 //     it implies that the wallet does not have the key to sign it, so it is
 //     skipped.
 func shouldSkipInput(pInput *psbt.PInput, idx int) bool {
 	// Skip if already finalized.
-	if len(pInput.FinalScriptWitness) > 0 {
-		log.Debugf("Skipping input %d: already has final "+
-			"script witness", idx)
+	if inputIsFinal(pInput) {
+		log.Debugf("Skipping input %d: already has final script", idx)
 
 		return true
 	}
@@ -2540,9 +2539,7 @@ func (w *Wallet) finalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 func setFinalizerUtxos(packet *psbt.Packet) {
 	for i := range packet.Inputs {
 		pInput := &packet.Inputs[i]
-		if pInput.NonWitnessUtxo == nil || pInput.FinalScriptSig != nil ||
-			pInput.FinalScriptWitness != nil {
-
+		if pInput.NonWitnessUtxo == nil || inputIsFinal(pInput) {
 			continue
 		}
 
