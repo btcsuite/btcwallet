@@ -186,6 +186,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getUtxoSpendByOutpointStmt, err = db.PrepareContext(ctx, GetUtxoSpendByOutpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query GetUtxoSpendByOutpoint: %w", err)
 	}
+	if q.getWalletBlockByHeightStmt, err = db.PrepareContext(ctx, GetWalletBlockByHeight); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletBlockByHeight: %w", err)
+	}
+	if q.getWalletBlocksInRangeStmt, err = db.PrepareContext(ctx, GetWalletBlocksInRange); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletBlocksInRange: %w", err)
+	}
 	if q.getWalletByIDStmt, err = db.PrepareContext(ctx, GetWalletByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletByID: %w", err)
 	}
@@ -227,6 +233,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertUtxoStmt, err = db.PrepareContext(ctx, InsertUtxo); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertUtxo: %w", err)
+	}
+	if q.insertWalletBlockStmt, err = db.PrepareContext(ctx, InsertWalletBlock); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertWalletBlock: %w", err)
 	}
 	if q.insertWalletSecretsStmt, err = db.PrepareContext(ctx, InsertWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSecrets: %w", err)
@@ -620,6 +629,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getUtxoSpendByOutpointStmt: %w", cerr)
 		}
 	}
+	if q.getWalletBlockByHeightStmt != nil {
+		if cerr := q.getWalletBlockByHeightStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletBlockByHeightStmt: %w", cerr)
+		}
+	}
+	if q.getWalletBlocksInRangeStmt != nil {
+		if cerr := q.getWalletBlocksInRangeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletBlocksInRangeStmt: %w", cerr)
+		}
+	}
 	if q.getWalletByIDStmt != nil {
 		if cerr := q.getWalletByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getWalletByIDStmt: %w", cerr)
@@ -688,6 +707,11 @@ func (q *Queries) Close() error {
 	if q.insertUtxoStmt != nil {
 		if cerr := q.insertUtxoStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertUtxoStmt: %w", cerr)
+		}
+	}
+	if q.insertWalletBlockStmt != nil {
+		if cerr := q.insertWalletBlockStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertWalletBlockStmt: %w", cerr)
 		}
 	}
 	if q.insertWalletSecretsStmt != nil {
@@ -978,6 +1002,8 @@ type Queries struct {
 	getUtxoByOutpointStmt                         *sql.Stmt
 	getUtxoIDByOutpointStmt                       *sql.Stmt
 	getUtxoSpendByOutpointStmt                    *sql.Stmt
+	getWalletBlockByHeightStmt                    *sql.Stmt
+	getWalletBlocksInRangeStmt                    *sql.Stmt
 	getWalletByIDStmt                             *sql.Stmt
 	getWalletByNameStmt                           *sql.Stmt
 	getWalletSecretsStmt                          *sql.Stmt
@@ -992,6 +1018,7 @@ type Queries struct {
 	insertTxReplacementEdgeStmt                   *sql.Stmt
 	insertTxReplacementEdgeByHashStmt             *sql.Stmt
 	insertUtxoStmt                                *sql.Stmt
+	insertWalletBlockStmt                         *sql.Stmt
 	insertWalletSecretsStmt                       *sql.Stmt
 	insertWalletSyncStateStmt                     *sql.Stmt
 	listAccountsByScopeStmt                       *sql.Stmt
@@ -1091,6 +1118,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getUtxoByOutpointStmt:                         q.getUtxoByOutpointStmt,
 		getUtxoIDByOutpointStmt:                       q.getUtxoIDByOutpointStmt,
 		getUtxoSpendByOutpointStmt:                    q.getUtxoSpendByOutpointStmt,
+		getWalletBlockByHeightStmt:                    q.getWalletBlockByHeightStmt,
+		getWalletBlocksInRangeStmt:                    q.getWalletBlocksInRangeStmt,
 		getWalletByIDStmt:                             q.getWalletByIDStmt,
 		getWalletByNameStmt:                           q.getWalletByNameStmt,
 		getWalletSecretsStmt:                          q.getWalletSecretsStmt,
@@ -1105,6 +1134,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertTxReplacementEdgeStmt:                   q.insertTxReplacementEdgeStmt,
 		insertTxReplacementEdgeByHashStmt:             q.insertTxReplacementEdgeByHashStmt,
 		insertUtxoStmt:                                q.insertUtxoStmt,
+		insertWalletBlockStmt:                         q.insertWalletBlockStmt,
 		insertWalletSecretsStmt:                       q.insertWalletSecretsStmt,
 		insertWalletSyncStateStmt:                     q.insertWalletSyncStateStmt,
 		listAccountsByScopeStmt:                       q.listAccountsByScopeStmt,

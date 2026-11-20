@@ -101,8 +101,13 @@ Mapping (conceptual -> SQL):
 | Recorded input | `(tx_inputs.wallet_id, tx_inputs.tx_id, tx_inputs.input_index)` |
 | Referenced outpoint | `(tx_inputs.wallet_id, tx_inputs.prev_tx_hash, tx_inputs.prev_output_index)` |
 | Address (address book) | `addresses.id` (address-manager schema) |
-| Confirmation | `transactions.block_height` (FK to `blocks(block_height)`) |
+| Target confirmation | `(transactions.wallet_id, transactions.block_height)` |
 | Lease | `(utxo_leases.wallet_id, utxo_leases.utxo_id)` |
+
+The [Wallet-owned history proposal](adr/0017-manager-chain-routing.md#3-decision)
+uses `wallet_blocks(wallet_id, block_height)` for confirmations. The
+[SQL preparation](adr/0006-wtxmgr-sql-schema.md#24-implementation-overview)
+still uses `blocks(block_height)` for confirmations.
 
 ### 2.1 Entity Roles
 
@@ -296,7 +301,10 @@ When the blockchain reorganizes (disconnects blocks):
         reserve its funding outputs. A credit becomes unclaimed only if no
         eligible unconfirmed or confirmed transaction still claims it.
 
-Implementation note: The SQL `blocks` table models the current best chain. During a disconnect, the best-chain association is removed (for example by deleting the `blocks` row at that height and inserting the new one). The coinbase status update MUST be atomic with clearing `BlockHeight` to avoid an invalid "unconfirmed coinbase" state.
+With Wallet-owned SQL history, a disconnect atomically detaches the Wallet's
+affected transactions and orphans its coinbases. Other Wallets keep their
+checkpoints and confirmations. Canonical observations below the disconnected
+height are preserved.
 
 Coinbase reconfirmation note: If an orphaned coinbase transaction re-enters the best chain, restoring it requires updating `BlockHeight` and `Status = 1` (`published`) atomically (one SQL statement within a transaction) to satisfy coinbase invariants.
 
