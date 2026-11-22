@@ -28,6 +28,14 @@ var (
 	ErrBitcoindClientShuttingDown = errors.New("client is shutting down")
 )
 
+const (
+	// rescanRetryMinBackoff is the wait before retrying a failed rescan.
+	rescanRetryMinBackoff = time.Second
+
+	// rescanRetryMaxBackoff is the longest wait between rescan attempts.
+	rescanRetryMaxBackoff = time.Minute
+)
+
 // BitcoindClient represents a persistent client connection to a bitcoind server
 // for information regarding the current best block chain.
 type BitcoindClient struct {
@@ -511,13 +519,95 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 	go func() {
 		defer c.wg.Done()
 
-		err := c.rescan(*blockHash)
-		if err != nil {
-			log.Errorf("Unable to complete chain rescan: %v", err)
-		}
+		c.rescanWithRetry(*blockHash)
 	}()
 
 	return nil
+}
+
+// rescanWithRetry runs a rescan until it finishes or the client shuts down.
+// The wallet leaves its startup sync only when it receives RescanFinished, so
+// a rescan that gives up on an RPC error would leave the caller waiting
+// forever. Each retry resumes after the last delivered block that is still on
+// the best chain.
+func (c *BitcoindClient) rescanWithRetry(start chainhash.Hash) {
+	backoff := rescanRetryMinBackoff
+
+	for retry := false; ; retry = true {
+		resumedFrom := start
+
+		var err error
+		if retry {
+			err = c.rewindToBestChain(&start)
+		}
+		if err == nil {
+			err = c.rescan(&start)
+		}
+		if err == nil {
+			return
+		}
+
+		// RPCs fail while we shut down, which is not a rescan failure.
+		select {
+		case <-c.quit:
+			return
+		default:
+		}
+
+		// An attempt that delivered blocks starts a new backoff.
+		if start != resumedFrom {
+			backoff = rescanRetryMinBackoff
+		}
+
+		log.Errorf("Unable to complete chain rescan, retrying in %v: "+
+			"%v", backoff, err)
+
+		select {
+		case <-time.After(backoff):
+		case <-c.quit:
+			return
+		}
+
+		backoff = min(backoff*2, rescanRetryMaxBackoff)
+	}
+}
+
+// rewindToBestChain moves start back to the nearest block on the best chain,
+// sending a disconnect for each block it leaves. A reorg can replace blocks a
+// failed rescan already delivered while it waits to retry.
+func (c *BitcoindClient) rewindToBestChain(start *chainhash.Hash) error {
+	_, bestHeight, err := c.GetBestBlock()
+	if err != nil {
+		return err
+	}
+
+	for {
+		header, err := c.GetBlockHeaderVerbose(start)
+		if err != nil {
+			return err
+		}
+
+		if header.Height <= bestHeight {
+			hash, err := c.GetBlockHash(int64(header.Height))
+			if err != nil {
+				return err
+			}
+
+			if *hash == *start {
+				return nil
+			}
+		}
+
+		parent, err := chainhash.NewHashFromStr(header.PreviousHash)
+		if err != nil {
+			return err
+		}
+
+		c.onBlockDisconnected(
+			start, header.Height, time.Unix(header.Time, 0),
+		)
+		*start = *parent
+	}
 }
 
 // Start initializes the bitcoind rescan client using the backing bitcoind
@@ -956,8 +1046,9 @@ func (c *BitcoindClient) FilterBlocks(
 // specified hash to the best known hash, while watching out for reorgs that
 // happen during the rescan. It uses the addresses and outputs being tracked by
 // the client in the watch list. This is called only within a queue processing
-// loop.
-func (c *BitcoindClient) rescan(start chainhash.Hash) error {
+// loop. start is advanced to each block delivered, so that a caller can resume
+// a failed rescan from it.
+func (c *BitcoindClient) rescan(start *chainhash.Hash) error {
 	// We start by getting the best already processed block. We only use
 	// the height, as the hash can change during a reorganization, which we
 	// catch by testing connectivity from known blocks to the previous
@@ -979,7 +1070,7 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 	// Create a list of headers sorted in forward order. We'll use this in
 	// the event that we need to backtrack due to a chain reorg.
 	headers := list.New()
-	previousHeader, err := c.GetBlockHeaderVerbose(&start)
+	previousHeader, err := c.GetBlockHeaderVerbose(start)
 	if err != nil {
 		return err
 	}
@@ -1102,6 +1193,7 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 
 		// Notify the block and any of its relevant transacations.
 		_ = c.filterBlock(block, i, true)
+		*start = blockHash
 
 		if i%10000 == 0 {
 			c.onRescanProgress(
