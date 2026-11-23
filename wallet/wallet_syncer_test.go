@@ -9789,3 +9789,222 @@ func TestSyncerBackoffRetainsDisconnect(t *testing.T) {
 		require.True(t, continued)
 	})
 }
+
+// TestSyncerBackoffDefersDisconnect keeps newly received fork evidence for the
+// next ready attempt instead of querying a possibly reconnecting backend.
+func TestSyncerBackoffDefersDisconnect(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Neither strict dependency permits a recovery read during
+		// backoff. A controlled deadline leaves intake observable before retry.
+		store := &walletmock.Store{}
+		source := &bwmock.Chain{}
+		t.Cleanup(func() {
+			store.AssertExpectations(t)
+			source.AssertExpectations(t)
+		})
+
+		s := newTestSyncer(t, Config{Chain: source},
+			nil, nil, nil, store, 7)
+		events := make(chan chainEvent, 1)
+		retry := make(chan time.Time)
+		finished := make(chan error, 1)
+		s.chainEventChan = events
+
+		// Act: Receive the first disconnect inside the wait itself, then
+		// leave a later notification queued until its unchanged deadline.
+		go func() {
+			finished <- s.waitForRetry(t.Context(), retry)
+		}()
+
+		events <- chainEvent{notification: chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 2, Hash: chainhash.Hash{2}},
+			Time:  time.Unix(2, 0),
+		}}
+
+		events <- chainEvent{notification: &chain.RescanProgress{}}
+
+		synctest.Wait()
+
+		queued := len(events)
+
+		retry <- time.Now()
+
+		err := <-finished
+
+		// Assert: No proof read or later delivery bypassed the next attempt.
+		// Joining the released wait also preserves the existing retry lifetime.
+		require.NoError(t, err)
+		require.Equal(t, 1, queued)
+	})
+}
+
+// TestSyncerDefersLiveDisconnect preserves confirmed history when a running
+// source loses currentness before a queued disconnect can collect proof.
+func TestSyncerDefersLiveDisconnect(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Real committed history includes a canonical reward at three.
+	// Only the initial catch-up check may read the tip; proof is forbidden
+	// after the source becomes noncurrent, despite the Wallet being synced.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+
+	blocks := make([]db.Block, 4)
+	for i := range blocks {
+		blocks[i] = db.Block{
+			Height:    uint32(i),
+			Hash:      chainhash.Hash{byte(i + 1)},
+			Timestamp: time.Unix(int64(i), 0),
+		}
+	}
+
+	tip := blocks[3]
+	reward := reorgCoinbase(t, 7)
+	require.NoError(t, store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: blocks,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: id,
+				Tx:       &reward.MsgTx,
+				Block:    &tip,
+				Status:   db.TxStatusPublished,
+				Received: tip.Timestamp,
+			},
+		},
+	}))
+
+	source := &bwmock.Chain{}
+	source.On("GetBestBlock").Return(&tip.Hash, int32(3), nil).Once()
+	source.On("IsCurrent").Return(false).Once()
+	t.Cleanup(func() { source.AssertExpectations(t) })
+	s := newTestSyncer(t, Config{
+		Name: "sql-watch-only-scripts", Chain: source,
+		ChainParams: &chainParams,
+	}, nil, nil, nil, store, id)
+	caught, err := s.advanceChainSync(ctx)
+	require.NoError(t, err)
+	require.True(t, caught)
+
+	events := make(chan chainEvent, 1)
+
+	s.chainEventChan = events
+	events <- chainEvent{notification: chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 2, Hash: blocks[2].Hash},
+		Time:  blocks[2].Timestamp,
+	}}
+
+	// Act: The live worker must yield to ordinary recovery before using a
+	// reconnecting source's temporary tip as evidence against stored blocks.
+	err = s.waitForEvent(ctx)
+	confirmed, readErr := store.GetTx(ctx, db.GetTxQuery{
+		WalletID: id, Txid: reward.Hash,
+	})
+	info, infoErr := store.GetWallet(ctx, s.cfg.Name)
+
+	// Assert: Readiness is revoked and the event is retryable, while the
+	// real checkpoint and reward remain intact. Existing retry tests cover
+	// replay after readiness without another native delivery.
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrStateChanged)
+	require.Equal(t, syncStateSyncing, s.syncState())
+	require.NoError(t, readErr)
+	require.Equal(t, db.TxStatusPublished, confirmed.Status)
+	require.NotNil(t, confirmed.Block)
+	require.Equal(t, tip.Hash, confirmed.Block.Hash)
+	require.NoError(t, infoErr)
+	require.Equal(t, tip, *info.SyncedTo)
+}
+
+// TestSyncerRejectsChangedDisconnectProof keeps a mid-read reorg from combining
+// the old tip's confirmation with the replacement branch's lower block hash.
+func TestSyncerRejectsChangedDisconnectProof(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit the old branch, including a reward in its tip. The
+	// source then switches branches between the height-three and -two reads.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	blocks := make([]db.Block, 4)
+
+	for i := range blocks {
+		blocks[i] = db.Block{
+			Height:    uint32(i),
+			Hash:      chainhash.Hash{byte(i + 1)},
+			Timestamp: time.Unix(int64(i), 0),
+		}
+	}
+
+	fork, old, tip := blocks[1], blocks[2], blocks[3]
+	reward := reorgCoinbase(t, 7)
+	err := store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: blocks,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: id,
+				Tx:       &reward.MsgTx,
+				Block:    &tip,
+				Status:   db.TxStatusPublished,
+				Received: tip.Timestamp,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	source := &bwmock.Chain{}
+	t.Cleanup(func() { source.AssertExpectations(t) })
+	source.On("IsCurrent").Return(true).Once()
+	source.On("GetBestBlock").Return(&tip.Hash, int32(3), nil).Once()
+	oldTip := source.On("GetBlockHash", int64(3)).Return(&tip.Hash, nil).
+		Once()
+	replacement := source.On("GetBlockHash", int64(2)).
+		Return(&chainhash.Hash{22}, nil).Once().NotBefore(oldTip)
+	source.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+	source.On("GetBlockHeader", &fork.Hash).Return(
+		&wire.BlockHeader{Timestamp: fork.Timestamp}, nil,
+	).Once()
+	source.On("GetBestBlock").Return(&chainhash.Hash{33}, int32(3), nil).
+		Once().NotBefore(replacement)
+
+	s := newTestSyncer(t, Config{
+		Name: "sql-watch-only-scripts", Chain: source,
+		ChainParams: &chainParams,
+	}, nil, nil, nil, store, id)
+	event := chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 2, Hash: old.Hash},
+		Time:  old.Timestamp,
+	}
+
+	// Act: Deliver the disconnect once. The final tip read sees the new
+	// branch at the same height as the old tip.
+	err = s.processChainEvent(ctx, chainEvent{notification: event})
+
+	// Assert: The worker retains the event for retry. Neither the Wallet's
+	// progress nor its history or reward can change on mixed proof.
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrStateChanged)
+	require.Equal(t, &event, s.pendingDisconnect)
+	info, err := store.GetWallet(ctx, s.cfg.Name)
+	require.NoError(t, err)
+	require.NotNil(t, info.SyncedTo)
+	require.Equal(t, tip.Hash, info.SyncedTo.Hash)
+
+	stored, err := store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		WalletID: id, StartHeight: old.Height, EndHeight: old.Height,
+	})
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.Equal(t, old.Hash, stored[0].Hash)
+	tx, err := store.GetTx(ctx, db.GetTxQuery{
+		WalletID: id, Txid: reward.Hash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, tx.Status)
+	require.NotNil(t, tx.Block)
+	require.Equal(t, tip.Hash, tx.Block.Hash)
+}
