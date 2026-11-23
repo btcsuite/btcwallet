@@ -9078,6 +9078,141 @@ func TestManagerRollbackKvdbCoinbaseDescendants(t *testing.T) {
 	require.Equal(t, coinbase.Hash, history[0].Hash)
 }
 
+// TestFindDisconnectForkDenseRanges finds the ancestor immediately below a
+// complete window without skipping or rereading the boundary height.
+func TestFindDisconnectForkDenseRanges(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The first window is orphaned; the next contains the ancestor.
+	// Exact range and header calls expose a skipped or overlapping boundary.
+	store := &walletmock.Store{}
+	client := &bwmock.Chain{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		client.AssertExpectations(t)
+	})
+	s := newTestSyncer(
+		t, Config{Chain: client}, nil, nil, nil, store, 7,
+	)
+	fork := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0),
+	}
+	query := db.ListSyncedBlocksQuery{
+		WalletID:    7,
+		StartHeight: 2,
+		EndHeight:   11,
+	}
+
+	blocks := make([]db.Block, 0, 12)
+	for height := range uint32(12) {
+		blocks = append(blocks, db.Block{
+			Height: height,
+			Hash:   chainhash.Hash{byte(height)},
+		})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, query).
+		Return(blocks[2:12], nil).Once()
+
+	query.StartHeight, query.EndHeight = 0, 1
+	store.On("ListSyncedBlocks", mock.Anything, query).
+		Return(blocks[:2], nil).Once()
+
+	for height := int64(11); height > 1; height-- {
+		client.On("GetBlockHash", height).
+			Return(&chainhash.Hash{99}, nil).Once()
+	}
+
+	client.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+	client.On("GetBlockHeader", &fork.Hash).Return(
+		&wire.BlockHeader{Timestamp: fork.Timestamp}, nil,
+	).Once()
+
+	// Act: Search beyond the first window with an older retained ancestor,
+	// without granting any header lookup on the abandoned branch.
+	found, proof, err := s.findDisconnectFork(
+		t.Context(), 11, 12, waddrmgr.BlockStamp{Height: 11},
+	)
+
+	// Assert: Both windows are read once and the boundary ancestor wins.
+	// Cleanup verifies the exact Store and native proof calls.
+	require.NoError(t, err)
+	require.Equal(t, fork, found)
+	require.Len(t, proof, 10)
+
+	for height := uint32(2); height <= 11; height++ {
+		require.Equal(t, &chainhash.Hash{99}, proof[height])
+	}
+}
+
+// TestFindDisconnectForkGappedRanges bounds singleton fallback to each failed
+// window while retaining the ancestor immediately below the first window.
+func TestFindDisconnectForkGappedRanges(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Only height one is retained across two incomplete windows.
+	// Each failed range permits one singleton probe per examined height.
+	store := &walletmock.Store{}
+	client := &bwmock.Chain{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		client.AssertExpectations(t)
+	})
+	s := newTestSyncer(
+		t, Config{Chain: client}, nil, nil, nil, store, 7,
+	)
+	fork := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0),
+	}
+	query := db.ListSyncedBlocksQuery{
+		WalletID:    7,
+		StartHeight: 2,
+		EndHeight:   11,
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, query).
+		Return([]db.Block(nil), db.ErrBlockNotFound).Once()
+
+	for height := uint32(11); height > 1; height-- {
+		query.StartHeight, query.EndHeight = height, height
+		store.On("ListSyncedBlocks", mock.Anything, query).
+			Return([]db.Block(nil), db.ErrBlockNotFound).Once()
+	}
+
+	query.StartHeight, query.EndHeight = 0, 1
+	store.On("ListSyncedBlocks", mock.Anything, query).
+		Return([]db.Block(nil), db.ErrBlockNotFound).Once()
+
+	query.StartHeight, query.EndHeight = 1, 1
+	store.On("ListSyncedBlocks", mock.Anything, query).
+		Return([]db.Block{
+			{
+				Height: 1,
+				Hash:   fork.Hash,
+			},
+		}, nil).Once()
+	client.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+	client.On("GetBlockHeader", &fork.Hash).Return(
+		&wire.BlockHeader{Timestamp: fork.Timestamp}, nil,
+	).Once()
+
+	// Act: Cross the missing first window and find the next retained row,
+	// without retrying overlapping ranges or requesting pruned headers.
+	found, proof, err := s.findDisconnectFork(
+		t.Context(), 11, 12, waddrmgr.BlockStamp{Height: 11},
+	)
+
+	// Assert: The singleton boundary is visited exactly once and returned.
+	// Cleanup rejects extra Store probes and any missing-height RPC.
+	require.NoError(t, err)
+	require.Equal(t, fork, found)
+	require.Empty(t, proof)
+}
+
 // TestManagerRollbackKvdbOrphanCoinbaseSpends preserves a detached spend of
 // a canonical coinbase while removing the orphaned coinbase's pending graph.
 func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
