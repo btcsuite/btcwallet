@@ -422,3 +422,151 @@ func TestDisconnectBlockPreservesCanonicalHistory(t *testing.T) {
 	})
 	require.ErrorIs(t, err, db.ErrBlockNotFound)
 }
+
+// TestDisconnectBlockPreservesHigherCanonicalHistory replays an orphaned gap
+// below valid live progress while retaining its confirmation and birthday.
+func TestDisconnectBlockPreservesHigherCanonicalHistory(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Scan old 420, then advance live progress to canonical 421.
+	// Its confirmation and birthday must survive replay of the earlier hole.
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	walletID := newWallet(t, store, "higher-canonical-history")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	fork, observed := NewBlockFixture(419), NewBlockFixture(420)
+	canonical, orphan := NewBlockFixture(421), NewBlockFixture(422)
+	replacement := observed
+	replacement.Hash[0] ^= 0xff
+
+	require.NoError(t, store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletID, SyncedBlocks: []db.Block{fork, observed},
+	}))
+
+	coinbase := newCoinbaseTx(addr.ScriptPubKey)
+	orphanCoinbase := newCoinbaseTx(addr.ScriptPubKey)
+	orphanCoinbase.LockTime = orphan.Height
+	spend := newRegularTx(
+		[]wire.OutPoint{{Hash: coinbase.TxHash()}},
+		[]*wire.TxOut{{Value: 1000, PkScript: addr.ScriptPubKey}},
+	)
+	orphanSpend := newRegularTx(
+		[]wire.OutPoint{{Hash: orphanCoinbase.TxHash()}},
+		[]*wire.TxOut{{Value: 1000, PkScript: addr.ScriptPubKey}},
+	)
+	received := time.Unix(1710004200, 0)
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID, SyncedTo: &canonical,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: walletID,
+				Tx:       coinbase,
+				Block:    &canonical,
+				Status:   db.TxStatusPublished,
+				Received: received,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+			{
+				WalletID: walletID, Tx: spend,
+				Status:   db.TxStatusPublished,
+				Received: received,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+			{
+				WalletID: walletID,
+				Tx:       orphanCoinbase,
+				Block:    &orphan,
+				Status:   db.TxStatusPublished,
+				Received: received,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+			{
+				WalletID: walletID, Tx: orphanSpend,
+				Status:   db.TxStatusPublished,
+				Received: received,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		},
+	})
+	require.NoError(t, err)
+	err = store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: walletID, BirthdayBlock: &canonical,
+	})
+	require.NoError(t, err)
+	before, err := store.GetWallet(t.Context(), "higher-canonical-history")
+	require.NoError(t, err)
+	require.Equal(t, canonical.Height, before.SyncedTo.Height)
+	parentBefore, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: coinbase.TxHash(),
+	})
+	require.NoError(t, err)
+	spendBefore, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: spend.TxHash(),
+	})
+	require.NoError(t, err)
+
+	// Act: Disconnect old 420, reopen, and capture recovery before replay.
+	// Only proven orphans 420/422 may lose their rows or transaction effects.
+	err = store.DisconnectBlock(
+		t.Context(), walletID, observed, &fork,
+		map[uint32]*chainhash.Hash{
+			observed.Height:  &replacement.Hash,
+			canonical.Height: &canonical.Hash,
+			orphan.Height:    nil,
+		},
+	)
+
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	store = reopen()
+	parentAfter, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: coinbase.TxHash(),
+	})
+	require.NoError(t, err)
+	spendAfter, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: spend.TxHash(),
+	})
+	require.NoError(t, err)
+	orphanAfter, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: orphanCoinbase.TxHash(),
+	})
+	require.NoError(t, err)
+	failed, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID, Txid: orphanSpend.TxHash(),
+	})
+	require.NoError(t, err)
+	current, err := store.GetWallet(t.Context(), "higher-canonical-history")
+	require.NoError(t, err)
+
+	_, observedErr := store.ListSyncedBlocks(
+		t.Context(), db.ListSyncedBlocksQuery{
+			WalletID: walletID, StartHeight: observed.Height,
+			EndHeight: observed.Height,
+		},
+	)
+	_, orphanErr := store.ListSyncedBlocks(
+		t.Context(), db.ListSyncedBlocksQuery{
+			WalletID: walletID, StartHeight: orphan.Height,
+			EndHeight: orphan.Height,
+		},
+	)
+	replayErr := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletID, SyncedBlocks: []db.Block{replacement, canonical},
+	})
+
+	// Assert: Persist the fork below the gap, keep valid birthday/graph state,
+	// invalidate the orphan graph, and accept the first replacement scan.
+	require.Equal(t, fork.Height, current.SyncedTo.Height)
+	require.Equal(t, fork.Hash, current.SyncedTo.Hash)
+	require.Equal(t, before.BirthdayBlock, current.BirthdayBlock)
+	require.Equal(t, parentBefore, parentAfter)
+	require.Equal(t, spendBefore, spendAfter)
+	require.Nil(t, orphanAfter.Block)
+	require.Equal(t, db.TxStatusOrphaned, orphanAfter.Status)
+	require.Equal(t, db.TxStatusFailed, failed.Status)
+	require.ErrorIs(t, observedErr, db.ErrBlockNotFound)
+	require.ErrorIs(t, orphanErr, db.ErrBlockNotFound)
+	require.NoError(t, replayErr)
+}
