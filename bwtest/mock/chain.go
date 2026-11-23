@@ -46,6 +46,7 @@ func NewGenesisChain(tb testing.TB, current bool) *Chain {
 	// Tests can replace these defaults when registration is under test.
 	chain.On("BackEnd").Return("mock").Maybe()
 	chain.On("Notifications").Return((<-chan any)(nil)).Maybe()
+	chain.On("NotificationsDone").Return((<-chan struct{})(nil)).Maybe()
 	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Maybe()
 	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
@@ -230,6 +231,13 @@ func (m *Chain) NotifyBlocks() error {
 func (m *Chain) Notifications() <-chan any {
 	args := m.Called()
 	return args.Get(0).(<-chan any)
+}
+
+// NotificationsDone returns the configured producer signal so tests can
+// terminate input independently of a blocked notification receive.
+func (m *Chain) NotificationsDone() <-chan struct{} {
+	args := m.Called()
+	return args.Get(0).(<-chan struct{})
 }
 
 // BackEnd implements the chain.Interface interface.

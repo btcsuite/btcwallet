@@ -355,6 +355,12 @@ func (c *BitcoindClient) Notifications() <-chan interface{} {
 	return c.notificationQueue.ChanOut()
 }
 
+// NotificationsDone exposes the existing producer shutdown signal without
+// waiting for queued notifications or taking ownership of the connection.
+func (c *BitcoindClient) NotificationsDone() <-chan struct{} {
+	return c.quit
+}
+
 // NotifyReceived allows the chain backend to notify the caller whenever a
 // transaction pays to any of the given addresses.
 //

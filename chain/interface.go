@@ -67,6 +67,13 @@ type Interface interface {
 	WatchAddrsFromTip(context.Context, []address.Address) error
 	NotifyBlocks() error
 	Notifications() <-chan interface{}
+
+	// NotificationsDone reports producer termination even when Notifications
+	// cannot be drained. Obtain it after Start; it may close before buffered
+	// data is drained and grants no ownership of Stop or WaitForShutdown.
+	// Non-notifying adapters may return nil alongside nil Notifications.
+	NotificationsDone() <-chan struct{}
+
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
 	SubmitPackage(txns []*wire.MsgTx,
