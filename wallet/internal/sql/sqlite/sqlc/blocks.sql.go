@@ -19,6 +19,25 @@ func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int64) error {
 	return err
 }
 
+const DeleteWalletBlockByHeight = `-- name: DeleteWalletBlockByHeight :execrows
+DELETE FROM wallet_blocks
+WHERE wallet_id = cast(?1 AS INTEGER) AND block_height = cast(?2 AS INTEGER)
+`
+
+type DeleteWalletBlockByHeightParams struct {
+	WalletID    int64
+	BlockHeight int64
+}
+
+// Delete only a proven orphan; higher current-chain observations stay owned.
+func (q *Queries) DeleteWalletBlockByHeight(ctx context.Context, arg DeleteWalletBlockByHeightParams) (int64, error) {
+	result, err := q.exec(ctx, q.deleteWalletBlockByHeightStmt, DeleteWalletBlockByHeight, arg.WalletID, arg.BlockHeight)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetBlockByHeight = `-- name: GetBlockByHeight :one
 SELECT
     block_height,
