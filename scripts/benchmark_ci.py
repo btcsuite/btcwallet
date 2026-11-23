@@ -3,11 +3,15 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import math
+import os
+import platform
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PACKAGE = "github.com/btcsuite/btcwallet/wallet/bench"
@@ -184,6 +188,129 @@ def compare_results(output, enforce=False):
     return int(enforce and failure)
 
 
+def harness_fingerprint(source, backend):
+    """harness_fingerprint identifies datasets and requests, not query code."""
+    def digest(paths):
+        """digest binds ordered relative paths and contents across checkouts."""
+        data = b"".join(
+            str(path.relative_to(source)).encode() + b"\0" + path.read_bytes()
+            for path in sorted(paths)
+        )
+        return hashlib.sha256(data).hexdigest()
+
+    common = [source / path for path in (
+        "wallet/bench/setup_test.go", f"wallet/bench/setup_{backend}_test.go",
+        "wallet/internal/bwtest/bench_cases.go", "wallet/internal/bwtest/profile.go",
+    )]
+    requests = {}
+    for path in sorted((source / "wallet/bench").glob("*_test.go")):
+        for name in re.findall(r"^func Benchmark((?:Get|List)\w*)\(",
+                               path.read_text(), re.MULTILINE):
+            # The point-read helpers live with address reads; include only the
+            # demonstrated cross-file edges, not a general dependency graph.
+            inputs = [path]
+            if (name.endswith(("Different", "NotFound"))
+                    and name.startswith(("GetTx", "GetUtxo"))):
+                inputs.append(source / "wallet/bench/get_address_info_test.go")
+            requests[name + "/smoke"] = digest(set(inputs))
+
+    schema = source / "wallet/internal/sql" / (
+        "pg" if backend == "postgres" else "sqlite"
+    )
+    return {
+        "common": digest(common) if all(path.is_file() for path in common) else None,
+        "requests": requests,
+        # Schema hashes select separate native fixtures; index changes remain
+        # comparable when logical workload and request definitions still match.
+        "schema": digest([*schema.glob("bootstrap/*.sql"),
+                          *schema.glob("migrations/*.sql")]),
+    }
+
+
+def collect(head, base, backend, output):
+    """collect runs serial paired samples through the unchanged Docker runner."""
+    head = head.resolve()
+    runner = Path(__file__).resolve().with_name("benchmark.sh")
+    output.mkdir(parents=True, exist_ok=False)
+    locations = {"head": head}
+    if base is not None:
+        locations["base"] = base.resolve()
+
+    # Bind collection to Git revisions while keeping file identities usable
+    # independently of repository state, including in temporary test fixtures.
+    sources = {}
+    for role, location in locations.items():
+        sources[role] = harness_fingerprint(location, backend)
+        sources[role]["revision"] = subprocess.check_output(
+            ["git", "-C", str(location), "rev-parse", "HEAD"], text=True,
+        ).strip()
+
+    if not sources["head"]["common"] or not sources["head"]["requests"]:
+        raise ValueError("candidate SQL benchmark harness is unavailable")
+
+    mode = _comparison_mode(sources)
+    roles = ["base", "head"] if mode == "paired" else ["head"]
+    cpu_command = ["lscpu"] if sys.platform == "linux" else [
+        "sysctl", "-n", "machdep.cpu.brand_string",
+    ]
+    metadata = {
+        "backend": backend, "sources": sources, "complete": False, "runs": [],
+        "profile": {
+            "samples": SAMPLES, "duration": DURATION, "selector": SELECTOR,
+            "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+        },
+        "environment": {
+            "host": platform.platform(),
+            "cpu": subprocess.check_output(cpu_command, text=True).strip(),
+            "docker": subprocess.check_output(["docker", "version"], text=True),
+            "runner_image": {key: os.getenv(key) for key in (
+                "ImageOS", "ImageVersion", "RUNNER_OS", "RUNNER_ARCH",
+                "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+            )},
+        },
+        "pull_request": {
+            "head": os.getenv("PR_HEAD_SHA"),
+            "payload_base": os.getenv("PR_PAYLOAD_BASE"),
+            "payload_base_matches": os.getenv("PR_PAYLOAD_BASE") ==
+            sources.get("base", {}).get("revision"),
+        },
+    }
+
+    metadata_path = output / "metadata.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+    environment = {**os.environ, "BENCH_PACKAGE": "./wallet/bench",
+                   "BENCH_CASE": SELECTOR}
+
+    # Preparation uses the same private restoration path but supplies no timing
+    # evidence. Every subsequent pair has balanced early/late source positions.
+    invocations = [(role, "prepare", "1x") for role in roles]
+    for index in range(SAMPLES):
+        order = roles if index % 2 == 0 else list(reversed(roles))
+        invocations.extend((role, str(index), DURATION) for role in order)
+
+    for role, sample, duration in invocations:
+        print(f"{backend}: {role} {sample}", flush=True)
+        started = time.monotonic()
+        with (output / f"{role}-{sample}.log").open("w") as log:
+            result = subprocess.run(
+                ["bash", str(runner), "sql-ci", backend, "smoke", "", duration,
+                 str(output / role)], cwd=locations[role], env=environment,
+                stdout=log, stderr=subprocess.STDOUT, check=False,
+            )
+
+        metadata["runs"].append({
+            "role": role, "sample": sample, "returncode": result.returncode,
+            "elapsed_seconds": time.monotonic() - started,
+        })
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+        if result.returncode:
+            raise ValueError(f"{role}-{sample} failed; inspect its raw log")
+
+    metadata["complete"] = True
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+    return 0
+
+
 def main():
     """main exposes report status without treating failed evidence as success."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -192,9 +319,17 @@ def main():
     report.add_argument("--out", type=Path, required=True)
     report.add_argument("--enforce", action="store_true")
 
+    collection = commands.add_parser("collect")
+    collection.add_argument("--head", type=Path, required=True)
+    collection.add_argument("--base", type=Path)
+    collection.add_argument("--backend", choices=("sqlite", "postgres"), required=True)
+    collection.add_argument("--out", type=Path, required=True)
     arguments = parser.parse_args()
 
     try:
+        if arguments.command == "collect":
+            return collect(arguments.head, arguments.base, arguments.backend,
+                           arguments.out.resolve())
         return compare_results(arguments.out, arguments.enforce)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         if arguments.command == "report":

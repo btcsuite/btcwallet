@@ -1,6 +1,7 @@
 """Exercise benchmark reporting through real files and the pinned benchstat."""
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -246,6 +247,94 @@ class BenchmarkCITest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 diagnostic = (output / "summary.md").read_text().splitlines()[0]
                 self.assertEqual(diagnostic, "# Measurement error")
+
+    def testReportChecksSourceComparability(self):
+        """testReportChecksSourceComparability separates requests from storage."""
+        # Arrange: These real files model only the demonstrated harness edges;
+        # the independent account must stay comparable after a point-helper change.
+        files = {
+            "wallet/bench/setup_test.go": "seed",
+            "wallet/bench/setup_sqlite_test.go": "sqlite fixture",
+            "wallet/internal/bwtest/bench_cases.go": "workload",
+            "wallet/internal/bwtest/profile.go": "measurement boundary",
+            "wallet/bench/get_tx_test.go": "func BenchmarkGetTxDifferent(b *testing.B) {}",
+            "wallet/bench/get_address_info_test.go":
+                "func BenchmarkGetAddressInfoDifferent(b *testing.B) {}",
+            "wallet/bench/get_account_test.go":
+                "func BenchmarkGetAccountDifferent(b *testing.B) {}",
+            "wallet/internal/sql/sqlite/bootstrap/schema.sql": "schema",
+        }
+        cases = [
+            {
+                "name": "fixture",
+                "path": "wallet/internal/bwtest/bench_cases.go",
+                "point": "incompatible",
+                "account": "incompatible",
+                "change": "—",
+                "exit": 1,
+            },
+            {
+                "name": "request",
+                "path": "wallet/bench/get_tx_test.go",
+                "point": "incompatible",
+                "account": "within budget",
+                "change": "—",
+                "exit": 1,
+            },
+            {
+                "name": "shared request helper",
+                "path": "wallet/bench/get_address_info_test.go",
+                "point": "incompatible",
+                "account": "within budget",
+                "change": "—",
+                "exit": 1,
+            },
+            {
+                "name": "schema",
+                "path": "wallet/internal/sql/sqlite/bootstrap/schema.sql",
+                "point": "within budget",
+                "account": "within budget",
+                "change": "~",
+                "exit": 0,
+            },
+        ]
+        for index, case in enumerate(cases):
+            with self.subTest(case=case["name"]):
+                base = self.root / f"base-{index}"
+                for name, contents in files.items():
+                    path = base / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(contents)
+                head = self.root / f"head-{index}"
+                shutil.copytree(base, head)
+                changed = head / case["path"]
+                changed.write_text(changed.read_text() + "\n// changed input\n")
+                sources = {
+                    role: {"revision": role, **ci.harness_fingerprint(path, "sqlite")}
+                    for role, path in (("base", base), ("head", head))
+                }
+                rows = dict.fromkeys(sources["head"]["requests"], [(100, 2048, 8)] * 6)
+                output = self.evidence(rows, rows)
+                metadata = json.loads((output / "metadata.json").read_text())
+                metadata["sources"] = sources
+                (output / "metadata.json").write_text(json.dumps(metadata))
+
+                # Act: Classify actual source fingerprints through the report CLI.
+                result = self.report(output)
+
+                # Assert: Dataset/request edits invalidate affected comparisons;
+                # SQL schema edits retain their independent native fixture keys.
+                self.assertEqual(result.returncode, case["exit"], result.stderr)
+                summary = (output / "summary.md").read_text().splitlines()
+                point = next(line for line in summary if line.startswith(
+                    "| GetTxDifferent/smoke | ns/op |"
+                ))
+                account = next(line for line in summary if line.startswith(
+                    "| GetAccountDifferent/smoke | ns/op |"
+                ))
+                self.assertIn(f"| {case['point']} |", point)
+                self.assertIn(f"| {case['account']} |", account)
+                self.assertEqual(point.split("|")[5].strip(), case["change"])
 
 
 if __name__ == "__main__":
