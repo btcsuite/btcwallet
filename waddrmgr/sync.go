@@ -64,8 +64,19 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 		return err
 	}
 
-	// Update memory now that the database is updated.
-	m.syncState.syncedTo = *bs
+	// Only update memory once the transaction commits. Callers derive the
+	// next height to sync from SyncedTo, so if memory moved ahead of a
+	// write that's later rolled back, every retry would start past a
+	// block the database never stored, and PutSyncedTo would reject it
+	// for good, as it requires the previous block to be stored.
+	syncedTo := *bs
+	ns.Tx().OnCommit(func() {
+		m.mtx.Lock()
+		defer m.mtx.Unlock()
+
+		m.syncState.syncedTo = syncedTo
+	})
+
 	return nil
 }
 
