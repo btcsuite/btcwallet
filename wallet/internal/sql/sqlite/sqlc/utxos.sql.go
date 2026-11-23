@@ -484,29 +484,12 @@ func (q *Queries) InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, 
 
 const ListOutputsToWatch = `-- name: ListOutputsToWatch :many
 SELECT
-    t.tx_hash,
-    u.output_index,
-    t.raw_tx
-FROM utxos AS u
-INNER JOIN transactions AS t ON u.tx_id = t.id
-LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
-LEFT JOIN accounts AS acc ON da.account_id = acc.id
-WHERE
-    t.wallet_id = ?1
-    AND (acc.id IS NULL OR NOT acc.no_chain_sync)
-    AND EXISTS (
-        SELECT 1 FROM eligible_transactions AS eligible
-        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
-    )
-    -- Recovery still watches unconfirmed-spent credits; a current block ends it.
-    AND NOT EXISTS (
-        SELECT 1 FROM tx_inputs AS claim
-        INNER JOIN transactions AS spender ON claim.wallet_id = spender.wallet_id AND claim.tx_id = spender.id
-        WHERE
-            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
-            AND claim.prev_output_index = u.output_index AND spender.block_height IS NOT NULL
-    )
-ORDER BY t.tx_hash, u.output_index
+    tx_hash,
+    output_index,
+    raw_tx
+FROM outputs_to_watch
+WHERE wallet_id = ?1
+ORDER BY tx_hash, output_index
 `
 
 type ListOutputsToWatchRow struct {
@@ -515,28 +498,10 @@ type ListOutputsToWatchRow struct {
 	RawTx       []byte
 }
 
-// Lists every output a recovery rescan must keep watching for one wallet.
-//
-// How:
-//   - Starts from the wallet's UTXO rows joined to their funding transaction;
-//     the rescan needs each outpoint plus the on-chain output script. The script
-//     is taken from the funding transaction's raw_tx (TxOut[output_index]) in the
-//     Store Go layer rather than from the credited address: a bare-multisig
-//     output the wallet partly owns is recorded against a member address whose
-//     own script differs from the multisig output script, so the address script
-//     would be the wrong thing to watch. Reading the actual output script matches
-//     the kvdb OutputsToWatch contract.
-//   - Includes outputs whose funding transaction is still active (pending or
-//     published); invalidated parents (replaced/failed/orphaned) are excluded so
-//     the watch set matches the legacy wtxmgr credit walk.
-//   - Keeps an output when it is either still unspent OR spent only by an
-//     unmined, still-active transaction. This mirrors the legacy behaviour of
-//     returning unmined credits and credits spent by other unmined txs, while
-//     dropping outputs already spent by a confirmed transaction.
-//   - Locked (leased) outputs are intentionally retained because leasing is
-//     modelled separately from existence and the rescan must still watch them.
-//   - Excludes credited accounts that opt out of chain synchronization while
-//     retaining accountless imports through nullable account joins.
+// Lists the outputs a recovery rescan must keep watching for one wallet.
+// Use the funding raw_tx to recover each on-chain output script,
+// including bare multisig credits whose owning address uses a different
+// script. Both watch readers share the view's eligibility.
 func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error) {
 	rows, err := q.query(ctx, q.listOutputsToWatchStmt, ListOutputsToWatch, walletID)
 	if err != nil {
