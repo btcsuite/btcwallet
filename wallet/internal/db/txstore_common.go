@@ -1555,6 +1555,20 @@ type UnminedTxRecord struct {
 // the shared `(id, tx_hash, raw_tx)` shape used by the invalidation walk.
 type ExtractUnminedTxFn[Row any] func(Row) (int64, []byte, []byte)
 
+// disconnectDescendantOps is the shared graph-write boundary for explicit
+// rollback and observed disconnections, independent of their block selection.
+type disconnectDescendantOps interface {
+	// ListUnminedTxRecords loads the wallet's current unmined transaction
+	// rows in the normalized shape the descendant walk expects.
+	ListUnminedTxRecords(ctx context.Context,
+		walletID int64) ([]UnminedTxRecord, error)
+
+	// MarkDescendantsFailed batch-marks the discovered descendants as
+	// failed while retaining their input facts for history.
+	MarkDescendantsFailed(ctx context.Context, walletID int64,
+		descendantIDs []int64) error
+}
+
 // RollbackToBlockOps adapts one SQL backend to the full RollbackToBlock
 // sequence, including sync-state rewinds, block deletion, and descendant
 // invalidation.
@@ -1588,15 +1602,7 @@ type RollbackToBlockOps interface {
 	MarkTxRootsOrphaned(ctx context.Context, walletID uint32,
 		rootHashes []chainhash.Hash) error
 
-	// ListUnminedTxRecords loads the wallet's current unmined transaction
-	// rows in the normalized shape the descendant walk expects.
-	ListUnminedTxRecords(ctx context.Context,
-		walletID int64) ([]UnminedTxRecord, error)
-
-	// MarkDescendantsFailed batch-marks the discovered descendants as
-	// failed while retaining their input facts for history.
-	MarkDescendantsFailed(ctx context.Context, walletID int64,
-		descendantIDs []int64) error
+	disconnectDescendantOps
 }
 
 // newUnminedTxRecord decodes one normalized unmined transaction row into the
@@ -1780,7 +1786,7 @@ func CollectDescendantTxIDs(rootHashes []chainhash.Hash,
 // Their retained inputs stop reserving credits once their status is invalid.
 func invalidateRollbackDescendants(ctx context.Context,
 	rootHashesByWallet map[uint32][]chainhash.Hash,
-	ops RollbackToBlockOps) error {
+	ops disconnectDescendantOps) error {
 
 	for walletID, rootHashes := range rootHashesByWallet {
 		walletID64 := int64(walletID)
@@ -1812,7 +1818,7 @@ func invalidateRollbackDescendants(ctx context.Context,
 // rewind paths use this without deleting shared block rows.
 func InvalidateRollbackDescendants(ctx context.Context,
 	rootHashesByWallet map[uint32][]chainhash.Hash,
-	ops RollbackToBlockOps) error {
+	ops disconnectDescendantOps) error {
 
 	return invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
 }
@@ -1869,6 +1875,44 @@ func RollbackToBlockWithOps(ctx context.Context, height uint32,
 	}
 
 	return nil
+}
+
+// DisconnectTx carries only the persisted facts used by disconnect policy.
+// IsCoinbase matches the classification used by confirmation-delete triggers.
+type DisconnectTx struct {
+	BlockHeight uint32
+	BlockHash   chainhash.Hash
+	Hash        chainhash.Hash
+	IsCoinbase  bool
+}
+
+// DisconnectBlockOps supplies owned history queries inside one SQL write.
+// The descendant walk is shared with explicit height rollback.
+type DisconnectBlockOps interface {
+	disconnectDescendantOps
+
+	// GetDisconnectBlock reads the observed height or ErrBlockNotFound.
+	GetDisconnectBlock(ctx context.Context, height uint32) (*Block, error)
+
+	// GetDisconnectCheckpoint reads nullable progress within the current write.
+	GetDisconnectCheckpoint(ctx context.Context) (*uint32, error)
+
+	// ListDisconnectBlocks reads the caller-selected committed interval,
+	// including empty rows and gaps without changing the requested bounds.
+	ListDisconnectBlocks(ctx context.Context,
+		start, end uint32) ([]Block, error)
+
+	// ListDisconnectTransactions reads mined facts before deletion.
+	ListDisconnectTransactions(ctx context.Context,
+		height uint32) ([]DisconnectTx, error)
+
+	// RewindDisconnectReferences rewinds progress across selected orphan rows
+	// and moves birthday only when its own block is removed.
+	RewindDisconnectReferences(ctx context.Context, heights []uint32,
+		previous *Block) error
+
+	// DeleteDisconnectBlocks removes exact rows after reference rewind.
+	DeleteDisconnectBlocks(ctx context.Context, heights []uint32) error
 }
 
 // txSpendsAnyParent reports whether the transaction spends any hash in the
