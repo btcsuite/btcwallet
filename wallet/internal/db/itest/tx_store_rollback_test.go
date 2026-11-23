@@ -735,3 +735,54 @@ func TestDisconnectBlockRestartCatchup(t *testing.T) {
 	require.ErrorIs(t, aboveTipErr, db.ErrBlockNotFound)
 	require.NoError(t, err)
 }
+
+// TestDisconnectBlockRewindsHigherCheckpoint recovers saved empty progress
+// when only a lower notification arrives after the source chain has shortened.
+func TestDisconnectBlockRewindsHigherCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit three empty blocks. The shortened source proves both
+	// identities above one orphaned, although only the lower event arrives.
+	ctx := t.Context()
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	id := newWallet(t, store, "lower-disconnect")
+	fork, observed, tip := NewBlockFixture(1), NewBlockFixture(2),
+		NewBlockFixture(3)
+	err := store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID: id, SyncedBlocks: []db.Block{fork, observed, tip},
+	})
+	require.NoError(t, err)
+
+	// Act: Deliver only two's disconnect, reopen the real Store and try its
+	// first replacement batch without ever delivering three's missing event.
+	err = store.DisconnectBlock(ctx, id, observed, &fork,
+		map[uint32]*chainhash.Hash{
+			observed.Height: nil,
+			tip.Height:      nil,
+		})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	store = reopen()
+	wallet, err := store.GetWallet(ctx, "lower-disconnect")
+	require.NoError(t, err)
+
+	_, observedErr := store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		WalletID: id, StartHeight: observed.Height, EndHeight: observed.Height,
+	})
+	_, tipErr := store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		WalletID: id, StartHeight: tip.Height, EndHeight: tip.Height,
+	})
+	replacement := observed
+	replacement.Hash[0] ^= 0xff
+	err = store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID: id, SyncedBlocks: []db.Block{replacement},
+	})
+
+	// Assert: No successful disconnect may leave the higher orphan checkpoint
+	// or either old empty row. The durable fork accepts replacement catch-up.
+	require.Equal(t, fork.Height, wallet.SyncedTo.Height)
+	require.Equal(t, fork.Hash, wallet.SyncedTo.Hash)
+	require.ErrorIs(t, observedErr, db.ErrBlockNotFound)
+	require.ErrorIs(t, tipErr, db.ErrBlockNotFound)
+	require.NoError(t, err)
+}
