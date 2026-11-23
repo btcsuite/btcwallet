@@ -25,6 +25,9 @@ var (
 
 // SQLite constraint constants expose exact extended codes to shared tests.
 const (
+	// driverRollbackDeleteFailure identifies the installed rollback trigger.
+	driverRollbackDeleteFailure = sqlite3.SQLITE_CONSTRAINT_TRIGGER
+
 	driverConstraintNotNull   = sqlite3.SQLITE_CONSTRAINT_NOTNULL
 	driverConstraintCheck     = sqlite3.SQLITE_CONSTRAINT_CHECK
 	driverConstraintImmutable = sqlite3.SQLITE_CONSTRAINT_TRIGGER

@@ -24,6 +24,9 @@ var (
 
 // PostgreSQL constraint constants expose exact SQLSTATE values to shared tests.
 const (
+	// driverRollbackDeleteFailure identifies the installed rollback trigger.
+	driverRollbackDeleteFailure = "P0001"
+
 	driverConstraintNotNull   = "23502"
 	driverConstraintCheck     = "23514"
 	driverConstraintImmutable = driverConstraintCheck
