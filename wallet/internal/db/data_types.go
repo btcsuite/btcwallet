@@ -270,10 +270,10 @@ type ListWalletsQuery struct {
 }
 
 // ListSyncedBlocksQuery contains the requested synced block height range.
-//
-// Synced block metadata is shared chain state rather than wallet-scoped state,
-// so the query carries no wallet ID.
 type ListSyncedBlocksQuery struct {
+	// WalletID owns the history; KVDB keeps its existing singleton identity.
+	WalletID uint32
+
 	// StartHeight is the first block height to include.
 	StartHeight uint32
 
