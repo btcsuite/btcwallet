@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -115,6 +116,9 @@ func (s *Store) RollbackToBlock(ctx context.Context,
 // sequence.
 type rollbackToBlockOps struct {
 	qtx *sqlc.Queries
+
+	// walletID binds the existing sequence to the request's history.
+	walletID uint32
 }
 
 var _ db.RollbackToBlockOps = (*rollbackToBlockOps)(nil)
@@ -255,4 +259,120 @@ func groupRollbackCoinbaseRoots(
 	}
 
 	return rootHashesByWallet, nil
+}
+
+// GetDisconnectBlock reads one owned identity before applying a native event.
+func (o rollbackToBlockOps) GetDisconnectBlock(ctx context.Context,
+	height uint32) (*db.Block, error) {
+
+	row, err := o.qtx.GetWalletBlockByHeight(
+		ctx, sqlc.GetWalletBlockByHeightParams{
+			WalletID: int64(o.walletID), BlockHeight: int64(height),
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrBlockNotFound
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("get disconnected block: %w", err)
+	}
+
+	return db.BuildBlock(row.HeaderHash, height, row.BlockTimestamp)
+}
+
+// GetDisconnectCheckpoint reads progress within the existing atomic write.
+// An absent checkpoint does not turn later empty observations into progress.
+func (o rollbackToBlockOps) GetDisconnectCheckpoint(ctx context.Context) (
+	*uint32, error) {
+
+	wallet, err := o.qtx.GetWalletByID(ctx, int64(o.walletID))
+	if err != nil {
+		return nil, fmt.Errorf("read disconnect checkpoint: %w", err)
+	}
+
+	var checkpoint *uint32
+	if wallet.SyncedHeight.Valid {
+		height, err := db.Int64ToUint32(wallet.SyncedHeight.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("decode disconnect checkpoint: %w", err)
+		}
+
+		checkpoint = &height
+	}
+
+	return checkpoint, nil
+}
+
+// ListDisconnectBlocks reads the shared workflow's selected committed range.
+// The current write retains empty rows and gaps for identity classification.
+func (o rollbackToBlockOps) ListDisconnectBlocks(ctx context.Context,
+	start, end uint32) ([]db.Block, error) {
+
+	rows, err := o.qtx.GetWalletBlocksInRange(
+		ctx, sqlc.GetWalletBlocksInRangeParams{
+			WalletID:    int64(o.walletID),
+			StartHeight: int64(start), EndHeight: int64(end),
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read committed disconnect history: %w", err)
+	}
+
+	blocks := make([]db.Block, 0, len(rows))
+	for _, row := range rows {
+		block, err := buildBlock(
+			sql.NullInt64{Int64: row.BlockHeight, Valid: true},
+			row.HeaderHash,
+			sql.NullInt64{Int64: row.BlockTimestamp, Valid: true},
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		blocks = append(blocks, *block)
+	}
+
+	return blocks, nil
+}
+
+// ListDisconnectTransactions retains only stored classification facts, rather
+// than hydrating a public transaction view or decoding its raw payload again.
+func (o rollbackToBlockOps) ListDisconnectTransactions(ctx context.Context,
+	height uint32) ([]db.DisconnectTx, error) {
+
+	rows, err := o.qtx.ListTransactionsByHeightRange(
+		ctx, sqlc.ListTransactionsByHeightRangeParams{
+			WalletID:    int64(o.walletID),
+			StartHeight: int64(height), EndHeight: maxSQLBlockHeight,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list disconnected history: %w", err)
+	}
+
+	history := make([]db.DisconnectTx, 0, len(rows))
+	for _, row := range rows {
+		h, err := db.Int64ToUint32(row.BlockHeight.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("disconnect transaction height: %w", err)
+		}
+
+		blockHash, err := chainhash.NewHash(row.BlockHash)
+		if err != nil {
+			return nil, fmt.Errorf("disconnect block hash: %w", err)
+		}
+
+		txHash, err := chainhash.NewHash(row.TxHash)
+		if err != nil {
+			return nil, fmt.Errorf("disconnect transaction hash: %w", err)
+		}
+
+		history = append(history, db.DisconnectTx{
+			BlockHeight: h, BlockHash: *blockHash,
+			Hash: *txHash, IsCoinbase: row.IsCoinbase,
+		})
+	}
+
+	return history, nil
 }
