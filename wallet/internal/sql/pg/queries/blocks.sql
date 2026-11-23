@@ -62,3 +62,8 @@ VALUES (
     sqlc.arg('block_timestamp')
 )
 ON CONFLICT DO NOTHING;
+
+-- name: DeleteWalletBlockByHeight :execrows
+-- Delete only a proven orphan; higher current-chain observations stay owned.
+DELETE FROM wallet_blocks
+WHERE wallet_id = sqlc.arg('wallet_id')::BIGINT AND block_height = sqlc.arg('block_height')::BIGINT;
