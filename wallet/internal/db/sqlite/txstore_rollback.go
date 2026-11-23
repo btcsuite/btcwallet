@@ -123,6 +123,8 @@ type rollbackToBlockOps struct {
 
 var _ db.RollbackToBlockOps = (*rollbackToBlockOps)(nil)
 
+var _ db.DisconnectBlockOps = (*rollbackToBlockOps)(nil)
+
 // ListRollbackRootHashes loads the coinbase roots that a rollback disconnects
 // and groups them by wallet.
 func (o rollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
@@ -375,4 +377,52 @@ func (o rollbackToBlockOps) ListDisconnectTransactions(ctx context.Context,
 	}
 
 	return history, nil
+}
+
+// RewindDisconnectReferences applies the shared workflow's selected rewinds.
+// Normalize the fork once; SQL rewinds progress across any removed history.
+func (o rollbackToBlockOps) RewindDisconnectReferences(ctx context.Context,
+	heights []uint32, previous *db.Block) error {
+
+	var fork sql.NullInt64
+	if previous != nil {
+		fork = sql.NullInt64{Int64: int64(previous.Height), Valid: true}
+	}
+
+	for _, height := range heights {
+		h := int64(height)
+
+		_, err := o.qtx.RewindWalletReferencesForDisconnect(
+			ctx, sqlc.RewindWalletReferencesForDisconnectParams{
+				WalletID: int64(o.walletID), Height: h,
+				PreviousHeight: fork,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("rewind disconnect refs: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// DeleteDisconnectBlocks removes only rows selected by shared recovery policy.
+// The shared workflow has already moved every affected reference in this write.
+func (o rollbackToBlockOps) DeleteDisconnectBlocks(ctx context.Context,
+	heights []uint32) error {
+
+	for _, height := range heights {
+		h := int64(height)
+
+		_, err := o.qtx.DeleteWalletBlockByHeight(
+			ctx, sqlc.DeleteWalletBlockByHeightParams{
+				WalletID: int64(o.walletID), BlockHeight: h,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("delete disconnected block: %w", err)
+		}
+	}
+
+	return nil
 }
