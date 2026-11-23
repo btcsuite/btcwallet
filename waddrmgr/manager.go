@@ -5,6 +5,7 @@
 package waddrmgr
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha512"
 	"fmt"
@@ -403,6 +404,9 @@ type Manager struct {
 	privPassphraseSalt   [saltSize]byte
 	hashedPrivPassphrase [sha512.Size]byte
 }
+
+// Ensure Manager exposes the address-store operations used by KVDB.
+var _ AddrStore = (*Manager)(nil)
 
 // WatchOnly returns true if the root manager is in watch only mode, and false
 // otherwise.
@@ -931,6 +935,81 @@ func (m *Manager) ForEachRelevantActiveAddress(ns walletdb.ReadBucket,
 	}
 
 	return nil
+}
+
+// ForEachWatchAddress visits the addresses eligible for a persisted watch
+// read. Scope metadata and addresses come from ns, which must belong to the
+// same walletdb snapshot as the caller's other watch data. A canceled
+// context stops the scan between address rows. The callback runs without
+// the root manager lock, so it may read metadata through the manager.
+func (m *Manager) ForEachWatchAddress(ctx context.Context,
+	ns walletdb.ReadBucket, fn func(addr address.Address) error) error {
+
+	// Use only public keys and keep decoded account rows confined to this
+	// walk so live scope publication and account caches cannot affect it.
+	// The public crypto key reference is fixed at construction.
+	decoder := &Manager{
+		chainParams:  m.chainParams,
+		cryptoKeyPub: m.cryptoKeyPub,
+	}
+	decoder.locked.Store(true)
+
+	return forEachKeyScope(ns, func(scope KeyScope) error {
+		// Scope creation commits the schema together with its bucket.
+		// Resolve it from the snapshot even before live publication.
+		schema, err := fetchScopeAddrSchema(ns, &scope)
+		if err != nil {
+			return err
+		}
+
+		scoped := &ScopedKeyManager{
+			scope:       scope,
+			addrSchema:  *schema,
+			rootManager: decoder,
+			acctInfo:    make(map[uint32]*accountInfo),
+		}
+		defer scoped.Close()
+
+		// The row decoder populates the scoped account cache as it
+		// derives public addresses.
+		scoped.mtx.Lock()
+		defer scoped.mtx.Unlock()
+
+		defaultScope := IsDefaultScope(scope)
+
+		return forEachActiveAddress(ns, &scope, func(row any) error {
+			// Unlike opening the view, advancing the address scan
+			// can stop before decoding and deriving the next row.
+			err := ctx.Err()
+			if err != nil {
+				return err
+			}
+
+			// Custom scopes keep change and imports. External
+			// children are only watched in the default scopes.
+			chained, derived := row.(*dbChainAddressRow)
+			if derived && !defaultScope &&
+				chained.branch != InternalBranch {
+
+				return nil
+			}
+
+			// Protect the key from Close during decoding. Release
+			// the root lock before invoking the callback so it can
+			// read manager metadata.
+			addr, err := func() (ManagedAddress, error) {
+				m.mtx.RLock()
+				defer m.mtx.RUnlock()
+
+				return scoped.rowInterfaceToManaged(ns, row)
+			}()
+			if err != nil {
+				return err
+			}
+
+			return fn(addr.Address())
+		})
+	})
 }
 
 // ForEachAccountAddress calls the given function with each address of
