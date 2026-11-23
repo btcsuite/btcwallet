@@ -168,6 +168,8 @@ type Querier interface {
 	// - Uses the `(tx_id)` index to keep the delete bounded to one transaction's
 	//   outputs, then rechecks wallet ownership through the parent transaction.
 	DeleteUtxosByTxID(ctx context.Context, arg DeleteUtxosByTxIDParams) (int64, error)
+	// Delete only a proven orphan; higher current-chain observations stay owned.
+	DeleteWalletBlockByHeight(ctx context.Context, arg DeleteWalletBlockByHeightParams) (int64, error)
 	// Returns a single account by scope id and account name.
 	GetAccountByScopeAndName(ctx context.Context, arg GetAccountByScopeAndNameParams) (GetAccountByScopeAndNameRow, error)
 	// Returns a single derived account by scope id and account number.
@@ -570,6 +572,8 @@ type Querier interface {
 	// Performance:
 	// - Targets at most one row through the unique lease key.
 	ReleaseUtxoLease(ctx context.Context, arg ReleaseUtxoLeaseParams) (int64, error)
+	// Rewind scanned progress across removed history; move birthday only on removal.
+	RewindWalletReferencesForDisconnect(ctx context.Context, arg RewindWalletReferencesForDisconnectParams) (int64, error)
 	// Rewrites wallet sync-state heights so they stop referencing blocks that are
 	// about to be deleted during RollbackToBlock.
 	//

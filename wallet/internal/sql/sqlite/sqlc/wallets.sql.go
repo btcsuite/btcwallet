@@ -343,6 +343,42 @@ func (q *Queries) ListWallets(ctx context.Context, arg ListWalletsParams) ([]Lis
 	return items, nil
 }
 
+const RewindWalletReferencesForDisconnect = `-- name: RewindWalletReferencesForDisconnect :execrows
+UPDATE wallet_sync_states
+SET
+    synced_height = CASE
+        WHEN
+            synced_height >= cast(?1 AS INTEGER)
+            THEN cast(?2 AS INTEGER)
+        ELSE synced_height
+    END,
+    birthday_height = CASE
+        WHEN
+            birthday_height = cast(?1 AS INTEGER)
+            THEN cast(?2 AS INTEGER)
+        ELSE birthday_height
+    END,
+    updated_at = current_timestamp
+WHERE
+    wallet_id = cast(?3 AS INTEGER)
+    AND (synced_height >= cast(?1 AS INTEGER) OR birthday_height = cast(?1 AS INTEGER))
+`
+
+type RewindWalletReferencesForDisconnectParams struct {
+	Height         int64
+	PreviousHeight sql.NullInt64
+	WalletID       int64
+}
+
+// Rewind scanned progress across removed history; move birthday only on removal.
+func (q *Queries) RewindWalletReferencesForDisconnect(ctx context.Context, arg RewindWalletReferencesForDisconnectParams) (int64, error) {
+	result, err := q.exec(ctx, q.rewindWalletReferencesForDisconnectStmt, RewindWalletReferencesForDisconnect, arg.Height, arg.PreviousHeight, arg.WalletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const UpdateWalletSecrets = `-- name: UpdateWalletSecrets :execrows
 UPDATE wallet_secrets
 SET
