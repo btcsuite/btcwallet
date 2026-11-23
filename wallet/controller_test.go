@@ -2940,6 +2940,7 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 	retryInterval := 3 * time.Second
 	w := &Wallet{
 		lifetimeCtx: context.Background(),
+		sync:        &syncer{},
 		cfg: Config{
 			WalletSyncRetryInterval: retryInterval,
 		},
@@ -2972,6 +2973,7 @@ func TestWaitForBackoff_UnstableRun(t *testing.T) {
 	// Arrange: Create a wallet.
 	w := &Wallet{
 		lifetimeCtx: context.Background(),
+		sync:        &syncer{},
 	}
 
 	// Mock a start time that is recent (unstable).
@@ -3005,6 +3007,7 @@ func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
 	// Arrange: Create a wallet.
 	w := &Wallet{
 		lifetimeCtx: context.Background(),
+		sync:        &syncer{},
 	}
 
 	startTime := time.Now()
@@ -3040,6 +3043,7 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 
 	w := &Wallet{
 		lifetimeCtx: ctx,
+		sync:        &syncer{},
 	}
 
 	startTime := time.Now()

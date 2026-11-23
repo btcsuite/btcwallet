@@ -1401,7 +1401,8 @@ type UpdateTxOps interface {
 
 	// PrepareState validates and caches any backend-specific block/status
 	// params needed for the later row update.
-	PrepareState(ctx context.Context, state UpdateTxState) error
+	PrepareState(ctx context.Context, walletID uint32,
+		state UpdateTxState) error
 
 	// CheckGraphState rejects terminal recovery or confirmation changes
 	// involving competing transactions; CreateTx and rollback own those flows.
@@ -1433,7 +1434,7 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 	}
 
 	if params.State != nil {
-		err = ops.PrepareState(ctx, *params.State)
+		err = ops.PrepareState(ctx, params.WalletID, *params.State)
 		if err != nil {
 			return fmt.Errorf("prepare tx state update: %w", err)
 		}
@@ -1577,7 +1578,7 @@ type disconnectDescendantOps interface {
 // The shared rollback algorithm is intentionally ordered:
 //   - collect rollback root hashes before block rows are removed
 //   - rewind sync-state heights that still point at the removed blocks
-//   - delete the shared block rows at or above the rollback height
+//   - delete the owning Wallet block rows at or above the rollback height
 //   - mark the disconnected coinbase roots orphaned once their confirming
 //     blocks have been removed
 //   - walk the disconnected roots and invalidate dependent descendants
@@ -1594,8 +1595,8 @@ type RollbackToBlockOps interface {
 	// below the rollback boundary before block rows are removed.
 	RewindWalletSyncStateHeights(ctx context.Context, height uint32) error
 
-	// DeleteBlocksAtOrAboveHeight removes the shared block rows at or above the
-	// rollback boundary after sync-state references have been rewound.
+	// DeleteBlocksAtOrAboveHeight removes owned block rows at or above
+	// the rollback boundary after sync-state references have been rewound.
 	DeleteBlocksAtOrAboveHeight(ctx context.Context, height uint32) error
 
 	// MarkTxRootsOrphaned rewrites the disconnected coinbase roots to the

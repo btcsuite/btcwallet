@@ -82,7 +82,8 @@ func TestRollbackToBlockRejectsHeightOverflowPostgres(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	err := store.RollbackToBlock(t.Context(), ^uint32(0))
+	walletID := newWallet(t, store, "rollback-overflow")
+	err := store.RollbackToBlock(t.Context(), walletID, ^uint32(0))
 	require.ErrorContains(t, err, "convert rollback height")
 }
 
@@ -283,7 +284,7 @@ func newTxGraphConflict(t *testing.T) (*pgTestStore, db.CreateTxParams,
 		[]wire.OutPoint{f},
 		[]*wire.TxOut{{Value: 5500, PkScript: []byte{0x51}}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 1)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 1)
 	require.NoError(
 		t, store.CreateTx(
 			t.Context(), db.CreateTxParams{
@@ -351,7 +352,7 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 		[]wire.OutPoint{{Hash: root.TxHash()}, q},
 		[]*wire.TxOut{{Value: 11000, PkScript: addr.ScriptPubKey}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 1)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	require.NoError(
@@ -397,7 +398,7 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 	waitTxGraphCall(t, ctx, store.DB(), childCall, 1)
 	rollbackCall := startTxGraphCall(
 		t, cancel, func() error {
-			return store.RollbackToBlock(ctx, 1)
+			return store.RollbackToBlock(ctx, walletID, 1)
 		},
 	)
 	waitTxGraphCall(t, ctx, store.DB(), rollbackCall, 2)
@@ -769,7 +770,7 @@ func TestLeaseAcquisitionConcurrentConfirmationPostgres(t *testing.T) {
 						{Value: 5000, PkScript: []byte{0x51}},
 					},
 				)
-				block := CreateBlockFixture(t, store.Queries(), 600)
+				block := CreateBlockFixture(t, store.Queries(), walletID, 600)
 
 				// Act: Start acquisition before confirmation. Release the
 				// credit once recording commits or waits behind acquisition.
@@ -813,7 +814,11 @@ func TestLeaseAcquisitionConcurrentConfirmationPostgres(t *testing.T) {
 				require.NoError(t, barrier.Rollback())
 				require.NoError(t, <-leaseCall)
 				require.NoError(t, <-confirmation)
-				require.NoError(t, store.RollbackToBlock(ctx, block.Height))
+				require.NoError(
+					t, store.RollbackToBlock(
+						ctx, walletID, block.Height,
+					),
+				)
 				require.NoError(
 					t, store.DeleteTx(
 						ctx, db.DeleteTxParams{

@@ -34,9 +34,9 @@ var _ db.UpdateWalletOps = (*updateWalletOps)(nil)
 
 // EnsureBlock implements db.UpdateWalletOps.
 func (o updateWalletOps) EnsureBlock(ctx context.Context,
-	block *db.Block) error {
+	walletID uint32, block *db.Block) error {
 
-	return ensureBlockExists(ctx, o.q, block)
+	return ensureBlockExists(ctx, o.q, walletID, block)
 }
 
 // UpdateWalletSyncState implements db.UpdateWalletOps.

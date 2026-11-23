@@ -72,9 +72,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createWalletStmt, err = db.PrepareContext(ctx, CreateWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateWallet: %w", err)
 	}
-	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
-		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
-	}
 	if q.deleteBlocksAtOrAboveHeightStmt, err = db.PrepareContext(ctx, DeleteBlocksAtOrAboveHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlocksAtOrAboveHeight: %w", err)
 	}
@@ -147,12 +144,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAndIncrementNextInternalIndexStmt, err = db.PrepareContext(ctx, GetAndIncrementNextInternalIndex); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAndIncrementNextInternalIndex: %w", err)
 	}
-	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
-		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
-	}
-	if q.getBlocksInRangeStmt, err = db.PrepareContext(ctx, GetBlocksInRange); err != nil {
-		return nil, fmt.Errorf("error preparing query GetBlocksInRange: %w", err)
-	}
 	if q.getDatabaseIdentityStmt, err = db.PrepareContext(ctx, GetDatabaseIdentity); err != nil {
 		return nil, fmt.Errorf("error preparing query GetDatabaseIdentity: %w", err)
 	}
@@ -206,9 +197,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertAddressSecretStmt, err = db.PrepareContext(ctx, InsertAddressSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertAddressSecret: %w", err)
-	}
-	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
-		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
 	}
 	if q.insertDatabaseIdentityStmt, err = db.PrepareContext(ctx, InsertDatabaseIdentity); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertDatabaseIdentity: %w", err)
@@ -430,11 +418,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing createWalletStmt: %w", cerr)
 		}
 	}
-	if q.deleteBlockStmt != nil {
-		if cerr := q.deleteBlockStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
-		}
-	}
 	if q.deleteBlocksAtOrAboveHeightStmt != nil {
 		if cerr := q.deleteBlocksAtOrAboveHeightStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteBlocksAtOrAboveHeightStmt: %w", cerr)
@@ -555,16 +538,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getAndIncrementNextInternalIndexStmt: %w", cerr)
 		}
 	}
-	if q.getBlockByHeightStmt != nil {
-		if cerr := q.getBlockByHeightStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getBlockByHeightStmt: %w", cerr)
-		}
-	}
-	if q.getBlocksInRangeStmt != nil {
-		if cerr := q.getBlocksInRangeStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getBlocksInRangeStmt: %w", cerr)
-		}
-	}
 	if q.getDatabaseIdentityStmt != nil {
 		if cerr := q.getDatabaseIdentityStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getDatabaseIdentityStmt: %w", cerr)
@@ -653,11 +626,6 @@ func (q *Queries) Close() error {
 	if q.insertAddressSecretStmt != nil {
 		if cerr := q.insertAddressSecretStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertAddressSecretStmt: %w", cerr)
-		}
-	}
-	if q.insertBlockStmt != nil {
-		if cerr := q.insertBlockStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
 		}
 	}
 	if q.insertDatabaseIdentityStmt != nil {
@@ -940,7 +908,6 @@ type Queries struct {
 	createImportedAddressStmt                     *sql.Stmt
 	createKeyScopeStmt                            *sql.Stmt
 	createWalletStmt                              *sql.Stmt
-	deleteBlockStmt                               *sql.Stmt
 	deleteBlocksAtOrAboveHeightStmt               *sql.Stmt
 	deleteExpiredUtxoLeasesStmt                   *sql.Stmt
 	deleteKeyScopeStmt                            *sql.Stmt
@@ -965,8 +932,6 @@ type Queries struct {
 	getAndIncrementNextAccountNumberStmt          *sql.Stmt
 	getAndIncrementNextExternalIndexStmt          *sql.Stmt
 	getAndIncrementNextInternalIndexStmt          *sql.Stmt
-	getBlockByHeightStmt                          *sql.Stmt
-	getBlocksInRangeStmt                          *sql.Stmt
 	getDatabaseIdentityStmt                       *sql.Stmt
 	getKeyScopeByIDStmt                           *sql.Stmt
 	getKeyScopeByWalletAndScopeStmt               *sql.Stmt
@@ -985,7 +950,6 @@ type Queries struct {
 	getWalletSecretsStmt                          *sql.Stmt
 	hasTxGraphStateChangeStmt                     *sql.Stmt
 	insertAddressSecretStmt                       *sql.Stmt
-	insertBlockStmt                               *sql.Stmt
 	insertDatabaseIdentityStmt                    *sql.Stmt
 	insertKeyScopeSecretsStmt                     *sql.Stmt
 	insertTransactionStmt                         *sql.Stmt
@@ -1053,7 +1017,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createImportedAddressStmt:                     q.createImportedAddressStmt,
 		createKeyScopeStmt:                            q.createKeyScopeStmt,
 		createWalletStmt:                              q.createWalletStmt,
-		deleteBlockStmt:                               q.deleteBlockStmt,
 		deleteBlocksAtOrAboveHeightStmt:               q.deleteBlocksAtOrAboveHeightStmt,
 		deleteExpiredUtxoLeasesStmt:                   q.deleteExpiredUtxoLeasesStmt,
 		deleteKeyScopeStmt:                            q.deleteKeyScopeStmt,
@@ -1078,8 +1041,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAndIncrementNextAccountNumberStmt:          q.getAndIncrementNextAccountNumberStmt,
 		getAndIncrementNextExternalIndexStmt:          q.getAndIncrementNextExternalIndexStmt,
 		getAndIncrementNextInternalIndexStmt:          q.getAndIncrementNextInternalIndexStmt,
-		getBlockByHeightStmt:                          q.getBlockByHeightStmt,
-		getBlocksInRangeStmt:                          q.getBlocksInRangeStmt,
 		getDatabaseIdentityStmt:                       q.getDatabaseIdentityStmt,
 		getKeyScopeByIDStmt:                           q.getKeyScopeByIDStmt,
 		getKeyScopeByWalletAndScopeStmt:               q.getKeyScopeByWalletAndScopeStmt,
@@ -1098,7 +1059,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getWalletSecretsStmt:                          q.getWalletSecretsStmt,
 		hasTxGraphStateChangeStmt:                     q.hasTxGraphStateChangeStmt,
 		insertAddressSecretStmt:                       q.insertAddressSecretStmt,
-		insertBlockStmt:                               q.insertBlockStmt,
 		insertDatabaseIdentityStmt:                    q.insertDatabaseIdentityStmt,
 		insertKeyScopeSecretsStmt:                     q.insertKeyScopeSecretsStmt,
 		insertTransactionStmt:                         q.insertTransactionStmt,

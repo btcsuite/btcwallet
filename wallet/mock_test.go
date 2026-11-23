@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"context"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -133,12 +134,12 @@ func (m *mockChainProcessor) run(ctx context.Context) error {
 	return args.Error(0)
 }
 
-// processChainEventBeforeSync records ordered mailbox work during startup or
-// retry so controller tests can require its exact acceptance and result.
-func (m *mockChainProcessor) processChainEventBeforeSync(ctx context.Context,
-	event chainEvent) error {
+// waitForRetry exposes the child-owned wait without duplicating its intake
+// policy in Wallet controller tests.
+func (m *mockChainProcessor) waitForRetry(ctx context.Context,
+	retry <-chan time.Time) error {
 
-	args := m.Called(ctx, event)
+	args := m.Called(ctx, retry)
 	return args.Error(0)
 }
 

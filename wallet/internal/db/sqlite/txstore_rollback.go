@@ -100,15 +100,27 @@ func rewindWalletTransactions(ctx context.Context, qtx *sqlc.Queries,
 	)
 }
 
-// RollbackToBlock atomically removes every block at or above the provided
-// height and rewrites wallet sync-state references so the block delete can
-// succeed.
+// RollbackToBlock atomically rewinds only the owning Wallet, including its
+// confirmations and sync-state references before history deletion.
 func (s *Store) RollbackToBlock(ctx context.Context,
-	height uint32) error {
+	walletID, height uint32) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.RollbackToBlockWithOps(ctx, height,
-			rollbackToBlockOps{qtx: qtx})
+			rollbackToBlockOps{qtx: qtx, walletID: walletID})
+	})
+}
+
+// DisconnectBlock applies native evidence inside one owning Wallet write.
+func (s *Store) DisconnectBlock(ctx context.Context, walletID uint32,
+	block db.Block, previous *db.Block,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		return db.DisconnectBlockWithOps(
+			ctx, walletID, block, previous, canonical,
+			rollbackToBlockOps{qtx: qtx, walletID: walletID},
+		)
 	})
 }
 
@@ -130,7 +142,11 @@ var _ db.DisconnectBlockOps = (*rollbackToBlockOps)(nil)
 func (o rollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
 	height uint32) (map[uint32][]chainhash.Hash, error) {
 
-	rows, err := o.qtx.ListRollbackCoinbaseRoots(ctx, int64(height))
+	rows, err := o.qtx.ListRollbackCoinbaseRoots(
+		ctx, sqlc.ListRollbackCoinbaseRootsParams{
+			WalletID: int64(o.walletID), RollbackHeight: int64(height),
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("query rollback coinbase roots: %w", err)
 	}
@@ -144,7 +160,9 @@ func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	ctx context.Context, height uint32) error {
 
 	_, err := o.qtx.RewindWalletSyncStateHeightsForRollback(
-		ctx, int64(height),
+		ctx, sqlc.RewindWalletSyncStateHeightsForRollbackParams{
+			WalletID: int64(o.walletID), RollbackHeight: int64(height),
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("rewind wallet sync state heights query: %w", err)
@@ -153,12 +171,16 @@ func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	return nil
 }
 
-// DeleteBlocksAtOrAboveHeight removes the shared block rows after sync-state
+// DeleteBlocksAtOrAboveHeight removes the Wallet's block rows after sync-state
 // references have been rewound.
 func (o rollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
 	ctx context.Context, height uint32) error {
 
-	_, err := o.qtx.DeleteBlocksAtOrAboveHeight(ctx, int64(height))
+	_, err := o.qtx.DeleteBlocksAtOrAboveHeight(
+		ctx, sqlc.DeleteBlocksAtOrAboveHeightParams{
+			WalletID: int64(o.walletID), RollbackHeight: int64(height),
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("delete blocks at or above height query: %w", err)
 	}

@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -100,15 +101,17 @@ func corruptTransactionHash(t *testing.T, store *sqlite.Store,
 
 // forceRollbackBlockDeleteFailure installs a trigger that fails the rollback
 // block-deletion stage after sync-state rewind has run.
-func forceRollbackBlockDeleteFailure(t *testing.T, store *sqlite.Store) {
+func forceRollbackBlockDeleteFailure(t *testing.T, store *sqlite.Store,
+	walletID uint32) {
+
 	t.Helper()
 
 	_, err := store.DB().ExecContext(
 		t.Context(),
-		"CREATE TRIGGER fail_rollback_block_delete "+
-			"BEFORE DELETE ON blocks "+
+		fmt.Sprintf("CREATE TRIGGER fail_rollback_block_delete "+
+			"BEFORE DELETE ON wallet_blocks WHEN old.wallet_id = %d "+
 			"BEGIN SELECT RAISE(FAIL, "+
-			"'forced rollback block delete failure'); END",
+			"'forced rollback block delete failure'); END", walletID),
 	)
 	require.NoError(t, err)
 }
@@ -137,12 +140,13 @@ func corruptTransactionBlockHeight(t *testing.T, store *sqlite.Store,
 	blockHash := RandomHash()
 	_, err = tx.ExecContext(
 		t.Context(),
-		"INSERT INTO blocks (block_height, header_hash, block_timestamp) "+
-			"VALUES (?, ?, ?) "+
-			"ON CONFLICT(block_height) DO UPDATE SET "+
+		"INSERT INTO wallet_blocks "+
+			"(wallet_id, block_height, header_hash, block_timestamp) "+
+			"VALUES (?, ?, ?, ?) "+
+			"ON CONFLICT(wallet_id, block_height) DO UPDATE SET "+
 			"header_hash = excluded.header_hash, "+
 			"block_timestamp = excluded.block_timestamp",
-		height, blockHash[:], time.Now().Unix(),
+		int64(walletID), height, blockHash[:], time.Now().Unix(),
 	)
 	require.NoError(t, err)
 

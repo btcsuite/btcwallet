@@ -136,6 +136,10 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	// once; the mock never permits teardown to stop that borrowed source.
 	chainSource := &bwmock.Chain{}
 	chainSource.On("Notifications").Return((<-chan any)(nil)).Twice()
+
+	// Each Manager also borrows the source termination signal once.
+	chainSource.On("NotificationsDone").
+		Return((<-chan struct{})(nil)).Twice()
 	h := &HarnessTest{
 		T:              t,
 		dbType:         "kvdb",
@@ -216,6 +220,10 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	// mock whose stream is borrowed once for each Manager.
 	chainSource := &bwmock.Chain{}
 	chainSource.On("Notifications").Return((<-chan any)(nil)).Twice()
+
+	// Each Manager also borrows the source termination signal once.
+	chainSource.On("NotificationsDone").
+		Return((<-chan struct{})(nil)).Twice()
 	h := &HarnessTest{
 		T:              t,
 		dbType:         dbType,

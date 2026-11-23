@@ -5,6 +5,7 @@ import (
 	"errors"
 	"iter"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 )
@@ -139,7 +140,7 @@ var (
 	ErrTxAlreadyExists = errors.New("tx already exists")
 
 	// ErrBlockNotFound is returned when a transaction operation references a
-	// block height that does not exist in the shared blocks table.
+	// block height that does not exist in the Wallet's block history.
 	ErrBlockNotFound = errors.New("block not found")
 
 	// ErrBlockMismatch is returned when a transaction operation references a
@@ -503,9 +504,8 @@ type TxStore interface {
 
 	// RewindWallet atomically detaches one wallet's confirmed transactions at
 	// and above the block after params.Block, and updates only that wallet's
-	// synced tip to params.Block. Unlike RollbackToBlock, this method is
-	// wallet-scoped and must not delete shared block rows or mutate other
-	// wallets' sync states.
+	// synced tip to params.Block. It retains recorded block rows for later
+	// rescanning and does not mutate other Wallets' sync states.
 	RewindWallet(ctx context.Context, params RewindWalletParams) error
 
 	// GetTx retrieves a transaction record by its hash. It takes a context
@@ -563,21 +563,23 @@ type TxStore interface {
 	DeleteUnminedTx(ctx context.Context,
 		params DeleteUnminedTxParams) error
 
-	// RollbackToBlock removes all blocks at and after a given height,
-	// moving any transactions within those blocks back to the unconfirmed
-	// pool. This operation is performed as a single, atomic database
-	// transaction to ensure data integrity. Breaking it into smaller,
-	// separate interface methods would risk leaving the database in an
-	// inconsistent state if an error occurred mid-process. The current
-	// approach guarantees that the rollback is either fully completed or
-	// not at all.
-	//
-	// NOTE: This method has no wallet ID parameter and is therefore a
-	// DB-wide operation affecting all wallets that share the same `blocks`
-	// table.
-	//
-	// TODO(yy): explore performance improvement for this method.
-	RollbackToBlock(ctx context.Context, height uint32) error
+	// RollbackToBlock atomically removes one Wallet's history at and above
+	// height, rewinds its checkpoints and detaches its transactions. It never
+	// changes another Wallet's chain view. KVDB ignores its singleton walletID.
+	RollbackToBlock(ctx context.Context, walletID, height uint32) error
+
+	// DisconnectBlock reconciles an observed disconnection with owned history.
+	// previous is the proven retained fork, or nil before genesis. canonical
+	// classifies committed blocks through the saved checkpoint, even above the
+	// observation, and affected mined heights: nil means
+	// above the source tip; missing required proof is an error. Empty retained
+	// rows above the checkpoint are outside this recovery scope. Stale events
+	// preserve replacements. Progress rewinds across any removed history;
+	// birthday moves only when its own block is removed.
+	// SQL verifies the retained fork hash against Wallet history in the same
+	// atomic write as all validation and mutations.
+	DisconnectBlock(ctx context.Context, walletID uint32, block Block,
+		previous *Block, canonical map[uint32]*chainhash.Hash) error
 }
 
 // UTXOStore defines the database actions for managing the UTXO set.

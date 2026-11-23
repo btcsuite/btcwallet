@@ -52,12 +52,6 @@ type AddressType struct {
 	Description string
 }
 
-type Block struct {
-	BlockHeight    int32
-	HeaderHash     []byte
-	BlockTimestamp int64
-}
-
 type BtcwalletDatabaseIdentity struct {
 	ID                    int16
 	GenesisHash           []byte

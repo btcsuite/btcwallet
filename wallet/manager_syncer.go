@@ -252,8 +252,8 @@ func (s *chainSyncer) routeChainEvent(n any,
 		records = update.RelevantTxs
 
 	default:
-		// Headers and controls need no matching. Manager intercepts
-		// disconnects for every storage backend before ordinary routing.
+		// Headers and disconnects need no transaction matching. Each
+		// Wallet receives them in order and processes its own history.
 		return events
 	}
 

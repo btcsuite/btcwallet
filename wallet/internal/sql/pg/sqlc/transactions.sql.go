@@ -12,21 +12,28 @@ import (
 )
 
 const DeleteBlocksAtOrAboveHeight = `-- name: DeleteBlocksAtOrAboveHeight :execrows
-DELETE FROM blocks
-WHERE block_height >= $1
+DELETE FROM wallet_blocks
+WHERE
+    wallet_id = $1::BIGINT
+    AND block_height >= $2::INTEGER
 `
+
+type DeleteBlocksAtOrAboveHeightParams struct {
+	WalletID       int64
+	RollbackHeight int32
+}
 
 // Deletes blocks at and after the provided height.
 //
 // How:
-//   - Deletes directly from blocks by the natural height key.
+//   - Deletes only the owning Wallet range in wallet_blocks.
 //   - Relies on FK/trigger side effects to null transaction block references and
 //     orphan coinbase rows.
 //
 // Performance:
 // - Executes as a range delete over the block-height primary key.
-func (q *Queries) DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int32) (int64, error) {
-	result, err := q.db.Exec(ctx, DeleteBlocksAtOrAboveHeight, blockHeight)
+func (q *Queries) DeleteBlocksAtOrAboveHeight(ctx context.Context, arg DeleteBlocksAtOrAboveHeightParams) (int64, error) {
+	result, err := q.db.Exec(ctx, DeleteBlocksAtOrAboveHeight, arg.WalletID, arg.RollbackHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -113,7 +120,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON t.block_height = b.block_height
+LEFT JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE t.wallet_id = $1 AND t.tx_hash = $2
 `
 
@@ -397,10 +407,16 @@ SELECT
     tx_hash
 FROM transactions
 WHERE
-    block_height >= $1::INTEGER
+    wallet_id = $1::BIGINT
+    AND block_height >= $2::INTEGER
     AND is_coinbase
 ORDER BY wallet_id, id
 `
+
+type ListRollbackCoinbaseRootsParams struct {
+	WalletID       int64
+	RollbackHeight int32
+}
 
 type ListRollbackCoinbaseRootsRow struct {
 	WalletID int64
@@ -420,8 +436,8 @@ type ListRollbackCoinbaseRootsRow struct {
 //
 // Performance:
 // - Uses the block-height index to bound the scan to the rollback range.
-func (q *Queries) ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int32) ([]ListRollbackCoinbaseRootsRow, error) {
-	rows, err := q.db.Query(ctx, ListRollbackCoinbaseRoots, rollbackHeight)
+func (q *Queries) ListRollbackCoinbaseRoots(ctx context.Context, arg ListRollbackCoinbaseRootsParams) ([]ListRollbackCoinbaseRootsRow, error) {
+	rows, err := q.db.Query(ctx, ListRollbackCoinbaseRoots, arg.WalletID, arg.RollbackHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +469,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-INNER JOIN blocks AS b ON t.block_height = b.block_height
+INNER JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE
     t.wallet_id = $1
     AND t.block_height BETWEEN
@@ -686,8 +705,10 @@ SET
             AND synced_height >= $1::INTEGER
             THEN (
                 SELECT max(block_height)::INTEGER
-                FROM blocks
-                WHERE block_height < $1::INTEGER
+                FROM wallet_blocks
+                WHERE
+                    wallet_id = $2::BIGINT
+                    AND block_height < $1::INTEGER
             )
         ELSE synced_height
     END,
@@ -697,22 +718,32 @@ SET
             AND birthday_height >= $1::INTEGER
             THEN (
                 SELECT max(block_height)::INTEGER
-                FROM blocks
-                WHERE block_height < $1::INTEGER
+                FROM wallet_blocks
+                WHERE
+                    wallet_id = $2::BIGINT
+                    AND block_height < $1::INTEGER
             )
         ELSE birthday_height
     END,
     updated_at = current_timestamp AT TIME ZONE 'UTC'
 WHERE
-    (
-        synced_height IS NOT NULL
-        AND synced_height >= $1::INTEGER
-    )
-    OR (
-        birthday_height IS NOT NULL
-        AND birthday_height >= $1::INTEGER
+    wallet_id = $2::BIGINT
+    AND (
+        (
+            synced_height IS NOT NULL
+            AND synced_height >= $1::INTEGER
+        )
+        OR (
+            birthday_height IS NOT NULL
+            AND birthday_height >= $1::INTEGER
+        )
     )
 `
+
+type RewindWalletSyncStateHeightsForRollbackParams struct {
+	RollbackHeight int32
+	WalletID       int64
+}
 
 // Rewrites wallet sync-state heights so they stop referencing blocks that are
 // about to be deleted during RollbackToBlock.
@@ -729,8 +760,8 @@ WHERE
 // Performance:
 //   - Touches only wallet_sync_states rows whose heights are at or above the
 //     rollback boundary.
-func (q *Queries) RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int32) (int64, error) {
-	result, err := q.db.Exec(ctx, RewindWalletSyncStateHeightsForRollback, rollbackHeight)
+func (q *Queries) RewindWalletSyncStateHeightsForRollback(ctx context.Context, arg RewindWalletSyncStateHeightsForRollbackParams) (int64, error) {
+	result, err := q.db.Exec(ctx, RewindWalletSyncStateHeightsForRollback, arg.RollbackHeight, arg.WalletID)
 	if err != nil {
 		return 0, err
 	}

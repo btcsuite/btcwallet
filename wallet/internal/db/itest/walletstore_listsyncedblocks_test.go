@@ -40,12 +40,15 @@ func TestListSyncedBlocksRejectsMissingRanges(t *testing.T) {
 
 			// Arrange: persist blocks on either side of the missing range.
 			store := NewTestStore(t)
+			walletID := newWallet(t, store, "range-owner")
 			queries := store.Queries()
-			CreateBlockFixture(t, queries, 144)
-			CreateBlockFixture(t, queries, 146)
+			CreateBlockFixture(t, queries, walletID, 144)
+			CreateBlockFixture(t, queries, walletID, 146)
 
 			// Act: request a range containing a missing height.
-			_, err := store.ListSyncedBlocks(t.Context(), test.query)
+			query := test.query
+			query.WalletID = walletID
+			_, err := store.ListSyncedBlocks(t.Context(), query)
 
 			// Assert: missing ranges return the shared not-found error.
 			require.ErrorIs(t, err, db.ErrBlockNotFound)

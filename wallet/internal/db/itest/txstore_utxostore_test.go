@@ -363,7 +363,7 @@ func TestCreateTxStoresConfirmedCoinbase(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 210)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 210)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 
 	// Act: Record the confirmed coinbase through the same public Store API.
@@ -482,7 +482,7 @@ func TestCreateTxValidatesParentWithoutCredit(t *testing.T) {
 		[]*wire.TxOut{{Value: 4000, PkScript: addr.ScriptPubKey}},
 	)
 
-	block := CreateBlockFixture(t, store.Queries(), 220)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 220)
 
 	// Act: Request a wallet credit from a child of the failed parent.
 	// Retained inputs must reject it without a parent credit.
@@ -544,7 +544,7 @@ func TestCreateTxRejectsConfirmedExternalInputConflict(t *testing.T) {
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 221)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 221)
 	require.NoError(t, store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID, Tx: first, Status: db.TxStatusPublished,
 		Received: time.Unix(1, 0), Block: &block,
@@ -788,7 +788,7 @@ func TestCreateTxReplayedCreditConfirmedChildReplacesUnmined(t *testing.T) {
 		[]*wire.TxOut{{Value: 3000, PkScript: confirmedAddr.ScriptPubKey}},
 	)
 	// Act: Confirm a competing child while the shared parent has no credit.
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 262)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), walletID, 262)
 	err = store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       confirmedChild,
@@ -870,7 +870,7 @@ func TestCreateTxConfirmsExistingUnminedRow(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 250)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 250)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -996,7 +996,7 @@ func TestCreateTxConfirmedWinnerInvalidatesConflictBranch(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 260)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), walletID, 260)
 	confirmedWinner := newRegularTx(
 		[]wire.OutPoint{spentOutPoint},
 		[]*wire.TxOut{{Value: 3500, PkScript: []byte{0x53}}},
@@ -1211,7 +1211,7 @@ func TestUpdateTxRejectsMismatchedConfirmedBlock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	block := CreateBlockFixture(t, queries, 240)
+	block := CreateBlockFixture(t, queries, walletID, 240)
 	mismatchBlock := block
 	mismatchBlock.Hash = RandomHash()
 
@@ -1322,7 +1322,7 @@ func TestUpdateTxConfirmsStoredPendingTx(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	block := CreateBlockFixture(t, queries, 220)
+	block := CreateBlockFixture(t, queries, walletID, 220)
 	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
 		WalletID: walletID,
 		Txid:     tx.TxHash(),
@@ -1439,7 +1439,7 @@ func TestListTxnsReturnsRowsWithoutBlock(t *testing.T) {
 	walletID := newWallet(t, store, "wallet-list-txns-without-block")
 	queries := store.Queries()
 
-	confirmedBlock := CreateBlockFixture(t, queries, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 200)
 	confirmedTx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 7000, PkScript: []byte{0x51}}},
@@ -1529,8 +1529,8 @@ func TestListTxnsReturnsConfirmedTxsByHeightRange(t *testing.T) {
 	walletID := newWallet(t, store, "wallet-list-txns-confirmed")
 	queries := store.Queries()
 
-	blockOne := CreateBlockFixture(t, queries, 210)
-	blockTwo := CreateBlockFixture(t, queries, 211)
+	blockOne := CreateBlockFixture(t, queries, walletID, 210)
+	blockTwo := CreateBlockFixture(t, queries, walletID, 211)
 
 	txOne := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -1628,7 +1628,7 @@ func TestListTxnsUsesConfirmationOrder(t *testing.T) {
 
 	const blockHeight = 222
 
-	block := CreateBlockFixture(t, queries, blockHeight)
+	block := CreateBlockFixture(t, queries, walletID, blockHeight)
 
 	laterBlockTx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -2010,7 +2010,7 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 	)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 
-	block := CreateBlockFixture(t, queries, 300)
+	block := CreateBlockFixture(t, queries, walletID, 300)
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       coinbaseTx,
@@ -2050,7 +2050,7 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 		1)
 	require.Len(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()), 1)
 
-	err = store.RollbackToBlock(t.Context(), block.Height)
+	err = store.RollbackToBlock(t.Context(), walletID, block.Height)
 	require.NoError(t, err)
 
 	coinbaseInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
@@ -2094,8 +2094,8 @@ func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
 	walletName := "wallet-rollback-sparse-sync"
 	walletID := newWallet(t, store, walletName)
 
-	forkBlock := CreateBlockFixture(t, queries, 5)
-	rollbackBlock := CreateBlockFixture(t, queries, 10)
+	forkBlock := CreateBlockFixture(t, queries, walletID, 5)
+	rollbackBlock := CreateBlockFixture(t, queries, walletID, 10)
 
 	err := store.UpdateWallet(t.Context(), db.UpdateWalletParams{
 		WalletID: walletID,
@@ -2109,7 +2109,7 @@ func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), rollbackBlock.Height)
+	err = store.RollbackToBlock(t.Context(), walletID, rollbackBlock.Height)
 	require.NoError(t, err)
 
 	walletInfo, err := store.GetWallet(t.Context(), walletName)
@@ -2260,7 +2260,7 @@ func TestCreateTxReconfirmsOrphanedCoinbase(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	block := CreateBlockFixture(t, queries, 310)
+	block := CreateBlockFixture(t, queries, walletID, 310)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
@@ -2273,7 +2273,7 @@ func TestCreateTxReconfirmsOrphanedCoinbase(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), block.Height)
+	err = store.RollbackToBlock(t.Context(), walletID, block.Height)
 	require.NoError(t, err)
 
 	orphanInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
@@ -2284,7 +2284,7 @@ func TestCreateTxReconfirmsOrphanedCoinbase(t *testing.T) {
 	require.Equal(t, db.TxStatusOrphaned, orphanInfo.Status)
 	require.Nil(t, orphanInfo.Block)
 
-	newBlock := CreateBlockFixture(t, queries, 311)
+	newBlock := CreateBlockFixture(t, queries, walletID, 311)
 	err = store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
 		Tx:       coinbaseTx,
@@ -3409,7 +3409,7 @@ func TestBalanceNameFilterDisambiguatesImportedXpub(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	block := CreateBlockFixture(t, queries, 280)
+	block := CreateBlockFixture(t, queries, walletID, 280)
 	derivedTx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 11000, PkScript: derivedAddr.ScriptPubKey}},
@@ -3721,7 +3721,7 @@ func TestLoadWatchSetExcludesIneligibleOutputs(t *testing.T) {
 
 	// Only the second credit has a confirmed claim. Keep the first as the
 	// eligible outpoint that the read must still return.
-	block := CreateBlockFixture(t, store.Queries(), 300)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 300)
 	spend := newRegularTx(
 		[]wire.OutPoint{funding[1]},
 		[]*wire.TxOut{wire.NewTxOut(5_000, []byte{txscript.OP_TRUE})},
@@ -5253,7 +5253,7 @@ func TestUpdateTxRejectsCompetingConfirmation(t *testing.T) {
 		)
 	}
 
-	block := CreateBlockFixture(t, store.Queries(), 220)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 220)
 	label := "changed"
 
 	// Act: Try to confirm B and change its label through UpdateTx rather
@@ -5422,7 +5422,7 @@ func TestCreateTxConfirmsRetainedReplaced(t *testing.T) {
 	)
 	b := a.Copy()
 	b.TxOut[0].Value = 5000
-	oldBlock := CreateBlockFixture(t, store.Queries(), 330)
+	oldBlock := CreateBlockFixture(t, store.Queries(), walletID, 330)
 	require.NoError(
 		t, store.CreateTx(
 			t.Context(), db.CreateTxParams{
@@ -5431,7 +5431,11 @@ func TestCreateTxConfirmsRetainedReplaced(t *testing.T) {
 			},
 		),
 	)
-	require.NoError(t, store.RollbackToBlock(t.Context(), oldBlock.Height))
+	require.NoError(
+		t, store.RollbackToBlock(
+			t.Context(), walletID, oldBlock.Height,
+		),
+	)
 	old, err := store.GetTx(
 		t.Context(), db.GetTxQuery{
 			WalletID: walletID, Txid: a.TxHash(),
@@ -5439,7 +5443,7 @@ func TestCreateTxConfirmsRetainedReplaced(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, db.TxStatusReplaced, old.Status)
-	block := CreateBlockFixture(t, store.Queries(), 330)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 330)
 
 	// Act: Record an actual current-chain confirmation of the retained loser.
 	err = store.CreateTx(
@@ -5509,7 +5513,7 @@ func TestCreateTxConfirmsRetainedFailed(t *testing.T) {
 
 	b := a.Copy()
 	b.TxOut[0].Value = 5000
-	oldBlock := CreateBlockFixture(t, store.Queries(), 340)
+	oldBlock := CreateBlockFixture(t, store.Queries(), walletID, 340)
 	require.NoError(
 		t, store.CreateTx(
 			t.Context(), db.CreateTxParams{
@@ -5518,7 +5522,11 @@ func TestCreateTxConfirmsRetainedFailed(t *testing.T) {
 			},
 		),
 	)
-	require.NoError(t, store.RollbackToBlock(t.Context(), oldBlock.Height))
+	require.NoError(
+		t, store.RollbackToBlock(
+			t.Context(), walletID, oldBlock.Height,
+		),
+	)
 	old, err := store.GetTx(
 		t.Context(), db.GetTxQuery{
 			WalletID: walletID, Txid: child.TxHash(),
@@ -5526,7 +5534,7 @@ func TestCreateTxConfirmsRetainedFailed(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, db.TxStatusFailed, old.Status)
-	block := CreateBlockFixture(t, store.Queries(), 340)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 340)
 
 	// Act: Confirm only the descendant using new current-chain block metadata.
 	err = store.CreateTx(

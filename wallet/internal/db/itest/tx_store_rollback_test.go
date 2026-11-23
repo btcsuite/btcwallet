@@ -40,12 +40,12 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnFailure(t *testing.T) {
 	)
 
 	// The fork block survives the rollback; the sync tip would rewind to it.
-	forkBlock := CreateBlockFixture(t, queries, 419)
+	forkBlock := CreateBlockFixture(t, queries, walletID, 419)
 
 	// Confirm a coinbase transaction at the next block and point the wallet
 	// sync tip at it, so a successful rollback would visibly move the tip back
 	// to the fork block.
-	coinbaseBlock := CreateBlockFixture(t, queries, 420)
+	coinbaseBlock := CreateBlockFixture(t, queries, walletID, 420)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
@@ -71,11 +71,11 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnFailure(t *testing.T) {
 
 	// Force the block deletion stage to fail after rollback has rewound the
 	// wallet sync state inside the same transaction.
-	forceRollbackBlockDeleteFailure(t, store)
+	forceRollbackBlockDeleteFailure(t, store, walletID)
 
 	// The rollback (boundary = coinbase height) must fail while deleting the
 	// rollback block after rewinding the sync state to the fork point.
-	err = store.RollbackToBlock(t.Context(), coinbaseBlock.Height)
+	err = store.RollbackToBlock(t.Context(), walletID, coinbaseBlock.Height)
 	require.ErrorContains(t, err, "delete blocks at or above height")
 
 	// The sync tip must be unchanged: the failed rollback rolled the sync-tip
@@ -106,9 +106,9 @@ func TestRollbackToBlockRewindsSyncTipAndRollsBack(t *testing.T) {
 
 	// The fork block at height-1 survives the rollback and becomes the new
 	// sync tip.
-	forkBlock := CreateBlockFixture(t, queries, 439)
+	forkBlock := CreateBlockFixture(t, queries, walletID, 439)
 
-	confirmedBlock := CreateBlockFixture(t, queries, 440)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 440)
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 6000, PkScript: addr.ScriptPubKey}},
@@ -129,7 +129,7 @@ func TestRollbackToBlockRewindsSyncTipAndRollsBack(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), confirmedBlock.Height)
+	err = store.RollbackToBlock(t.Context(), walletID, confirmedBlock.Height)
 	require.NoError(t, err)
 
 	// The sync tip moved back to the fork point at height-1.
