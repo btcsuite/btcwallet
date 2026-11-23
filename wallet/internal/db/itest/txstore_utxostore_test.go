@@ -3702,6 +3702,78 @@ func TestListOutputsToWatchExcludesNoChainSync(t *testing.T) {
 	})
 }
 
+// TestLoadWatchSetExcludesIneligibleOutputs verifies that a confirmed
+// input claim and failed funding ancestry each end an outpoint watch.
+func TestLoadWatchSetExcludesIneligibleOutputs(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use two credits in the same funding transaction. Save the
+	// credited script so a separate branch can pay the same wallet.
+	store := NewTestStore(t)
+	walletID, funding := newLeaseSetFixture(
+		t, store, "wallet-watch-exclusions", 2,
+	)
+	credit, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: funding[0],
+	})
+	require.NoError(t, err)
+
+	// Only the second credit has a confirmed claim. Keep the first as the
+	// eligible outpoint that the read must still return.
+	block := CreateBlockFixture(t, store.Queries(), 300)
+	spend := newRegularTx(
+		[]wire.OutPoint{funding[1]},
+		[]*wire.TxOut{wire.NewTxOut(5_000, []byte{txscript.OP_TRUE})},
+	)
+	received := time.Unix(1710004500, 0)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       spend,
+		Received: received,
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	// Give the descendant a wallet credit before marking its ancestor
+	// failed. Changing only the ancestor isolates persisted eligibility
+	// from the cascading invalidation performed by transaction writes.
+	ancestor := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{wire.NewTxOut(7_000, []byte{txscript.OP_TRUE})},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       ancestor,
+		Received: received,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	child := newRegularTx(
+		[]wire.OutPoint{{Hash: ancestor.TxHash(), Index: 0}},
+		[]*wire.TxOut{wire.NewTxOut(6_000, credit.PkScript)},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       child,
+		Received: received,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+	setTxStatus(t, store, walletID, ancestor.TxHash(), db.TxStatusFailed)
+
+	// Act: Read the combined watch set after both exclusions are persisted.
+	watches, err := store.LoadWatchSet(t.Context(), walletID)
+	require.NoError(t, err)
+
+	// Assert: The exact result detects either unexpected outpoint and also
+	// ensures that the eligible sibling credit stays watched.
+	require.ElementsMatch(t, []wire.OutPoint{funding[0]}, watches.OutPoints)
+}
+
 // TestApplyTxBatchChildBeforeParent checks that caller order does not change
 // recorded input relationships: after a child-first batch, its parent output
 // is spent and the child's owned output is available. Retained input lookup
