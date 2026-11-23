@@ -3273,3 +3273,74 @@ func TestManagerWatchRegistrationDuringDelivery(t *testing.T) {
 		require.NoError(t, m.Stop())
 	})
 }
+
+// TestManagerSourceClosedDuringRecovery joins a permanently backpressured
+// Wallet without draining later source data or stopping the borrowed client.
+func TestManagerSourceClosedDuringRecovery(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The real SQLite Wallet must retain its disconnect until the
+	// backend is current. Its producer supplies an independent terminal signal.
+	source := createTestChain(t)
+	notifications := make(chan any, 3)
+	producerDone := make(chan struct{})
+
+	source.On("Notifications").Unset()
+	source.On("Notifications").Return((<-chan any)(notifications)).Once()
+	source.On("NotificationsDone").Unset()
+	source.On("NotificationsDone").
+		Return((<-chan struct{})(producerDone)).Once()
+	m := testSQLiteManagerWithChain(t, source)
+	w, err := m.Create(sqliteCreateParams(t))
+	require.NoError(t, err)
+
+	backend, ok := m.backend.(*sqlManagerBackend)
+	require.True(t, ok)
+
+	closeFn := backend.closeFn
+	closed := false
+
+	var closeErr error
+
+	// Observe the real close result; joining Manager orders these writes
+	// before assertions without depending on database/sql error wording.
+	backend.closeFn = func() error {
+		closeErr = closeFn()
+		closed = true
+
+		return closeErr
+	}
+
+	// Act: Fill the Wallet's mailbox and block its next delivery, leaving one
+	// further event in the source. Reading ahead one item cannot resolve this.
+	notifications <- chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 2},
+	}
+
+	for range 3 {
+		notifications <- chain.BlockConnected{}
+	}
+
+	require.Eventually(t, func() bool {
+		return len(notifications) == 1 && len(w.chainEventChan) == 1
+	}, 5*time.Second, time.Millisecond)
+
+	close(producerDone)
+	close(notifications)
+
+	select {
+	case <-m.lifetimeCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("producer termination did not release blocked delivery")
+	}
+
+	m.wg.Wait()
+
+	// Assert: Terminal input runs joined cleanup before storage closes.
+	// Strict mock expectations forbid stopping the borrowed source.
+	require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
+	require.ErrorIs(t, m.Stop(), ErrManagerStopped)
+	require.Len(t, notifications, 1)
+	require.True(t, closed)
+	require.NoError(t, closeErr)
+}
