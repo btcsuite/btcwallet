@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -2965,4 +2966,61 @@ func (s *syncer) resolveDisconnectFork(block db.Block,
 	block.Timestamp = header.Timestamp
 
 	return db.BlockStampFromBlock(&block)
+}
+
+// findCanonicalBlockHashes completes proof for the event and mined heights.
+// It adds to the fork-search proof without repeating native lookups; explicit
+// nil entries classify heights beyond the source tip before the write.
+func (s *syncer) findCanonicalBlockHashes(ctx context.Context,
+	height, committedHeight, sourceHeight int32, observed uint32,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	start, err := db.Int64ToUint32(int64(height))
+	if err != nil {
+		return fmt.Errorf("disconnect history start: %w", err)
+	}
+
+	tip, err := db.Int64ToUint32(int64(sourceHeight))
+	if err != nil {
+		return fmt.Errorf("disconnect history tip: %w", err)
+	}
+
+	// The shortened source already proves every committed height above its
+	// tip absent. Retain that evidence for empty rows skipped by fork lookup.
+	for h := tip + 1; int64(h) <= int64(committedHeight); h++ {
+		canonical[h] = nil
+	}
+
+	history, err := s.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID: s.walletID, StartHeight: start, EndHeight: math.MaxInt32,
+	})
+	if err != nil {
+		return fmt.Errorf("disconnect history: %w", err)
+	}
+
+	// An empty observed block has no mined transaction to supply its height.
+	heights := []uint32{observed}
+	for _, info := range history {
+		heights = append(heights, info.Block.Height)
+	}
+
+	for _, h := range heights {
+		if _, known := canonical[h]; known {
+			continue
+		}
+
+		if h > tip {
+			canonical[h] = nil
+			continue
+		}
+
+		hash, err := s.cfg.Chain.GetBlockHash(int64(h))
+		if err != nil {
+			return fmt.Errorf("disconnect history hash: %w", err)
+		}
+
+		canonical[h] = hash
+	}
+
+	return nil
 }
