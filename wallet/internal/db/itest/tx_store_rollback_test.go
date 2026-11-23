@@ -570,3 +570,78 @@ func TestDisconnectBlockPreservesHigherCanonicalHistory(t *testing.T) {
 	require.ErrorIs(t, orphanErr, db.ErrBlockNotFound)
 	require.NoError(t, replayErr)
 }
+
+// TestDisconnectBlockRejectsUnknownHistory distinguishes missing committed
+// empty-block proof from missing mined proof; neither permits partial mutation.
+func TestDisconnectBlockRejectsUnknownHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		missingHeight uint32
+	}{
+		{
+			name:          "mined observation",
+			missingHeight: 6,
+		},
+		{
+			name:          "empty checkpoint above observation",
+			missingHeight: 5,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange: The same checkpoint/transaction fixture needs both
+			// higher empty-row proof and mined proof above progress. Omit
+			// only the case's proof, keeping every other entry explicit.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "unknown-history")
+			fork := CreateBlockFixture(t, store.Queries(), walletID, 1)
+			empty := CreateBlockFixture(t, store.Queries(), walletID, 2)
+			observed := CreateBlockFixture(t, store.Queries(), walletID, 3)
+			mined := CreateBlockFixture(t, store.Queries(), walletID, 6)
+			tip := CreateBlockFixture(t, store.Queries(), walletID, 5)
+			coinbase := newCoinbaseTx(nil)
+			require.NoError(t, store.CreateTx(t.Context(), db.CreateTxParams{
+				WalletID: walletID, Tx: coinbase, Block: &mined,
+				Status: db.TxStatusPublished, Received: time.Unix(6, 0),
+			}))
+			err := store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+				WalletID: walletID, SyncedTo: &tip,
+				BirthdayBlock: &tip,
+			})
+			require.NoError(t, err)
+			before, err := store.GetWallet(t.Context(), "unknown-history")
+			require.NoError(t, err)
+			beforeTx, err := store.GetTx(t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: coinbase.TxHash(),
+			})
+			require.NoError(t, err)
+
+			proof := map[uint32]*chainhash.Hash{
+				empty.Height:    &empty.Hash,
+				observed.Height: nil,
+				mined.Height:    &mined.Hash,
+				tip.Height:      nil,
+			}
+			delete(proof, tc.missingHeight)
+
+			// Act: The observed event is valid, but its complete atomic
+			// classification cannot finish without the omitted proof.
+			err = store.DisconnectBlock(
+				t.Context(), walletID, observed, &fork, proof,
+			)
+
+			// Assert: A causal evidence failure preserves both reference
+			// fields and the transaction, rather than committing a rewind.
+			require.ErrorIs(t, err, db.ErrInvalidParam)
+			after, err := store.GetWallet(t.Context(), "unknown-history")
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			afterTx, err := store.GetTx(t.Context(), db.GetTxQuery{
+				WalletID: walletID, Txid: coinbase.TxHash(),
+			})
+			require.NoError(t, err)
+			require.Equal(t, beforeTx, afterTx)
+		})
+	}
+}
