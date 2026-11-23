@@ -46,6 +46,11 @@ WHERE
     AND block_height <= cast(sqlc.arg('end_height') AS INTEGER)
 ORDER BY block_height;
 
+-- name: DeleteWalletBlockByHeight :execrows
+-- Delete only a proven orphan; higher current-chain observations stay owned.
+DELETE FROM wallet_blocks
+WHERE wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER) AND block_height = cast(sqlc.arg('block_height') AS INTEGER);
+
 -- name: InsertWalletBlock :exec
 -- Verify conflicts through requireBlockMatches in the same write transaction.
 INSERT INTO wallet_blocks (
