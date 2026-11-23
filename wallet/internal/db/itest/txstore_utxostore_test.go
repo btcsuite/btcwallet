@@ -3618,6 +3618,7 @@ func TestListOutputsToWatchBareMultisigUsesOutputScript(t *testing.T) {
 
 // TestListOutputsToWatchExcludesNoChainSync verifies recovery keeps eligible
 // credits while omitting outputs owned by accounts that opt out of chain sync.
+// LoadWatchSet must also exclude those accounts' receiving addresses.
 func TestListOutputsToWatchExcludesNoChainSync(t *testing.T) {
 	t.Parallel()
 
@@ -3671,16 +3672,34 @@ func TestListOutputsToWatchExcludesNoChainSync(t *testing.T) {
 		Hash: tx.TxHash(), Index: 1,
 	}))
 
-	// Act: Read the same wallet-wide output set used by both recovery modes.
-	utxos, err := store.ListOutputsToWatch(t.Context(), walletID)
+	// Both reads should retain only the first credit. The combined read
+	// also returns that credit's address script.
+	expectedPoint := wire.OutPoint{
+		Hash:  tx.TxHash(),
+		Index: 0,
+	}
 
-	// Assert: Exactly the eligible credit remains; the existing conformance
-	// tests separately cover leases, unmined spends, and accountless imports.
-	require.NoError(t, err)
-	require.Len(t, utxos, 1)
-	require.Equal(
-		t, wire.OutPoint{Hash: tx.TxHash(), Index: 0}, utxos[0].OutPoint,
-	)
+	t.Run("ListOutputsToWatch", func(t *testing.T) {
+		// Act: Read recovery outputs after both account credits are stored.
+		utxos, err := store.ListOutputsToWatch(t.Context(), walletID)
+		require.NoError(t, err)
+
+		// Assert: The recovery list retains only the eligible credit.
+		require.Len(t, utxos, 1)
+		require.Equal(t, expectedPoint, utxos[0].OutPoint)
+	})
+
+	t.Run("LoadWatchSet", func(t *testing.T) {
+		// Act: Read the combined set to observe account opt-out
+		// in both receiving scripts and spend watches.
+		watches, err := store.LoadWatchSet(t.Context(), walletID)
+		require.NoError(t, err)
+
+		// Assert: Only the eligible account's script and outpoint
+		// survive the combined read.
+		require.Equal(t, [][]byte{outputs[0].PkScript}, watches.AddressScripts)
+		require.Equal(t, []wire.OutPoint{expectedPoint}, watches.OutPoints)
+	})
 }
 
 // TestApplyTxBatchChildBeforeParent checks that caller order does not change
