@@ -2842,3 +2842,92 @@ func (s *syncer) loadWalletScanData(ctx context.Context) ([]storeScanAccount,
 
 	return s.loadStoreScanData(ctx, nil)
 }
+
+// findDisconnectFork finds the latest retained Wallet block on the current
+// chain at or below forkHeight. Higher blocks cannot be the rewind point.
+// Sparse history falls back to single reads within each bounded window.
+func (s *syncer) findDisconnectFork(ctx context.Context,
+	forkHeight, sourceHeight int32, synced waddrmgr.BlockStamp) (
+	waddrmgr.BlockStamp, error) {
+
+	const batchSize = 10
+
+	height := min(forkHeight, synced.Height, sourceHeight)
+
+	for height >= 0 {
+		// Revisit no part of a failed window: overlapping range retries
+		// would multiply Store reads while descending through pruned rows.
+		end := uint32(height)
+		start := end - min(end, batchSize-1)
+		blocks, err := s.store.ListSyncedBlocks(
+			ctx, db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
+				StartHeight: start,
+				EndHeight:   end,
+			},
+		)
+
+		sparse := errors.Is(err, db.ErrBlockNotFound)
+		for offset := range end - start + 1 {
+			h := end - offset
+			index := h - start
+
+			if sparse {
+				// A missing range can still contain retained rows. Probe
+				// only its current height and preserve real read failures.
+				blocks, err = s.store.ListSyncedBlocks(
+					ctx, db.ListSyncedBlocksQuery{
+						WalletID:    s.walletID,
+						StartHeight: h, EndHeight: h,
+					},
+				)
+				if errors.Is(err, db.ErrBlockNotFound) {
+					continue
+				}
+
+				index = 0
+			}
+
+			if err != nil {
+				return waddrmgr.BlockStamp{}, err
+			}
+
+			// Prove membership before fetching a header: Neutrino may
+			// already have discarded headers from the abandoned branch.
+			hash, err := s.cfg.Chain.GetBlockHash(int64(h))
+			if err != nil {
+				return waddrmgr.BlockStamp{}, fmt.Errorf(
+					"disconnect fork hash: %w", err,
+				)
+			}
+
+			if *hash == blocks[index].Hash {
+				return s.resolveDisconnectFork(blocks[index], synced)
+			}
+		}
+
+		height = max(0, height-batchSize+1) - 1
+	}
+
+	return waddrmgr.BlockStamp{Height: -1}, nil
+}
+
+// resolveDisconnectFork restores the already-proven matching block's stamp.
+// Keep the cached tip intact; older KVDB rows need their native header time.
+func (s *syncer) resolveDisconnectFork(block db.Block,
+	synced waddrmgr.BlockStamp) (waddrmgr.BlockStamp, error) {
+
+	if int64(block.Height) == int64(synced.Height) {
+		return synced, nil
+	}
+
+	header, err := s.cfg.Chain.GetBlockHeader(&block.Hash)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("disconnect fork header: %w",
+			err)
+	}
+
+	block.Timestamp = header.Timestamp
+
+	return db.BlockStampFromBlock(&block)
+}
