@@ -1,0 +1,161 @@
+name: SQL benchmarks
+
+on:
+  pull_request:
+    # A label requests one pinned revision, rather than every subsequent push.
+    types: [labeled]
+    paths: &benchmark-paths
+      - 'wallet/**'
+      - 'scripts/benchmark.sh'
+      - 'scripts/benchmark_ci.py'
+      - 'scripts/test_benchmark_ci.py'
+      - '.github/workflows/benchmarks.yml'
+  push:
+    branches: [master, sql-wallet]
+    paths: *benchmark-paths
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Previous release tag to compare with the selected candidate ref
+        type: string
+        required: true
+      enforce:
+        description: Apply calibrated regression budgets to this comparison
+        type: boolean
+        default: false
+
+# Fork code runs only on ephemeral hosted runners, with no publishing credential.
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.state == 'open' &&
+       github.event.label.name == 'benchmark')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, postgres]
+    # Skipped label events never enter job concurrency and cannot cancel a run.
+    concurrency:
+      group: sql-bench-${{ github.event.pull_request.number || github.ref }}-${{ matrix.db }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Workspace-relative paths are available before runner step contexts.
+      BENCHMARK_OUT: .lgtm/sql-bench-${{ matrix.db }}
+      BACKEND: ${{ matrix.db }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_PAYLOAD_BASE: ${{ github.event.pull_request.base.sha }}
+      BENCHMARK_ENFORCE: >-
+        ${{ (github.event_name == 'workflow_dispatch' && inputs.enforce) ||
+            (github.event_name == 'pull_request' && vars.BENCHMARK_ENFORCE == 'true') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.11'
+          cache: false
+      - name: Install job-local reporting and validation tools
+        run: |
+          # Versioned installs bypass repository module metadata and shared caches.
+          bench_tools="$RUNNER_TEMP/benchmark-tools"
+          python3 -m venv "$bench_tools"
+          "$bench_tools/bin/pip" install ruff==0.17.3
+          GOBIN="$bench_tools/bin" GOTOOLCHAIN=local go install \
+            golang.org/x/perf/cmd/benchstat@v0.0.0-20260813145340-fd4a688df892
+          GOBIN="$bench_tools/bin" GOTOOLCHAIN=local go install \
+            github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$bench_tools/bin" >> "$GITHUB_PATH"
+      - name: Validate benchmark CI
+        run: |
+          # Exercise report policy before spending time on native SQL fixtures.
+          command -v shellcheck
+          ruff check scripts/benchmark_ci.py scripts/test_benchmark_ci.py
+          actionlint .github/workflows/benchmarks.yml
+          python3 -B -m unittest discover -s scripts -p test_benchmark_ci.py
+      - name: Resolve measured sources
+        id: sources
+        env:
+          EVENT: ${{ github.event_name }}
+          BASELINE: ${{ inputs.baseline }}
+        run: |
+          # The test merge pins its actual target; payload base.sha can be stale.
+          base_sha=
+          if [[ "$EVENT" == pull_request ]]; then
+            read -r -a parents <<< "$(git show -s --format=%P HEAD)"
+            if [[ ${#parents[@]} -ne 2 || ${parents[1]:-} != "$PR_HEAD_SHA" ]]; then
+              echo '::error::Unexpected PR test-merge parents'
+              exit 1
+            fi
+            base_sha=${parents[0]}
+          elif [[ "$EVENT" == workflow_dispatch ]]; then
+            base_sha=$(git rev-parse --verify --end-of-options "${BASELINE}^{commit}")
+          fi
+          if [[ -n "$base_sha" ]]; then
+            git worktree add --detach .worktrees/benchmark-base "$base_sha"
+          fi
+          echo "baseline=$base_sha" >> "$GITHUB_OUTPUT"
+      - name: Collect SQL smoke measurements
+        id: collect
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ steps.sources.outputs.baseline }}
+        run: |
+          # One source is an intentional push trend; paired sources stay serial.
+          args=(--head "$GITHUB_WORKSPACE" --backend "$BACKEND" --out "$BENCHMARK_OUT")
+          if [[ -n "$BASE_SHA" ]]; then
+            args+=(--base "$GITHUB_WORKSPACE/.worktrees/benchmark-base")
+          fi
+          timeout 25m python3 -B scripts/benchmark_ci.py collect "${args[@]}"
+      - name: Analyze completed or partial evidence
+        id: report
+        if: always()
+        continue-on-error: true
+        run: |
+          # Suppress only regression enforcement during rollout, never data errors.
+          args=(--out "$BENCHMARK_OUT")
+          if [[ "$BENCHMARK_ENFORCE" == true ]]; then
+            args+=(--enforce)
+          fi
+          python3 -B scripts/benchmark_ci.py report "${args[@]}"
+      - name: Summarize measurements
+        if: always()
+        run: |
+          # Retain a visible result and source/run link even when a stage fails.
+          cat "$BENCHMARK_OUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Actions run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sql-bench-${{ matrix.db }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: error
+          # Evidence lives under .lgtm; the explicit paths below limit uploads.
+          include-hidden-files: true
+          # Exclude compiled binaries and private databases from the evidence.
+          path: |
+            ${{ env.BENCHMARK_OUT }}/*.log
+            ${{ env.BENCHMARK_OUT }}/metadata.json
+            ${{ env.BENCHMARK_OUT }}/*.txt
+            ${{ env.BENCHMARK_OUT }}/benchstat.*
+            ${{ env.BENCHMARK_OUT }}/summary.md
+      - name: Apply final verdict after artifact retention
+        if: always()
+        env:
+          COLLECTION: ${{ steps.collect.outcome }}
+          REPORT: ${{ steps.report.outcome }}
+        run: |
+          # Step-level continuation preserves artifacts; this keeps failures red.
+          [[ "$COLLECTION" == success && "$REPORT" == success ]]

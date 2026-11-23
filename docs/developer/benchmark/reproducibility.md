@@ -357,6 +357,122 @@ PostgreSQL saves a custom `pg_dump` archive. Analyze each private PG restore
 before Wallet startup so timed reads have planner statistics. Preparation and
 restoration remain outside timing.
 
+## Fast SQL CI
+
+The [SQL benchmark workflow](../../../.github/workflows/benchmarks.yml) skips
+ordinary PRs. A maintainer applies the `benchmark` label to an open PR to request
+one comparison of that revision. After another commit, remove and reapply the
+label for a fresh request. Retaining the label does not benchmark every push.
+Re-running an old Actions run repeats its pinned revision.
+
+The comparison uses GitHub's event-pinned test merge and its first parent.
+The second parent must match the submitted PR head. The PR payload's base SHA
+is recorded separately because it can lag the target used by the test merge.
+Both measured sources therefore contain the same target-branch changes.
+
+Pushes to `sql-wallet` and `master` collect head-only SQL trend records. They
+do not compare historical timings from different runners. Manual dispatch
+compares the selected candidate ref with a supplied previous release tag;
+GitHub requires the workflow to exist on the default branch for dispatch.
+An older release without the SQL harness is reported as unavailable.
+
+PR requests and automatic pushes use the same path filter: `wallet/**`, the
+benchmark runner, collection/report command, its tests and this workflow.
+Root module/driver changes and compiled Wallet dependencies outside `wallet/**`
+are intentionally excluded. Explicit local runs remain available for those
+changes. A requested run starts at most two hosted jobs: SQLite and PostgreSQL.
+The ordinary PR event uses read-only repository permissions, no secrets and
+checkout without persisted credentials, preserving normal fork approvals.
+
+### Profile and evidence
+
+Both jobs reuse `scripts/benchmark.sh`, its pinned images/resource limits and
+native saved fixtures. The selector is `./wallet/bench` with
+`^Benchmark(Get|List).*/^smoke$`: all sixteen current SQL read leaves, including
+different-item and not-found reads. Full node sizes, legacy/KVDB, lifecycle
+benchmarks and profiles are outside this CI profile.
+
+Each source gets one excluded `1x` preparation invocation, then six separate
+process invocations with a fixed `10x` call count per leaf. Different-item
+and not-found consumers require a fixed count to prepare their requests.
+Measured rows require `N >= 2`; single-operation results remain invalid timing
+evidence.
+Paired runs alternate base/head and head/base three times. Push trends use
+only the head. The existing fixture owns untimed restoration, startup, request
+priming and cleanup. Schema/index changes retain separate native fixture keys
+and remain comparable; changed workload, measurement or request definitions
+are explicitly marked incompatible.
+
+Six samples bound cost but have less statistical power than benchstat's
+recommended ten or more. Noisy or insignificant comparisons must not be
+presented as proof of equal performance. The job allows 25 minutes for
+collection and 30 minutes overall, including artifact retention; actual cold
+build and fixture costs must be measured on the intended hosted runner.
+Normal PRs spend no benchmark time. A head-only trend halves the number of
+source invocations, while retaining cold build/download costs.
+
+Artifacts are retained for 30 days: raw invocation logs, source and environment
+metadata, normalized Go samples, pinned benchstat text/CSV/warnings and the
+Markdown summary. Metadata records actual order, command exit status and wall
+time. Compiled binaries and private databases are excluded from uploads.
+Failed or partial collections remain measurement errors even if result rows
+were printed before cleanup failed. Use a fresh output directory per attempt.
+
+### Regression policy and rollout
+
+The [report command](../../../scripts/benchmark_ci.py) uses the workflow's
+pinned benchstat for medians, 95% confidence intervals and nonparametric
+comparisons at `alpha=0.01`. It applies these budgets independently to each
+benchmark/backend, using unrounded medians:
+
+| Metric | Relative increase | Additional absolute floor |
+| --- | ---: | ---: |
+| `ns/op` | greater than 20% | none |
+| `B/op` | greater than 25% | at least 1,024 bytes/op |
+| `allocs/op` | greater than 25% | at least one allocation/op |
+
+A regression requires a significant change and the practical budget/floor.
+Zero allocation baselines use the absolute floor without division by zero.
+A reported confidence range above 10% on either side is inconclusive.
+Warnings remain in the report and artifacts; no geomean masks individual
+regressions. New benchmarks have no invented baseline. Removed benchmarks,
+incompatible requests and unavailable baselines are reported explicitly.
+
+Start report-only. `BENCHMARK_ENFORCE=true` as a repository variable enables
+enforcement for explicitly requested PR comparisons; manual release runs have
+an equivalent `enforce` input. These settings do not enable ordinary PR runs.
+Before enabling them, collect at least twenty representative requested PR
+comparisons and five same-SHA A/A pairs on the hosted runner. Check per-case
+noise, false alerts and runtime; revise the policy deliberately if needed.
+
+Enforcement fails proven regressions, removed coverage and incompatible or
+unavailable paired comparisons. Noise and new benchmarks stay informational.
+Report-only suppresses those enforcement verdicts; execution and malformed or
+incomplete-data errors still fail. Push trends have no performance verdict.
+Artifacts are uploaded before the workflow applies its final verdict.
+
+For local verification, place the workflow's pinned `benchstat` on `PATH` and
+prepare the exact baseline in a separate worktree:
+
+```sh
+# Use an existing baseline worktree and a fresh artifact directory so neither
+# source is rewritten and earlier attempts remain available for inspection.
+python3 -B scripts/benchmark_ci.py collect --head . \
+  --base .worktrees/benchmark-base --backend sqlite --out /tmp/sql-ci-example
+# Analyze the preserved samples in report-only mode, matching the initial CI
+# rollout; use --enforce explicitly when inspecting the calibrated gate.
+python3 -B scripts/benchmark_ci.py report --out /tmp/sql-ci-example
+```
+
+Replace `sqlite` with `postgres` for the native server fixture, or omit `--base`
+for a head-only trend. Run the reporting contract tests with:
+
+```sh
+# Exercise real benchmark text and the pinned statistical tool without database
+# setup; each temporary evidence directory is removed after its test.
+python3 -B -m unittest discover -s scripts -p test_benchmark_ci.py
+```
+
 [lnd-revocation]: https://github.com/lightningnetwork/lnd/blob/1a359d4aa1e58daad2c3c5ade1ff3f415f91ac1b/lnwallet/revocation_producer.go#L23-L33
 
 ## Startup chain dataset
