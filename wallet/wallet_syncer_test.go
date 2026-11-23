@@ -9579,3 +9579,213 @@ func TestSyncerDisconnectProvesHigherCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, syncStateSyncing, s.syncState())
 }
+
+// TestSyncerRetriesFailedDisconnect waits for current proof after a read
+// failure, preserving higher confirmations and received lower-fork evidence.
+func TestSyncerRetriesFailedDisconnect(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Scan old block two, then advance live progress to canonical
+	// three with its reward. Retry starts with a backend still catching up;
+	// its incomplete tip must not authorize removal of the higher reward.
+	base, _, id := newSQLScriptVault(t)
+	blocks := make([]db.Block, 4)
+	hashes := make([]chainhash.Hash, 4)
+
+	for i := range blocks {
+		hashes[i] = chainhash.Hash{byte(i + 1)}
+		blocks[i] = db.Block{
+			Height: uint32(i), Hash: hashes[i],
+			Timestamp: time.Unix(int64(i), 0),
+		}
+	}
+
+	require.NoError(t, base.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: id, SyncedBlocks: blocks[:3],
+	}))
+	reward := reorgCoinbase(t, 7)
+
+	require.NoError(t, base.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: id, SyncedTo: &blocks[3],
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: id, Tx: &reward.MsgTx, Block: &blocks[3],
+				Status:   db.TxStatusPublished,
+				Received: blocks[3].Timestamp,
+			},
+		},
+	}))
+
+	hashes[2] = chainhash.Hash{99}
+
+	retryCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	store := &syncRetryStoreMock{Store: base}
+	source := &bwmock.Chain{}
+	events := make(chan chainEvent, 1)
+
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		source.AssertExpectations(t)
+	})
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: id, StartHeight: 2, EndHeight: math.MaxInt32,
+	}).Return([]db.TxInfo(nil), nil).Once()
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: id, UnminedOnly: true,
+	}).Return([]db.TxInfo(nil), nil).Run(func(mock.Arguments) {
+		cancel()
+	}).Once()
+
+	failure := errors.New("temporary chain proof failure")
+
+	// The first attempt fails while current. Subsequent proof must wait
+	// through the reconnect, without consuming the later native event.
+	source.On("IsCurrent").Return(true).Once()
+	source.On("IsCurrent").Return(false).Once()
+	backendReady := source.On("IsCurrent").Return(true).
+		Run(func(mock.Arguments) {
+			require.Len(t, events, 1)
+		}).Twice()
+	source.On("GetBestBlock").Return(&hashes[3], int32(3), nil).Once()
+	source.On("GetBestBlock").Return(&hashes[3], int32(3), nil).
+		Times(5).NotBefore(backendReady)
+	source.On("GetBlockHash", int64(3)).Return(&hashes[3], nil).Once()
+	source.On("GetBlockHash", int64(3)).Return(&hashes[3], nil).
+		Once().NotBefore(backendReady)
+	source.On("GetBlockHash", int64(2)).Return(
+		(*chainhash.Hash)(nil), failure,
+	).Once()
+	source.On("GetBlockHash", int64(2)).Return(&hashes[2], nil).Once()
+	source.On("GetBlockHash", int64(1)).Return(&hashes[1], nil).Once()
+	source.On("GetBlockHeader", &hashes[1]).Return(
+		&wire.BlockHeader{Timestamp: blocks[1].Timestamp}, nil,
+	).Once()
+	source.On("GetBlockHashes", int64(0), int64(1)).Return(hashes[:2], nil).
+		Once()
+	source.On("GetBlockHashes", int64(2), int64(3)).Return(hashes[2:], nil).
+		Once()
+	source.On("GetBlockHeaders", hashes[2:]).Return([]*wire.BlockHeader{
+		{
+			PrevBlock: hashes[1], Timestamp: blocks[2].Timestamp,
+		},
+		{
+			PrevBlock: hashes[2], Timestamp: blocks[3].Timestamp,
+		},
+	}, nil).Once()
+	source.On("WatchAddrsFromTip", mock.Anything, []address.Address(nil)).
+		Return(nil).Once()
+	source.On("NotifyBlocks").Return(nil).Once()
+
+	s := newTestSyncer(t, Config{
+		Name: "sql-watch-only-scripts", Chain: source,
+		ChainParams: &chainParams,
+	}, nil, nil, nil, store, id)
+	s.chainEventChan = events
+
+	// Act: Consume once, then retry the same worker without redelivery.
+	// Its ordinary idle lookup ends the run after catch-up.
+	events <- chainEvent{notification: chain.BlockDisconnected{
+		Block: wtxmgr.Block{Height: 2, Hash: blocks[2].Hash},
+		Time:  blocks[2].Timestamp,
+	}}
+
+	firstErr := s.waitForEvent(t.Context())
+
+	// Later input must stay queued while the backend is catching up. Its
+	// normal handling resumes after proof is safe; idle cancellation joins run.
+	events <- chainEvent{notification: &chain.RescanProgress{}}
+
+	retryErr := s.run(retryCtx)
+	stored, err := base.ListSyncedBlocks(
+		t.Context(), db.ListSyncedBlocksQuery{
+			WalletID: id, StartHeight: 2, EndHeight: 2,
+		},
+	)
+
+	// Assert: Retry repairs the stored replacement before readiness.
+	// The initial causal error remains observable.
+	require.ErrorIs(t, firstErr, failure)
+	require.NoError(t, retryErr)
+	require.NoError(t, err)
+	require.Equal(t, hashes[2], stored[0].Hash)
+	require.Equal(t, syncStateSynced, s.syncState())
+	confirmed, err := base.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: id, Txid: reward.Hash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, confirmed.Status)
+	require.NotNil(t, confirmed.Block)
+	require.Equal(t, blocks[3].Hash, confirmed.Block.Hash)
+}
+
+// TestSyncerBackoffRetainsDisconnect holds later input behind failed native
+// evidence while preserving Wallet's retry deadline and joined wait.
+func TestSyncerBackoffRetainsDisconnect(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Fail a real disconnect before persistence, with later
+		// input queued and a deadline controlled by this test.
+		store := &walletmock.Store{}
+		source := &bwmock.Chain{}
+		source.On("IsCurrent").Return(true).Once()
+		t.Cleanup(func() {
+			store.AssertExpectations(t)
+			source.AssertExpectations(t)
+		})
+
+		failure := errors.New("disconnect progress read failed")
+		store.On("GetWallet", mock.Anything, "").Return(
+			(*db.WalletInfo)(nil), failure,
+		).Once()
+		s := newTestSyncer(t, Config{Chain: source},
+			nil, nil, nil, store, 7)
+		events := make(chan chainEvent, 1)
+		s.chainEventChan = events
+		w := &Wallet{
+			lifetimeCtx:    t.Context(),
+			sync:           s,
+			chainEventChan: events,
+		}
+		retry := make(chan time.Time)
+		timerFn := func(time.Duration) <-chan time.Time {
+			return retry
+		}
+
+		finished := make(chan bool, 1)
+
+		// Act: Fail one disconnect, then enter Wallet's real backoff.
+		// Wait for quiescence before releasing its deadline and joining.
+		events <- chainEvent{notification: chain.BlockDisconnected{
+			Block: wtxmgr.Block{Height: 2, Hash: chainhash.Hash{2}},
+			Time:  time.Unix(2, 0),
+		}}
+
+		err := s.waitForEvent(t.Context())
+
+		events <- chainEvent{notification: &chain.RescanProgress{}}
+
+		go func() {
+			_, ok := w.waitForBackoff(time.Now(), time.Second, timerFn)
+			finished <- ok
+		}()
+
+		synctest.Wait()
+
+		queued := len(events)
+
+		retry <- time.Now()
+
+		continued := <-finished
+
+		// Assert: Later input stays owned by the bounded mailbox. The
+		// unchanged deadline still advances Wallet to its next attempt.
+		require.ErrorIs(t, err, failure)
+		require.Equal(t, 1, queued)
+		require.True(t, continued)
+	})
+}
