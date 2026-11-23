@@ -645,3 +645,93 @@ func TestDisconnectBlockRejectsUnknownHistory(t *testing.T) {
 		})
 	}
 }
+
+// TestDisconnectBlockRestartCatchup recovers a skipped committed interval
+// after only its highest disconnect arrives, without waiting for lower events.
+func TestDisconnectBlockRestartCatchup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit a coinbase and two empty rows below the tip. One empty
+	// row is replaced; the other is above the shortened source. The pending
+	// spend also exposes a roots query that still starts at the observation.
+	ctx := t.Context()
+	store, reopen := newReopenableTestStore(t, mockDeriveFunc())
+	id := newWallet(t, store, "restart-disconnect")
+	fork, mined := NewBlockFixture(1), NewBlockFixture(2)
+	empty, aboveTip := NewBlockFixture(3), NewBlockFixture(4)
+	tip := NewBlockFixture(5)
+	coinbase := newCoinbaseTx(nil)
+	spend := newRegularTx(
+		[]wire.OutPoint{{Hash: coinbase.TxHash(), Index: 0}},
+		[]*wire.TxOut{wire.NewTxOut(1000, nil)},
+	)
+	err := store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{fork, mined, empty, aboveTip, tip},
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: id, Tx: coinbase, Block: &mined,
+				Status: db.TxStatusPublished, Received: time.Unix(2, 0),
+			},
+			{
+				WalletID: id, Tx: spend, Status: db.TxStatusPublished,
+				Received: time.Unix(3, 0),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	nextEmpty, nextMined := empty, mined
+	nextEmpty.Hash[0] ^= 0xff
+	nextMined.Hash[0] ^= 0xff
+
+	// Act: Only the highest disconnect is delivered. Close/reopen the actual
+	// Store, capture its durable recovery state, and attempt the first fetched
+	// replacement batch without delivering any missing lower disconnect.
+	err = store.DisconnectBlock(ctx, id, tip, &fork,
+		map[uint32]*chainhash.Hash{
+			empty.Height:    &nextEmpty.Hash,
+			mined.Height:    &nextMined.Hash,
+			aboveTip.Height: nil,
+			tip.Height:      nil,
+		})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	store = reopen()
+	wallet, err := store.GetWallet(ctx, "restart-disconnect")
+	require.NoError(t, err)
+	root, err := store.GetTx(ctx, db.GetTxQuery{
+		WalletID: id, Txid: coinbase.TxHash(),
+	})
+	require.NoError(t, err)
+	child, err := store.GetTx(ctx, db.GetTxQuery{
+		WalletID: id, Txid: spend.TxHash(),
+	})
+	require.NoError(t, err)
+
+	_, emptyErr := store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		WalletID: id, StartHeight: empty.Height, EndHeight: empty.Height,
+	})
+	_, minedErr := store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		WalletID: id, StartHeight: mined.Height, EndHeight: mined.Height,
+	})
+	_, aboveTipErr := store.ListSyncedBlocks(ctx, db.ListSyncedBlocksQuery{
+		WalletID: id, StartHeight: aboveTip.Height, EndHeight: aboveTip.Height,
+	})
+	err = store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID: id, SyncedBlocks: []db.Block{nextMined, nextEmpty},
+	})
+
+	// Assert: Reopen retains the proven fork, detached coinbase and failed
+	// pending spend. All skipped identities are gone and catch-up succeeds.
+	require.Equal(t, fork.Hash, wallet.SyncedTo.Hash)
+	require.Equal(t, fork.Height, wallet.SyncedTo.Height)
+	require.Equal(t, db.TxStatusOrphaned, root.Status)
+	require.Nil(t, root.Block)
+	require.Equal(t, db.TxStatusFailed, child.Status)
+	require.Nil(t, child.Block)
+	require.ErrorIs(t, emptyErr, db.ErrBlockNotFound)
+	require.ErrorIs(t, minedErr, db.ErrBlockNotFound)
+	require.ErrorIs(t, aboveTipErr, db.ErrBlockNotFound)
+	require.NoError(t, err)
+}
