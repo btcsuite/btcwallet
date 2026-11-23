@@ -91,11 +91,11 @@ CREATE TABLE wallet_sync_states (
     -- primary key, enforcing one-to-one relationship.
     wallet_id BIGINT PRIMARY KEY,
 
-    -- Current sync status of the wallet (references blocks table). NULL for wallets
+    -- Current sync status of the wallet (references wallet_blocks table). NULL for wallets
     -- that haven't synced any blocks yet.
     synced_height INTEGER,
 
-    -- Birthday block height of the wallet (references blocks table). NULL if the
+    -- Birthday block height of the wallet (references wallet_blocks table). NULL if the
     -- wallet has no known birthday block. When set, indicates the block has been
     -- verified.
     birthday_height INTEGER,
@@ -112,11 +112,13 @@ CREATE TABLE wallet_sync_states (
 
     -- Foreign key constraint to blocks. Using ON DELETE RESTRICT to ensure
     -- that the block cannot be deleted if it is referenced by the sync state.
-    FOREIGN KEY (synced_height) REFERENCES blocks (block_height)
+    FOREIGN KEY (wallet_id, synced_height)
+    REFERENCES wallet_blocks (wallet_id, block_height)
     ON DELETE RESTRICT,
 
     -- Foreign key constraint to blocks. Using ON DELETE RESTRICT to ensure
     -- that the block cannot be deleted if it is referenced by the sync state.
-    FOREIGN KEY (birthday_height) REFERENCES blocks (block_height)
+    FOREIGN KEY (wallet_id, birthday_height)
+    REFERENCES wallet_blocks (wallet_id, block_height)
     ON DELETE RESTRICT
 );

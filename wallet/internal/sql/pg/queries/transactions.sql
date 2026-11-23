@@ -75,7 +75,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON t.block_height = b.block_height
+LEFT JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE t.wallet_id = $1 AND t.tx_hash = $2;
 
 -- name: ListTransactionsWithoutBlock :many
@@ -163,7 +166,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-INNER JOIN blocks AS b ON t.block_height = b.block_height
+INNER JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
     AND t.block_height BETWEEN
@@ -336,7 +342,8 @@ SELECT
     tx_hash
 FROM transactions
 WHERE
-    block_height >= sqlc.arg('rollback_height')::INTEGER
+    wallet_id = sqlc.arg('wallet_id')::BIGINT
+    AND block_height >= sqlc.arg('rollback_height')::INTEGER
     AND is_coinbase
 ORDER BY wallet_id, id;
 
@@ -363,8 +370,10 @@ SET
             AND synced_height >= sqlc.arg('rollback_height')::INTEGER
             THEN (
                 SELECT max(block_height)::INTEGER
-                FROM blocks
-                WHERE block_height < sqlc.arg('rollback_height')::INTEGER
+                FROM wallet_blocks
+                WHERE
+                    wallet_id = sqlc.arg('wallet_id')::BIGINT
+                    AND block_height < sqlc.arg('rollback_height')::INTEGER
             )
         ELSE synced_height
     END,
@@ -374,30 +383,37 @@ SET
             AND birthday_height >= sqlc.arg('rollback_height')::INTEGER
             THEN (
                 SELECT max(block_height)::INTEGER
-                FROM blocks
-                WHERE block_height < sqlc.arg('rollback_height')::INTEGER
+                FROM wallet_blocks
+                WHERE
+                    wallet_id = sqlc.arg('wallet_id')::BIGINT
+                    AND block_height < sqlc.arg('rollback_height')::INTEGER
             )
         ELSE birthday_height
     END,
     updated_at = current_timestamp AT TIME ZONE 'UTC'
 WHERE
-    (
-        synced_height IS NOT NULL
-        AND synced_height >= sqlc.arg('rollback_height')::INTEGER
-    )
-    OR (
-        birthday_height IS NOT NULL
-        AND birthday_height >= sqlc.arg('rollback_height')::INTEGER
+    wallet_id = sqlc.arg('wallet_id')::BIGINT
+    AND (
+        (
+            synced_height IS NOT NULL
+            AND synced_height >= sqlc.arg('rollback_height')::INTEGER
+        )
+        OR (
+            birthday_height IS NOT NULL
+            AND birthday_height >= sqlc.arg('rollback_height')::INTEGER
+        )
     );
 
 -- name: DeleteBlocksAtOrAboveHeight :execrows
 -- Deletes blocks at and after the provided height.
 --
 -- How:
--- - Deletes directly from blocks by the natural height key.
+-- - Deletes only the owning Wallet range in wallet_blocks.
 -- - Relies on FK/trigger side effects to null transaction block references and
 --   orphan coinbase rows.
 -- Performance:
 -- - Executes as a range delete over the block-height primary key.
-DELETE FROM blocks
-WHERE block_height >= $1;
+DELETE FROM wallet_blocks
+WHERE
+    wallet_id = sqlc.arg('wallet_id')::BIGINT
+    AND block_height >= sqlc.arg('rollback_height')::INTEGER;
