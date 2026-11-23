@@ -99,6 +99,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteUtxosByTxIDStmt, err = db.PrepareContext(ctx, DeleteUtxosByTxID); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteUtxosByTxID: %w", err)
 	}
+	if q.deleteWalletBlockByHeightStmt, err = db.PrepareContext(ctx, DeleteWalletBlockByHeight); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteWalletBlockByHeight: %w", err)
+	}
 	if q.getAccountByScopeAndNameStmt, err = db.PrepareContext(ctx, GetAccountByScopeAndName); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccountByScopeAndName: %w", err)
 	}
@@ -315,6 +318,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.releaseUtxoLeaseStmt, err = db.PrepareContext(ctx, ReleaseUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query ReleaseUtxoLease: %w", err)
 	}
+	if q.rewindWalletReferencesForDisconnectStmt, err = db.PrepareContext(ctx, RewindWalletReferencesForDisconnect); err != nil {
+		return nil, fmt.Errorf("error preparing query RewindWalletReferencesForDisconnect: %w", err)
+	}
 	if q.rewindWalletSyncStateHeightsForRollbackStmt, err = db.PrepareContext(ctx, RewindWalletSyncStateHeightsForRollback); err != nil {
 		return nil, fmt.Errorf("error preparing query RewindWalletSyncStateHeightsForRollback: %w", err)
 	}
@@ -467,6 +473,11 @@ func (q *Queries) Close() error {
 	if q.deleteUtxosByTxIDStmt != nil {
 		if cerr := q.deleteUtxosByTxIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteUtxosByTxIDStmt: %w", cerr)
+		}
+	}
+	if q.deleteWalletBlockByHeightStmt != nil {
+		if cerr := q.deleteWalletBlockByHeightStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteWalletBlockByHeightStmt: %w", cerr)
 		}
 	}
 	if q.getAccountByScopeAndNameStmt != nil {
@@ -829,6 +840,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing releaseUtxoLeaseStmt: %w", cerr)
 		}
 	}
+	if q.rewindWalletReferencesForDisconnectStmt != nil {
+		if cerr := q.rewindWalletReferencesForDisconnectStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing rewindWalletReferencesForDisconnectStmt: %w", cerr)
+		}
+	}
 	if q.rewindWalletSyncStateHeightsForRollbackStmt != nil {
 		if cerr := q.rewindWalletSyncStateHeightsForRollbackStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing rewindWalletSyncStateHeightsForRollbackStmt: %w", cerr)
@@ -933,6 +949,7 @@ type Queries struct {
 	deleteUnminedTransactionByHashWithInvalidStmt *sql.Stmt
 	deleteUtxoLeasesSpentByConfirmedTxStmt        *sql.Stmt
 	deleteUtxosByTxIDStmt                         *sql.Stmt
+	deleteWalletBlockByHeightStmt                 *sql.Stmt
 	getAccountByScopeAndNameStmt                  *sql.Stmt
 	getAccountByScopeAndNumberStmt                *sql.Stmt
 	getAccountByWalletScopeAndNameStmt            *sql.Stmt
@@ -1005,6 +1022,7 @@ type Queries struct {
 	listWalletsStmt                               *sql.Stmt
 	loadWatchSetStmt                              *sql.Stmt
 	releaseUtxoLeaseStmt                          *sql.Stmt
+	rewindWalletReferencesForDisconnectStmt       *sql.Stmt
 	rewindWalletSyncStateHeightsForRollbackStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt     *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt   *sql.Stmt
@@ -1044,6 +1062,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteUnminedTransactionByHashWithInvalidStmt: q.deleteUnminedTransactionByHashWithInvalidStmt,
 		deleteUtxoLeasesSpentByConfirmedTxStmt:        q.deleteUtxoLeasesSpentByConfirmedTxStmt,
 		deleteUtxosByTxIDStmt:                         q.deleteUtxosByTxIDStmt,
+		deleteWalletBlockByHeightStmt:                 q.deleteWalletBlockByHeightStmt,
 		getAccountByScopeAndNameStmt:                  q.getAccountByScopeAndNameStmt,
 		getAccountByScopeAndNumberStmt:                q.getAccountByScopeAndNumberStmt,
 		getAccountByWalletScopeAndNameStmt:            q.getAccountByWalletScopeAndNameStmt,
@@ -1116,6 +1135,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listWalletsStmt:                               q.listWalletsStmt,
 		loadWatchSetStmt:                              q.loadWatchSetStmt,
 		releaseUtxoLeaseStmt:                          q.releaseUtxoLeaseStmt,
+		rewindWalletReferencesForDisconnectStmt:       q.rewindWalletReferencesForDisconnectStmt,
 		rewindWalletSyncStateHeightsForRollbackStmt:   q.rewindWalletSyncStateHeightsForRollbackStmt,
 		updateAccountNameByWalletScopeAndNameStmt:     q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt:   q.updateAccountNameByWalletScopeAndNumberStmt,

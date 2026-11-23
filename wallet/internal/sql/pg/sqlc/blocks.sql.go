@@ -19,6 +19,25 @@ func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
 	return err
 }
 
+const DeleteWalletBlockByHeight = `-- name: DeleteWalletBlockByHeight :execrows
+DELETE FROM wallet_blocks
+WHERE wallet_id = $1::BIGINT AND block_height = $2::BIGINT
+`
+
+type DeleteWalletBlockByHeightParams struct {
+	WalletID    int64
+	BlockHeight int64
+}
+
+// Delete only a proven orphan; higher current-chain observations stay owned.
+func (q *Queries) DeleteWalletBlockByHeight(ctx context.Context, arg DeleteWalletBlockByHeightParams) (int64, error) {
+	result, err := q.db.Exec(ctx, DeleteWalletBlockByHeight, arg.WalletID, arg.BlockHeight)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const GetBlockByHeight = `-- name: GetBlockByHeight :one
 SELECT
     block_height,
@@ -109,15 +128,15 @@ SELECT
 FROM wallet_blocks
 WHERE
     wallet_id = $1::BIGINT
-    AND block_height >= $2::INTEGER
-    AND block_height <= $3::INTEGER
+    AND block_height >= $2::BIGINT
+    AND block_height <= $3::BIGINT
 ORDER BY block_height
 `
 
 type GetWalletBlocksInRangeParams struct {
 	WalletID    int64
-	StartHeight int32
-	EndHeight   int32
+	StartHeight int64
+	EndHeight   int64
 }
 
 type GetWalletBlocksInRangeRow struct {
