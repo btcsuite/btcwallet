@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -1913,6 +1914,49 @@ type DisconnectBlockOps interface {
 
 	// DeleteDisconnectBlocks removes exact rows after reference rewind.
 	DeleteDisconnectBlocks(ctx context.Context, heights []uint32) error
+}
+
+// selectDisconnectHistory classifies each owned block identity once, so exact
+// deletion and coinbase descendant invalidation use the same orphan decision.
+func selectDisconnectHistory(walletID uint32, observed Block, blocks []Block,
+	history []DisconnectTx, canonical map[uint32]*chainhash.Hash) (
+	[]uint32, map[uint32][]chainhash.Hash, error) {
+
+	// Mined observations can lie outside committed progress. Their owned
+	// block join guarantees the same identity as any committed row here.
+	orphaned := map[uint32]chainhash.Hash{observed.Height: observed.Hash}
+	for _, block := range blocks {
+		orphaned[block.Height] = block.Hash
+	}
+
+	for _, info := range history {
+		orphaned[info.BlockHeight] = info.BlockHash
+	}
+
+	// Validate the union before any mutation. Matching rows leave the selected
+	// set, while an explicit nil proves absence above the source's tip.
+	for height, stored := range orphaned {
+		hash, known := canonical[height]
+		if !known {
+			return nil, nil, fmt.Errorf("unknown canonical block at %d: %w",
+				height, ErrInvalidParam)
+		}
+
+		if hash != nil && *hash == stored {
+			delete(orphaned, height)
+		}
+	}
+
+	roots := make(map[uint32][]chainhash.Hash)
+	for _, info := range history {
+		if _, removed := orphaned[info.BlockHeight]; removed &&
+			info.IsCoinbase {
+
+			roots[walletID] = append(roots[walletID], info.Hash)
+		}
+	}
+
+	return slices.Collect(maps.Keys(orphaned)), roots, nil
 }
 
 // txSpendsAnyParent reports whether the transaction spends any hash in the
