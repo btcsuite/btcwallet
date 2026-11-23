@@ -141,3 +141,20 @@ SET
     encrypted_crypto_script_key = $3,
     encrypted_master_hd_priv_key = $4
 WHERE wallet_id = $5;
+
+-- name: RewindWalletReferencesForDisconnect :execrows
+-- Rewind scanned progress across removed history; move birthday only on removal.
+UPDATE wallet_sync_states
+SET
+    synced_height = CASE
+        WHEN synced_height >= sqlc.arg('height')::BIGINT THEN sqlc.narg('previous_height')::INTEGER
+        ELSE synced_height
+    END,
+    birthday_height = CASE
+        WHEN birthday_height = sqlc.arg('height')::BIGINT THEN sqlc.narg('previous_height')::INTEGER
+        ELSE birthday_height
+    END,
+    updated_at = current_timestamp AT TIME ZONE 'UTC'
+WHERE
+    wallet_id = sqlc.arg('wallet_id')::BIGINT
+    AND (synced_height >= sqlc.arg('height')::BIGINT OR birthday_height = sqlc.arg('height')::BIGINT);

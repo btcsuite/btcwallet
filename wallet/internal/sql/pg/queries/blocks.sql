@@ -46,8 +46,8 @@ SELECT
 FROM wallet_blocks
 WHERE
     wallet_id = sqlc.arg('wallet_id')::BIGINT
-    AND block_height >= sqlc.arg('start_height')::INTEGER
-    AND block_height <= sqlc.arg('end_height')::INTEGER
+    AND block_height >= sqlc.arg('start_height')::BIGINT
+    AND block_height <= sqlc.arg('end_height')::BIGINT
 ORDER BY block_height;
 
 -- name: InsertWalletBlock :exec
@@ -62,3 +62,8 @@ VALUES (
     sqlc.arg('block_timestamp')
 )
 ON CONFLICT DO NOTHING;
+
+-- name: DeleteWalletBlockByHeight :execrows
+-- Delete only a proven orphan; higher current-chain observations stay owned.
+DELETE FROM wallet_blocks
+WHERE wallet_id = sqlc.arg('wallet_id')::BIGINT AND block_height = sqlc.arg('block_height')::BIGINT;
