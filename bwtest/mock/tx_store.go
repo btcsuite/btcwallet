@@ -105,14 +105,14 @@ func (m *TxStore) ListLockedOutputs(
 // LockOutput implements the wtxmgr.TxStore interface.
 func (m *TxStore) LockOutput(ns walletdb.ReadWriteBucket, id wtxmgr.LockID,
 	op wire.OutPoint, duration time.Duration,
-	optFuncs ...wtxmgr.LockOutputOption) (time.Time, error) {
+	optFuncs ...wtxmgr.LockOutputOption) (*wtxmgr.LockedOutput, error) {
 
 	args := m.Called(ns, id, op, duration, optFuncs)
 	if args.Get(0) == nil {
-		return time.Time{}, args.Error(1)
+		return nil, args.Error(1)
 	}
 
-	return args.Get(0).(time.Time), args.Error(1)
+	return args.Get(0).(*wtxmgr.LockedOutput), args.Error(1)
 }
 
 // OutputsToWatch implements the wtxmgr.TxStore interface.
