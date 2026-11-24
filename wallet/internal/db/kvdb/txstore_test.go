@@ -530,7 +530,7 @@ func TestRollbackToBlockMovesConfirmedTxToUnmined(t *testing.T) {
 	store := NewStore(dbConn, txStore, nil)
 	rec := insertConfirmedTx(t, dbConn, txStore, 144)
 
-	err := store.RollbackToBlock(t.Context(), 144)
+	err := store.RollbackToBlock(t.Context(), 0, 144)
 	require.NoError(t, err)
 
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
@@ -578,7 +578,7 @@ func TestRollbackToBlockHeightZeroResetsSyncTip(t *testing.T) {
 		Return(nil)
 	store := NewStore(dbConn, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 0)
+	err := store.RollbackToBlock(t.Context(), 0, 0)
 	require.NoError(t, err)
 
 	// The reset to the start block ran with a nil blockstamp, so no stale
@@ -627,7 +627,7 @@ func TestRollbackToBlockRewindsSyncTipWithForkTimestamp(t *testing.T) {
 	).Return(nil)
 	store := NewStore(dbConn, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 10)
+	err := store.RollbackToBlock(t.Context(), 0, 10)
 	require.NoError(t, err)
 }
 
@@ -688,7 +688,7 @@ func TestRollbackToBlockRewindsSyncTipToSparseFork(t *testing.T) {
 	).Return(nil).Once()
 	store := NewStore(dbConn, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 10)
+	err := store.RollbackToBlock(t.Context(), 0, 10)
 	require.NoError(t, err)
 
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
@@ -745,7 +745,7 @@ func TestRollbackToBlockRewindsSyncTipWithoutForkTimestamp(t *testing.T) {
 	).Return(nil)
 	store := NewStore(dbConn, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 10)
+	err := store.RollbackToBlock(t.Context(), 0, 10)
 	require.NoError(t, err)
 }
 
@@ -786,7 +786,7 @@ func TestRollbackToBlockRewindsBirthdayBlock(t *testing.T) {
 	writeSyncedTo(t, dbConn, addrStore, currentTip)
 	writeBirthdayBlock(t, dbConn, addrStore, birthdayBlock, true)
 
-	err := store.RollbackToBlock(t.Context(), 10)
+	err := store.RollbackToBlock(t.Context(), 0, 10)
 	require.NoError(t, err)
 
 	rewoundBlock, verified := readBirthdayBlock(t, dbConn, addrStore)
@@ -818,7 +818,7 @@ func TestRollbackToBlockHeightZeroClearsBirthdayBlock(t *testing.T) {
 	writeSyncedTo(t, dbConn, addrStore, birthdayBlock)
 	writeBirthdayBlock(t, dbConn, addrStore, birthdayBlock, true)
 
-	err := store.RollbackToBlock(t.Context(), 0)
+	err := store.RollbackToBlock(t.Context(), 0, 0)
 	require.NoError(t, err)
 
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
@@ -862,7 +862,7 @@ func TestRollbackToBlockRestoresBirthdayBlockOnCommitFailure(t *testing.T) {
 	failDB := &commitFailDB{DB: dbConn, failNext: true}
 	store := NewStore(failDB, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 10)
+	err := store.RollbackToBlock(t.Context(), 0, 10)
 	require.ErrorIs(t, err, errInjectedCommit)
 
 	restoredBlock, verified := readBirthdayBlock(t, dbConn, addrStore)
@@ -930,7 +930,7 @@ func TestRollbackToBlockRestoresSyncTipOnCommitFailure(t *testing.T) {
 	failDB := &commitFailDB{DB: dbConn, failNext: true}
 	store := NewStore(failDB, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 10)
+	err := store.RollbackToBlock(t.Context(), 0, 10)
 	require.ErrorIs(t, err, errInjectedCommit)
 
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
@@ -984,7 +984,7 @@ func TestRollbackToBlockRestoresResetSyncTipOnCommitFailure(t *testing.T) {
 	failDB := &commitFailDB{DB: dbConn, failNext: true}
 	store := NewStore(failDB, txStore, addrStore)
 
-	err := store.RollbackToBlock(t.Context(), 0)
+	err := store.RollbackToBlock(t.Context(), 0, 0)
 	require.ErrorIs(t, err, errInjectedCommit)
 }
 
@@ -1029,7 +1029,7 @@ func TestRollbackToBlockFailureKeepsSyncTip(t *testing.T) {
 			err:     errInducedFailure,
 		}, addrStore,
 	)
-	err = store.RollbackToBlock(t.Context(), 10)
+	err = store.RollbackToBlock(t.Context(), 0, 10)
 	require.ErrorIs(t, err, errInducedFailure)
 	require.Equal(t, currentTip, addrStore.SyncedTo())
 }
@@ -4453,7 +4453,7 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError(t *testing.T) {
 
 	store := NewStore(dbConn, mockTxStore, addrMgr)
 
-	err = store.RollbackToBlock(t.Context(), rollbackHeight)
+	err = store.RollbackToBlock(t.Context(), 0, rollbackHeight)
 	require.ErrorIs(t, err, errForcedRollback)
 
 	// The persisted and live sync tips must remain at the original height: the
@@ -4749,7 +4749,7 @@ func TestDisconnectBlockIdentities(t *testing.T) {
 
 			// Act through the public Store capability, without consulting
 			// buckets or using the manager tip as the mined identity.
-			err = store.DisconnectBlock(t.Context(), db.Block{
+			err = store.DisconnectBlock(t.Context(), 0, db.Block{
 				Height: 2,
 				Hash:   chainhash.Hash{31, 2},
 			}, retained, canonical)
@@ -4821,7 +4821,7 @@ func TestDisconnectBlockIdentityError(t *testing.T) {
 
 	// Act on an independently matching mined identity with unreadable manager
 	// history; recovery must preserve the causal error instead of guessing.
-	err := store.DisconnectBlock(t.Context(), db.Block{
+	err := store.DisconnectBlock(t.Context(), 0, db.Block{
 		Height: 2,
 		Hash:   chainhash.Hash{31, 2},
 	}, nil, nil)

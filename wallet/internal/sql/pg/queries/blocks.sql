@@ -1,30 +1,38 @@
--- name: GetBlockByHeight :one
+-- name: GetWalletBlockByHeight :one
+-- Block identity belongs to one Wallet, including during replacement replay.
 SELECT
     block_height,
     header_hash,
     block_timestamp
-FROM blocks
-WHERE block_height = $1;
+FROM wallet_blocks
+WHERE wallet_id = sqlc.arg('wallet_id')::BIGINT AND block_height = sqlc.arg('block_height')::INTEGER;
 
--- name: GetBlocksInRange :many
+-- name: GetWalletBlocksInRange :many
 SELECT
     block_height,
     header_hash,
     block_timestamp
-FROM blocks
+FROM wallet_blocks
 WHERE
-    block_height BETWEEN
-    sqlc.arg('start_height')::INTEGER
-    AND sqlc.arg('end_height')::INTEGER
+    wallet_id = sqlc.arg('wallet_id')::BIGINT
+    AND block_height >= sqlc.arg('start_height')::BIGINT
+    AND block_height <= sqlc.arg('end_height')::BIGINT
 ORDER BY block_height;
 
--- name: InsertBlock :exec
-INSERT INTO blocks (block_height, header_hash, block_timestamp)
-VALUES ($1, $2, $3)
--- InsertBlock arbitrates both unique keys when wallets insert a shared block.
--- ensureBlockExists still verifies the stored hash and timestamp afterward.
+-- name: InsertWalletBlock :exec
+-- Verify conflicts through requireBlockMatches in the same write transaction.
+INSERT INTO wallet_blocks (
+    wallet_id, block_height, header_hash, block_timestamp
+)
+VALUES (
+    sqlc.arg('wallet_id')::BIGINT,
+    sqlc.arg('block_height')::INTEGER,
+    sqlc.arg('header_hash'),
+    sqlc.arg('block_timestamp')
+)
 ON CONFLICT DO NOTHING;
 
--- name: DeleteBlock :exec
-DELETE FROM blocks
-WHERE block_height = $1;
+-- name: DeleteWalletBlockByHeight :execrows
+-- Delete only a proven orphan; higher current-chain observations stay owned.
+DELETE FROM wallet_blocks
+WHERE wallet_id = sqlc.arg('wallet_id')::BIGINT AND block_height = sqlc.arg('block_height')::BIGINT;

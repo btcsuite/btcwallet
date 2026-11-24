@@ -391,6 +391,12 @@ func (c *RPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
+// NotificationsDone exposes the existing producer shutdown signal so a
+// consumer can detect termination while notification delivery is blocked.
+func (c *RPCClient) NotificationsDone() <-chan struct{} {
+	return c.quit
+}
+
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
 func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {

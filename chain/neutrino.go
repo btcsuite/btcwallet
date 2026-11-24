@@ -613,6 +613,12 @@ func (s *NeutrinoClient) Notifications() <-chan interface{} {
 	return s.dequeueNotification
 }
 
+// NotificationsDone exposes the current producer's shutdown signal. Obtain
+// it after Start, like Notifications, before observing this client lifetime.
+func (s *NeutrinoClient) NotificationsDone() <-chan struct{} {
+	return s.quit
+}
+
 // SetStartTime sets the birthday used when the native rescan starts. Once a
 // scan is active, later hints leave its birthday unchanged; they do not restart
 // it. The client currently supports only one rescan at a time.

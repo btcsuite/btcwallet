@@ -78,7 +78,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON t.block_height = b.block_height
+LEFT JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE t.wallet_id = ? AND t.tx_hash = ?;
 
 -- name: ListTransactionsWithoutBlock :many
@@ -89,7 +92,7 @@ WHERE t.wallet_id = ? AND t.tx_hash = ?;
 -- - Includes the active unmined set (`pending` and `published`) together with
 --   retained invalid history such as `failed`, `replaced`, or `orphaned`
 --   rows.
--- - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+-- - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 --   so sqlc preserves the nullable block columns while the row shape stays
 --   aligned with the confirmed query below.
 -- Performance:
@@ -106,7 +109,7 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON 1 = 0
+LEFT JOIN wallet_blocks AS b ON 1 = 0
 WHERE
     t.wallet_id = ?
     AND t.block_height IS NULL
@@ -120,7 +123,7 @@ ORDER BY t.received_time DESC, t.id DESC;
 --   in unmined `pending` or `published` status.
 -- - Excludes orphaned/replaced/failed history so delete and rollback logic do
 --   not treat retained invalid rows as active mempool spends.
--- - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+-- - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 --   so sqlc preserves the nullable block columns while the row shape stays
 --   aligned with other transaction queries.
 -- Performance:
@@ -138,7 +141,7 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON 1 = 0
+LEFT JOIN wallet_blocks AS b ON 1 = 0
 WHERE
     t.wallet_id = ?
     AND t.block_height IS NULL
@@ -168,7 +171,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-INNER JOIN blocks AS b ON t.block_height = b.block_height
+INNER JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
     AND t.block_height >= cast(sqlc.arg('start_height') AS INTEGER)
@@ -343,7 +349,8 @@ SELECT
     tx_hash
 FROM transactions
 WHERE
-    block_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
+    wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER)
+    AND block_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
     AND is_coinbase
 ORDER BY wallet_id, id;
 
@@ -370,8 +377,10 @@ SET
             AND synced_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
             THEN (
                 SELECT max(block_height)
-                FROM blocks
-                WHERE block_height < cast(sqlc.arg('rollback_height') AS INTEGER)
+                FROM wallet_blocks
+                WHERE
+                    wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER)
+                    AND block_height < cast(sqlc.arg('rollback_height') AS INTEGER)
             )
         ELSE synced_height
     END,
@@ -381,30 +390,37 @@ SET
             AND birthday_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
             THEN (
                 SELECT max(block_height)
-                FROM blocks
-                WHERE block_height < cast(sqlc.arg('rollback_height') AS INTEGER)
+                FROM wallet_blocks
+                WHERE
+                    wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER)
+                    AND block_height < cast(sqlc.arg('rollback_height') AS INTEGER)
             )
         ELSE birthday_height
     END,
     updated_at = current_timestamp
 WHERE
-    (
-        synced_height IS NOT NULL
-        AND synced_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
-    )
-    OR (
-        birthday_height IS NOT NULL
-        AND birthday_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
+    wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER)
+    AND (
+        (
+            synced_height IS NOT NULL
+            AND synced_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
+        )
+        OR (
+            birthday_height IS NOT NULL
+            AND birthday_height >= cast(sqlc.arg('rollback_height') AS INTEGER)
+        )
     );
 
 -- name: DeleteBlocksAtOrAboveHeight :execrows
 -- Deletes blocks at and after the provided height.
 --
 -- How:
--- - Deletes directly from blocks by the natural height key.
+-- - Deletes only the owning Wallet range in wallet_blocks.
 -- - Relies on FK/trigger side effects to null transaction block references and
 --   orphan coinbase rows.
 -- Performance:
 -- - Executes as a range delete over the block-height primary key.
-DELETE FROM blocks
-WHERE block_height >= ?;
+DELETE FROM wallet_blocks
+WHERE
+    wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER)
+    AND block_height >= cast(sqlc.arg('rollback_height') AS INTEGER);

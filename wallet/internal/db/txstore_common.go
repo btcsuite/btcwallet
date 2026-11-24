@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -1400,7 +1401,8 @@ type UpdateTxOps interface {
 
 	// PrepareState validates and caches any backend-specific block/status
 	// params needed for the later row update.
-	PrepareState(ctx context.Context, state UpdateTxState) error
+	PrepareState(ctx context.Context, walletID uint32,
+		state UpdateTxState) error
 
 	// CheckGraphState rejects terminal recovery or confirmation changes
 	// involving competing transactions; CreateTx and rollback own those flows.
@@ -1432,7 +1434,7 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 	}
 
 	if params.State != nil {
-		err = ops.PrepareState(ctx, *params.State)
+		err = ops.PrepareState(ctx, params.WalletID, *params.State)
 		if err != nil {
 			return fmt.Errorf("prepare tx state update: %w", err)
 		}
@@ -1555,6 +1557,20 @@ type UnminedTxRecord struct {
 // the shared `(id, tx_hash, raw_tx)` shape used by the invalidation walk.
 type ExtractUnminedTxFn[Row any] func(Row) (int64, []byte, []byte)
 
+// disconnectDescendantOps is the shared graph-write boundary for explicit
+// rollback and observed disconnections, independent of their block selection.
+type disconnectDescendantOps interface {
+	// ListUnminedTxRecords loads the wallet's current unmined transaction
+	// rows in the normalized shape the descendant walk expects.
+	ListUnminedTxRecords(ctx context.Context,
+		walletID int64) ([]UnminedTxRecord, error)
+
+	// MarkDescendantsFailed batch-marks the discovered descendants as
+	// failed while retaining their input facts for history.
+	MarkDescendantsFailed(ctx context.Context, walletID int64,
+		descendantIDs []int64) error
+}
+
 // RollbackToBlockOps adapts one SQL backend to the full RollbackToBlock
 // sequence, including sync-state rewinds, block deletion, and descendant
 // invalidation.
@@ -1562,7 +1578,7 @@ type ExtractUnminedTxFn[Row any] func(Row) (int64, []byte, []byte)
 // The shared rollback algorithm is intentionally ordered:
 //   - collect rollback root hashes before block rows are removed
 //   - rewind sync-state heights that still point at the removed blocks
-//   - delete the shared block rows at or above the rollback height
+//   - delete the owning Wallet block rows at or above the rollback height
 //   - mark the disconnected coinbase roots orphaned once their confirming
 //     blocks have been removed
 //   - walk the disconnected roots and invalidate dependent descendants
@@ -1579,8 +1595,8 @@ type RollbackToBlockOps interface {
 	// below the rollback boundary before block rows are removed.
 	RewindWalletSyncStateHeights(ctx context.Context, height uint32) error
 
-	// DeleteBlocksAtOrAboveHeight removes the shared block rows at or above the
-	// rollback boundary after sync-state references have been rewound.
+	// DeleteBlocksAtOrAboveHeight removes owned block rows at or above
+	// the rollback boundary after sync-state references have been rewound.
 	DeleteBlocksAtOrAboveHeight(ctx context.Context, height uint32) error
 
 	// MarkTxRootsOrphaned rewrites the disconnected coinbase roots to the
@@ -1588,15 +1604,7 @@ type RollbackToBlockOps interface {
 	MarkTxRootsOrphaned(ctx context.Context, walletID uint32,
 		rootHashes []chainhash.Hash) error
 
-	// ListUnminedTxRecords loads the wallet's current unmined transaction
-	// rows in the normalized shape the descendant walk expects.
-	ListUnminedTxRecords(ctx context.Context,
-		walletID int64) ([]UnminedTxRecord, error)
-
-	// MarkDescendantsFailed batch-marks the discovered descendants as
-	// failed while retaining their input facts for history.
-	MarkDescendantsFailed(ctx context.Context, walletID int64,
-		descendantIDs []int64) error
+	disconnectDescendantOps
 }
 
 // newUnminedTxRecord decodes one normalized unmined transaction row into the
@@ -1780,7 +1788,7 @@ func CollectDescendantTxIDs(rootHashes []chainhash.Hash,
 // Their retained inputs stop reserving credits once their status is invalid.
 func invalidateRollbackDescendants(ctx context.Context,
 	rootHashesByWallet map[uint32][]chainhash.Hash,
-	ops RollbackToBlockOps) error {
+	ops disconnectDescendantOps) error {
 
 	for walletID, rootHashes := range rootHashesByWallet {
 		walletID64 := int64(walletID)
@@ -1812,7 +1820,7 @@ func invalidateRollbackDescendants(ctx context.Context,
 // rewind paths use this without deleting shared block rows.
 func InvalidateRollbackDescendants(ctx context.Context,
 	rootHashesByWallet map[uint32][]chainhash.Hash,
-	ops RollbackToBlockOps) error {
+	ops disconnectDescendantOps) error {
 
 	return invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
 }
@@ -1869,6 +1877,188 @@ func RollbackToBlockWithOps(ctx context.Context, height uint32,
 	}
 
 	return nil
+}
+
+// DisconnectTx carries only the persisted facts used by disconnect policy.
+// IsCoinbase matches the classification used by confirmation-delete triggers.
+type DisconnectTx struct {
+	BlockHeight uint32
+	BlockHash   chainhash.Hash
+	Hash        chainhash.Hash
+	IsCoinbase  bool
+}
+
+// DisconnectBlockOps supplies owned history queries inside one SQL write.
+// The descendant walk is shared with explicit height rollback.
+type DisconnectBlockOps interface {
+	disconnectDescendantOps
+
+	// GetDisconnectBlock reads the observed height or ErrBlockNotFound.
+	GetDisconnectBlock(ctx context.Context, height uint32) (*Block, error)
+
+	// GetDisconnectCheckpoint reads nullable progress within the current write.
+	GetDisconnectCheckpoint(ctx context.Context) (*uint32, error)
+
+	// ListDisconnectBlocks reads the caller-selected committed interval,
+	// including empty rows and gaps without changing the requested bounds.
+	ListDisconnectBlocks(ctx context.Context,
+		start, end uint32) ([]Block, error)
+
+	// ListDisconnectTransactions reads mined facts before deletion.
+	ListDisconnectTransactions(ctx context.Context,
+		height uint32) ([]DisconnectTx, error)
+
+	// RewindDisconnectReferences rewinds progress across selected orphan rows
+	// and moves birthday only when its own block is removed.
+	RewindDisconnectReferences(ctx context.Context, heights []uint32,
+		previous *Block) error
+
+	// DeleteDisconnectBlocks removes exact rows after reference rewind.
+	DeleteDisconnectBlocks(ctx context.Context, heights []uint32) error
+}
+
+// DisconnectBlockWithOps validates native evidence and removes only proven
+// orphan history; explicit height rollback retains its separate range policy.
+func DisconnectBlockWithOps(ctx context.Context, walletID uint32, block Block,
+	previous *Block, canonical map[uint32]*chainhash.Hash,
+	ops DisconnectBlockOps) error {
+
+	current, known := canonical[block.Height]
+	if !known {
+		return fmt.Errorf("unknown canonical block at %d: %w",
+			block.Height, ErrInvalidParam)
+	}
+
+	stored, err := ops.GetDisconnectBlock(ctx, block.Height)
+	if errors.Is(err, ErrBlockNotFound) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// A delayed event cannot rewind a replacement or a still-current block.
+	if stored.Hash != block.Hash ||
+		(current != nil && *current == block.Hash) {
+
+		return nil
+	}
+
+	// A height is enough to update the reference only after this transaction
+	// verifies that the Wallet still owns the fork used to collect the proof.
+	if previous != nil {
+		fork, err := ops.GetDisconnectBlock(ctx, previous.Height)
+		if err != nil {
+			return err
+		}
+
+		if fork.Hash != previous.Hash {
+			return fmt.Errorf("disconnect fork at height %d: %w",
+				previous.Height, ErrBlockMismatch)
+		}
+	}
+
+	return disconnectStoredHistory(
+		ctx, walletID, block, previous, canonical, ops,
+	)
+}
+
+// selectDisconnectHistory classifies each owned block identity once, so exact
+// deletion and coinbase descendant invalidation use the same orphan decision.
+func selectDisconnectHistory(walletID uint32, observed Block, blocks []Block,
+	history []DisconnectTx, canonical map[uint32]*chainhash.Hash) (
+	[]uint32, map[uint32][]chainhash.Hash, error) {
+
+	// Mined observations can lie outside committed progress. Their owned
+	// block join guarantees the same identity as any committed row here.
+	orphaned := map[uint32]chainhash.Hash{observed.Height: observed.Hash}
+	for _, block := range blocks {
+		orphaned[block.Height] = block.Hash
+	}
+
+	for _, info := range history {
+		orphaned[info.BlockHeight] = info.BlockHash
+	}
+
+	// Validate the union before any mutation. Matching rows leave the selected
+	// set, while an explicit nil proves absence above the source's tip.
+	for height, stored := range orphaned {
+		hash, known := canonical[height]
+		if !known {
+			return nil, nil, fmt.Errorf("unknown canonical block at %d: %w",
+				height, ErrInvalidParam)
+		}
+
+		if hash != nil && *hash == stored {
+			delete(orphaned, height)
+		}
+	}
+
+	roots := make(map[uint32][]chainhash.Hash)
+	for _, info := range history {
+		if _, removed := orphaned[info.BlockHeight]; removed &&
+			info.IsCoinbase {
+
+			roots[walletID] = append(roots[walletID], info.Hash)
+		}
+	}
+
+	return slices.Collect(maps.Keys(orphaned)), roots, nil
+}
+
+// disconnectStoredHistory validates all required evidence before writes. Its
+// saved-checkpoint bound includes orphaned progress above a lower notification.
+func disconnectStoredHistory(ctx context.Context, walletID uint32,
+	observed Block, previous *Block, canonical map[uint32]*chainhash.Hash,
+	ops DisconnectBlockOps) error {
+
+	// The proven fork precedes the observation; nil means before genesis.
+	start := uint32(0)
+	if previous != nil {
+		start = previous.Height + 1
+	}
+
+	checkpoint, err := ops.GetDisconnectCheckpoint(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Only committed empty rows require proof. Empty retained observations
+	// above progress remain outside this received-event recovery contract.
+	var blocks []Block
+	if checkpoint != nil && start <= *checkpoint {
+		blocks, err = ops.ListDisconnectBlocks(ctx, start, *checkpoint)
+		if err != nil {
+			return fmt.Errorf("list committed disconnect blocks: %w", err)
+		}
+	}
+
+	history, err := ops.ListDisconnectTransactions(ctx, start)
+	if err != nil {
+		return err
+	}
+
+	heights, roots, err := selectDisconnectHistory(
+		walletID, observed, blocks, history, canonical,
+	)
+	if err != nil {
+		return err
+	}
+
+	// References must move before any delete can fire confirmation triggers.
+	// All selected rows and their descendant effects share this same write.
+	err = ops.RewindDisconnectReferences(ctx, heights, previous)
+	if err != nil {
+		return err
+	}
+
+	err = ops.DeleteDisconnectBlocks(ctx, heights)
+	if err != nil {
+		return err
+	}
+
+	return invalidateRollbackDescendants(ctx, roots, ops)
 }
 
 // txSpendsAnyParent reports whether the transaction spends any hash in the

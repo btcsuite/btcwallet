@@ -127,7 +127,7 @@ func TestInvalidateUnminedTxRejectsConfirmedAndMissing(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	block := CreateBlockFixture(t, store.Queries(), 320)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 320)
 	confirmedTx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 5200, PkScript: addr.ScriptPubKey}},

@@ -85,7 +85,7 @@ func applyBatchSyncedBlocks(ctx context.Context, qtx *sqlc.Queries,
 	for i := range params.SyncedBlocks {
 		block := &params.SyncedBlocks[i]
 
-		err := ensureBlockExists(ctx, qtx, block)
+		err := ensureBlockExists(ctx, qtx, params.WalletID, block)
 		if err != nil {
 			return fmt.Errorf("ensure synced block %d: %w", i, err)
 		}

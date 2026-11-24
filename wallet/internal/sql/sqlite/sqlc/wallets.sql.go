@@ -62,8 +62,14 @@ SELECT
     b_birthday.block_timestamp AS birthday_block_timestamp
 FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
-LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+LEFT JOIN wallet_blocks AS b_synced
+    ON
+        s.synced_height = b_synced.block_height
+        AND s.wallet_id = b_synced.wallet_id
+LEFT JOIN wallet_blocks AS b_birthday
+    ON
+        s.birthday_height = b_birthday.block_height
+        AND s.wallet_id = b_birthday.wallet_id
 WHERE w.id = ?
 `
 
@@ -124,8 +130,14 @@ SELECT
     b_birthday.block_timestamp AS birthday_block_timestamp
 FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
-LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+LEFT JOIN wallet_blocks AS b_synced
+    ON
+        s.synced_height = b_synced.block_height
+        AND s.wallet_id = b_synced.wallet_id
+LEFT JOIN wallet_blocks AS b_birthday
+    ON
+        s.birthday_height = b_birthday.block_height
+        AND s.wallet_id = b_birthday.wallet_id
 WHERE w.wallet_name = ?
 `
 
@@ -270,8 +282,14 @@ SELECT
     b_birthday.block_timestamp AS birthday_block_timestamp
 FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
-LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+LEFT JOIN wallet_blocks AS b_synced
+    ON
+        s.synced_height = b_synced.block_height
+        AND s.wallet_id = b_synced.wallet_id
+LEFT JOIN wallet_blocks AS b_birthday
+    ON
+        s.birthday_height = b_birthday.block_height
+        AND s.wallet_id = b_birthday.wallet_id
 WHERE (
     ?1 IS NULL
     OR w.id > ?1
@@ -341,6 +359,42 @@ func (q *Queries) ListWallets(ctx context.Context, arg ListWalletsParams) ([]Lis
 		return nil, err
 	}
 	return items, nil
+}
+
+const RewindWalletReferencesForDisconnect = `-- name: RewindWalletReferencesForDisconnect :execrows
+UPDATE wallet_sync_states
+SET
+    synced_height = CASE
+        WHEN
+            synced_height >= cast(?1 AS INTEGER)
+            THEN cast(?2 AS INTEGER)
+        ELSE synced_height
+    END,
+    birthday_height = CASE
+        WHEN
+            birthday_height = cast(?1 AS INTEGER)
+            THEN cast(?2 AS INTEGER)
+        ELSE birthday_height
+    END,
+    updated_at = current_timestamp
+WHERE
+    wallet_id = cast(?3 AS INTEGER)
+    AND (synced_height >= cast(?1 AS INTEGER) OR birthday_height = cast(?1 AS INTEGER))
+`
+
+type RewindWalletReferencesForDisconnectParams struct {
+	Height         int64
+	PreviousHeight sql.NullInt64
+	WalletID       int64
+}
+
+// Rewind scanned progress across removed history; move birthday only on removal.
+func (q *Queries) RewindWalletReferencesForDisconnect(ctx context.Context, arg RewindWalletReferencesForDisconnectParams) (int64, error) {
+	result, err := q.exec(ctx, q.rewindWalletReferencesForDisconnectStmt, RewindWalletReferencesForDisconnect, arg.Height, arg.PreviousHeight, arg.WalletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const UpdateWalletSecrets = `-- name: UpdateWalletSecrets :execrows

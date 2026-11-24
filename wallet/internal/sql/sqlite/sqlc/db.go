@@ -72,9 +72,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createWalletStmt, err = db.PrepareContext(ctx, CreateWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateWallet: %w", err)
 	}
-	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
-		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
-	}
 	if q.deleteBlocksAtOrAboveHeightStmt, err = db.PrepareContext(ctx, DeleteBlocksAtOrAboveHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlocksAtOrAboveHeight: %w", err)
 	}
@@ -98,6 +95,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.deleteUtxosByTxIDStmt, err = db.PrepareContext(ctx, DeleteUtxosByTxID); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteUtxosByTxID: %w", err)
+	}
+	if q.deleteWalletBlockByHeightStmt, err = db.PrepareContext(ctx, DeleteWalletBlockByHeight); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteWalletBlockByHeight: %w", err)
 	}
 	if q.getAccountByScopeAndNameStmt, err = db.PrepareContext(ctx, GetAccountByScopeAndName); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccountByScopeAndName: %w", err)
@@ -144,12 +144,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAndIncrementNextInternalIndexStmt, err = db.PrepareContext(ctx, GetAndIncrementNextInternalIndex); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAndIncrementNextInternalIndex: %w", err)
 	}
-	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
-		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
-	}
-	if q.getBlocksInRangeStmt, err = db.PrepareContext(ctx, GetBlocksInRange); err != nil {
-		return nil, fmt.Errorf("error preparing query GetBlocksInRange: %w", err)
-	}
 	if q.getDatabaseIdentityStmt, err = db.PrepareContext(ctx, GetDatabaseIdentity); err != nil {
 		return nil, fmt.Errorf("error preparing query GetDatabaseIdentity: %w", err)
 	}
@@ -180,6 +174,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getUtxoIDByOutpointStmt, err = db.PrepareContext(ctx, GetUtxoIDByOutpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query GetUtxoIDByOutpoint: %w", err)
 	}
+	if q.getWalletBlockByHeightStmt, err = db.PrepareContext(ctx, GetWalletBlockByHeight); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletBlockByHeight: %w", err)
+	}
+	if q.getWalletBlocksInRangeStmt, err = db.PrepareContext(ctx, GetWalletBlocksInRange); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletBlocksInRange: %w", err)
+	}
 	if q.getWalletByIDStmt, err = db.PrepareContext(ctx, GetWalletByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletByID: %w", err)
 	}
@@ -197,9 +197,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertAddressSecretStmt, err = db.PrepareContext(ctx, InsertAddressSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertAddressSecret: %w", err)
-	}
-	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
-		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
 	}
 	if q.insertDatabaseIdentityStmt, err = db.PrepareContext(ctx, InsertDatabaseIdentity); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertDatabaseIdentity: %w", err)
@@ -221,6 +218,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertUtxoStmt, err = db.PrepareContext(ctx, InsertUtxo); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertUtxo: %w", err)
+	}
+	if q.insertWalletBlockStmt, err = db.PrepareContext(ctx, InsertWalletBlock); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertWalletBlock: %w", err)
 	}
 	if q.insertWalletSecretsStmt, err = db.PrepareContext(ctx, InsertWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSecrets: %w", err)
@@ -300,8 +300,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
 	}
+	if q.loadWatchSetStmt, err = db.PrepareContext(ctx, LoadWatchSet); err != nil {
+		return nil, fmt.Errorf("error preparing query LoadWatchSet: %w", err)
+	}
 	if q.releaseUtxoLeaseStmt, err = db.PrepareContext(ctx, ReleaseUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query ReleaseUtxoLease: %w", err)
+	}
+	if q.rewindWalletReferencesForDisconnectStmt, err = db.PrepareContext(ctx, RewindWalletReferencesForDisconnect); err != nil {
+		return nil, fmt.Errorf("error preparing query RewindWalletReferencesForDisconnect: %w", err)
 	}
 	if q.rewindWalletSyncStateHeightsForRollbackStmt, err = db.PrepareContext(ctx, RewindWalletSyncStateHeightsForRollback); err != nil {
 		return nil, fmt.Errorf("error preparing query RewindWalletSyncStateHeightsForRollback: %w", err)
@@ -412,11 +418,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing createWalletStmt: %w", cerr)
 		}
 	}
-	if q.deleteBlockStmt != nil {
-		if cerr := q.deleteBlockStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
-		}
-	}
 	if q.deleteBlocksAtOrAboveHeightStmt != nil {
 		if cerr := q.deleteBlocksAtOrAboveHeightStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteBlocksAtOrAboveHeightStmt: %w", cerr)
@@ -455,6 +456,11 @@ func (q *Queries) Close() error {
 	if q.deleteUtxosByTxIDStmt != nil {
 		if cerr := q.deleteUtxosByTxIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteUtxosByTxIDStmt: %w", cerr)
+		}
+	}
+	if q.deleteWalletBlockByHeightStmt != nil {
+		if cerr := q.deleteWalletBlockByHeightStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteWalletBlockByHeightStmt: %w", cerr)
 		}
 	}
 	if q.getAccountByScopeAndNameStmt != nil {
@@ -532,16 +538,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getAndIncrementNextInternalIndexStmt: %w", cerr)
 		}
 	}
-	if q.getBlockByHeightStmt != nil {
-		if cerr := q.getBlockByHeightStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getBlockByHeightStmt: %w", cerr)
-		}
-	}
-	if q.getBlocksInRangeStmt != nil {
-		if cerr := q.getBlocksInRangeStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getBlocksInRangeStmt: %w", cerr)
-		}
-	}
 	if q.getDatabaseIdentityStmt != nil {
 		if cerr := q.getDatabaseIdentityStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getDatabaseIdentityStmt: %w", cerr)
@@ -592,6 +588,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getUtxoIDByOutpointStmt: %w", cerr)
 		}
 	}
+	if q.getWalletBlockByHeightStmt != nil {
+		if cerr := q.getWalletBlockByHeightStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletBlockByHeightStmt: %w", cerr)
+		}
+	}
+	if q.getWalletBlocksInRangeStmt != nil {
+		if cerr := q.getWalletBlocksInRangeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletBlocksInRangeStmt: %w", cerr)
+		}
+	}
 	if q.getWalletByIDStmt != nil {
 		if cerr := q.getWalletByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getWalletByIDStmt: %w", cerr)
@@ -620,11 +626,6 @@ func (q *Queries) Close() error {
 	if q.insertAddressSecretStmt != nil {
 		if cerr := q.insertAddressSecretStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertAddressSecretStmt: %w", cerr)
-		}
-	}
-	if q.insertBlockStmt != nil {
-		if cerr := q.insertBlockStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
 		}
 	}
 	if q.insertDatabaseIdentityStmt != nil {
@@ -660,6 +661,11 @@ func (q *Queries) Close() error {
 	if q.insertUtxoStmt != nil {
 		if cerr := q.insertUtxoStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertUtxoStmt: %w", cerr)
+		}
+	}
+	if q.insertWalletBlockStmt != nil {
+		if cerr := q.insertWalletBlockStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertWalletBlockStmt: %w", cerr)
 		}
 	}
 	if q.insertWalletSecretsStmt != nil {
@@ -792,9 +798,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
+	if q.loadWatchSetStmt != nil {
+		if cerr := q.loadWatchSetStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing loadWatchSetStmt: %w", cerr)
+		}
+	}
 	if q.releaseUtxoLeaseStmt != nil {
 		if cerr := q.releaseUtxoLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing releaseUtxoLeaseStmt: %w", cerr)
+		}
+	}
+	if q.rewindWalletReferencesForDisconnectStmt != nil {
+		if cerr := q.rewindWalletReferencesForDisconnectStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing rewindWalletReferencesForDisconnectStmt: %w", cerr)
 		}
 	}
 	if q.rewindWalletSyncStateHeightsForRollbackStmt != nil {
@@ -892,7 +908,6 @@ type Queries struct {
 	createImportedAddressStmt                     *sql.Stmt
 	createKeyScopeStmt                            *sql.Stmt
 	createWalletStmt                              *sql.Stmt
-	deleteBlockStmt                               *sql.Stmt
 	deleteBlocksAtOrAboveHeightStmt               *sql.Stmt
 	deleteExpiredUtxoLeasesStmt                   *sql.Stmt
 	deleteKeyScopeStmt                            *sql.Stmt
@@ -901,6 +916,7 @@ type Queries struct {
 	deleteUnminedTransactionByHashWithInvalidStmt *sql.Stmt
 	deleteUtxoLeasesSpentByConfirmedTxStmt        *sql.Stmt
 	deleteUtxosByTxIDStmt                         *sql.Stmt
+	deleteWalletBlockByHeightStmt                 *sql.Stmt
 	getAccountByScopeAndNameStmt                  *sql.Stmt
 	getAccountByScopeAndNumberStmt                *sql.Stmt
 	getAccountByWalletScopeAndNameStmt            *sql.Stmt
@@ -916,8 +932,6 @@ type Queries struct {
 	getAndIncrementNextAccountNumberStmt          *sql.Stmt
 	getAndIncrementNextExternalIndexStmt          *sql.Stmt
 	getAndIncrementNextInternalIndexStmt          *sql.Stmt
-	getBlockByHeightStmt                          *sql.Stmt
-	getBlocksInRangeStmt                          *sql.Stmt
 	getDatabaseIdentityStmt                       *sql.Stmt
 	getKeyScopeByIDStmt                           *sql.Stmt
 	getKeyScopeByWalletAndScopeStmt               *sql.Stmt
@@ -928,13 +942,14 @@ type Queries struct {
 	getTxInputValidityStmt                        *sql.Stmt
 	getUtxoByOutpointStmt                         *sql.Stmt
 	getUtxoIDByOutpointStmt                       *sql.Stmt
+	getWalletBlockByHeightStmt                    *sql.Stmt
+	getWalletBlocksInRangeStmt                    *sql.Stmt
 	getWalletByIDStmt                             *sql.Stmt
 	getWalletByNameStmt                           *sql.Stmt
 	getWalletCreditByOutpointStmt                 *sql.Stmt
 	getWalletSecretsStmt                          *sql.Stmt
 	hasTxGraphStateChangeStmt                     *sql.Stmt
 	insertAddressSecretStmt                       *sql.Stmt
-	insertBlockStmt                               *sql.Stmt
 	insertDatabaseIdentityStmt                    *sql.Stmt
 	insertKeyScopeSecretsStmt                     *sql.Stmt
 	insertTransactionStmt                         *sql.Stmt
@@ -942,6 +957,7 @@ type Queries struct {
 	insertTxReplacementEdgeStmt                   *sql.Stmt
 	insertTxReplacementEdgeByHashStmt             *sql.Stmt
 	insertUtxoStmt                                *sql.Stmt
+	insertWalletBlockStmt                         *sql.Stmt
 	insertWalletSecretsStmt                       *sql.Stmt
 	insertWalletSyncStateStmt                     *sql.Stmt
 	listAccountsByScopeStmt                       *sql.Stmt
@@ -968,7 +984,9 @@ type Queries struct {
 	listUnminedTransactionsStmt                   *sql.Stmt
 	listUtxosStmt                                 *sql.Stmt
 	listWalletsStmt                               *sql.Stmt
+	loadWatchSetStmt                              *sql.Stmt
 	releaseUtxoLeaseStmt                          *sql.Stmt
+	rewindWalletReferencesForDisconnectStmt       *sql.Stmt
 	rewindWalletSyncStateHeightsForRollbackStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt     *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt   *sql.Stmt
@@ -999,7 +1017,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createImportedAddressStmt:                     q.createImportedAddressStmt,
 		createKeyScopeStmt:                            q.createKeyScopeStmt,
 		createWalletStmt:                              q.createWalletStmt,
-		deleteBlockStmt:                               q.deleteBlockStmt,
 		deleteBlocksAtOrAboveHeightStmt:               q.deleteBlocksAtOrAboveHeightStmt,
 		deleteExpiredUtxoLeasesStmt:                   q.deleteExpiredUtxoLeasesStmt,
 		deleteKeyScopeStmt:                            q.deleteKeyScopeStmt,
@@ -1008,6 +1025,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteUnminedTransactionByHashWithInvalidStmt: q.deleteUnminedTransactionByHashWithInvalidStmt,
 		deleteUtxoLeasesSpentByConfirmedTxStmt:        q.deleteUtxoLeasesSpentByConfirmedTxStmt,
 		deleteUtxosByTxIDStmt:                         q.deleteUtxosByTxIDStmt,
+		deleteWalletBlockByHeightStmt:                 q.deleteWalletBlockByHeightStmt,
 		getAccountByScopeAndNameStmt:                  q.getAccountByScopeAndNameStmt,
 		getAccountByScopeAndNumberStmt:                q.getAccountByScopeAndNumberStmt,
 		getAccountByWalletScopeAndNameStmt:            q.getAccountByWalletScopeAndNameStmt,
@@ -1023,8 +1041,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAndIncrementNextAccountNumberStmt:          q.getAndIncrementNextAccountNumberStmt,
 		getAndIncrementNextExternalIndexStmt:          q.getAndIncrementNextExternalIndexStmt,
 		getAndIncrementNextInternalIndexStmt:          q.getAndIncrementNextInternalIndexStmt,
-		getBlockByHeightStmt:                          q.getBlockByHeightStmt,
-		getBlocksInRangeStmt:                          q.getBlocksInRangeStmt,
 		getDatabaseIdentityStmt:                       q.getDatabaseIdentityStmt,
 		getKeyScopeByIDStmt:                           q.getKeyScopeByIDStmt,
 		getKeyScopeByWalletAndScopeStmt:               q.getKeyScopeByWalletAndScopeStmt,
@@ -1035,13 +1051,14 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getTxInputValidityStmt:                        q.getTxInputValidityStmt,
 		getUtxoByOutpointStmt:                         q.getUtxoByOutpointStmt,
 		getUtxoIDByOutpointStmt:                       q.getUtxoIDByOutpointStmt,
+		getWalletBlockByHeightStmt:                    q.getWalletBlockByHeightStmt,
+		getWalletBlocksInRangeStmt:                    q.getWalletBlocksInRangeStmt,
 		getWalletByIDStmt:                             q.getWalletByIDStmt,
 		getWalletByNameStmt:                           q.getWalletByNameStmt,
 		getWalletCreditByOutpointStmt:                 q.getWalletCreditByOutpointStmt,
 		getWalletSecretsStmt:                          q.getWalletSecretsStmt,
 		hasTxGraphStateChangeStmt:                     q.hasTxGraphStateChangeStmt,
 		insertAddressSecretStmt:                       q.insertAddressSecretStmt,
-		insertBlockStmt:                               q.insertBlockStmt,
 		insertDatabaseIdentityStmt:                    q.insertDatabaseIdentityStmt,
 		insertKeyScopeSecretsStmt:                     q.insertKeyScopeSecretsStmt,
 		insertTransactionStmt:                         q.insertTransactionStmt,
@@ -1049,6 +1066,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertTxReplacementEdgeStmt:                   q.insertTxReplacementEdgeStmt,
 		insertTxReplacementEdgeByHashStmt:             q.insertTxReplacementEdgeByHashStmt,
 		insertUtxoStmt:                                q.insertUtxoStmt,
+		insertWalletBlockStmt:                         q.insertWalletBlockStmt,
 		insertWalletSecretsStmt:                       q.insertWalletSecretsStmt,
 		insertWalletSyncStateStmt:                     q.insertWalletSyncStateStmt,
 		listAccountsByScopeStmt:                       q.listAccountsByScopeStmt,
@@ -1075,7 +1093,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUnminedTransactionsStmt:                   q.listUnminedTransactionsStmt,
 		listUtxosStmt:                                 q.listUtxosStmt,
 		listWalletsStmt:                               q.listWalletsStmt,
+		loadWatchSetStmt:                              q.loadWatchSetStmt,
 		releaseUtxoLeaseStmt:                          q.releaseUtxoLeaseStmt,
+		rewindWalletReferencesForDisconnectStmt:       q.rewindWalletReferencesForDisconnectStmt,
 		rewindWalletSyncStateHeightsForRollbackStmt:   q.rewindWalletSyncStateHeightsForRollbackStmt,
 		updateAccountNameByWalletScopeAndNameStmt:     q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt:   q.updateAccountNameByWalletScopeAndNumberStmt,

@@ -12,10 +12,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -152,7 +150,7 @@ type Manager struct {
 	started atomic.Bool
 
 	// wallets holds fully initialized and started Wallets keyed by unique
-	// name. The runtime loop serializes creation, delivery and rollback after
+	// name. The runtime loop serializes creation and ordered delivery after
 	// synchronous startup publishes the initial set.
 	wallets map[string]*Wallet
 
@@ -177,8 +175,19 @@ type Manager struct {
 	// chainEvents borrows the already-started source's one native stream.
 	chainEvents <-chan any
 
-	// requestChan transfers creation to the same owner as native delivery.
+	// chainDone borrows producer termination independently of blocked data
+	// delivery. It does not transfer ownership of the source connection.
+	chainDone <-chan struct{}
+
+	// requestChan defers creation to the outer loop, keeping the recipient
+	// set fixed while delivery waits.
 	requestChan chan createWalletReq
+
+	// walletRequests is unbuffered: receipt selects an owner turn that applies
+	// the watches before another native event can be routed. It stays live
+	// during delivery waits; Create stays on requestChan so those
+	// waits retain a fixed recipient set.
+	walletRequests chan watchRegistrationReq
 
 	// wg joins the runtime before normal Stop disposes Wallets and storage.
 	wg sync.WaitGroup
@@ -250,16 +259,18 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
 	m := &Manager{
-		wallets:     make(map[string]*Wallet),
-		requestChan: make(chan createWalletReq),
-		chainEvents: cfg.ChainSource.Notifications(),
-		backend:     backend,
-		config:      cfg,
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
+		wallets:        make(map[string]*Wallet),
+		requestChan:    make(chan createWalletReq),
+		walletRequests: make(chan watchRegistrationReq),
+		chainEvents:    cfg.ChainSource.Notifications(),
+		chainDone:      cfg.ChainSource.NotificationsDone(),
+		backend:        backend,
+		config:         cfg,
+		lifetimeCtx:    lifetimeCtx,
+		cancel:         cancel,
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.chainSyncer = newChainSyncer(&m.config.ChainParams)
 
 	return m, nil
 }
@@ -279,10 +290,17 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 			return wallets, err
 		}
 
-		wallet := newManagedWallet(cfg, walletData, m.chainSyncer)
+		wallet := newManagedWallet(cfg, walletData, m)
 		wallets = append(wallets, wallet)
 
-		err = wallet.start(ctx)
+		err = wallet.prepareStart(ctx)
+		if err != nil {
+			return wallets, err
+		}
+
+		// Wallet requests carry their own contexts, independent of startup.
+		//nolint:contextcheck // Activation starts the request-context bridge.
+		err = wallet.start()
 		if err != nil {
 			return wallets, err
 		}
@@ -322,7 +340,8 @@ func (m *Manager) stopWallets(wallets []*Wallet) error {
 		}
 	}
 
-	// Wallet work and accepted rollback settle before storage closes.
+	// Wallet requests and workers, including local rewinds, settle before
+	// storage closes.
 	// Clearing backend records released resources so a lifecycle caller
 	// can skip disposal after waiting for the cleanup owner.
 	err := errors.Join(errs...)
@@ -450,17 +469,14 @@ type createWalletResp struct {
 	err    error
 }
 
-// mainLoop serializes creation, source delivery and shared rollback until the
-// lifetime is canceled. Normal Stop joins the owner before disposing resources.
+// mainLoop serializes creation and source delivery until its lifetime ends.
+// Each Wallet worker owns its rewind; Stop joins all work before Store closes.
 func (m *Manager) mainLoop() {
 	var chainErr error
 
+	// Uncanceled exits carry chainErr; Stop handles canceled exits below.
 	// Fatal exits need private cleanup: public Stop would self-join.
 	defer func() {
-		if chainErr == nil {
-			return
-		}
-
 		// Serialize Start's lifetime check and CAS with terminal cleanup.
 		m.Lock()
 		defer m.Unlock()
@@ -480,11 +496,14 @@ func (m *Manager) mainLoop() {
 		case <-m.lifetimeCtx.Done():
 			return
 
+		case <-m.chainDone:
+			chainErr = errors.New("chain notification source closed")
+
 		case req := <-m.requestChan:
-			err := m.handleCreateWalletReq(req)
-			if err != nil {
-				return
-			}
+			chainErr = m.handleCreateWalletReq(req)
+
+		case req := <-m.walletRequests:
+			m.chainSyncer.registerWatchSet(req)
 
 		case event, ok := <-m.chainEvents:
 			if !ok {
@@ -495,11 +514,13 @@ func (m *Manager) mainLoop() {
 				return
 			}
 
-			chainErr = m.dispatchChainEvent(m.lifetimeCtx, event)
-			if chainErr != nil {
-				// Failed rewind can leave workers paused; exit to cleanup.
-				return
-			}
+			chainErr = m.dispatchChainEvent(event)
+		}
+
+		if chainErr != nil {
+			// Cancellation releases delivery so Stop can join this owner
+			// before disposing Wallets and Store.
+			return
 		}
 	}
 }
@@ -515,17 +536,9 @@ func (m *Manager) chainRecipients() []*Wallet {
 }
 
 // dispatchChainEvent admits source-ordered events to existing Wallet workers.
-// Capacity-one mailboxes deliberately backpressure the sole reader; Wallet
-// and reader cancellation both release delivery during terminal shutdown.
-// Shared storage disconnects settle rollback before the next source event.
-func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
-	// A disconnect changes the history that Wallet workers are writing.
-	// Settle their earlier writes and rewind Store once before the next
-	// source event; independent Wallet delivery cannot order that rewind.
-	if disconnect, ok := n.(chain.BlockDisconnected); ok {
-		return m.handleRollbackEvent(ctx, disconnect)
-	}
-
+// Capacity-one mailboxes deliberately backpressure the sole reader; child
+// registration must still progress so the worker can consume earlier input.
+func (m *Manager) dispatchChainEvent(n any) error {
 	wallets := m.chainRecipients()
 
 	events := m.chainSyncer.routeChainEvent(n, wallets)
@@ -537,24 +550,7 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-w.lifetimeCtx.Done():
-		case w.chainEventChan <- event:
-		}
-	}
-
-	return nil
-}
-
-// prepareWalletsForRollback waits for earlier sync writes on every Wallet.
-// The caller keeps the Wallet set fixed while each worker pauses for rollback.
-func (m *Manager) prepareWalletsForRollback(ctx context.Context,
-	resume <-chan struct{}) error {
-
-	for _, wallet := range m.wallets {
-		err := wallet.pauseForRollback(ctx, resume)
+		err := m.deliverChainEvent(w, event)
 		if err != nil {
 			return err
 		}
@@ -563,47 +559,28 @@ func (m *Manager) prepareWalletsForRollback(ctx context.Context,
 	return nil
 }
 
-// handleRollbackEvent settles published writers around one backend rollback.
-// Success releases workers and lets the source reader dispatch its next event.
-// A rollback error stops every Wallet before any worker can write again.
-func (m *Manager) handleRollbackEvent(ctx context.Context,
-	event chain.BlockDisconnected) error {
+// deliverChainEvent preserves source order while serving watch declarations.
+// A worker may need registration before it can consume its bounded input.
+// This owner-loop operation stops on Manager cancellation or termination of
+// the borrowed producer, without consuming more source data.
+func (m *Manager) deliverChainEvent(wallet *Wallet, event chainEvent) error {
+	for {
+		select {
+		case wallet.chainEventChan <- event:
+			return nil
 
-	// Preserve hash and time as well as height for storage that needs to
-	// distinguish a stale disconnect from a replacement at the same height.
-	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
-	if err != nil {
-		return fmt.Errorf("disconnect block: %w", err)
+		case <-m.chainDone:
+			return errors.New("chain notification source closed")
+
+		case req := <-m.walletRequests:
+			// The worker may need this send accepted before it can drain
+			// its earlier work and consume our queued input.
+			m.chainSyncer.registerWatchSet(req)
+
+		case <-m.lifetimeCtx.Done():
+			return m.lifetimeCtx.Err()
+		}
 	}
-
-	// Manager alone signals rollback completion. Terminal cleanup stops
-	// workers first, so a failed rewind cannot resume old writes.
-	rollbackDone := make(chan struct{})
-
-	err = m.prepareWalletsForRollback(ctx, rollbackDone)
-	if err != nil {
-		// Only Stop's lifetime cancellation interrupts preparation. Leave
-		// completion held and cleanup to that waiting caller so it receives
-		// close errors; prepared workers exit through Wallet cancellation.
-		return fmt.Errorf("wait for rollback writers: %w", err)
-	}
-
-	// Accepted persistence settles even if its caller or Stop cancels.
-	// The owner keeps Store open until this one rollback completes.
-	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
-	if err != nil {
-		err = fmt.Errorf("rollback chain: %w", err)
-		// Leave paused workers to the owner, which drains them on failure
-		// or handles the accepted Stop before another operation can run.
-		log.Errorf("Unable to roll back chain to height %d: %v",
-			block.Height, err)
-
-		return err
-	}
-
-	close(rollbackDone)
-
-	return nil
 }
 
 // validateManagedWalletName rejects an absent durable identity before cache,
@@ -687,7 +664,11 @@ func (m *Manager) handleCreateWalletReq(req createWalletReq) error {
 		return err
 	}
 
-	err = wallet.start(ctx)
+	err = wallet.prepareStart(ctx)
+	if err == nil {
+		err = wallet.start()
+	}
+
 	if err != nil {
 		// Failed startup needs the same serialized disposal and reply.
 		m.Lock()
@@ -759,7 +740,7 @@ func (m *Manager) createWallet(ctx context.Context,
 		return nil, err
 	}
 
-	return newManagedWallet(walletCfg, data, m.chainSyncer), nil
+	return newManagedWallet(walletCfg, data, m), nil
 }
 
 // validateInitialAccounts checks resolved scope and script ownership before

@@ -100,16 +100,15 @@ type Querier interface {
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
-	DeleteBlock(ctx context.Context, blockHeight int64) error
 	// Deletes blocks at and after the provided height.
 	//
 	// How:
-	// - Deletes directly from blocks by the natural height key.
+	// - Deletes only the owning Wallet range in wallet_blocks.
 	// - Relies on FK/trigger side effects to null transaction block references and
 	//   orphan coinbase rows.
 	// Performance:
 	// - Executes as a range delete over the block-height primary key.
-	DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int64) (int64, error)
+	DeleteBlocksAtOrAboveHeight(ctx context.Context, arg DeleteBlocksAtOrAboveHeightParams) (int64, error)
 	// Deletes all expired lease rows for a wallet.
 	//
 	// How:
@@ -166,6 +165,9 @@ type Querier interface {
 	// - Uses the `(tx_id)` index to keep the delete bounded to one transaction's
 	//   outputs, then rechecks wallet ownership through the parent transaction.
 	DeleteUtxosByTxID(ctx context.Context, arg DeleteUtxosByTxIDParams) (int64, error)
+	// Keep data validation errors visible.
+	// Delete only a proven orphan; higher current-chain observations stay owned.
+	DeleteWalletBlockByHeight(ctx context.Context, arg DeleteWalletBlockByHeightParams) (int64, error)
 	// Returns a single account by scope id and account name.
 	GetAccountByScopeAndName(ctx context.Context, arg GetAccountByScopeAndNameParams) (GetAccountByScopeAndNameRow, error)
 	// Returns a single derived account by scope id and account number.
@@ -211,8 +213,6 @@ type Querier interface {
 	// Atomically gets the next internal/change address index and increments the counter.
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
-	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
-	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
 	// GetDatabaseIdentity reads only a canonical SQLite value tuple so dynamic
 	// storage classes and out-of-range integers become a malformed missing row.
 	GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error)
@@ -281,6 +281,9 @@ type Querier interface {
 	// - Uses the wallet-scoped transaction hash lookup first, then narrows to the
 	//   unique `(tx_id, output_index)` outpoint.
 	GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpointParams) (int64, error)
+	// Block identity belongs to one Wallet, including during replacement replay.
+	GetWalletBlockByHeight(ctx context.Context, arg GetWalletBlockByHeightParams) (GetWalletBlockByHeightRow, error)
+	GetWalletBlocksInRange(ctx context.Context, arg GetWalletBlocksInRangeParams) ([]GetWalletBlocksInRangeRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	// Credit replay checks immutable ownership even after a credit has been spent.
@@ -294,7 +297,6 @@ type Querier interface {
 	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
-	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	// InsertDatabaseIdentity writes the only permitted row after catalog checks
 	// prove that an unmarked SQLite file is empty and safe to claim.
 	InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error
@@ -349,6 +351,8 @@ type Querier interface {
 	// - Single-row insert. The main cost is the wallet-ownership validation join
 	//   plus FK and uniqueness checks.
 	InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error)
+	// Verify conflicts through requireBlockMatches in the same write transaction.
+	InsertWalletBlock(ctx context.Context, arg InsertWalletBlockParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
 	// Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
@@ -390,28 +394,10 @@ type Querier interface {
 	ListConflictingTransactions(ctx context.Context, arg ListConflictingTransactionsParams) ([]ListConflictingTransactionsRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
-	// Lists every output a recovery rescan must keep watching for one wallet.
-	//
-	// How:
-	// - Starts from the wallet's UTXO rows joined to their funding transaction;
-	//   the rescan needs each outpoint plus the on-chain output script. The script
-	//   is taken from the funding transaction's raw_tx (TxOut[output_index]) in the
-	//   Store Go layer rather than from the credited address: a bare-multisig
-	//   output the wallet partly owns is recorded against a member address whose
-	//   own script differs from the multisig output script, so the address script
-	//   would be the wrong thing to watch. Reading the actual output script matches
-	//   the kvdb OutputsToWatch contract.
-	// - Includes outputs whose funding transaction is still active (pending or
-	//   published); invalidated parents (replaced/failed/orphaned) are excluded so
-	//   the watch set matches the legacy wtxmgr credit walk.
-	// - Keeps an output when it is either still unspent OR spent only by an
-	//   unmined, still-active transaction. This mirrors the legacy behaviour of
-	//   returning unmined credits and credits spent by other unmined txs, while
-	//   dropping outputs already spent by a confirmed transaction.
-	// - Locked (leased) outputs are intentionally retained because leasing is
-	//   modelled separately from existence and the rescan must still watch them.
-	// - Excludes credited accounts that opt out of chain synchronization while
-	//   retaining accountless imports through nullable account joins.
+	// Lists the outputs a recovery rescan must keep watching for one wallet.
+	// Use the funding raw_tx to recover each on-chain output script,
+	// including bare multisig credits whose owning address uses a different
+	// script. Both watch readers share the view's eligibility.
 	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
 	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
 	// may be spent by selected transaction inputs.
@@ -491,7 +477,7 @@ type Querier interface {
 	//   block" listing query.
 	// Performance:
 	// - Uses the block-height index to bound the scan to the rollback range.
-	ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int64) ([]ListRollbackCoinbaseRootsRow, error)
+	ListRollbackCoinbaseRoots(ctx context.Context, arg ListRollbackCoinbaseRootsParams) ([]ListRollbackCoinbaseRootsRow, error)
 	// Lists all confirmed transactions for a wallet in the provided height range.
 	//
 	// How:
@@ -510,7 +496,7 @@ type Querier interface {
 	// - Includes the active unmined set (`pending` and `published`) together with
 	//   retained invalid history such as `failed`, `replaced`, or `orphaned`
 	//   rows.
-	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	// - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 	//   so sqlc preserves the nullable block columns while the row shape stays
 	//   aligned with the confirmed query below.
 	// Performance:
@@ -523,7 +509,7 @@ type Querier interface {
 	//   in unmined `pending` or `published` status.
 	// - Excludes orphaned/replaced/failed history so delete and rollback logic do
 	//   not treat retained invalid rows as active mempool spends.
-	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	// - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 	//   so sqlc preserves the nullable block columns while the row shape stays
 	//   aligned with other transaction queries.
 	// Performance:
@@ -553,6 +539,11 @@ type Querier interface {
 	// from the beginning; otherwise returns wallets with id > cursor_id. Returns up
 	// to page_limit rows.
 	ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error)
+	// Loads address and outpoint interests from one snapshot before publication.
+	// The row kind separates the two collections without multiplying them; NULLs
+	// occupy fields that do not apply. The outpoint arm uses the same eligibility
+	// view as the recovery query while projecting only the outpoint identity.
+	LoadWatchSet(ctx context.Context, walletID int64) ([]LoadWatchSetRow, error)
 	// Releases a lease for a UTXO ID if the lock_id matches.
 	//
 	// How:
@@ -561,6 +552,8 @@ type Querier interface {
 	// Performance:
 	// - Targets at most one row through the unique lease key.
 	ReleaseUtxoLease(ctx context.Context, arg ReleaseUtxoLeaseParams) (int64, error)
+	// Rewind scanned progress across removed history; move birthday only on removal.
+	RewindWalletReferencesForDisconnect(ctx context.Context, arg RewindWalletReferencesForDisconnectParams) (int64, error)
 	// Rewrites wallet sync-state heights so they stop referencing blocks that are
 	// about to be deleted during RollbackToBlock.
 	//
@@ -575,7 +568,7 @@ type Querier interface {
 	// Performance:
 	// - Touches only wallet_sync_states rows whose heights are at or above the
 	//   rollback boundary.
-	RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int64) (int64, error)
+	RewindWalletSyncStateHeightsForRollback(ctx context.Context, arg RewindWalletSyncStateHeightsForRollbackParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and current name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames a derived account identified by wallet id, scope tuple, and number.

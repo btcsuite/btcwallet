@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +22,91 @@ var (
 	errInducedFailure          = errors.New("induced failure")
 	errInducedVerificationStep = errors.New("induced verification-step failure")
 )
+
+// watchViewDB lets the snapshot regression control when Bolt commits relative
+// to opening the read view.
+type watchViewDB struct {
+	walletdb.DB
+	mock.Mock
+}
+
+// watchViewDB implements walletdb.DB for the snapshot regression.
+var _ walletdb.DB = (*watchViewDB)(nil)
+
+// View invokes the arranged callback to control the real Bolt view.
+func (m *watchViewDB) View(
+	read func(walletdb.ReadTx) error, reset func()) error {
+
+	args := m.Called(read, reset)
+
+	//nolint:forcetypeassert // The sole View expectation owns this return type.
+	view := args.Get(0).(func(func(walletdb.ReadTx) error, func()) error)
+
+	return view(read, reset)
+}
+
+// TestLoadWatchSetScopeSnapshot verifies that publishing a new scope while a
+// read is open does not make that older read fail.
+func TestLoadWatchSetScopeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Open a wallet with no watch data and reserve Bolt pages so
+	// the overlapping scope commit can finish without growing its mmap.
+	baseStore, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	conn := baseStore.db
+	txStore := newTxStore(t, conn)
+
+	const scopeCommitReserve = 512 << 10
+
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		pad, err := tx.CreateTopLevelBucket([]byte("watch-view-reserve"))
+		if err != nil {
+			return err
+		}
+
+		return pad.Put([]byte("reserve"), make([]byte, scopeCommitReserve))
+	})
+	require.NoError(t, err)
+
+	// Commit a new scope after Bolt opens the reader. Its live manager is
+	// therefore visible by the time LoadWatchSet starts traversing rows.
+	writeScope := func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+		_, err := mgr.NewScopedKeyManager(
+			ns, waddrmgr.KeyScope{Purpose: 1017}, schema,
+		)
+
+		return err
+	}
+	view := func(read func(walletdb.ReadTx) error, reset func()) error {
+		return conn.View(func(snapshot walletdb.ReadTx) error {
+			err := walletdb.Update(conn, writeScope)
+			if err != nil {
+				return err
+			}
+
+			return read(snapshot)
+		}, reset)
+	}
+	viewDB := &watchViewDB{DB: conn}
+	viewDB.On("View", mock.Anything, mock.Anything).Return(view).Once()
+	t.Cleanup(func() {
+		viewDB.AssertExpectations(t)
+	})
+
+	store := NewStore(viewDB, txStore, mgr)
+
+	// Act: Read the watch set from the view that predates the commit.
+	watches, err := store.LoadWatchSet(t.Context(), 0)
+
+	// Assert: The earlier view is valid and observes the empty wallet.
+	require.NoError(t, err)
+	require.Empty(t, watches.AddressScripts)
+	require.Empty(t, watches.OutPoints)
+}
 
 // newSpendableAddrMgr creates a fresh waddrmgr-backed wallet on top of a new
 // temporary walletdb and returns the open *waddrmgr.Manager. The wallet uses

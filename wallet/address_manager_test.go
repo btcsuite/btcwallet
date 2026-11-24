@@ -3378,27 +3378,46 @@ func TestNewAddressKVDBAllocatesSuccessive(t *testing.T) {
 	require.NotEqual(t, second.Addr, third.Addr)
 }
 
-// TestNewAddressKVDBRoutesLiveTransactions prevents native address activation
-// from bypassing Manager ownership and losing the first payment notification.
+// TestNewAddressKVDBRoutesLiveTransactions keeps the first payment emitted
+// during address activation on the real Manager-to-Wallet notification path.
 func TestNewAddressKVDBRoutesLiveTransactions(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Keep the real kvdb allocation path, but emit a payment inside
-	// its native subscription call, before NewAddress can return to its caller.
-	m := testKVDBManager(t)
+	// Arrange: Keep real kvdb allocation and the existing non-current chain
+	// fixture. Its pre-sync worker can record the payment without starting
+	// catch-up or rebroadcast. Subscribe before native activation emits it.
+	client := createTestChain(t)
+	notifications := make(chan any, 1)
 
-	// The kvdb fixture supplies this concrete mock for native expectations.
-	client, _ := m.config.ChainSource.(*bwmock.Chain)
+	client.On("Notifications").Unset()
+	client.On("Notifications").Return((<-chan any)(notifications)).Once()
+
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend:           DBBackendKVDB,
+		DataSource:        testKVDBPath(t),
+		ChainParams:       chainParams,
+		ChainSource:       client,
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, stopManagerForTest(t, m))
+	})
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
 
 	params := sqliteCreateParams(t)
 	params.PubPassphrase = []byte("public")
 	w, err := m.Create(params)
 	require.NoError(t, err)
 
+	events, cancel, err := w.SubscribeTxns(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(cancel)
+
 	var (
 		callbackErr error
 		record      *wtxmgr.TxRecord
-		matched     TxEntries
 	)
 	client.On("NotifyReceived", mock.MatchedBy(
 		func(addrs []address.Address) bool { return len(addrs) == 1 },
@@ -3416,31 +3435,40 @@ func TestNewAddressKVDBRoutesLiveTransactions(t *testing.T) {
 			callbackErr = err
 			return
 		}
+		// The payment now traverses normal Wallet decoding, so include a
+		// synthetic input rather than constructing a parsing-only record.
 		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 7}, nil, nil))
 		tx.AddTxOut(&wire.TxOut{Value: 1, PkScript: script})
 		record, callbackErr = wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 		if callbackErr != nil {
 			return
 		}
 
-		events := m.chainSyncer.routeChainEvent(
-			chain.RelevantTx{TxRecord: record}, []*Wallet{w},
-		)
-		matched = events[w.id].matches
+		// Emit before returning from activation. Manager must finish the
+		// accepted watch update before matching this queued notification.
+		notifications <- chain.RelevantTx{TxRecord: record}
 	}).Return(nil).Once()
 
-	// Act: Allocate through the public single-address API; its response joins
-	// the callback before the test inspects the captured routing result.
+	// Act: Allocate through the public single-address API; the native call
+	// emits the first payment before this response reaches its caller.
 	_, err = w.NewAddress(
 		t.Context(), NewAccountSelectorByNumber(
 			waddrmgr.KeyScopeBIP0084, 0,
 		), false,
 	)
 
-	// Assert: Ownership was visible during activation rather than installed
-	// afterward. Fixture cleanup verifies the one native subscription call.
+	// Assert: The first payment reaches the public Wallet stream through
+	// the real owner/worker path. Only its hash is needed to prove delivery;
+	// the existing fixture verifies the one native call during cleanup.
 	require.NoError(t, err)
 	require.NoError(t, callbackErr)
-	require.Len(t, matched, 1)
-	require.Same(t, record, matched[0].Rec)
+
+	select {
+	case event := <-events:
+		require.Equal(t, record.Hash, event.Detail.Hash)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("first native payment was not delivered")
+	}
 }

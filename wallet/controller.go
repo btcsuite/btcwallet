@@ -167,22 +167,17 @@ type Controller interface {
 		targets []waddrmgr.AccountScope) error
 }
 
-// start starts the background processes owned by a Wallet. Manager is its sole
-// caller and invokes it at most once for each Wallet instance.
-func (w *Wallet) start(startCtx context.Context) error {
-	// 1. Attempt to transition from Stopped to Starting.
+// prepareStart enters Starting and prepares data without activating workers.
+// It reuses the lifetime created by newManagedWallet; Manager currently
+// activates the Wallet immediately after successful preparation.
+func (w *Wallet) prepareStart(startCtx context.Context) error {
+	// 1. Enter Starting so setup failure can make this instance terminal.
 	err := w.state.toStarting()
 	if err != nil {
 		return err
 	}
 
-	// 2. Setup background resources.
-	//
-	// w.lifetimeCtx governs the lifecycle of all background goroutines.
-	// It is canceled when stop() is called.
-	w.lifetimeCtx, w.cancel = context.WithCancel(context.Background())
-
-	// 3. Perform runtime setup.
+	// 2. Complete runtime reads before any Wallet worker can observe them.
 	//
 	// We use startCtx here because these operations must complete
 	// synchronously before the wallet is considered "started". If
@@ -202,12 +197,15 @@ func (w *Wallet) start(startCtx context.Context) error {
 		return err
 	}
 
-	// 4. Start background goroutines.
+	return nil
+}
+
+// start activates the workers of a successfully prepared Wallet. Manager is
+// its sole caller and currently invokes it once, right after prepareStart.
+func (w *Wallet) start() error {
+	// 1. Start the owned request loop and processing worker together.
 	w.wg.Add(1)
 
-	// Requests retain their own contexts; the routed legacy tip accessor still
-	// has no context parameter. Its existing exemption follows the call path.
-	//nolint:contextcheck // SyncedTo takes no context.
 	go w.mainLoop()
 
 	w.wg.Add(1)
@@ -218,8 +216,8 @@ func (w *Wallet) start(startCtx context.Context) error {
 		w.runSyncLoop()
 	}()
 
-	// 5. Mark the wallet as fully started.
-	err = w.state.toStarted()
+	// 2. Mark Started only after both owned workers are registered.
+	err := w.state.toStarted()
 	if err != nil {
 		return err
 	}
@@ -291,39 +289,21 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 
 	log.Infof("Restarting sync loop in %v...", backoff)
 
-	// Keep the original retry deadline while servicing the same mailbox.
-	// A failed initialization must not prevent rollback from repairing it.
-	retry := timerFn(backoff)
-	for {
-		select {
-		case event := <-w.chainEventChan:
-			err := w.sync.processChainEventBeforeSync(w.lifetimeCtx, event)
-			if w.lifetimeCtx.Err() != nil {
-				return 0, false
-			}
+	// Let the child retain input ordering while Wallet owns retry timing.
+	err := w.sync.waitForRetry(w.lifetimeCtx, timerFn(backoff))
+	if err != nil {
+		log.Debug("Backoff interrupted by wallet shutdown")
 
-			if err != nil {
-				// Retain the scheduled retry after an observation fails, just
-				// as a failed sync attempt returns here instead of stopping.
-				log.Errorf("Chain event processing failed during retry: %v",
-					err)
-			}
-
-		case <-retry:
-			// Increase backoff for the next attempt, capping it.
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-
-			return backoff, true
-
-		case <-w.lifetimeCtx.Done():
-			log.Debug("Backoff interrupted by wallet shutdown")
-
-			return 0, false
-		}
+		return 0, false
 	}
+
+	// Increase backoff for the next attempt, capping it.
+	backoff *= 2
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+
+	return backoff, true
 }
 
 // performRuntimeSetup executes the synchronous initialization tasks required
@@ -363,35 +343,6 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	return nil
 }
 
-// pauseForRollback waits until the sync worker has finished earlier writes.
-// The caller keeps resume open through shared rollback; failed rollback leaves
-// the worker paused until Wallet shutdown cancels its own lifetime.
-func (w *Wallet) pauseForRollback(ctx context.Context,
-	resume <-chan struct{}) error {
-
-	// Only the sync worker can confirm its current historical or live write
-	// has settled, so send preparation through its existing ordered mailbox.
-	req := prepareRollbackReq{
-		readyForRollback: make(chan struct{}),
-		rollbackDone:     resume,
-	}
-
-	select {
-	case w.chainEventChan <- chainEvent{notification: req}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	// Cancellation releases the caller without resuming a worker that may
-	// still require terminal cleanup after an interrupted preparation.
-	select {
-	case <-req.readyForRollback:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 // stop performs the Wallet's complete terminal teardown synchronously. The
 // Manager serializes lifecycle operations, so this method never runs alongside
 // start or another stop and needs no additional synchronization primitive.
@@ -400,6 +351,16 @@ func (w *Wallet) stop() error {
 	// join, but it must still become terminal so a retained pointer cannot
 	// start a new runtime later.
 	if lifecycle(w.state.lifecycle.Load()) == lifecycleInitialized {
+		return w.state.toStopped()
+	}
+
+	if lifecycle(w.state.lifecycle.Load()) == lifecycleStarting {
+		// Manager can discard a prepared candidate before workers start.
+		// Current paths activate immediately; the follow-up readiness
+		// phase may fail reading watches or registering subscriptions.
+		// Cancel its existing lifetime and make it terminal; there are no
+		// workers to join or active requests requiring vault teardown.
+		w.cancel()
 		return w.state.toStopped()
 	}
 
@@ -412,15 +373,6 @@ func (w *Wallet) stop() error {
 	}
 
 	// Signal all background processes to stop.
-	//
-	// It is safe to call w.cancel() here because the successful transition
-	// to Stopping guarantees that we were previously in the Started state,
-	// which in turn guarantees that start() has completed initialization
-	// of w.lifetimeCtx and w.cancel.
-	//
-	// Additionally, w.cancel() is idempotent, so it is safe to call even
-	// if it has effectively already been called (though the state machine
-	// guarantees we only reach this point once).
 	w.cancel()
 
 	// Terminal teardown cannot be abandoned by a caller deadline. Draining

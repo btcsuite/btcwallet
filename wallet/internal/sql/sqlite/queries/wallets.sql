@@ -56,8 +56,14 @@ SELECT
     b_birthday.block_timestamp AS birthday_block_timestamp
 FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
-LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+LEFT JOIN wallet_blocks AS b_synced
+    ON
+        s.synced_height = b_synced.block_height
+        AND s.wallet_id = b_synced.wallet_id
+LEFT JOIN wallet_blocks AS b_birthday
+    ON
+        s.birthday_height = b_birthday.block_height
+        AND s.wallet_id = b_birthday.wallet_id
 WHERE w.wallet_name = ?;
 
 -- name: ListWallets :many
@@ -81,8 +87,14 @@ SELECT
     b_birthday.block_timestamp AS birthday_block_timestamp
 FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
-LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+LEFT JOIN wallet_blocks AS b_synced
+    ON
+        s.synced_height = b_synced.block_height
+        AND s.wallet_id = b_synced.wallet_id
+LEFT JOIN wallet_blocks AS b_birthday
+    ON
+        s.birthday_height = b_birthday.block_height
+        AND s.wallet_id = b_birthday.wallet_id
 WHERE (
     sqlc.narg('cursor_id') IS NULL
     OR w.id > sqlc.narg('cursor_id')
@@ -108,8 +120,14 @@ SELECT
     b_birthday.block_timestamp AS birthday_block_timestamp
 FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
-LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+LEFT JOIN wallet_blocks AS b_synced
+    ON
+        s.synced_height = b_synced.block_height
+        AND s.wallet_id = b_synced.wallet_id
+LEFT JOIN wallet_blocks AS b_birthday
+    ON
+        s.birthday_height = b_birthday.block_height
+        AND s.wallet_id = b_birthday.wallet_id
 WHERE w.id = ?;
 
 -- name: InsertWalletSecrets :exec
@@ -141,3 +159,24 @@ SET
     encrypted_crypto_script_key = ?,
     encrypted_master_hd_priv_key = ?
 WHERE wallet_id = ?;
+
+-- name: RewindWalletReferencesForDisconnect :execrows
+-- Rewind scanned progress across removed history; move birthday only on removal.
+UPDATE wallet_sync_states
+SET
+    synced_height = CASE
+        WHEN
+            synced_height >= cast(sqlc.arg('height') AS INTEGER)
+            THEN cast(sqlc.narg('previous_height') AS INTEGER)
+        ELSE synced_height
+    END,
+    birthday_height = CASE
+        WHEN
+            birthday_height = cast(sqlc.arg('height') AS INTEGER)
+            THEN cast(sqlc.narg('previous_height') AS INTEGER)
+        ELSE birthday_height
+    END,
+    updated_at = current_timestamp
+WHERE
+    wallet_id = cast(sqlc.arg('wallet_id') AS INTEGER)
+    AND (synced_height >= cast(sqlc.arg('height') AS INTEGER) OR birthday_height = cast(sqlc.arg('height') AS INTEGER));

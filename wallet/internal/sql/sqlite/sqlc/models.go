@@ -52,12 +52,6 @@ type AddressType struct {
 	Description string
 }
 
-type Block struct {
-	BlockHeight    int64
-	HeaderHash     []byte
-	BlockTimestamp int64
-}
-
 type BtcwalletDatabaseIdentity struct {
 	ID                    int64
 	GenesisHash           []byte
@@ -97,6 +91,13 @@ type KeyScope struct {
 type KeyScopeSecret struct {
 	ScopeID              int64
 	EncryptedCoinPrivKey []byte
+}
+
+type OutputsToWatch struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+	RawTx       []byte
 }
 
 type Transaction struct {
@@ -150,6 +151,13 @@ type Wallet struct {
 	ManagerVersion int64
 	IsWatchOnly    bool
 	MasterHdPubKey []byte
+}
+
+type WalletBlock struct {
+	WalletID       int64
+	BlockHeight    int64
+	HeaderHash     []byte
+	BlockTimestamp int64
 }
 
 type WalletSecret struct {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"iter"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
@@ -31,6 +32,15 @@ var _ db.Store = (*Store)(nil)
 // kvdb store.
 func (m *Store) StatsSnapshot() dbruntime.StatsSnapshot {
 	return dbruntime.StatsSnapshot{}
+}
+
+// LoadWatchSet implements the combined persisted-interest read.
+func (m *Store) LoadWatchSet(ctx context.Context, walletID uint32) (db.WatchSet,
+	error) {
+
+	args := m.Called(ctx, walletID)
+
+	return args.Get(0).(db.WatchSet), args.Error(1)
 }
 
 // CreateWallet implements the db.WalletStore interface.
@@ -571,8 +581,20 @@ func (m *Store) InvalidateUnminedTx(ctx context.Context,
 }
 
 // RollbackToBlock implements the db.TxStore interface.
-func (m *Store) RollbackToBlock(ctx context.Context, height uint32) error {
-	args := m.Called(ctx, height)
+func (m *Store) RollbackToBlock(ctx context.Context, walletID,
+	height uint32) error {
+
+	args := m.Called(ctx, walletID, height)
+
+	return args.Error(0)
+}
+
+// DisconnectBlock records the worker's atomic local disconnection request.
+func (m *Store) DisconnectBlock(ctx context.Context, walletID uint32,
+	block db.Block, previous *db.Block,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	args := m.Called(ctx, walletID, block, previous, canonical)
 
 	return args.Error(0)
 }

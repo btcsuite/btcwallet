@@ -9,59 +9,87 @@ import (
 	"context"
 )
 
-const DeleteBlock = `-- name: DeleteBlock :exec
-DELETE FROM blocks
-WHERE block_height = $1
+const DeleteWalletBlockByHeight = `-- name: DeleteWalletBlockByHeight :execrows
+DELETE FROM wallet_blocks
+WHERE wallet_id = $1::BIGINT AND block_height = $2::BIGINT
 `
 
-func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
-	_, err := q.db.Exec(ctx, DeleteBlock, blockHeight)
-	return err
+type DeleteWalletBlockByHeightParams struct {
+	WalletID    int64
+	BlockHeight int64
 }
 
-const GetBlockByHeight = `-- name: GetBlockByHeight :one
+// Delete only a proven orphan; higher current-chain observations stay owned.
+func (q *Queries) DeleteWalletBlockByHeight(ctx context.Context, arg DeleteWalletBlockByHeightParams) (int64, error) {
+	result, err := q.db.Exec(ctx, DeleteWalletBlockByHeight, arg.WalletID, arg.BlockHeight)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const GetWalletBlockByHeight = `-- name: GetWalletBlockByHeight :one
 SELECT
     block_height,
     header_hash,
     block_timestamp
-FROM blocks
-WHERE block_height = $1
+FROM wallet_blocks
+WHERE wallet_id = $1::BIGINT AND block_height = $2::INTEGER
 `
 
-func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error) {
-	row := q.db.QueryRow(ctx, GetBlockByHeight, blockHeight)
-	var i Block
+type GetWalletBlockByHeightParams struct {
+	WalletID    int64
+	BlockHeight int32
+}
+
+type GetWalletBlockByHeightRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+// Block identity belongs to one Wallet, including during replacement replay.
+func (q *Queries) GetWalletBlockByHeight(ctx context.Context, arg GetWalletBlockByHeightParams) (GetWalletBlockByHeightRow, error) {
+	row := q.db.QueryRow(ctx, GetWalletBlockByHeight, arg.WalletID, arg.BlockHeight)
+	var i GetWalletBlockByHeightRow
 	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
 	return i, err
 }
 
-const GetBlocksInRange = `-- name: GetBlocksInRange :many
+const GetWalletBlocksInRange = `-- name: GetWalletBlocksInRange :many
 SELECT
     block_height,
     header_hash,
     block_timestamp
-FROM blocks
+FROM wallet_blocks
 WHERE
-    block_height BETWEEN
-    $1::INTEGER
-    AND $2::INTEGER
+    wallet_id = $1::BIGINT
+    AND block_height >= $2::BIGINT
+    AND block_height <= $3::BIGINT
 ORDER BY block_height
 `
 
-type GetBlocksInRangeParams struct {
-	StartHeight int32
-	EndHeight   int32
+type GetWalletBlocksInRangeParams struct {
+	WalletID    int64
+	StartHeight int64
+	EndHeight   int64
 }
 
-func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error) {
-	rows, err := q.db.Query(ctx, GetBlocksInRange, arg.StartHeight, arg.EndHeight)
+type GetWalletBlocksInRangeRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) GetWalletBlocksInRange(ctx context.Context, arg GetWalletBlocksInRangeParams) ([]GetWalletBlocksInRangeRow, error) {
+	rows, err := q.db.Query(ctx, GetWalletBlocksInRange, arg.WalletID, arg.StartHeight, arg.EndHeight)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Block
+	var items []GetWalletBlocksInRangeRow
 	for rows.Next() {
-		var i Block
+		var i GetWalletBlocksInRangeRow
 		if err := rows.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp); err != nil {
 			return nil, err
 		}
@@ -73,21 +101,33 @@ func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangePara
 	return items, nil
 }
 
-const InsertBlock = `-- name: InsertBlock :exec
-INSERT INTO blocks (block_height, header_hash, block_timestamp)
-VALUES ($1, $2, $3)
+const InsertWalletBlock = `-- name: InsertWalletBlock :exec
+INSERT INTO wallet_blocks (
+    wallet_id, block_height, header_hash, block_timestamp
+)
+VALUES (
+    $1::BIGINT,
+    $2::INTEGER,
+    $3,
+    $4
+)
 ON CONFLICT DO NOTHING
 `
 
-type InsertBlockParams struct {
+type InsertWalletBlockParams struct {
+	WalletID       int64
 	BlockHeight    int32
 	HeaderHash     []byte
 	BlockTimestamp int64
 }
 
-// InsertBlock arbitrates both unique keys when wallets insert a shared block.
-// ensureBlockExists still verifies the stored hash and timestamp afterward.
-func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error {
-	_, err := q.db.Exec(ctx, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
+// Verify conflicts through requireBlockMatches in the same write transaction.
+func (q *Queries) InsertWalletBlock(ctx context.Context, arg InsertWalletBlockParams) error {
+	_, err := q.db.Exec(ctx, InsertWalletBlock,
+		arg.WalletID,
+		arg.BlockHeight,
+		arg.HeaderHash,
+		arg.BlockTimestamp,
+	)
 	return err
 }

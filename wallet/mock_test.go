@@ -6,11 +6,13 @@ package wallet
 
 import (
 	"context"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -118,18 +120,27 @@ type mockChainProcessor struct {
 // chainProcessor interface.
 var _ chainProcessor = (*mockChainProcessor)(nil)
 
+// loadWatchSet exposes data preparation while Manager retains
+// native subscription and startup policy.
+func (m *mockChainProcessor) loadWatchSet(
+	ctx context.Context) (watchSet, error) {
+
+	args := m.Called(ctx)
+	return args.Get(0).(watchSet), args.Error(1)
+}
+
 // run implements the chainProcessor interface.
 func (m *mockChainProcessor) run(ctx context.Context) error {
 	args := m.Called(ctx)
 	return args.Error(0)
 }
 
-// processChainEventBeforeSync records ordered mailbox work during startup or
-// retry so controller tests can require its exact acceptance and result.
-func (m *mockChainProcessor) processChainEventBeforeSync(ctx context.Context,
-	event chainEvent) error {
+// waitForRetry exposes the child-owned wait without duplicating its intake
+// policy in Wallet controller tests.
+func (m *mockChainProcessor) waitForRetry(ctx context.Context,
+	retry <-chan time.Time) error {
 
-	args := m.Called(ctx, event)
+	args := m.Called(ctx, retry)
 	return args.Error(0)
 }
 
@@ -169,4 +180,22 @@ func (m *mockTxPublisher) rebroadcast(ctx context.Context,
 
 	args := m.Called(ctx, tx)
 	return args.Error(0)
+}
+
+// syncRetryStoreMock leaves history persistence on SQLite and intercepts only
+// the empty transaction reads needed to stop the worker at its idle boundary.
+type syncRetryStoreMock struct {
+	db.Store
+	mock.Mock
+}
+
+var _ db.Store = (*syncRetryStoreMock)(nil)
+
+// ListTxns exposes the fixture's empty graph through explicit expectations so
+// cancellation occurs at idle without timers or an additional worker.
+func (m *syncRetryStoreMock) ListTxns(ctx context.Context,
+	query db.ListTxnsQuery) ([]db.TxInfo, error) {
+
+	args := m.Called(ctx, query)
+	return args.Get(0).([]db.TxInfo), args.Error(1)
 }

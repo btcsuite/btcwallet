@@ -208,6 +208,12 @@ func (c *MempoolChain) NotifyBlocks() error { return nil }
 // Notifications implements the chain.Interface interface.
 func (c *MempoolChain) Notifications() <-chan any { return nil }
 
+// NotificationsDone returns nil because this benchmark source has no
+// notification producer to terminate, matching its nil Notifications stream.
+func (c *MempoolChain) NotificationsDone() <-chan struct{} {
+	return nil
+}
+
 // BackEnd implements the chain.Interface interface.
 func (c *MempoolChain) BackEnd() string { return "mempool-fake" }
 

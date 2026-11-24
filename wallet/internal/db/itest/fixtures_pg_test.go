@@ -24,9 +24,20 @@ var (
 
 // PostgreSQL constraint constants expose exact SQLSTATE values to shared tests.
 const (
+	// driverRollbackDeleteFailure identifies the installed rollback trigger.
+	driverRollbackDeleteFailure = "P0001"
+
 	driverConstraintNotNull   = "23502"
-	driverConstraintImmutable = "23514"
+	driverConstraintCheck     = "23514"
+	driverConstraintImmutable = driverConstraintCheck
 )
+
+// insertWalletBlockParams lets the shared test use PostgreSQL's native height.
+type insertWalletBlockParams = sqlc.InsertWalletBlockParams
+
+// getWalletBlocksInRangeParams keeps PostgreSQL's int32 bounds so the shared
+// regression can check the stored block through the native query.
+type getWalletBlocksInRangeParams = sqlc.GetWalletBlocksInRangeParams
 
 // testBackend returns the SQL backend expected by PostgreSQL itests.
 func testBackend() dberr.Backend {
@@ -64,15 +75,16 @@ func requireDriverConstraintError(t *testing.T, err error,
 	require.Equal(t, expectedCode, pgErr.Code)
 }
 
-// CreateBlockFixture inserts a test block into the database and returns it.
+// CreateBlockFixture inserts history owned by the given Wallet and returns it.
 func CreateBlockFixture(t *testing.T, queries *sqlc.Queries,
-	height uint32) db.Block {
+	walletID, height uint32) db.Block {
 
 	t.Helper()
 
 	block := NewBlockFixture(height)
-	err := queries.InsertBlock(
-		t.Context(), sqlc.InsertBlockParams{
+	err := queries.InsertWalletBlock(
+		t.Context(), sqlc.InsertWalletBlockParams{
+			WalletID:       int64(walletID),
 			BlockHeight:    int32(block.Height),
 			HeaderHash:     block.Hash[:],
 			BlockTimestamp: block.Timestamp.Unix(),

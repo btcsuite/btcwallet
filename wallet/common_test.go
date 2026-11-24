@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/bwtest/keyvaultmock"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
@@ -168,6 +169,22 @@ func testSQLiteManagerWithChain(tb testing.TB, chain *bwmock.Chain) *Manager {
 func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 	tb.Helper()
 
+	// Register first so the owner's later cleanup joins before assertions.
+	tb.Cleanup(func() {
+		store.AssertExpectations(tb)
+	})
+
+	return newTestRegistrationManager(
+		tb, store, createTestChain(tb), &chainParams,
+	)
+}
+
+// newTestRegistrationManager serves requests with borrowed dependencies.
+func newTestRegistrationManager(tb testing.TB, store db.Store,
+	source chain.Interface, params *chaincfg.Params) *Manager {
+
+	tb.Helper()
+
 	// Match the service lifetime; the existing Stop cleanup cancels and joins.
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
@@ -180,23 +197,19 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 			closeFn: func() error { return nil },
 		},
 		config: ManagerConfig{
-			ChainSource:             createTestChain(tb),
-			ChainParams:             chainParams,
+			ChainSource:             source,
+			ChainParams:             *params,
 			WalletSyncRetryInterval: initialBackoff,
 			AutoLockDuration:        defaultLockDuration,
 		},
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
+	m.walletRequests = make(chan watchRegistrationReq)
+	m.chainSyncer = newChainSyncer(&m.config.ChainParams)
 	// This Store fixture has no native input; the owner serves Create.
 	m.started.Store(true)
 	m.wg.Go(m.mainLoop)
 
-	// The fixture owns required-call verification. Stop joins workers before
-	// assertions run, while the caller retains ownership of the mock Store.
-	tb.Cleanup(func() {
-		store.AssertExpectations(tb)
-	})
 	tb.Cleanup(func() {
 		_ = stopManagerForTest(tb, m)
 	})
@@ -331,8 +344,6 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 			ChainParams: &chainParams,
 		},
 	}
-	// Match managed assembly so every producer declares its routing interest.
-	w.chainSyncer = newChainSyncer(mockChain, &chainParams)
 	w.chainEventChan = make(chan chainEvent, 1)
 	w.cache = newStoreRuntimeCache(mockStore)
 
@@ -365,6 +376,11 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		mockPubKeyAddr.AssertExpectations(t)
 		mockTaprootAddr.AssertExpectations(t)
 	})
+
+	// Join the registration owner before dependency assertions run.
+	w.registry = newTestRegistrationManager(
+		t, mockStore, mockChain, &chainParams,
+	)
 
 	return w, deps
 }
@@ -462,8 +478,10 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 
 	expectStopTeardown(deps)
 
-	// Start the wallet.
-	require.NoError(t, w.start(t.Context()))
+	// Prepare persisted runtime state before launching the request and sync
+	// workers, matching the managed startup sequence.
+	require.NoError(t, w.prepareStart(t.Context()))
+	require.NoError(t, w.start())
 
 	t.Cleanup(func() {
 		require.NoError(t, w.stop())

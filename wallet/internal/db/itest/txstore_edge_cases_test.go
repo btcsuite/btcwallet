@@ -26,7 +26,7 @@ func TestDeleteTxRejectsConfirmedAndMissing(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 260)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 260)
 
 	confirmedTx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},

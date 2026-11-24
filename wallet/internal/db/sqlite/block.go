@@ -31,22 +31,23 @@ func buildBlock(height sql.NullInt64, hash []byte,
 // ensureBlockExists ensures that a block exists in the database. If it
 // doesn't exist, it inserts it.
 func ensureBlockExists(ctx context.Context, qtx *sqlc.Queries,
-	block *db.Block) error {
+	walletID uint32, block *db.Block) error {
 
 	height := int64(block.Height)
 
-	blockParams := sqlc.InsertBlockParams{
+	blockParams := sqlc.InsertWalletBlockParams{
+		WalletID:       int64(walletID),
 		BlockHeight:    height,
 		HeaderHash:     block.Hash[:],
 		BlockTimestamp: block.Timestamp.Unix(),
 	}
 
-	err := qtx.InsertBlock(ctx, blockParams)
+	err := qtx.InsertWalletBlock(ctx, blockParams)
 	if err != nil {
 		return fmt.Errorf("insert block: %w", err)
 	}
 
-	_, err = requireBlockMatches(ctx, qtx, block)
+	_, err = requireBlockMatches(ctx, qtx, walletID, block)
 	if err != nil {
 		return err
 	}
@@ -54,14 +55,18 @@ func ensureBlockExists(ctx context.Context, qtx *sqlc.Queries,
 	return nil
 }
 
-// requireBlockMatches loads the shared block row for the provided height
-// and verifies that its stored metadata matches the supplied block reference.
+// requireBlockMatches loads the owning Wallet's block row and verifies its
+// metadata against the supplied confirmation reference.
 func requireBlockMatches(ctx context.Context, qtx *sqlc.Queries,
-	block *db.Block) (int64, error) {
+	walletID uint32, block *db.Block) (int64, error) {
 
 	height := int64(block.Height)
 
-	storedBlock, err := qtx.GetBlockByHeight(ctx, height)
+	storedBlock, err := qtx.GetWalletBlockByHeight(
+		ctx, sqlc.GetWalletBlockByHeightParams{
+			WalletID: int64(walletID), BlockHeight: height,
+		},
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, fmt.Errorf("block %d: %w", block.Height,
