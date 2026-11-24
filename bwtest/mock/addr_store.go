@@ -5,6 +5,7 @@
 package mock
 
 import (
+	"context"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -132,6 +133,14 @@ func (m *AddrStore) ForEachRelevantActiveAddress(ns walletdb.ReadBucket,
 	fn func(addr address.Address) error) error {
 
 	args := m.Called(ns, fn)
+	return args.Error(0)
+}
+
+// ForEachWatchAddress visits eligible addresses from the supplied snapshot.
+func (m *AddrStore) ForEachWatchAddress(ctx context.Context,
+	ns walletdb.ReadBucket, fn func(addr address.Address) error) error {
+
+	args := m.Called(ctx, ns, fn)
 	return args.Error(0)
 }
 
