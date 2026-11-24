@@ -36,10 +36,6 @@ var (
 	// bucket is not available in the kvdb wallet database.
 	errMissingTxmgrNamespace = errors.New("missing wtxmgr namespace")
 
-	// errLeaseNotStored is returned when a successful legacy lock cannot be
-	// read back from the lock bucket.
-	errLeaseNotStored = errors.New("lease not stored")
-
 	// errUnownedScript is returned when a legacy credit's pkScript cannot
 	// be resolved to a wallet-owned account. The iteration skips the row
 	// rather than propagating; wallet-owned outputs should always resolve.
@@ -276,7 +272,7 @@ func (s *Store) LeaseOutput(_ context.Context,
 			return db.ErrUtxoNotFound
 		}
 
-		err = s.lockOutput(
+		lock, err := s.lockOutput(
 			ns, params.ID, params.OutPoint, params.Duration,
 			params.NoExpiry,
 		)
@@ -284,14 +280,7 @@ func (s *Store) LeaseOutput(_ context.Context,
 			return err
 		}
 
-		stored, err := s.storedLeases(ns, []wire.OutPoint{
-			params.OutPoint,
-		})
-		if err != nil {
-			return err
-		}
-
-		lease = stored[0]
+		lease = kvdbLeasedOutput(lock)
 
 		return nil
 	})
@@ -330,24 +319,25 @@ func (s *Store) LeaseOutputs(_ context.Context,
 			return err
 		}
 
+		leases = make([]db.LeasedOutput, 0, len(params.OutPoints))
 		for _, outPoint := range params.OutPoints {
 			if _, ok := current[outPoint]; !ok {
 				return fmt.Errorf("utxo %s: %w", outPoint,
 					db.ErrUtxoNotFound)
 			}
 
-			err = s.lockOutput(
+			lock, err := s.lockOutput(
 				ns, params.ID, outPoint, params.Duration,
 				params.NoExpiry,
 			)
 			if err != nil {
 				return err
 			}
+
+			leases = append(leases, kvdbLeasedOutput(lock))
 		}
 
-		leases, err = s.storedLeases(ns, params.OutPoints)
-
-		return err
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.LeaseOutputs: %w", err)
@@ -356,11 +346,13 @@ func (s *Store) LeaseOutputs(_ context.Context,
 	return leases, nil
 }
 
-// lockOutput writes one wtxmgr lock and translates legacy lock errors onto
-// the shared Store sentinels. Without noExpiry, wtxmgr keeps the release depth
-// of an owner's existing lock, so a renewal keeps a lease without expiry.
+// lockOutput writes one wtxmgr lock, returns it as stored, and translates
+// legacy lock errors onto the shared Store sentinels. Without noExpiry, wtxmgr
+// keeps the release depth of an owner's existing lock, so a renewal keeps a
+// lease without expiry.
 func (s *Store) lockOutput(ns walletdb.ReadWriteBucket, id [32]byte,
-	outPoint wire.OutPoint, duration time.Duration, noExpiry bool) error {
+	outPoint wire.OutPoint, duration time.Duration,
+	noExpiry bool) (*wtxmgr.LockedOutput, error) {
 
 	var opts []wtxmgr.LockOutputOption
 	if noExpiry {
@@ -369,53 +361,25 @@ func (s *Store) lockOutput(ns walletdb.ReadWriteBucket, id [32]byte,
 		))
 	}
 
-	_, err := s.txStore.LockOutput(
+	lock, err := s.txStore.LockOutput(
 		ns, wtxmgr.LockID(id), outPoint, duration, opts...,
 	)
 	if err == nil {
-		return nil
+		return lock, nil
 	}
 
 	switch {
 	case errors.Is(err, wtxmgr.ErrUtxoNotFound),
 		errors.Is(err, wtxmgr.ErrUnknownOutput):
-		return fmt.Errorf("utxo %s: %w", outPoint, db.ErrUtxoNotFound)
+		return nil, fmt.Errorf("utxo %s: %w", outPoint,
+			db.ErrUtxoNotFound)
 
 	case errors.Is(err, wtxmgr.ErrOutputAlreadyLocked):
-		return fmt.Errorf("utxo %s: %w", outPoint,
+		return nil, fmt.Errorf("utxo %s: %w", outPoint,
 			db.ErrOutputAlreadyLeased)
 	}
 
-	return fmt.Errorf("lock output: %w", err)
-}
-
-// storedLeases reads back the active locks on outPoints in order, so callers
-// report the stored policy rather than the requested one.
-func (s *Store) storedLeases(ns walletdb.ReadBucket,
-	outPoints []wire.OutPoint) ([]db.LeasedOutput, error) {
-
-	locked, err := s.txStore.ListLockedOutputs(ns)
-	if err != nil {
-		return nil, fmt.Errorf("list locked outputs: %w", err)
-	}
-
-	byOutPoint := make(map[wire.OutPoint]*wtxmgr.LockedOutput, len(locked))
-	for _, lock := range locked {
-		byOutPoint[lock.Outpoint] = lock
-	}
-
-	leases := make([]db.LeasedOutput, 0, len(outPoints))
-	for _, outPoint := range outPoints {
-		lock, ok := byOutPoint[outPoint]
-		if !ok {
-			return nil, fmt.Errorf("lock output %v: %w", outPoint,
-				errLeaseNotStored)
-		}
-
-		leases = append(leases, kvdbLeasedOutput(lock))
-	}
-
-	return leases, nil
+	return nil, fmt.Errorf("lock output: %w", err)
 }
 
 // kvdbLeasedOutput converts a legacy lock into the shared lease view. A lock
