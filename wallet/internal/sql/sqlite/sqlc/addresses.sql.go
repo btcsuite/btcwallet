@@ -819,3 +819,66 @@ func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImpor
 	}
 	return items, nil
 }
+
+const LoadWatchSet = `-- name: LoadWatchSet :many
+SELECT
+    FALSE AS is_outpoint,
+    a.script_pub_key,
+    cast(NULL AS BLOB) AS tx_hash,
+    -- sqlc maps this column to int64, so the unused address-row index is 0.
+    0 AS output_index
+FROM addresses AS a
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+WHERE
+    a.wallet_id = ?1
+    AND (NOT a.is_derived OR NOT acc.no_chain_sync)
+UNION ALL
+SELECT
+    TRUE AS is_outpoint,
+    cast(NULL AS BLOB) AS script_pub_key,
+    tx_hash,
+    output_index
+FROM outputs_to_watch
+WHERE wallet_id = ?1
+`
+
+type LoadWatchSetRow struct {
+	IsOutpoint   int64
+	ScriptPubKey []byte
+	TxHash       []byte
+	OutputIndex  int64
+}
+
+// One statement loads both collections from the same snapshot without a
+// separate read transaction or second database round trip.
+// The row kind separates the two collections without multiplying them; NULLs
+// occupy fields that do not apply. The outpoint arm uses the same eligibility
+// view as the recovery query while projecting only the outpoint identity.
+func (q *Queries) LoadWatchSet(ctx context.Context, walletID int64) ([]LoadWatchSetRow, error) {
+	rows, err := q.query(ctx, q.loadWatchSetStmt, LoadWatchSet, walletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LoadWatchSetRow
+	for rows.Next() {
+		var i LoadWatchSetRow
+		if err := rows.Scan(
+			&i.IsOutpoint,
+			&i.ScriptPubKey,
+			&i.TxHash,
+			&i.OutputIndex,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
