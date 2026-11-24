@@ -133,6 +133,13 @@ type AddrStore interface {
 	ForEachWatchAddress(ctx context.Context, ns walletdb.ReadBucket,
 		fn func(addr address.Address) error) error
 
+	// ForEachAddressOwner visits scoped owners of addr persisted in ns,
+	// including legacy hash-only aliases. The root read lock protects scoped
+	// loading and callback metadata reads from Unlock. The callback may use
+	// its AccountStore, but must not re-enter root manager locking methods.
+	ForEachAddressOwner(ns walletdb.ReadBucket, addr address.Address,
+		fn func(AccountStore, uint32, ManagedAddress) error) error
+
 	// Unlock derives the master private key from the specified passphrase.
 	Unlock(ns walletdb.ReadBucket, passphrase []byte) error
 

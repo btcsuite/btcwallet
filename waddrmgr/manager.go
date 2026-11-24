@@ -757,6 +757,48 @@ func (m *Manager) Address(ns walletdb.ReadBucket,
 	return nil, managerError(ErrAddressNotFound, str, nil)
 }
 
+// ForEachAddressOwner visits scoped owners of addr persisted in ns, including
+// legacy hash-only aliases. The root read lock protects scoped loading and
+// callback metadata reads from Unlock. The callback may use its AccountStore,
+// but must not call root methods that acquire the manager lock again.
+func (m *Manager) ForEachAddressOwner(ns walletdb.ReadBucket,
+	addr address.Address,
+	fn func(AccountStore, uint32, ManagedAddress) error) error {
+
+	// Pair with Unlock before a scoped load can change derivation caches.
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	for _, scoped := range m.scopedManagers {
+		managed, err := scoped.Address(ns, addr)
+		if IsError(err, ErrAddressNotFound) || IsError(err, ErrScopeNotFound) {
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("lookup scoped address: %w", err)
+		}
+
+		// A live cache may include a later commit or a rolled-back import.
+		// Resolve membership and origin from this same scoped read view.
+		account, err := scoped.AddrAccount(ns, managed.Address())
+		if IsError(err, ErrAddressNotFound) || IsError(err, ErrScopeNotFound) {
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("lookup scoped address account: %w", err)
+		}
+
+		err = fn(scoped, account, managed)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // MarkUsed updates the used flag for the provided address.
 func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket,
 	address address.Address) error {

@@ -117,6 +117,16 @@ func (m *AddrStore) AddrAccount(ns walletdb.ReadBucket,
 		args.Get(1).(uint32), args.Error(2)
 }
 
+// ForEachAddressOwner records the native scoped-owner callback so fixtures can
+// arrange deterministic owners without replacing public ownership assertions.
+func (m *AddrStore) ForEachAddressOwner(ns walletdb.ReadBucket,
+	addr address.Address, fn func(waddrmgr.AccountStore, uint32,
+		waddrmgr.ManagedAddress) error) error {
+
+	args := m.Called(ns, addr, fn)
+	return args.Error(0)
+}
+
 // AddressDetails determines whether the wallet has access to the private
 // keys required to sign for a given address, and returns other address
 // details.
