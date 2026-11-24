@@ -1292,17 +1292,20 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, outPointKey []byte,
 	return nil
 }
 
-// serializeLockedOutput serializes the value of a locked output. Values written
-// before spend maturity tracking was introduced remain valid and deserialize
-// with zero maturity and spend height.
+// serializeLockedOutput serializes the value of a locked output. The expiry's
+// sub-second part follows the other fields, so older readers still see whole
+// seconds. Values written before spend maturity tracking or sub-second expiry
+// remain valid and deserialize with zero for the missing fields.
 func serializeLockedOutput(id LockID, expiry time.Time,
 	releaseAfterSpendConfs uint32, spendHeight int32) []byte {
 
-	var v [len(id) + 8 + 4 + 4]byte
+	var v [len(id) + 8 + 4 + 4 + 4]byte
 	copy(v[:len(id)], id[:])
 	byteOrder.PutUint64(v[len(id):], uint64(expiry.Unix()))
 	byteOrder.PutUint32(v[len(id)+8:], releaseAfterSpendConfs)
 	byteOrder.PutUint32(v[len(id)+12:], uint32(spendHeight))
+	//nolint:gosec // Nanosecond is in [0, 1e9).
+	byteOrder.PutUint32(v[len(id)+16:], uint32(expiry.Nanosecond()))
 
 	return v[:]
 }
@@ -1318,6 +1321,13 @@ func deserializeLockedOutput(v []byte) (LockID, time.Time, uint32, int32) {
 
 	releaseAfterSpendConfs := byteOrder.Uint32(v[len(id)+8:])
 	spendHeight := int32(byteOrder.Uint32(v[len(id)+12:]))
+
+	if len(v) < len(id)+20 {
+		return id, expiry, releaseAfterSpendConfs, spendHeight
+	}
+
+	nanoseconds := byteOrder.Uint32(v[len(id)+16:])
+	expiry = expiry.Add(time.Duration(nanoseconds))
 
 	return id, expiry, releaseAfterSpendConfs, spendHeight
 }

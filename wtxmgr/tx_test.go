@@ -3000,7 +3000,8 @@ func TestDeserializeLegacyLockedOutput(t *testing.T) {
 
 // TestDeserializeRetainedLockedOutput verifies that lock rows written by
 // btcwallet master with confirmation-controlled leases keep their policy and
-// disconnected-spend marker.
+// disconnected-spend marker, and that a new write keeps that layout as its
+// prefix, with the expiry in whole seconds.
 func TestDeserializeRetainedLockedOutput(t *testing.T) {
 	t.Parallel()
 
@@ -3021,8 +3022,78 @@ func TestDeserializeRetainedLockedOutput(t *testing.T) {
 	require.Equal(t, uint32(6), releaseConfs)
 	require.Equal(t, int32(-1), spendHeight)
 	require.Equal(t, value, serializeLockedOutput(
-		lockID, expiry, releaseConfs, spendHeight,
-	))
+		lockID, expiry.Add(500*time.Millisecond), releaseConfs,
+		spendHeight,
+	)[:len(value)])
+}
+
+// TestLockedOutputSubSecondExpiry verifies that a lock value round-trips the
+// expiry's sub-second part.
+func TestLockedOutputSubSecondExpiry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An expiry with a sub-second part.
+	lockID := LockID{7, 8, 9}
+	expiry := time.Unix(123456789, 500_000_000)
+
+	// Act: Serialize the lock and decode it.
+	value := serializeLockedOutput(lockID, expiry, 6, -1)
+	gotID, gotExpiry, releaseConfs, spendHeight :=
+		deserializeLockedOutput(value)
+
+	// Assert: Every field, including the full expiry, round-trips.
+	require.Equal(t, lockID, gotID)
+	require.True(t, gotExpiry.Equal(expiry))
+	require.Equal(t, uint32(6), releaseConfs)
+	require.Equal(t, int32(-1), spendHeight)
+}
+
+// TestLockOutputSubSecondDuration verifies that a lease shorter than a second
+// past a whole second stays locked until its full deadline, and that
+// LockOutput returns the deadline that ListLockedOutputs reports.
+func TestLockOutputSubSecondDuration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A known output and a clock on a whole second.
+	store, db, err := testStore(t)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	start := time.Unix(1_000_000, 0)
+	testClock := clock.NewTestClock(start)
+	store.clock = testClock
+
+	creditBlock := &BlockMeta{
+		Block: Block{
+			Hash:   chainhash.Hash{1},
+			Height: 100,
+		},
+		Time: time.Now(),
+	}
+	creditTx := newCoinBase(btcutil.SatoshiPerBitcoin)
+	insertConfirmedCredit(t, store, db, creditTx, 0, creditBlock)
+	op := wire.OutPoint{Hash: creditTx.TxHash(), Index: 0}
+
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		// Act: Lease the output for 1.5 seconds.
+		lockedOutput, err := store.LockOutput(
+			ns, LockID{1}, op, 1500*time.Millisecond,
+		)
+		require.NoError(t, err)
+
+		// Assert: The returned and listed deadlines match, and the
+		// lock holds until that deadline.
+		deadline := start.Add(1500 * time.Millisecond)
+		require.True(t, lockedOutput.Expiration.Equal(deadline))
+
+		locks, err := store.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locks, 1)
+		require.True(t, locks[0].Expiration.Equal(deadline))
+
+		assertLocked(t, ns, op, start.Add(time.Second), true)
+		assertLocked(t, ns, op, deadline, false)
+	})
 }
 
 // TestOutputLockConfirmationIgnoresWallClock verifies that a
