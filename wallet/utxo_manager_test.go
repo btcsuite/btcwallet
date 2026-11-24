@@ -405,6 +405,11 @@ func TestLeaseOutputErr(t *testing.T) {
 			expectedErr: ErrOutputAlreadyLocked,
 		},
 		{
+			name:        "invalid parameter",
+			storeErr:    db.ErrInvalidParam,
+			expectedErr: ErrInvalidParam,
+		},
+		{
 			name:          "ambiguous commit",
 			storeErr:      db.ErrIndeterminateCommit,
 			expectedErr:   ErrIndeterminateCommit,
