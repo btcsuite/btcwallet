@@ -99,6 +99,13 @@ type KeyScopeSecret struct {
 	EncryptedCoinPrivKey []byte
 }
 
+type OutputsToWatch struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int32
+	RawTx       []byte
+}
+
 type Transaction struct {
 	WalletID       int64
 	ID             int64

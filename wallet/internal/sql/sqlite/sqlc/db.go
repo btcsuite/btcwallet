@@ -300,6 +300,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
 	}
+	if q.loadWatchSetStmt, err = db.PrepareContext(ctx, LoadWatchSet); err != nil {
+		return nil, fmt.Errorf("error preparing query LoadWatchSet: %w", err)
+	}
 	if q.releaseUtxoLeaseStmt, err = db.PrepareContext(ctx, ReleaseUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query ReleaseUtxoLease: %w", err)
 	}
@@ -792,6 +795,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
+	if q.loadWatchSetStmt != nil {
+		if cerr := q.loadWatchSetStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing loadWatchSetStmt: %w", cerr)
+		}
+	}
 	if q.releaseUtxoLeaseStmt != nil {
 		if cerr := q.releaseUtxoLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing releaseUtxoLeaseStmt: %w", cerr)
@@ -968,6 +976,7 @@ type Queries struct {
 	listUnminedTransactionsStmt                   *sql.Stmt
 	listUtxosStmt                                 *sql.Stmt
 	listWalletsStmt                               *sql.Stmt
+	loadWatchSetStmt                              *sql.Stmt
 	releaseUtxoLeaseStmt                          *sql.Stmt
 	rewindWalletSyncStateHeightsForRollbackStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt     *sql.Stmt
@@ -1075,6 +1084,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUnminedTransactionsStmt:                   q.listUnminedTransactionsStmt,
 		listUtxosStmt:                                 q.listUtxosStmt,
 		listWalletsStmt:                               q.listWalletsStmt,
+		loadWatchSetStmt:                              q.loadWatchSetStmt,
 		releaseUtxoLeaseStmt:                          q.releaseUtxoLeaseStmt,
 		rewindWalletSyncStateHeightsForRollbackStmt:   q.rewindWalletSyncStateHeightsForRollbackStmt,
 		updateAccountNameByWalletScopeAndNameStmt:     q.updateAccountNameByWalletScopeAndNameStmt,
