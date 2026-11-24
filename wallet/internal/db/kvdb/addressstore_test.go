@@ -672,8 +672,14 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
+	// Arrange: Forward only the declared address-store interface so the
+	// real imports also guard constructor compatibility for wrapped stores.
 	addrStore := newSpendableAddrMgr(t, dbConn)
-	store := NewStore(dbConn, nil, addrStore)
+	store := NewStore(dbConn, nil, struct {
+		waddrmgr.AddrStore
+	}{
+		AddrStore: addrStore,
+	})
 
 	// importP2WKH imports a fresh P2WKH address and returns its script.
 	importP2WKH := func(t *testing.T) []byte {
@@ -722,6 +728,7 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 	t.Run("mixed owned and foreign", func(t *testing.T) {
 		t.Parallel()
 
+		// Act: Resolve the mixed scripts through the declared store interface.
 		owned, err := store.ResolveOwnedAddresses(
 			t.Context(), db.ResolveOwnedAddressesQuery{
 				WalletID: 0,
@@ -730,6 +737,9 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 				},
 			},
 		)
+
+		// Assert: Only both imported scripts are owned; the foreign key
+		// stays absent instead of producing a capability error.
 		require.NoError(t, err)
 
 		require.Len(t, owned, 2)
@@ -741,12 +751,16 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 	t.Run("duplicate scripts resolve once", func(t *testing.T) {
 		t.Parallel()
 
+		// Act: Resolve repeated scripts through the same public resolver.
 		owned, err := store.ResolveOwnedAddresses(
 			t.Context(), db.ResolveOwnedAddressesQuery{
 				WalletID:      0,
 				ScriptPubKeys: [][]byte{owned1, owned1},
 			},
 		)
+
+		// Assert: Repeated input has one owned result, preserving subset
+		// deduplication through an ordinary interface forwarder.
 		require.NoError(t, err)
 		require.Len(t, owned, 1)
 		require.Contains(t, owned, string(owned1))
@@ -755,9 +769,13 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
 		t.Parallel()
 
+		// Act: Resolve no scripts through the same declared store interface.
 		owned, err := store.ResolveOwnedAddresses(
 			t.Context(), db.ResolveOwnedAddressesQuery{WalletID: 0},
 		)
+
+		// Assert: The public empty-query result remains a usable empty
+		// map rather than a nil result or an unsupported-operation error.
 		require.NoError(t, err)
 		require.NotNil(t, owned)
 		require.Empty(t, owned)

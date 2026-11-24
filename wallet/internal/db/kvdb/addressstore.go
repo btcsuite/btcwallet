@@ -373,7 +373,7 @@ func resolveOwnedScripts(ns walletdb.ReadBucket, addrMgr waddrmgr.AddrStore,
 			continue
 		}
 
-		info, err := resolvedAddressInfo(ns, addrMgr, addr)
+		info, err := resolvedOwnedAddressInfo(ns, addrMgr, addr)
 
 		// A missing address means the script is not owned by the
 		// wallet, which is the common case, so we keep resolving the
@@ -390,6 +390,60 @@ func resolveOwnedScripts(ns walletdb.ReadBucket, addrMgr waddrmgr.AddrStore,
 	}
 
 	return nil
+}
+
+// resolvedOwnedAddressInfo prefers a persisted owner of the exact script.
+// If only hash aliases match, it preserves the first legacy owner.
+func resolvedOwnedAddressInfo(ns walletdb.ReadBucket,
+	resolver waddrmgr.AddrStore,
+	addr address.Address) (*db.AddressInfo, error) {
+
+	// Read wallet mode before entering the root-locked callback. Encoded
+	// identity distinguishes script formats and already normalizes P2PK
+	// addresses to P2PKH, matching the legacy scoped lookup contract.
+	watchOnly := resolver.WatchOnly()
+	encoded := addr.EncodeAddress()
+
+	var (
+		owned      *db.AddressInfo
+		ownedExact bool
+	)
+
+	err := resolver.ForEachAddressOwner(ns, addr, func(
+		manager waddrmgr.AccountStore, account uint32,
+		managed waddrmgr.ManagedAddress) error {
+
+		imported, err := accountIsImported(ns, manager, account)
+		if err != nil {
+			return err
+		}
+
+		info, err := managedAddressInfo(
+			ns, manager, watchOnly, imported, managed,
+		)
+		if err != nil {
+			return err
+		}
+
+		// An exact match carries the requested script's metadata. Keep
+		// the first owner when two matches have the same exactness.
+		exact := managed.Address().EncodeAddress() == encoded
+		if owned == nil || (exact && !ownedExact) {
+			owned = info
+			ownedExact = exact
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup scoped owners: %w", err)
+	}
+
+	if owned == nil {
+		return nil, db.ErrAddressNotFound
+	}
+
+	return owned, nil
 }
 
 // resolvedAddressInfo resolves one legacy managed address without enumerating
