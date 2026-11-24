@@ -60,6 +60,10 @@ func (v *LegacyWalletVault) Unlock(ctx context.Context,
 		return v.mgr.Unlock(ns, passphrase)
 	})
 	if err != nil {
+		// A driver can fail to finalize the read after the callback has
+		// unlocked the manager. A failed Unlock must leave it locked.
+		v.Lock()
+
 		return fmt.Errorf("view: %w", translateVaultErr(err))
 	}
 

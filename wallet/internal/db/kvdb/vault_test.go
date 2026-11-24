@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -242,6 +243,40 @@ func TestLegacyWalletVaultTranslatesManagerSentinels(t *testing.T) {
 		require.ErrorIs(t, err, keyvault.ErrVaultLocked)
 		require.False(t, waddrmgr.IsError(err, waddrmgr.ErrLocked))
 	})
+}
+
+// TestLegacyWalletVaultUnlockReadFailure checks the lock postcondition when
+// the read transaction fails after the address manager accepts the passphrase.
+func TestLegacyWalletVaultUnlockReadFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use a real wallet so authentication changes its key state.
+	// Return a finalization error only after the real read succeeds.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	view := func(read func(walletdb.ReadTx) error, reset func()) error {
+		err := dbConn.View(read, reset)
+		if err != nil {
+			return err
+		}
+
+		return errInjectedCommit
+	}
+	reader := &watchViewDB{DB: dbConn}
+	reader.On("View", mock.Anything, mock.Anything).Return(view).Once()
+	vault := NewLegacyWalletVault(reader, mgr)
+
+	// Act: Authenticate with the original private passphrase through View.
+	err := vault.Unlock(t.Context(), testPrivPass)
+
+	// Assert: The caller sees the driver's error and the vault has erased
+	// the private key material made available during the callback.
+	require.ErrorIs(t, err, errInjectedCommit)
+	require.True(t, vault.IsLocked())
+	reader.AssertExpectations(t)
 }
 
 // TestLegacyWalletVaultUnlockAlreadyUnlocked verifies that unlocking an
