@@ -3324,10 +3324,15 @@ func (w *Wallet) LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 	var expiry time.Time
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		var err error
 
-		expiry, err = w.txStore.LockOutput(ns, id, op, duration)
-		return err
+		lock, err := w.txStore.LockOutput(ns, id, op, duration)
+		if err != nil {
+			return err
+		}
+
+		expiry = lock.Expiration
+
+		return nil
 	})
 	return expiry, err
 }

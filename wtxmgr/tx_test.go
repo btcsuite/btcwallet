@@ -2586,7 +2586,7 @@ func lock(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
 
 	t.Helper()
 
-	expiry, err := s.LockOutput(ns, id, op, 10*time.Minute)
+	lockedOutput, err := s.LockOutput(ns, id, op, 10*time.Minute)
 	if err != exp {
 		t.Fatalf("expected err %q, got %q", exp, err)
 	}
@@ -2595,7 +2595,12 @@ func lock(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
 	} else {
 		assertLocked(t, ns, op, s.clock.Now(), true)
 	}
-	return expiry
+
+	if lockedOutput == nil {
+		return time.Time{}
+	}
+
+	return lockedOutput.Expiration
 }
 
 func unlock(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
@@ -3048,14 +3053,14 @@ func TestOutputLockConfirmationIgnoresWallClock(t *testing.T) {
 	other := LockID{2}
 
 	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
-		expiry, err := store.LockOutput(
+		lockedOutput, err := store.LockOutput(
 			ns, owner, op, 10*time.Minute, WithReleaseAfterSpend(3),
 		)
 		require.NoError(t, err)
 
 		// Past its expiry the lock still holds, and expired cleanup keeps
 		// it.
-		testClock.SetTime(expiry)
+		testClock.SetTime(lockedOutput.Expiration)
 		assertLocked(t, ns, op, testClock.Now(), true)
 		require.NoError(t, store.DeleteExpiredLockedOutputs(ns))
 
@@ -3125,7 +3130,7 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 	lockID := LockID{1}
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(namespaceKey)
-		expiry, err := store.LockOutput(
+		lockedOutput, err := store.LockOutput(
 			ns, lockID, creditOutpoint, 10*time.Minute,
 			WithReleaseAfterSpend(3),
 		)
@@ -3135,7 +3140,9 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 
 		// The first confirmation may arrive after the wall-clock deadline.
 		// Confirmation-controlled leases must still record that spend.
-		store.clock.(*clock.TestClock).SetTime(expiry.Add(time.Second))
+		store.clock.(*clock.TestClock).SetTime(
+			lockedOutput.Expiration.Add(time.Second),
+		)
 		if err := store.DeleteExpiredLockedOutputs(ns); err != nil {
 			return err
 		}
@@ -3168,12 +3175,15 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 
 		// Renewing the lease must preserve the disconnected spend state
 		// and its configured release depth.
-		renewedExpiry, err := store.LockOutput(
+		renewed, err := store.LockOutput(
 			ns, lockID, creditOutpoint, 10*time.Minute,
 		)
 		if err != nil {
 			return err
 		}
+
+		require.Equal(t, uint32(3), renewed.ReleaseAfterSpendConfs)
+		require.Equal(t, int32(-1), renewed.ConfirmedSpendHeight)
 
 		locks, err = store.ListLockedOutputs(ns)
 		require.NoError(t, err)
@@ -3213,7 +3223,7 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 		// A lease that has observed a spend must survive its wall clock
 		// expiry while that spend is disconnected.
 		store.clock.(*clock.TestClock).SetTime(
-			renewedExpiry.Add(time.Second),
+			renewed.Expiration.Add(time.Second),
 		)
 		if err := store.DeleteExpiredLockedOutputs(ns); err != nil {
 			return err

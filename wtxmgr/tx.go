@@ -1494,10 +1494,11 @@ func isKnownOutput(ns walletdb.ReadWriteBucket, op wire.OutPoint) bool {
 }
 
 // LockOutput locks an output to the given ID, preventing it from being
-// available for coin selection. It returns the absolute wall-clock expiration.
-// Successive calls can extend that time. A confirmation-controlled lock stores
-// the time for compatibility but ignores it until the owner explicitly releases
-// the lock or its spend reaches the requested depth.
+// available for coin selection. It returns the lock as stored, including the
+// absolute wall-clock expiration and any release depth kept by a same-owner
+// renewal. Successive calls can extend that time. A confirmation-controlled
+// lock stores the time for compatibility but ignores it until the owner
+// explicitly releases the lock or its spend reaches the requested depth.
 //
 // Outputs can be unlocked before their expiration through `UnlockOutput`.
 // Otherwise, they are unlocked lazily through calls which iterate through all
@@ -1508,7 +1509,7 @@ func isKnownOutput(ns walletdb.ReadWriteBucket, op wire.OutPoint) bool {
 // returned.
 func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 	op wire.OutPoint, duration time.Duration,
-	optFuncs ...LockOutputOption) (time.Time, error) {
+	optFuncs ...LockOutputOption) (*LockedOutput, error) {
 
 	var opts lockOutputOptions
 	for _, optFunc := range optFuncs {
@@ -1517,13 +1518,13 @@ func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 
 	// Make sure the output is known.
 	if !isKnownOutput(ns, op) {
-		return time.Time{}, ErrUnknownOutput
+		return nil, ErrUnknownOutput
 	}
 
 	// Make sure the output hasn't already been locked to some other ID.
 	lockedID, _, isLocked := isLockedOutput(ns, op, s.clock.Now())
 	if isLocked && lockedID != id {
-		return time.Time{}, ErrOutputAlreadyLocked
+		return nil, ErrOutputAlreadyLocked
 	}
 
 	// A renewal by the same owner must not discard confirmation progress.
@@ -1548,10 +1549,16 @@ func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 	if err := lockOutput(
 		ns, id, op, expiry, releaseAfterSpendConfs, spendHeight,
 	); err != nil {
-		return time.Time{}, err
+		return nil, err
 	}
 
-	return expiry, nil
+	return &LockedOutput{
+		Outpoint:               op,
+		LockID:                 id,
+		Expiration:             expiry,
+		ReleaseAfterSpendConfs: releaseAfterSpendConfs,
+		ConfirmedSpendHeight:   spendHeight,
+	}, nil
 }
 
 // UnlockOutput unlocks an output, allowing it to be available for coin

@@ -103,13 +103,13 @@ type TxStore interface {
 	ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput, error)
 
 	// LockOutput locks an output to the given ID, preventing it from being
-	// available for coin selection. The absolute time of the lock's
-	// expiration is returned. The expiration of the lock can be extended by
-	// successive invocations of this call. A confirmation-controlled lock
-	// stores that time but releases only at spend maturity or by its owner.
+	// available for coin selection. The lock is returned as stored. The
+	// expiration of the lock can be extended by successive invocations of
+	// this call. A confirmation-controlled lock stores that time but
+	// releases only at spend maturity or by its owner.
 	LockOutput(ns walletdb.ReadWriteBucket, id LockID, op wire.OutPoint,
-		duration time.Duration, optFuncs ...LockOutputOption) (time.Time,
-		error)
+		duration time.Duration,
+		optFuncs ...LockOutputOption) (*LockedOutput, error)
 
 	// OutputsToWatch returns a list of outputs to monitor during the
 	// wallet's startup. The returned items are similar to UnspentOutputs,
