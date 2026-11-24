@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -780,6 +781,251 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 		require.NotNil(t, owned)
 		require.Empty(t, owned)
 	})
+}
+
+// TestAddressStoreResolveOwnedAddressesUnlock protects cold ownership reads
+// while the native manager derives and clears private keys during unlock.
+func TestAddressStoreResolveOwnedAddressesUnlock(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist default children, then reopen locked so ownership
+	// must populate cold scoped caches while the vault changes lock state.
+	store, old, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	params := old.ChainParams()
+
+	var scripts [][]byte
+
+	err := walletdb.Update(store.db, func(tx walletdb.ReadWriteTx) error {
+		scoped, err := old.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+		if err != nil {
+			return err
+		}
+
+		addrs, err := scoped.NextExternalAddresses(
+			tx.ReadWriteBucket(waddrmgr.NamespaceKey), 0, 64,
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, managed := range addrs {
+			script, err := txscript.PayToAddrScript(managed.Address())
+			if err != nil {
+				return err
+			}
+
+			scripts = append(scripts, script)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	old.Close()
+
+	var mgr *waddrmgr.Manager
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		var err error
+
+		mgr, err = waddrmgr.Open(
+			tx.ReadBucket(waddrmgr.NamespaceKey), []byte("pub"), params,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+	t.Cleanup(mgr.Close)
+	store = NewStore(store.db, nil, mgr)
+
+	// Act: Start both public operations together. Each bounded goroutine
+	// returns one result so the owner joins both before assertions/cleanup.
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+
+	var owned map[string]*db.AddressInfo
+
+	go func() {
+		<-start
+
+		var err error
+
+		owned, err = store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				ScriptPubKeys: scripts,
+			},
+		)
+		errs <- err
+	}()
+	go func() {
+		<-start
+
+		for range 16 {
+			err := walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+				return mgr.Unlock(
+					tx.ReadBucket(waddrmgr.NamespaceKey), []byte("priv"),
+				)
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+
+			err = mgr.Lock()
+			if err != nil {
+				errs <- err
+				return
+			}
+		}
+
+		errs <- nil
+	}()
+
+	close(start)
+
+	first, second := <-errs, <-errs
+
+	// Assert: Every persisted script remains owned across vault changes;
+	// the race detector also verifies synchronized native derivation state.
+	require.NoError(t, first)
+	require.NoError(t, second)
+	require.Len(t, owned, len(scripts))
+}
+
+// TestAddressStoreResolveScriptAliases prefers exact owners for shared key
+// hashes and keeps the legacy lookup when only an alias matches.
+func TestAddressStoreResolveScriptAliases(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Give one custom child a second owner in a legacy scope.
+	// Keep the other child's hash unshared to exercise alias fallback.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	custom := db.KeyScope{
+		Purpose: 1017,
+		Coin:    1,
+	}
+	schema := db.ScopeAddrMap[db.KeyScopeBIP0084]
+	number := uint32(0)
+
+	const name = "overlapping-keys"
+
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			Scope:         custom,
+			Name:          name,
+			AddrSchema:    &schema,
+			AccountNumber: &number,
+		}, kvdbDeriveFnFixture(t, mgr),
+	)
+	require.NoError(t, err)
+
+	params := db.NewDerivedAddressParams{
+		Scope:       custom,
+		AccountName: name,
+	}
+	aliasOwner, err := store.NewDerivedAddress(t.Context(), params)
+	require.NoError(t, err)
+	overlap, err := store.NewDerivedAddress(t.Context(), params)
+	require.NoError(t, err)
+	legacyKey, err := address.NewAddressPubKeyHash(
+		address.Hash160(overlap.PubKey), mgr.ChainParams(),
+	)
+	require.NoError(t, err)
+	legacyScript, err := txscript.PayToAddrScript(legacyKey)
+	require.NoError(t, err)
+	_, err = store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			AddressType:  db.PubKeyHash,
+			ScriptPubKey: legacyScript,
+			PubKey:       overlap.PubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	// No legacy row exists for the first key, so its legacy alias must keep
+	// the native hash-only fallback when there is no exact-script owner.
+	alias, err := address.NewAddressPubKeyHash(
+		address.Hash160(aliasOwner.PubKey), mgr.ChainParams(),
+	)
+	require.NoError(t, err)
+	aliasScript, err := txscript.PayToAddrScript(alias)
+	require.NoError(t, err)
+
+	// Fix scope order at the root reader boundary while the real native
+	// iterator still loads and verifies every owner in the Bolt read view.
+	resolver := &bwmock.AddrStore{}
+	resolver.On("ChainParams").Return(mgr.ChainParams())
+	resolver.On("ForEachAddressOwner", mock.Anything, mock.Anything,
+		mock.Anything).Run(func(args mock.Arguments) {
+		ns, ok := args.Get(0).(walletdb.ReadBucket)
+		require.True(t, ok)
+
+		addr, ok := args.Get(1).(address.Address)
+		require.True(t, ok)
+
+		visit, ok := args.Get(2).(func(waddrmgr.AccountStore, uint32,
+			waddrmgr.ManagedAddress) error)
+		require.True(t, ok)
+
+		for _, scope := range []waddrmgr.KeyScope{
+			waddrmgr.KeyScope(custom), waddrmgr.KeyScopeBIP0044,
+		} {
+			err := mgr.ForEachAddressOwner(ns, addr, func(
+				owner waddrmgr.AccountStore, account uint32,
+				managed waddrmgr.ManagedAddress) error {
+
+				if owner.Scope() != scope {
+					return nil
+				}
+
+				return visit(owner, account, managed)
+			})
+			require.NoError(t, err)
+		}
+	}).Return(nil)
+	resolver.On("WatchOnly").Return(false)
+	t.Cleanup(func() {
+		resolver.AssertExpectations(t)
+	})
+
+	store = NewStore(store.db, nil, resolver)
+
+	// Act: Resolve both formats of the shared key and the legacy alias of
+	// the first child. The custom scope is visited before the import.
+	owned, err := store.ResolveOwnedAddresses(
+		t.Context(), db.ResolveOwnedAddressesQuery{
+			ScriptPubKeys: [][]byte{
+				overlap.ScriptPubKey,
+				legacyScript,
+				aliasScript,
+			},
+		},
+	)
+
+	// Assert: Each exact script resolves to its own scope. In the absence
+	// of an exact match, the first child remains visible through its alias.
+	require.NoError(t, err)
+	require.Len(t, owned, 3)
+
+	key := owned[string(overlap.ScriptPubKey)]
+	require.NotNil(t, key)
+	require.True(t, key.HasDerivationPath)
+	require.Equal(t, custom, key.KeyScope)
+	require.Equal(t, name, key.AccountName)
+	require.Equal(t, overlap.ScriptPubKey, key.ScriptPubKey)
+
+	legacy := owned[string(legacyScript)]
+	require.NotNil(t, legacy)
+	require.True(t, legacy.IsImported)
+	require.Equal(t, legacyScript, legacy.ScriptPubKey)
+
+	fallback := owned[string(aliasScript)]
+	require.NotNil(t, fallback)
+	require.Equal(t, custom, fallback.KeyScope)
+	require.Equal(t, aliasOwner.ScriptPubKey, fallback.ScriptPubKey)
 }
 
 // TestAddressStoreImportedPrivateKeyIsSpendable verifies that legacy imported
