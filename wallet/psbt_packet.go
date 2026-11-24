@@ -550,6 +550,13 @@ func validateNoUnknowns(packet *psbt.Packet) error {
 	return nil
 }
 
+// inputIsFinal reports whether an input carries a final script sig or witness.
+// Like psbt.isFinalized it tests presence, not length: an empty final script
+// sig is a complete spend of a script that needs no data.
+func inputIsFinal(pIn *psbt.PInput) bool {
+	return pIn.FinalScriptSig != nil || pIn.FinalScriptWitness != nil
+}
+
 // inputIsSigned reports whether an input carries any signature material, in
 // any of the forms a PSBT can hold it.
 //
@@ -562,6 +569,5 @@ func inputIsSigned(pIn *psbt.PInput) bool {
 	return len(pIn.PartialSigs) > 0 ||
 		len(pIn.TaprootScriptSpendSig) > 0 ||
 		pIn.TaprootKeySpendSig != nil ||
-		pIn.FinalScriptSig != nil ||
-		pIn.FinalScriptWitness != nil
+		inputIsFinal(pIn)
 }

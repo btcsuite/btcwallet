@@ -646,6 +646,54 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerCombineRejectInternalKey,
 	},
 	{
+		Name:     "psbtmanager sign owned inputs",
+		TestFunc: testPsbtManagerSignOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager sign already signed",
+		TestFunc: testPsbtManagerSignAlreadySigned,
+	},
+	{
+		Name:     "psbtmanager sign finalized packet",
+		TestFunc: testPsbtManagerSignFinalizedPacket,
+	},
+	{
+		Name:     "psbtmanager sign partial ownership",
+		TestFunc: testPsbtManagerSignPartialOwnership,
+	},
+	{
+		Name:     "psbtmanager sign multisig partial",
+		TestFunc: testPsbtManagerSignMultisigPartial,
+	},
+	{
+		Name:     "psbtmanager sign unrecognized script",
+		TestFunc: testPsbtManagerSignUnrecognizedScript,
+	},
+	{
+		Name:     "psbtmanager sign tapscript",
+		TestFunc: testPsbtManagerSignTapscript,
+	},
+	{
+		Name:     "psbtmanager sign reject packet",
+		TestFunc: testPsbtManagerSignRejectPacket,
+	},
+	{
+		Name:     "psbtmanager sign reject nil",
+		TestFunc: testPsbtManagerSignRejectNil,
+	},
+	{
+		Name:     "psbtmanager sign reject after signing",
+		TestFunc: testPsbtManagerSignRejectAfterSigning,
+	},
+	{
+		Name:     "psbtmanager sign reject missing leaf",
+		TestFunc: testPsbtManagerSignRejectMissingLeaf,
+	},
+	{
+		Name:     "psbtmanager sign reject mismatched signature",
+		TestFunc: testPsbtManagerSignRejectMismatchedSignature,
+	},
+	{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
