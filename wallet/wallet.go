@@ -181,7 +181,7 @@ type Config struct {
 	// DB is the underlying database for the wallet.
 	//
 	// Deprecated: the Manager owns its database, configured once through
-	// ManagerConfig.DataSource. This field serves the deprecated
+	// ManagerConfig. This field serves the deprecated
 	// constructors only and is ignored by Manager.Create.
 	DB walletdb.DB
 

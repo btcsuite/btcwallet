@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"math/big"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +49,12 @@ func TestManagerConfigValidate(t *testing.T) {
 	aboveMaximumRetry.WalletSyncRetryInterval = maxBackoff + 1
 	aboveMaximumRecovery := validRuntimeManagerConfig()
 	aboveMaximumRecovery.RecoveryWindow = MaxRecoveryWindow + 1
+
+	// Admission only inspects the opener's presence. Calling it here would
+	// acquire storage before the configuration has been accepted.
+	opener := func(context.Context) (walletdb.DB, error) {
+		return nil, errDBFail
+	}
 	tests := []struct {
 		name    string
 		cfg     ManagerConfig
@@ -89,6 +97,7 @@ func TestManagerConfigValidate(t *testing.T) {
 				DataSource:     testSQLiteDBName,
 				ChainParams:    chaincfg.SimNetParams,
 				ChainSource:    &bwmock.Chain{},
+				OpenKVDB:       opener,
 				NoFreelistSync: true,
 				Timeout:        time.Second,
 			},
@@ -108,6 +117,25 @@ func TestManagerConfigValidate(t *testing.T) {
 			},
 			wantIs:  errUnsupportedBackend,
 			wantMsg: "mysql",
+		},
+		{
+			name: "kvdb path and opener",
+			cfg: ManagerConfig{
+				Backend:    DBBackendKVDB,
+				DataSource: WalletDBName,
+				OpenKVDB:   opener,
+			},
+			wantIs:  ErrInvalidParam,
+			wantMsg: "OpenKVDB",
+		},
+		{
+			name: "sqlite opener without data source",
+			cfg: ManagerConfig{
+				Backend:  DBBackendSQLite,
+				OpenKVDB: opener,
+			},
+			wantIs:  ErrMissingParam,
+			wantMsg: "DataSource",
 		},
 		{
 			name: "no data source",
