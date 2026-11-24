@@ -40,11 +40,25 @@ type kvdbManagerBackend struct {
 // Compile-time assertion that kvdbManagerBackend implements managerBackend.
 var _ managerBackend = (*kvdbManagerBackend)(nil)
 
-// newKVDBManagerBackend opens or creates the legacy walletdb database owned by
-// a Manager.
-//
-// Deprecated: remove this constructor with kvdb support.
-func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
+// openKVDB acquires the handle the backend will close after its wallets stop.
+func (cfg ManagerConfig) openKVDB(ctx context.Context) (walletdb.DB, error) {
+	// The caller selects the namespace and driver. A nil success would
+	// leave startup without a database for its first wallet lookup.
+	if cfg.OpenKVDB != nil {
+		dbConn, err := cfg.OpenKVDB(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("open kvdb: %w", err)
+		}
+
+		if dbConn == nil {
+			return nil, fmt.Errorf("%w: OpenKVDB returned nil",
+				ErrInvalidParam)
+		}
+
+		return dbConn, nil
+	}
+
+	// A fallback to bbolt after an opener error could create another wallet.
 	err := os.MkdirAll(filepath.Dir(cfg.DataSource), defaultWalletDBDirPerm)
 	if err != nil {
 		return nil, fmt.Errorf("create kvdb directory: %w", err)
@@ -67,6 +81,22 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 
 	default:
 		return nil, fmt.Errorf("open kvdb: %w", err)
+	}
+
+	return dbConn, nil
+}
+
+// newKVDBManagerBackend acquires the legacy database for a Manager.
+//
+// Deprecated: remove this constructor with kvdb support.
+func newKVDBManagerBackend(ctx context.Context, cfg ManagerConfig,
+	open func(context.Context) (walletdb.DB, error)) (*kvdbManagerBackend,
+	error) {
+
+	// Both acquisition paths transfer one handle to backend.close.
+	dbConn, err := open(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	return &kvdbManagerBackend{

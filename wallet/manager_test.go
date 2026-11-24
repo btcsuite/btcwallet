@@ -2825,6 +2825,96 @@ func TestManagerKVDBRejectsSecondCreate(t *testing.T) {
 	}
 }
 
+// TestManagerKVDBOpenerStartsWallet verifies that successive Managers can
+// acquire the same database and unlock its original wallet.
+func TestManagerKVDBOpenerStartsWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare an empty database. Each call to the opener must
+	// acquire its own file lock, so a leaked first handle prevents reopen.
+	path := testKVDBPath(t)
+	conn, err := walletdb.Create("bdb", path, true, time.Second, false)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	cfg := ManagerConfig{
+		Backend:           DBBackendKVDB,
+		ChainParams:       chainParams,
+		ChainSource:       createTestChain(t),
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
+		OpenKVDB: func(context.Context) (walletdb.DB, error) {
+			return walletdb.Open(
+				"bdb", path, true, time.Second, false,
+			)
+		},
+	}
+
+	// Persist a spendable wallet in the database selected by the opener.
+	first, err := NewManager(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stopManagerForTest(t, first) })
+	_, err = first.Start(t.Context())
+	require.NoError(t, err)
+
+	pass := []byte("private")
+	_, err = first.Create(CreateWalletParams{
+		Name:              testWalletName,
+		Mode:              ModeGenSeed,
+		PubPassphrase:     cfg.KVDBPubPassphrase,
+		PrivatePassphrase: pass,
+		Birthday:          time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, first.Stop())
+
+	// Act: End the second construction request before starting the wallet.
+	// The handle must remain usable throughout the wallet lifetime.
+	openCtx, cancel := context.WithCancel(t.Context())
+	second, err := NewManager(openCtx, cfg)
+
+	cancel()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stopManagerForTest(t, second) })
+	loaded, err := second.Start(t.Context())
+
+	// Assert: Unlocking the recovered wallet with its creation credential
+	// proves that startup used the database prepared by the first Manager.
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.NoError(t, loaded[0].Unlock(t.Context(), UnlockRequest{
+		Passphrase: pass,
+	}))
+}
+
+// TestManagerKVDBOpenerError verifies that failed acquisition cannot publish
+// a Manager or silently select a different database.
+func TestManagerKVDBOpenerError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The opener returns its request error. A live request thus
+	// models a nil success and a canceled one provides a concrete error.
+	cfg := ManagerConfig{
+		Backend:     DBBackendKVDB,
+		ChainParams: chainParams,
+		ChainSource: createTestChain(t),
+		OpenKVDB: func(ctx context.Context) (walletdb.DB, error) {
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: Construct with each request to exercise both opener outcomes.
+	failed, openErr := NewManager(ctx, cfg)
+	missing, nilErr := NewManager(t.Context(), cfg)
+
+	// Assert: Preserve the cancellation and diagnose the invalid handle
+	// at construction, before startup can attempt its first wallet read.
+	require.ErrorIs(t, openErr, context.Canceled)
+	require.Nil(t, failed)
+	require.ErrorIs(t, nilErr, ErrInvalidParam)
+	require.Nil(t, missing)
+}
+
 // TestManagerKVDBCreateMissingNameAfterReopen verifies an unnamed startup
 // entry cannot hide the caller's missing-name validation error.
 func TestManagerKVDBCreateMissingNameAfterReopen(t *testing.T) {
