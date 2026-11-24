@@ -5,6 +5,7 @@
 package kvdb
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -20,6 +21,180 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
+
+// TestForEachWatchAddressCancellation verifies that cancellation interrupts
+// the scan between address rows in an already-open Bolt view.
+func TestForEachWatchAddressCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Derive two eligible addresses in the same default scope so
+	// the iterator has another row to visit after the request is canceled.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	err = walletdb.Update(store.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		_, err := scope.NextExternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, 2,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	visits := 0
+
+	// Act: Cancel in the first address callback while the view is open.
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.ForEachWatchAddress(
+			ctx, ns, func(_ address.Address) error {
+				visits++
+
+				cancel()
+
+				return nil
+			},
+		)
+	})
+
+	// Assert: The next callback is skipped and the error preserves the
+	// cancellation cause across the storage iterator's error wrapping.
+	require.Equal(t, 1, visits)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestForEachWatchAddressCallbackDecrypt verifies that a watch callback can
+// read public metadata from the same manager during the Bolt view.
+func TestForEachWatchAddressCallbackDecrypt(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist one eligible child and encrypt public metadata
+	// with the manager the callback will re-enter.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	err = walletdb.Update(store.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		_, err := scope.NextExternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, 1,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	want := []byte("public metadata")
+	ciphertext, err := mgr.Encrypt(waddrmgr.CKTPublic, want)
+	require.NoError(t, err)
+
+	var plaintext []byte
+
+	// Act: Read the address snapshot and decrypt inside the callback.
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.ForEachWatchAddress(
+			t.Context(), ns, func(_ address.Address) error {
+				decoded, err := mgr.Decrypt(
+					waddrmgr.CKTPublic, ciphertext,
+				)
+				plaintext = decoded
+
+				return err
+			},
+		)
+	})
+
+	// Assert: The callback completes re-entry and returns the metadata.
+	require.NoError(t, err)
+	require.Equal(t, want, plaintext)
+}
+
+// TestLoadWatchSetCustomScopeImport verifies that a persisted custom scope
+// contributes its raw imports and change addresses.
+func TestLoadWatchSetCustomScopeImport(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist one raw key and two derived children in a custom
+	// scope. The external child belongs to that scope but is ineligible.
+	baseStore, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+	store := NewStore(baseStore.db, newTxStore(t, baseStore.db), mgr)
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	wif, err := btcutil.NewWIF(key, mgr.ChainParams(), true)
+	require.NoError(t, err)
+
+	var expected [][]byte
+
+	err = walletdb.Update(baseStore.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+
+		scope, err := mgr.NewScopedKeyManager(
+			ns, waddrmgr.KeyScope{Purpose: 1017}, schema,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Use the same scope for both derivation branches so the watch
+		// selection must distinguish change from external children.
+		_, err = scope.NextExternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, 1,
+		)
+		if err != nil {
+			return err
+		}
+
+		change, err := scope.NextInternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, 1,
+		)
+		if err != nil {
+			return err
+		}
+
+		// A raw import in this scope is eligible despite having no
+		// derivation branch.
+		stamp := mgr.SyncedTo()
+
+		imported, err := scope.ImportPrivateKey(ns, wif, &stamp)
+		if err != nil {
+			return err
+		}
+
+		for _, addr := range []waddrmgr.ManagedAddress{imported, change[0]} {
+			script, err := txscript.PayToAddrScript(addr.Address())
+			if err != nil {
+				return err
+			}
+
+			expected = append(expected, script)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Act: Read the watch set after the scope and all addresses commit.
+	watches, err := store.LoadWatchSet(t.Context(), 0)
+
+	// Assert: Both eligible scripts survive and the external one is absent.
+	require.NoError(t, err)
+	require.ElementsMatch(t, expected, watches.AddressScripts)
+}
 
 // TestAddressStoreNewDerivedAddress verifies that kvdb.Store creates derived
 // addresses through the legacy address manager.
