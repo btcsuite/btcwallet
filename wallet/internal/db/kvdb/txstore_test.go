@@ -749,6 +749,124 @@ func TestRollbackToBlockRewindsSyncTipWithoutForkTimestamp(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestRewindWalletPreservesSparseBirthday verifies that a manual rewind can
+// reach a birthday checkpoint without a predecessor or changing verification.
+func TestRewindWalletPreservesSparseBirthday(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist a later tip before the birthday marker so its preceding
+	// block was never recorded, as happens with sparse birthday checkpoints.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	addrStore := newAddrStore(t, dbConn)
+	t.Cleanup(addrStore.Close)
+	store := NewStore(dbConn, newTxStore(t, dbConn), addrStore)
+	currentTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{20},
+		Height:    20,
+		Timestamp: time.Unix(1710004200, 0).UTC(),
+	}
+	birthday := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0).UTC(),
+	}
+
+	writeSyncedTo(t, dbConn, addrStore, currentTip)
+	writeBirthdayBlock(t, dbConn, addrStore, birthday, false)
+
+	// Act: Request the ordinary wallet-scoped manual rewind, which must not
+	// require a birthday predecessor or promote its unverified marker.
+	err := store.RewindWallet(t.Context(), db.RewindWalletParams{
+		Block: db.Block{
+			Hash:      birthday.Hash,
+			Height:    uint32(birthday.Height),
+			Timestamp: birthday.Timestamp,
+		},
+	})
+
+	// Assert: The new tip is committed while the durable birthday identity and
+	// verification flag survive the temporary deletion within the update.
+	require.NoError(t, err)
+	require.Equal(t, birthday, addrStore.SyncedTo())
+	retained, verified := readBirthdayBlock(t, dbConn, addrStore)
+	require.Equal(t, birthday.Height, retained.Height)
+	require.Equal(t, birthday.Hash, retained.Hash)
+	require.True(t, birthday.Timestamp.Equal(retained.Timestamp))
+	require.False(t, verified)
+}
+
+// TestRewindWalletRestoresStateOnCommitFailure verifies that a rejected manual
+// rewind leaves both persisted birthday metadata and the live tip unchanged.
+func TestRewindWalletRestoresStateOnCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use the same sparse birthday boundary, but reject the completed
+	// write transaction after SetSyncedTo has already changed the live cache.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+	addrStore := newAddrStore(t, dbConn)
+	t.Cleanup(addrStore.Close)
+
+	currentTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{20},
+		Height:    20,
+		Timestamp: time.Unix(1710004200, 0).UTC(),
+	}
+	birthday := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0).UTC(),
+	}
+
+	writeSyncedTo(t, dbConn, addrStore, currentTip)
+	writeBirthdayBlock(t, dbConn, addrStore, birthday, true)
+	failingDB := &commitFailDB{
+		DB:       dbConn,
+		failNext: true,
+	}
+	store := NewStore(failingDB, newTxStore(t, dbConn), addrStore)
+
+	// Act: Finish the rewind's mutations, then inject the existing fixture's
+	// commit failure to exercise transaction rollback and cache restoration.
+	err := store.RewindWallet(t.Context(), db.RewindWalletParams{
+		Block: db.Block{
+			Hash:      birthday.Hash,
+			Height:    uint32(birthday.Height),
+			Timestamp: birthday.Timestamp,
+		},
+	})
+
+	// Assert: The original cache and durable birthday state remain visible;
+	// reopening within a read transaction independently checks the saved tip.
+	require.ErrorIs(t, err, errInjectedCommit)
+	require.Equal(t, currentTip, addrStore.SyncedTo())
+	retained, verified := readBirthdayBlock(t, dbConn, addrStore)
+	require.Equal(t, birthday.Height, retained.Height)
+	require.Equal(t, birthday.Hash, retained.Hash)
+	require.True(t, birthday.Timestamp.Equal(retained.Timestamp))
+	require.True(t, verified)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		persisted, err := waddrmgr.Open(
+			tx.ReadBucket(waddrmgr.NamespaceKey), []byte("pub"),
+			&chaincfg.SimNetParams,
+		)
+		if err != nil {
+			return err
+		}
+		defer persisted.Close()
+
+		tip := persisted.SyncedTo()
+		require.Equal(t, currentTip.Height, tip.Height)
+		require.Equal(t, currentTip.Hash, tip.Hash)
+		require.True(t, currentTip.Timestamp.Equal(tip.Timestamp))
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 // TestRollbackToBlockRewindsBirthdayBlock verifies that rollback rewrites a
 // birthday block at the disconnected height to the retained fork block.
 func TestRollbackToBlockRewindsBirthdayBlock(t *testing.T) {
