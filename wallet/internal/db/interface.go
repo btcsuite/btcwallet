@@ -191,6 +191,10 @@ type Store interface {
 
 // WalletStore defines the methods for wallet-level operations.
 type WalletStore interface {
+	// LoadWatchSet returns eligible receiving scripts and spend outpoints
+	// from one storage snapshot. It does not activate native subscriptions.
+	LoadWatchSet(ctx context.Context, walletID uint32) (WatchSet, error)
+
 	// CreateWallet creates a wallet and returns its information. An occupied
 	// name returns ErrWalletExists without modifying the existing wallet.
 	CreateWallet(ctx context.Context, params CreateWalletParams) (
