@@ -188,6 +188,21 @@ var (
 // WalletStore Types
 // --------------------
 
+// WatchSet contains persisted interests from one storage snapshot.
+// AddressScripts match payments in transaction outputs. OutPoints match
+// spends of known wallet outputs in transaction inputs. Either collection
+// may be empty independently.
+//
+// Callers decode address scripts for their network and activate native
+// subscriptions.
+type WatchSet struct {
+	// AddressScripts preserves the backend-selected receiving scripts.
+	AddressScripts [][]byte
+
+	// OutPoints includes outputs that still need spend observations.
+	OutPoints []wire.OutPoint
+}
+
 // WalletInfo contains the static properties of a wallet. This struct provides a
 // summary of the wallet's configuration and state.
 type WalletInfo struct {
