@@ -8,7 +8,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Register bdb.
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
