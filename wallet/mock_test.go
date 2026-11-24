@@ -155,27 +155,18 @@ func (m *mockChainProcessor) syncedTo(ctx context.Context) (waddrmgr.BlockStamp,
 	return args.Get(0).(waddrmgr.BlockStamp), args.Error(1)
 }
 
-// mockTxPublisher is a mock implementation of the TxPublisher interface.
+// mockTxPublisher mocks only the syncer's non-creating retry capability.
 type mockTxPublisher struct {
 	mock.Mock
 }
 
-// A compile-time check to ensure that mockTxPublisher implements the
-// TxPublisher interface.
-var _ TxPublisher = (*mockTxPublisher)(nil)
+// mockTxPublisher implements the private capability used by syncer fixtures.
+var _ txRebroadcaster = (*mockTxPublisher)(nil)
 
-// CheckMempoolAcceptance implements the TxPublisher interface.
-func (m *mockTxPublisher) CheckMempoolAcceptance(ctx context.Context,
+// rebroadcast exposes each background retry to the test's declared expectation.
+func (m *mockTxPublisher) rebroadcast(ctx context.Context,
 	tx *wire.MsgTx) error {
 
 	args := m.Called(ctx, tx)
-	return args.Error(0)
-}
-
-// Broadcast implements the TxPublisher interface.
-func (m *mockTxPublisher) Broadcast(ctx context.Context, tx *wire.MsgTx,
-	label string) error {
-
-	args := m.Called(ctx, tx, label)
 	return args.Error(0)
 }
