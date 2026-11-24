@@ -1340,9 +1340,12 @@ func TestNewImportedAddressConcurrentDuplicates(t *testing.T) {
 // TestNewImportedAddressDuplicateAcrossWallets verifies that wallet-scoped
 // uniqueness allows the same script pubkey to be imported into different
 // wallets.
+// LoadWatchSet must isolate each Wallet's raw imports without spend watches.
 func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Give each wallet one distinct raw script so the watch read
+	// can detect a leak. The insert case later repeats the first script.
 	store := NewTestStore(t)
 	// ADR 0012: imported addresses without private-key material require
 	// watch-only wallets to satisfy the symmetric invariant.
@@ -1365,18 +1368,52 @@ func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	info, err := store.NewImportedAddress(
+	otherScript := RandomBytes(32)
+	_, err = store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     secondWalletID,
 			AddressType:  db.WitnessPubKey,
 			PubKey:       RandomBytes(33),
-			ScriptPubKey: scriptPubKey,
+			ScriptPubKey: otherScript,
 		},
 	)
 	require.NoError(t, err)
-	require.NotZero(t, info.ID)
-	require.Nil(t, info.AccountID)
-	require.Nil(t, info.AccountNumber)
+
+	t.Run("LoadWatchSet", func(t *testing.T) {
+		// Act: Read the two wallet-local snapshots while their imported
+		// scripts are distinct, so leaking either peer is observable.
+		firstSet, err := store.LoadWatchSet(t.Context(), firstWalletID)
+		require.NoError(t, err)
+		secondSet, err := store.LoadWatchSet(t.Context(), secondWalletID)
+		require.NoError(t, err)
+
+		// Assert: Each snapshot contains only its wallet's script and
+		// has no spend watches for the unfunded imports.
+		require.Equal(t, [][]byte{scriptPubKey}, firstSet.AddressScripts)
+		require.Equal(t, [][]byte{otherScript}, secondSet.AddressScripts)
+		require.Empty(t, firstSet.OutPoints)
+		require.Empty(t, secondSet.OutPoints)
+	})
+
+	t.Run("NewImportedAddress", func(t *testing.T) {
+		// Act: Repeat the first wallet's import in the second wallet to
+		// exercise wallet-scoped uniqueness after the shared setup.
+		info, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     secondWalletID,
+				AddressType:  db.WitnessPubKey,
+				PubKey:       RandomBytes(33),
+				ScriptPubKey: scriptPubKey,
+			},
+		)
+		require.NoError(t, err)
+
+		// Assert: The duplicate script was stored in the second wallet
+		// without assigning the raw import to an account.
+		require.NotZero(t, info.ID)
+		require.Nil(t, info.AccountID)
+		require.Nil(t, info.AccountNumber)
+	})
 }
 
 // TestCreateImportedAddressRawIsAccountless verifies that direct raw imported

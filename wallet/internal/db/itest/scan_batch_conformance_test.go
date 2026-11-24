@@ -817,9 +817,13 @@ func watchOutPoints(t *testing.T, store db.Store,
 // covering an unspent credit, a credit spent by an unmined transaction, and a
 // leased credit. Comparing each SQL backend against an in-process kvdb store
 // (and exercising both build tags) establishes kvdb == sqlite == postgres.
+// LoadWatchSet must also return matching persisted address scripts and
+// outpoints across the same backends.
 func TestListOutputsToWatchConformance(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Mirror native derivation, funding, unmined spends and leases
+	// in SQL so both read APIs observe the same committed history.
 	fixture := newKVDBScanFixture(t)
 
 	sqlStore := NewTestStoreWithDerive(t, realAddressDeriveFunc())
@@ -936,21 +940,56 @@ func TestListOutputsToWatchConformance(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	kvdbWatch := watchOutPoints(t, fixture.store, 0)
-	sqlWatch := watchOutPoints(t, sqlStore, walletID)
-
-	// Expected watch set: the leased unspent output (funding:0), the
-	// spent-by-unmined output (funding:1), and the unmined spend's own
-	// credit (spend:0).
+	// Both operations must keep the leased unspent output (funding:0),
+	// the spent-by-unmined output (funding:1), and the spend's own credit
+	// (spend:0) in the committed history.
 	expected := map[wire.OutPoint]struct{}{
 		{Hash: fundingHash, Index: 0}:      {},
 		{Hash: fundingHash, Index: 1}:      {},
 		{Hash: spendTx.TxHash(), Index: 0}: {},
 	}
-	require.Equal(t, expected, kvdbWatch)
-	require.Equal(t, expected, sqlWatch)
-	require.Equal(t, kvdbWatch, sqlWatch,
-		"kvdb and SQL must report the same recovery watch set")
+
+	t.Run("ListOutputsToWatch", func(t *testing.T) {
+		// Act: Read the recovery output-only operation from the same history
+		// in each backend.
+		kvdbWatch := watchOutPoints(t, fixture.store, 0)
+		sqlWatch := watchOutPoints(t, sqlStore, walletID)
+
+		// Assert: Both stores report exactly the expected recovery watches.
+		require.Equal(t, expected, kvdbWatch)
+		require.Equal(t, expected, sqlWatch)
+	})
+
+	t.Run("LoadWatchSet", func(t *testing.T) {
+		// Arrange: Use the fixture's persisted children as the address oracle
+		// and retain the expected multiplicity of each outpoint.
+		derived := collectDerivedScripts(
+			t, fixture.store, 0, fixture.scope, fixture.accountName,
+		)
+
+		expectedScripts := make([][]byte, 0, len(derived))
+		for _, script := range derived {
+			expectedScripts = append(expectedScripts, script)
+		}
+
+		expectedPoints := make([]wire.OutPoint, 0, len(expected))
+		for point := range expected {
+			expectedPoints = append(expectedPoints, point)
+		}
+
+		// Act: Load both collections from each backend's combined read.
+		kvdbSet, err := fixture.store.LoadWatchSet(t.Context(), 0)
+		require.NoError(t, err)
+		sqlSet, err := sqlStore.LoadWatchSet(t.Context(), walletID)
+		require.NoError(t, err)
+
+		// Assert: Exact unordered equality catches a duplicate watch
+		// in place of a missing leased or spent-by-unmined outpoint.
+		require.ElementsMatch(t, expectedScripts, kvdbSet.AddressScripts)
+		require.ElementsMatch(t, expectedScripts, sqlSet.AddressScripts)
+		require.ElementsMatch(t, expectedPoints, kvdbSet.OutPoints)
+		require.ElementsMatch(t, expectedPoints, sqlSet.OutPoints)
+	})
 }
 
 // TestApplyScanBatchSkipsInvalidLastChild verifies that when the discovered
