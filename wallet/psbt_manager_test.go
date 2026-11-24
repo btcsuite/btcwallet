@@ -6297,32 +6297,59 @@ func TestDeduplicateUnknowns(t *testing.T) {
 	}
 }
 
-// TestSignPsbtLocked tests that SignPsbt fails when the wallet is locked.
+// TestSignPsbtLocked tests that SignPsbt fails when the wallet is locked,
+// returning no result and leaving the caller's packet unchanged.
 func TestSignPsbtLocked(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: A started Wallet that is not unlocked, and a minimal packet.
 	w, _ := createStartedWalletWithMocks(t)
-	// Minimal packet.
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{})
-	packet, _ := psbt.NewFromUnsignedTx(tx)
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
 
-	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+	// JSON keeps the transaction witnesses PSBT serialization drops.
+	before, err := json.Marshal(packet)
+	require.NoError(t, err)
+
+	// Act: Sign the packet.
+	result, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: The refusal returns nothing and leaves the packet intact.
 	require.ErrorIs(t, err, ErrStateForbidden)
+	require.Nil(t, result)
+
+	after, err := json.Marshal(packet)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 // TestFinalizePsbtLocked tests that FinalizePsbt fails when the wallet is
-// locked.
+// locked, leaving the caller's packet unchanged.
 func TestFinalizePsbtLocked(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: A started Wallet that is not unlocked, and a minimal packet.
 	w, _ := createStartedWalletWithMocks(t)
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{})
-	packet, _ := psbt.NewFromUnsignedTx(tx)
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
 
-	err := w.FinalizePsbt(t.Context(), packet)
+	// JSON keeps the transaction witnesses PSBT serialization drops.
+	before, err := json.Marshal(packet)
+	require.NoError(t, err)
+
+	// Act: Finalize the packet.
+	err = w.FinalizePsbt(t.Context(), packet)
+
+	// Assert: The refusal leaves the packet intact.
 	require.ErrorIs(t, err, ErrStateForbidden)
+
+	after, err := json.Marshal(packet)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 // TestFundPsbtRejectsCorruptInputAmounts verifies that a store result carrying
