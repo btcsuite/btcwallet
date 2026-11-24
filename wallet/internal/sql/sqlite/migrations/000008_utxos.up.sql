@@ -72,3 +72,31 @@ BEGIN
     );
 
 END;
+
+-- Share normalized spend eligibility between recovery and the combined read.
+-- Keep leases, accountless imports and credits claimed only by unconfirmed
+-- spenders. Funding and its known unconfirmed ancestry must be eligible.
+CREATE VIEW outputs_to_watch AS
+SELECT
+    t.wallet_id,
+    t.tx_hash,
+    u.output_index,
+    t.raw_tx
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+WHERE
+    (acc.id IS NULL OR NOT acc.no_chain_sync)
+    AND EXISTS (
+        SELECT 1 FROM eligible_transactions AS eligible
+        WHERE eligible.wallet_id = t.wallet_id AND eligible.id = t.id
+    )
+    -- Recovery still watches unconfirmed-spent credits; a current block ends it.
+    AND NOT EXISTS (
+        SELECT 1 FROM tx_inputs AS claim
+        INNER JOIN transactions AS spender ON claim.wallet_id = spender.wallet_id AND claim.tx_id = spender.id
+        WHERE
+            claim.wallet_id = t.wallet_id AND claim.prev_tx_hash = t.tx_hash
+            AND claim.prev_output_index = u.output_index AND spender.block_height IS NOT NULL
+    );

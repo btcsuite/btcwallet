@@ -321,3 +321,29 @@ WHERE
     )
 ORDER BY a.id
 LIMIT sqlc.arg('page_limit')::BIGINT;
+
+-- name: LoadWatchSet :many
+-- One statement loads both collections from the same snapshot without a
+-- separate read transaction or second database round trip.
+-- The row kind separates the two collections without multiplying them; NULLs
+-- occupy fields that do not apply. The outpoint arm uses the same eligibility
+-- view as the recovery query while projecting only the outpoint identity.
+SELECT
+    FALSE AS is_outpoint,
+    a.script_pub_key,
+    NULL::BYTEA AS tx_hash,
+    NULL::BIGINT AS output_index
+FROM addresses AS a
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+WHERE
+    a.wallet_id = sqlc.arg('wallet_id')
+    AND (NOT a.is_derived OR NOT acc.no_chain_sync)
+UNION ALL
+SELECT
+    TRUE AS is_outpoint,
+    NULL::BYTEA AS script_pub_key,
+    tx_hash,
+    output_index
+FROM outputs_to_watch
+WHERE wallet_id = sqlc.arg('wallet_id');
