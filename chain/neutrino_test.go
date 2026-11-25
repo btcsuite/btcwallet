@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -140,6 +141,65 @@ func TestNeutrinoClientSequentialStartStop(t *testing.T) {
 		case <-callStartStop():
 		}
 	}
+}
+
+// TestNeutrinoClientSubscriptionGeneration ties each reader to one client run.
+func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a service that supplies a tip for each run. Join the current
+	// generation even on a failed assertion so its handler cannot leak.
+	client := newMockNeutrinoClient()
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+	service.On("Start").Return(nil).Twice()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{}, nil).Twice()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+	first := client.SubscribeChainEvents(t.Context())
+	hash := chainhash.Hash{1}
+	client.onBlockDisconnected(&hash, 1, time.Time{})
+	require.Equal(t, hash, waitForBlockNtfn(t, first.Events, 1, false))
+
+	// Act by joining the first run before reopening the same client. The
+	// new subscriber and its marker belong to the second handler only.
+	client.Stop()
+	client.WaitForShutdown()
+	require.NoError(t, client.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	second := client.SubscribeChainEvents(ctx)
+	nextHash := chainhash.Hash{2}
+	client.onBlockDisconnected(&nextHash, 2, time.Time{})
+
+	// Assert the first generation retired and the current generation
+	// delivers its own marker before canceling while the client runs.
+	select {
+	case <-first.Done:
+	default:
+		t.Fatal("first generation is still subscribed after join")
+	}
+
+	require.Equal(t, nextHash, waitForBlockNtfn(t, second.Events, 2, false))
+
+	// The second generation also offers the marker to its legacy reader.
+	legacyHash := waitForBlockNtfn(t, client.Notifications(), 2, false)
+	require.Equal(t, nextHash, legacyHash)
+	cancel()
+
+	select {
+	case <-second.Done:
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("the restarted handler did not retire a canceled reader")
+	}
+
+	service.AssertExpectations(t)
 }
 
 // TestNeutrinoClientNotifyReceived verifies live watch updates preserve the

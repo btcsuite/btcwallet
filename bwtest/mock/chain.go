@@ -232,6 +232,14 @@ func (m *Chain) Notifications() <-chan any {
 	return args.Get(0).(<-chan any)
 }
 
+// SubscribeChainEvents returns the stream arranged for the caller.
+func (m *Chain) SubscribeChainEvents(
+	ctx context.Context) chain.EventSubscription {
+
+	args := m.Called(ctx)
+	return args.Get(0).(chain.EventSubscription)
+}
+
 // BackEnd implements the chain.Interface interface.
 func (m *Chain) BackEnd() string {
 	args := m.Called()

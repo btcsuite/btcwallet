@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -236,6 +237,49 @@ func TestRPCClientWatchAddrsFromTip(t *testing.T) {
 
 	// Assert: the shared routine returns only after exactly one future payment
 	// and a later block barrier exclude historical or duplicate delivery.
+}
+
+// TestRPCClientSubscriptionLifecycle checks live delivery, cancellation, and
+// shutdown through btcd's native notification handler.
+func TestRPCClientSubscriptionLifecycle(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a live client and a cancellable reader before calling the
+	// native notification callback with a distinct block marker.
+	_, client := setupBtcd(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	sub := client.SubscribeChainEvents(ctx)
+	hash := chainhash.Hash{1}
+
+	// Act by publishing the marker after enrollment and receiving it
+	// despite any connection notification from the running client.
+	client.onBlockConnected(&hash, 2, time.Time{})
+	require.Equal(t, hash, waitForBlockNtfn(t, sub.Events, 2, true))
+
+	// The original reader can still receive the same native marker.
+	legacyHash := waitForBlockNtfn(t, client.Notifications(), 2, true)
+	require.Equal(t, hash, legacyHash)
+	cancel()
+
+	// Assert cancellation retires this reader while the owner is still
+	// running. A different live context then exercises handler shutdown.
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("btcd subscription did not cancel")
+	}
+
+	live := client.SubscribeChainEvents(t.Context())
+	client.Stop()
+
+	select {
+	case <-live.Done:
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("btcd subscription outlived the client")
+	}
 }
 
 // mineHistoricalWatchAddr confirms a payment before a notification client is
