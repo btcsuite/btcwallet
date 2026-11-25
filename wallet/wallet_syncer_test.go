@@ -745,6 +745,102 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	mockChain.AssertExpectations(t)
 }
 
+// syncReadDBMock delegates wallet storage to a real database while its View
+// expectations control which snapshots the startup sync check reads.
+type syncReadDBMock struct {
+	walletdb.DB
+	mock.Mock
+}
+
+var _ walletdb.DB = (*syncReadDBMock)(nil)
+
+// View allows a partial block range to be replayed before returning.
+func (m *syncReadDBMock) View(read func(walletdb.ReadTx) error,
+	reset func()) error {
+
+	args := m.Called(read, reset)
+
+	return args.Error(0)
+}
+
+// TestSyncerReadRetryPreservesConfirmation checks that a discarded partial
+// hash range cannot cause initial sync to detach a confirmed transaction.
+func TestSyncerReadRetryPreservesConfirmation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange two snapshots. Only the second contains the mined payment.
+	_, _, prefix := newStoreScanSyncer(t)
+	s, mgr, conn := newStoreScanSyncer(t)
+	genesis := mgr.SyncedTo()
+	block := reorgBlock(1)
+	record := reorgRecord(t, 1)
+	tip := waddrmgr.BlockStamp{
+		Height:    block.Height,
+		Hash:      block.Hash,
+		Timestamp: block.Time,
+	}
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := mgr.SetSyncedTo(ns, &tip)
+		if err != nil {
+			return err
+		}
+
+		return s.txStore.InsertTx(
+			tx.ReadWriteBucket(wtxmgrNamespaceKey), record, &block,
+		)
+	})
+	require.NoError(t, err)
+
+	reader := &syncReadDBMock{DB: conn}
+	t.Cleanup(func() { reader.AssertExpectations(t) })
+
+	// Replay only the second View, where the range stops after genesis.
+	for _, discarded := range []walletdb.DB{nil, prefix} {
+		run := func(args mock.Arguments) {
+			read, ok := args.Get(0).(func(walletdb.ReadTx) error)
+			require.True(t, ok)
+			reset, ok := args.Get(1).(func())
+			require.True(t, ok)
+
+			if discarded != nil {
+				err := discarded.View(read, reset)
+				require.ErrorIs(t, err, db.ErrBlockNotFound)
+			}
+
+			require.NoError(t, conn.View(read, reset))
+		}
+		reader.On("View", mock.Anything, mock.Anything).
+			Run(run).Return(nil).Once()
+	}
+
+	// Both remote hashes match the records in the winning snapshot.
+	client := &bwmock.Chain{}
+	client.Test(t)
+	t.Cleanup(func() { client.AssertExpectations(t) })
+	client.On("GetBestBlock").Return(&tip.Hash, tip.Height, nil).Once()
+	client.On("GetBlockHashes", int64(0), int64(1)).
+		Return([]chainhash.Hash{genesis.Hash, tip.Hash}, nil).Once()
+
+	realStore := s.store
+	s.store = kvdb.NewStore(reader, s.txStore, mgr)
+	s.cfg.Chain = client
+
+	// Act through the rollback check run at the start of sync.
+	err = s.checkRollback(t.Context())
+
+	// Assert the transaction retains its mined block and the tip stays put.
+	require.NoError(t, err)
+	info, err := realStore.GetTx(
+		t.Context(), db.GetTxQuery{Txid: record.Hash},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, info.Block)
+	require.Equal(t, tip.Hash, info.Block.Hash)
+	require.Equal(t, tip, mgr.SyncedTo())
+}
+
 // TestCheckRollbackMissingHistoricalBlock verifies that a Store-backed wallet
 // accepts its persisted tip when its historical block range is unavailable.
 func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {

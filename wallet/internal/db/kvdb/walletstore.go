@@ -86,7 +86,7 @@ func (s *Store) GetWallet(_ context.Context,
 		masterPubKey  []byte
 	)
 
-	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err := s.db.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return errMissingAddrmgrNamespace
@@ -118,6 +118,9 @@ func (s *Store) GetWallet(_ context.Context,
 		}
 
 		return nil
+	}, func() {
+		// A previously verified block can be unverified on retry.
+		birthdayBlock = nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
@@ -178,7 +181,7 @@ func (s *Store) ListSyncedBlocks(_ context.Context,
 
 	blocks := make([]db.Block, 0, int(length))
 
-	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err = s.db.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return errMissingAddrmgrNamespace
@@ -211,6 +214,9 @@ func (s *Store) ListSyncedBlocks(_ context.Context,
 		}
 
 		return nil
+	}, func() {
+		// A replay starts at StartHeight even after a partial read.
+		blocks = blocks[:0]
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w", err)
