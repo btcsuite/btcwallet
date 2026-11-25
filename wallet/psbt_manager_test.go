@@ -4232,7 +4232,7 @@ func testFinalizeTweak(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
 
 	basePriv, _ := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
 	tweaked, _ := btcec.PrivKeyFromBytes(basePriv.Serialize())
-	require.NoError(t, tweak.apply(tweaked))
+	require.NoError(t, tweak.Apply(tweaked))
 
 	return tweaked, tweaked.PubKey()
 }

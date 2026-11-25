@@ -735,7 +735,7 @@ func ecdsaSignerKey(record []byte, tweak KeyTweak) ([]byte, error) {
 		return record, nil
 	}
 
-	key, err := tweak.pubKey(base)
+	key, err := tweakedPubKey(&tweak, base)
 	if err != nil {
 		return nil, err
 	}
@@ -782,7 +782,7 @@ func taprootSignerKey(record []byte, base *btcec.PublicKey,
 			"key at its path", ErrSigningKeyMismatch)
 	}
 
-	key, err := tweak.pubKey(base)
+	key, err := tweakedPubKey(&tweak, base)
 	if err != nil {
 		return nil, err
 	}
