@@ -801,3 +801,42 @@ func TestLegacyWalletVaultPubKeyWatchOnlyManager(t *testing.T) {
 	require.ErrorIs(t, err, keyvault.ErrNoPrivateKey)
 	require.Nil(t, pub)
 }
+
+// TestLegacyWalletVaultSignDigest verifies that the legacy vault signs with
+// the account child key, so kvdb signing needs no Wallet-side private key.
+func TestLegacyWalletVaultSignDigest(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked legacy vault and the public key at
+	// m/84'/1'/0'/0/1 read from the account xpub.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	vault := NewLegacyWalletVault(dbConn, mgr)
+	require.NoError(t, vault.Unlock(t.Context(), testPrivPass))
+	t.Cleanup(vault.Lock)
+
+	path := waddrmgr.DerivationPath{Branch: 0, Index: 1}
+	walletPub := legacyAccountChildPubKey(
+		t, dbConn, mgr, waddrmgr.KeyScopeBIP0084, path,
+	)
+	digest := sha256.Sum256([]byte("kvdb vault digest"))
+
+	// Act: Sign a digest with the key at the path.
+	sig, err := vault.SignDigest(t.Context(), signing.DigestRequest{
+		Key: signing.DerivedKey{
+			KeyScope:       waddrmgr.KeyScopeBIP0084,
+			DerivationPath: path,
+		},
+		Digest: digest,
+		Mode:   signing.ModeSchnorr,
+	})
+
+	// Assert: The signature verifies under the wallet key.
+	require.NoError(t, err)
+
+	schnorrSig, ok := sig.(signing.SchnorrSignature)
+	require.True(t, ok)
+	require.True(t, schnorrSig.Verify(digest[:], walletPub))
+}
