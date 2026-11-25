@@ -196,8 +196,11 @@ func (s *Store) ListUTXOs(_ context.Context,
 
 	var utxos []db.UtxoInfo
 
-	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err = s.db.View(func(tx walletdb.ReadTx) error {
 		return s.listUTXOsInView(tx, query, &utxos)
+	}, func() {
+		// Discard credits already visited in the previous snapshot.
+		utxos = utxos[:0]
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.ListUTXOs: %w", err)

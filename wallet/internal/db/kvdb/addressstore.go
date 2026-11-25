@@ -338,7 +338,7 @@ func (s *Store) ResolveOwnedAddresses(ctx context.Context,
 
 	addrMgr := s.addrStore
 
-	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err = s.db.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return errMissingAddrmgrNamespace
@@ -347,6 +347,9 @@ func (s *Store) ResolveOwnedAddresses(ctx context.Context,
 		return resolveOwnedScripts(
 			ns, addrMgr, query.ScriptPubKeys, owned,
 		)
+	}, func() {
+		// Resolve every script against the winning snapshot.
+		clear(owned)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ResolveOwnedAddresses: %w", err)
@@ -1020,18 +1023,23 @@ func listRawImportedAddressItems(dbConn walletdb.DB,
 
 	var items []db.AddressInfo
 
-	managers := addrMgr.ActiveScopedKeyManagers()
-
-	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+	err := dbConn.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return errMissingAddrmgrNamespace
 		}
 
-		for _, manager := range managers {
+		// Each attempt sees scopes published before its scan.
+		for _, manager := range addrMgr.ActiveScopedKeyManagers() {
 			account, err := manager.LookupAccount(
 				ns, db.DefaultImportedAccountName,
 			)
+			// A scope published after this view opened has no rows
+			// in the snapshot, even if its manager is already live.
+			if waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+				continue
+			}
+
 			if err != nil {
 				if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
 					continue
@@ -1051,6 +1059,9 @@ func listRawImportedAddressItems(dbConn walletdb.DB,
 		}
 
 		return nil
+	}, func() {
+		// Drop imported rows collected by the discarded attempt.
+		items = items[:0]
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list raw imported address items: %w", err)

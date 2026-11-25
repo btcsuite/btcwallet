@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"os"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/mock"
@@ -591,4 +593,303 @@ func TestUpdateWalletMissingAddrStore(t *testing.T) {
 
 	err := store.UpdateWallet(t.Context(), db.UpdateWalletParams{})
 	require.ErrorContains(t, err, "missing legacy addr store")
+}
+
+// expectReadReplay arranges a Store whose next View reads two snapshots.
+// An optional write between attempts can change the winning result.
+func expectReadReplay(t *testing.T, store *Store, between func()) *Store {
+	t.Helper()
+
+	view := func(read func(walletdb.ReadTx) error, reset func()) error {
+		err := store.db.View(read, reset)
+		if err != nil {
+			return err
+		}
+
+		// The driver releases the first snapshot before retrying.
+		if between != nil {
+			between()
+		}
+
+		return store.db.View(read, reset)
+	}
+	reader := &watchViewDB{DB: store.db}
+	reader.On("View", mock.Anything, mock.Anything).Return(view).Once()
+	t.Cleanup(func() { reader.AssertExpectations(t) })
+
+	return NewStore(reader, store.txStore, store.addrStore)
+}
+
+// TestStoreReadRetry checks that each legacy read returns only rows and
+// metadata from the winning transaction when a driver replays its callback.
+func TestStoreReadRetry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange one imported credit that the UTXO, history and watch
+	// queries can each identify independently after a replay.
+	const height = 144
+
+	scope := waddrmgr.KeyScopeBIP0084
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	creditImportedKeyAtHeight(
+		t, store.db, mgr, txStore, scope, 70000, height,
+	)
+
+	t.Run("unspent outputs", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange two snapshots containing the same unspent credit.
+		reader := expectReadReplay(t, store, nil)
+
+		// Act by listing all available outputs through the replay.
+		rows, err := reader.ListUTXOs(t.Context(), db.ListUtxosQuery{})
+
+		// Assert the outpoint contributes exactly one spendable row.
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+	})
+
+	t.Run("transaction details", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange a history query for the block containing the credit.
+		reader := expectReadReplay(t, store, nil)
+		query := db.ListTxDetailsQuery{
+			StartHeight: height,
+			EndHeight:   height,
+		}
+
+		// Act by reading its mined transaction in both snapshots.
+		rows, err := reader.ListTxDetails(t.Context(), query)
+
+		// Assert the transaction appears once at its queried height.
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+	})
+
+	t.Run("startup watches", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange one script and one outpoint from the imported credit.
+		want, err := store.LoadWatchSet(t.Context(), 0)
+		require.NoError(t, err)
+		require.Len(t, want.AddressScripts, 1)
+		require.Len(t, want.OutPoints, 1)
+		reader := expectReadReplay(t, store, nil)
+
+		// Act by loading the interests registered during startup.
+		got, err := reader.LoadWatchSet(t.Context(), 0)
+
+		// Assert neither collection retains the first attempt's rows.
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	})
+
+	t.Run("raw imported addresses", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange one import in each snapshot and a second import that
+		// becomes visible when the new scope commits between attempts.
+		store, mgr, txs, cleanup := newCreditedFixture(t)
+		t.Cleanup(cleanup)
+		creditImportedKeyAtHeight(
+			t, store.db, mgr, txs, scope, 70000, height,
+		)
+		derive := kvdbDeriveFnFixture(t, mgr)
+		custom := waddrmgr.KeyScope{Purpose: 1017, Coin: 1}
+		reader := expectReadReplay(t, store, func() {
+			schema := db.ScopeAddrMap[db.KeyScope(scope)]
+			zero := uint32(0)
+			params := db.CreateDerivedAccountParams{
+				Scope:         db.KeyScope(custom),
+				Name:          "family zero",
+				AddrSchema:    &schema,
+				AccountNumber: &zero,
+			}
+			_, err := store.CreateDerivedAccount(
+				t.Context(), params, derive,
+			)
+			require.NoError(t, err)
+			creditImportedKeyAtHeight(
+				t, store.db, mgr, txs, custom,
+				70001, height+1,
+			)
+		})
+		request, err := page.NewRequest[uint32](3)
+		require.NoError(t, err)
+
+		query := db.ListAddressesQuery{Page: request}
+
+		// Act by listing imports across all published scopes.
+		result, err := reader.ListAddresses(t.Context(), query)
+
+		// Assert the page matches a fresh listing of both imports,
+		// including its cursor and the identity of each address.
+		require.NoError(t, err)
+		want, err := store.ListAddresses(t.Context(), query)
+		require.NoError(t, err)
+		require.Len(t, want.Items, 2)
+		require.Equal(t, want, result)
+	})
+
+	t.Run("accounts", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange a name that moves to a funded account between reads.
+		const amount = 70000
+
+		store, mgr, txs, closeDB := newCreditedFixture(t)
+		t.Cleanup(closeDB)
+
+		name := "match"
+		first := createDerivedAccount(t, store.db, mgr, scope, name)
+		winner := createDerivedAccount(
+			t, store.db, mgr, scope, "funded",
+		)
+		creditNextAccountAddress(
+			t, store.db, mgr, txs, scope, winner, amount,
+		)
+
+		reader := expectReadReplay(t, store, func() {
+			rename := db.RenameAccountParams{
+				Scope:         db.KeyScope(scope),
+				AccountNumber: &first,
+				NewName:       "former",
+			}
+			err := store.RenameAccount(t.Context(), rename)
+			require.NoError(t, err)
+
+			rename.AccountNumber = &winner
+			rename.NewName = name
+			err = store.RenameAccount(t.Context(), rename)
+			require.NoError(t, err)
+		})
+
+		// Act by querying the named account with balances.
+		query := db.ListAccountsQuery{Name: &name}
+		rows, err := reader.ListAccounts(t.Context(), query)
+
+		// Assert the winning account has its own number and balance.
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.Equal(t, &winner, rows[0].AccountNumber)
+		require.EqualValues(t, amount, rows[0].ConfirmedBalance)
+	})
+
+	t.Run("owned address metadata", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange an account rename between reads of its script.
+		store, mgr, _, cleanup := newCreditedFixture(t)
+		t.Cleanup(cleanup)
+		createDerivedAccount(t, store.db, mgr, scope, "before")
+		params := db.NewDerivedAddressParams{
+			Scope:       db.KeyScope(scope),
+			AccountName: "before",
+		}
+		addr, err := store.NewDerivedAddress(t.Context(), params)
+		require.NoError(t, err)
+		reader := expectReadReplay(t, store, func() {
+			rename := db.RenameAccountParams{
+				Scope:   db.KeyScope(scope),
+				OldName: "before",
+				NewName: "after",
+			}
+			err := store.RenameAccount(t.Context(), rename)
+			require.NoError(t, err)
+		})
+
+		// Act by resolving the same script across the rename.
+		query := db.ResolveOwnedAddressesQuery{
+			ScriptPubKeys: [][]byte{addr.ScriptPubKey},
+		}
+		owned, err := reader.ResolveOwnedAddresses(t.Context(), query)
+
+		// Assert the script resolves to the renamed account.
+		require.NoError(t, err)
+
+		info := owned[string(addr.ScriptPubKey)]
+		require.NotNil(t, info)
+		require.Equal(t, "after", info.AccountName)
+	})
+
+	t.Run("birthday verification", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange a birthday that loses verification between attempts.
+		store, mgr, _, cleanup := newCreditedFixture(t)
+		t.Cleanup(cleanup)
+
+		block := mgr.SyncedTo()
+		writeBirthdayBlock(t, store.db, mgr, block, true)
+		reader := expectReadReplay(t, store, func() {
+			writeBirthdayBlock(t, store.db, mgr, block, false)
+		})
+
+		// Act by reading the birthday metadata used during startup.
+		info, err := reader.GetWallet(t.Context(), "")
+
+		// Assert startup sees the need to verify the birthday on chain.
+		require.NoError(t, err)
+		require.Nil(t, info.BirthdayBlock)
+	})
+}
+
+// TestListAddressesOlderScopeSnapshot checks that a newly published scope
+// cannot invalidate a raw-address listing against an earlier snapshot.
+func TestListAddressesOlderScopeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an older database containing one import. Saving its pages
+	// lets the live manager publish another scope without blocking Bolt.
+	store, mgr, txs, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	creditImportedKeyAtHeight(t, store.db, mgr, txs, scope, 70000, 144)
+
+	request, err := page.NewRequest[uint32](3)
+	require.NoError(t, err)
+
+	query := db.ListAddressesQuery{Page: request}
+	want, err := store.ListAddresses(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, want.Items, 1)
+
+	file, err := os.CreateTemp(t.TempDir(), "snapshot-*.db")
+	require.NoError(t, err)
+
+	copyErr := store.db.Copy(file)
+	require.NoError(t, file.Close())
+	require.NoError(t, copyErr)
+
+	schema := db.ScopeAddrMap[db.KeyScope(scope)]
+	zero := uint32(0)
+	params := db.CreateDerivedAccountParams{
+		Scope:         db.KeyScope{Purpose: 1017, Coin: 1},
+		Name:          "family zero",
+		AddrSchema:    &schema,
+		AccountNumber: &zero,
+	}
+	_, err = store.CreateDerivedAccount(
+		t.Context(), params, kvdbDeriveFnFixture(t, mgr),
+	)
+	require.NoError(t, err)
+
+	snapshot, err := walletdb.Open(
+		"bdb", file.Name(), true, defaultDBTimeout, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, snapshot.Close()) })
+
+	reader := NewStore(snapshot, txs, mgr)
+
+	// Act through the live manager using only the saved snapshot's rows.
+	got, err := reader.ListAddresses(t.Context(), query)
+
+	// Assert the missing scope leaves the original address readable.
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }

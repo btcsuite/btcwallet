@@ -1245,7 +1245,7 @@ func (s *Store) ListTxDetails(_ context.Context, query db.ListTxDetailsQuery) (
 
 	var details []db.TxDetailInfo
 
-	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err := s.db.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		if ns == nil {
 			return fmt.Errorf(
@@ -1275,6 +1275,9 @@ func (s *Store) ListTxDetails(_ context.Context, query db.ListTxDetailsQuery) (
 				return false, nil
 			},
 		)
+	}, func() {
+		// A retried range starts again at its first transaction.
+		details = details[:0]
 	})
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.ListTxDetails: %w", err)
