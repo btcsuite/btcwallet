@@ -196,3 +196,61 @@ func decodeHex(t *testing.T, value string) []byte {
 
 	return raw
 }
+
+// TestKeyTweakThen verifies that Then composes two tweaks in order: applying
+// the result once equals applying the first tweak and then the second.
+func TestKeyTweakThen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two tweaks with both scalars set and a base key.
+	firstMul := sha256.Sum256([]byte("first mul"))
+	firstAdd := sha256.Sum256([]byte("first add"))
+	first, err := NewKeyTweak(firstMul, firstAdd)
+	require.NoError(t, err)
+
+	nextMul := sha256.Sum256([]byte("next mul"))
+	nextAdd := sha256.Sum256([]byte("next add"))
+	next, err := NewKeyTweak(nextMul, nextAdd)
+	require.NoError(t, err)
+
+	baseBytes := sha256.Sum256([]byte("then base"))
+	want, _ := btcec.PrivKeyFromBytes(baseBytes[:])
+	require.NoError(t, first.Apply(want))
+	require.NoError(t, next.Apply(want))
+
+	// Act: Compose the tweaks and apply the result once.
+	composed := first.Then(next)
+
+	got, _ := btcec.PrivKeyFromBytes(baseBytes[:])
+	require.NoError(t, composed.Apply(got))
+
+	// Assert: Both give the same key.
+	require.True(t, got.Key.Equals(&want.Key))
+}
+
+// TestKeyTweakThenIdentity verifies that composing with the identity, the zero
+// value, returns the other tweak unchanged, so composing two identities stays
+// the zero value.
+func TestKeyTweakThenIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A tweak with both scalars set and the identity.
+	mul := sha256.Sum256([]byte("identity mul"))
+	add := sha256.Sum256([]byte("identity add"))
+	tweak, err := NewKeyTweak(mul, add)
+	require.NoError(t, err)
+
+	var identity KeyTweak
+
+	// Act: Compose the tweak with the identity on each side, and the
+	// identity with itself.
+	after := tweak.Then(identity)
+	before := identity.Then(tweak)
+	both := identity.Then(identity)
+
+	// Assert: The identity keeps the other tweak, and two identities stay
+	// the zero value.
+	require.Equal(t, tweak, after)
+	require.Equal(t, tweak, before)
+	require.Equal(t, KeyTweak{}, both)
+}
