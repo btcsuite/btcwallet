@@ -694,6 +694,22 @@ var allTestCases = []*testCase{
 		TestFunc: testPsbtManagerSignRejectMismatchedSignature,
 	},
 	{
+		Name:     "psbtmanager finalize owned inputs",
+		TestFunc: testPsbtManagerFinalizeOwnedInputs,
+	},
+	{
+		Name:     "psbtmanager finalize signed tapscript",
+		TestFunc: testPsbtManagerFinalizeSignedTapscript,
+	},
+	{
+		Name:     "psbtmanager finalize external signatures",
+		TestFunc: testPsbtManagerFinalizeExternalSignatures,
+	},
+	{
+		Name:     "psbtmanager finalize finalized packet",
+		TestFunc: testPsbtManagerFinalizeFinalizedPacket,
+	},
+	{
 		Name:     "psbtmanager complete workflow",
 		TestFunc: testPsbtManagerCompleteWorkflow,
 	},
