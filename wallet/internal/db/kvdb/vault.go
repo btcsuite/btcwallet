@@ -190,6 +190,33 @@ func (v *LegacyWalletVault) PubKey(ctx context.Context,
 	return pub, nil
 }
 
+// SignDigest implements keyvault.Vault.SignDigest for kvdb wallets.
+//
+// Deprecated: kvdb support is being removed; delete this method with it.
+func (v *LegacyWalletVault) SignDigest(ctx context.Context,
+	req signing.DigestRequest) (signing.Signature, error) {
+
+	defer req.Tweak.Zero()
+
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("kvdb vault SignDigest: %w", err)
+	}
+
+	var sig signing.Signature
+
+	err = v.useKey(ctx, req.Key, func(key *btcec.PrivateKey) error {
+		sig, err = keyvault.SignDigestWithKey(key, &req)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return sig, nil
+}
+
 // useKey reads the selected key through the kvdb Store, decrypts it with the
 // legacy manager and runs use with the private key, so the key never reaches
 // Wallet. It refuses an invalid selector, then returns keyvault.ErrVaultLocked
