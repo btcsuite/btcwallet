@@ -131,5 +131,22 @@ func (m *Vault) PubKey(ctx context.Context,
 	return pub, args.Error(1)
 }
 
+// SignDigest forwards to the configured testify expectations. A test may
+// return a function of the request to compute the signature from it.
+func (m *Vault) SignDigest(ctx context.Context,
+	req signing.DigestRequest) (signing.Signature, error) {
+
+	args := m.Called(ctx, req)
+
+	if fn, ok := args.Get(0).(func(signing.DigestRequest) (
+		signing.Signature, error)); ok {
+		return fn(req)
+	}
+
+	sig, _ := args.Get(0).(signing.Signature)
+
+	return sig, args.Error(1)
+}
+
 // A compile-time check that the mock satisfies the interface it stands in for.
 var _ keyvault.UnsafeVault = (*Vault)(nil)
