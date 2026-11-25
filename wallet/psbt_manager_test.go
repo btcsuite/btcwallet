@@ -6352,6 +6352,20 @@ func TestFinalizePsbtLocked(t *testing.T) {
 	require.Equal(t, before, after)
 }
 
+// TestFinalizePsbtNilPacket tests that FinalizePsbt refuses a nil packet.
+func TestFinalizePsbtNilPacket(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked Wallet, so only the missing packet is refused.
+	w, _ := createUnlockedWalletWithMocks(t)
+
+	// Act: Finalize without a packet.
+	err := w.FinalizePsbt(t.Context(), nil)
+
+	// Assert: The missing packet is named.
+	require.ErrorIs(t, err, ErrPacketNil)
+}
+
 // TestFundPsbtRejectsCorruptInputAmounts verifies that a store result carrying
 // an unrepresentable or inconsistent amount is refused by FundPsbt too, on both
 // the automatic and the manual selection path, without mutating the caller's
