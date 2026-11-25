@@ -44,41 +44,60 @@ func (cq *ConcurrentQueue) ChanOut() <-chan interface{} {
 // minimize overhead, but if the out channel is full it pushes items to an
 // overflow queue. This must be called before using the queue.
 func (cq *ConcurrentQueue) Start() {
-	go func() {
-		for {
-			nextElement := cq.overflow.Front()
-			if nextElement == nil {
-				// The overflow queue is empty, so incoming
-				// items can be pushed directly to the output
-				// channel. However, if output channel is full,
-				// we'll push to the overflow list instead.
-				select {
-				case item := <-cq.chanIn:
-					select {
-					case cq.chanOut <- item:
-					case <-cq.quit:
-						return
-					default:
-						cq.overflow.PushBack(item)
-					}
-				case <-cq.quit:
-					return
-				}
-			} else {
-				// The overflow queue is not empty, so any new
-				// items get pushed to the back to preserve
-				// order.
-				select {
-				case item := <-cq.chanIn:
-					cq.overflow.PushBack(item)
-				case cq.chanOut <- nextElement.Value:
-					cq.overflow.Remove(nextElement)
-				case <-cq.quit:
-					return
-				}
-			}
+	// A standalone queue only needs its original FIFO path.
+	go cq.run(nil, nil)
+}
+
+// run owns FIFO buffering and offers events to the optional live stream.
+// Stop retires the queue. A backing source can also retire it.
+func (cq *ConcurrentQueue) run(stream *chainEventStream,
+	sourceQuit <-chan struct{}) {
+
+	for {
+		// Offer the legacy overflow head only while a backlog exists.
+		var (
+			out  chan<- any
+			next any
+		)
+
+		head := cq.overflow.Front()
+		if head != nil {
+			out, next = cq.chanOut, head.Value
 		}
-	}()
+
+		select {
+		case item := <-cq.chanIn:
+			// A live offer does not depend on the FIFO reader.
+			if stream != nil {
+				stream.publish(item)
+			}
+
+			cq.enqueue(item)
+
+		case out <- next:
+			cq.overflow.Remove(head)
+
+		case <-cq.quit:
+			return
+
+		case <-sourceQuit:
+			return
+		}
+	}
+}
+
+// enqueue preserves FIFO order when called before startup or by the owner.
+func (cq *ConcurrentQueue) enqueue(item any) {
+	// Bypass the overflow list only when no older event is there.
+	if cq.overflow.Len() == 0 {
+		select {
+		case cq.chanOut <- item:
+			return
+		default:
+		}
+	}
+
+	cq.overflow.PushBack(item)
 }
 
 // Stop ends the goroutine that moves items from the in channel to the out
