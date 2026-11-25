@@ -2931,3 +2931,103 @@ func (s *syncer) resolveDisconnectFork(block db.Block,
 
 	return db.BlockStampFromBlock(&block)
 }
+
+// verifyDisconnectAncestry reads every header from the captured tip back to
+// the fork before writing. A Wallet catching up after a long outage pays
+// for the full gap, checking cancellation between recoveryBatchSize batches.
+// Rechecking its tip also validates absent heights above a shortened chain.
+func (s *syncer) verifyDisconnectAncestry(ctx context.Context,
+	lowest, tip uint32, fork, source waddrmgr.BlockStamp,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	parent := source.Hash
+	for high := tip; high > lowest; {
+		low := high - min(high-lowest, uint32(recoveryBatchSize)) + 1
+
+		next, err := s.readDisconnectWindow(
+			ctx, low, high, parent, canonical,
+		)
+		if err != nil {
+			return err
+		}
+
+		parent, high = next, low-1
+	}
+
+	// The last parent identifies the lowest block without fetching a
+	// redundant header. A different destination invalidates the whole proof.
+	if fork.Height >= 0 && parent != fork.Hash {
+		return fmt.Errorf("disconnect fork %d changed", fork.Height)
+	}
+
+	if _, needed := canonical[lowest]; needed {
+		canonical[lowest] = &parent
+	}
+
+	// A current source can reorganize during proof collection. Even a tip
+	// extension can invalidate evidence that an observed height was absent.
+	tipHash, tipHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("recheck disconnect source tip: %w", err)
+	}
+
+	if tipHeight != source.Height || *tipHash != source.Hash {
+		return fmt.Errorf("disconnect source tip changed from %s at %d "+
+			"to %s at %d", source.Hash, source.Height, tipHash, tipHeight)
+	}
+
+	return nil
+}
+
+// readDisconnectWindow verifies one bounded range against its expected high
+// hash. Its return value anchors the next range to this one's lowest header.
+func (s *syncer) readDisconnectWindow(ctx context.Context, low, high uint32,
+	parent chainhash.Hash,
+	canonical map[uint32]*chainhash.Hash) (chainhash.Hash, error) {
+
+	// Stop between batches so a deep fork does not hold Wallet shutdown.
+	err := ctx.Err()
+	if err != nil {
+		return parent, err
+	}
+
+	// The reverse walk indexes both results by height. It needs one
+	// hash per height and one header at the same index for each hash.
+	hashes, err := s.cfg.Chain.GetBlockHashes(int64(low), int64(high))
+	if err != nil {
+		return parent, fmt.Errorf("disconnect block hashes: %w", err)
+	}
+
+	if int64(len(hashes)) != int64(high-low+1) {
+		return parent, fmt.Errorf("incomplete disconnect hashes at %d", low)
+	}
+
+	headers, err := s.cfg.Chain.GetBlockHeaders(hashes)
+	if err != nil {
+		return parent, fmt.Errorf("disconnect block headers: %w", err)
+	}
+
+	if len(headers) != len(hashes) {
+		return parent, fmt.Errorf("incomplete disconnect headers at %d", low)
+	}
+
+	// Point lookup and bulk lookup can straddle a reorg. A key is usable
+	// only when the higher, already anchored header names that exact hash.
+	for i := len(hashes) - 1; i >= 0; i-- {
+		if hashes[i] != parent {
+			return parent, fmt.Errorf(
+				"disconnect ancestry changed at %d", high,
+			)
+		}
+
+		if _, needed := canonical[high]; needed {
+			hash := parent
+			canonical[high] = &hash
+		}
+
+		parent = headers[i].PrevBlock
+		high--
+	}
+
+	return parent, nil
+}
