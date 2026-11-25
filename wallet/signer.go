@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 )
 
 var (
@@ -231,36 +232,20 @@ type SignDigestIntent struct {
 }
 
 // Signature is an interface that represents a cryptographic signature.
-// It is a marker interface to allow returning different signature types.
-type Signature interface {
-	// isSignature is a marker method to ensure that only the types defined
-	// in this package can implement this interface.
-	isSignature()
-}
+// It is a marker interface to allow returning different signature types,
+// and only the signature types below implement it.
+type Signature = signing.Signature
 
 // ECDSASignature wraps an ecdsa.Signature to implement the Signature interface.
-type ECDSASignature struct {
-	*ecdsa.Signature
-}
+type ECDSASignature = signing.ECDSASignature
 
 // CompactSignature wraps a compact signature byte slice to implement the
 // Signature interface.
-type CompactSignature []byte
+type CompactSignature = signing.CompactSignature
 
 // SchnorrSignature wraps a schnorr.Signature to implement the Signature
 // interface.
-type SchnorrSignature struct {
-	*schnorr.Signature
-}
-
-// isSignature implements the Signature marker interface.
-func (ECDSASignature) isSignature() {}
-
-// isSignature implements the Signature marker interface.
-func (CompactSignature) isSignature() {}
-
-// isSignature implements the Signature marker interface.
-func (SchnorrSignature) isSignature() {}
+type SchnorrSignature = signing.SchnorrSignature
 
 // UnlockingScript is a struct that contains the witness and sigScript for a
 // transaction input.
@@ -963,7 +948,7 @@ func signDigestSchnorr(privKey *btcec.PrivateKey,
 		return nil, fmt.Errorf("cannot create schnorr sig: %w", err)
 	}
 
-	return SchnorrSignature{sig}, nil
+	return SchnorrSignature{Signature: sig}, nil
 }
 
 // signDigestECDSA performs the actual signing of a digest with a given
@@ -978,7 +963,7 @@ func signDigestECDSA(privKey *btcec.PrivateKey,
 
 	sig := ecdsa.Sign(privKey, intent.Digest)
 
-	return ECDSASignature{sig}, nil
+	return ECDSASignature{Signature: sig}, nil
 }
 
 // ComputeUnlockingScript generates the full sigScript and witness required to
