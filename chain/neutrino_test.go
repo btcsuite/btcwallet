@@ -1,13 +1,18 @@
 package chain
 
 import (
+	"container/list"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -214,5 +219,146 @@ func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 		}
 
 		require.Equal(t, wantMsgs, gotMsgs)
+	}
+}
+
+// TestNeutrinoClientRescanErrorNotMissed asserts that when Rescan() is called
+// and the rescanner's Start() returns an error channel that produces an error
+// immediately, notificationHandler does not miss the error while waiting in
+// select, and s.scanning is reset to false once the error is handled.
+func TestNeutrinoClientRescanErrorNotMissed(t *testing.T) {
+	nc := newMockNeutrinoClient()
+	nc.rescanMinBackoff = 100 * time.Millisecond
+
+	errCh := make(chan error, 1)
+	expectedErr := errors.New("peer disconnected: batch 0 timed out")
+	errCh <- expectedErr
+
+	nc.newRescan = func(ro ...neutrino.RescanOption) rescanner {
+		return &mockRescanner{
+			updateArgs: list.New(),
+			startChan:  errCh,
+		}
+	}
+
+	require.NoError(t, nc.Start(t.Context()))
+	defer nc.Stop()
+
+	startHash := new(wire.BlockHeader).BlockHash()
+	require.NoError(t, nc.Rescan(&startHash, nil, nil))
+
+	// The error channel should be drained by notificationHandler.
+	require.Eventually(t, func() bool {
+		return len(errCh) == 0
+	}, maxDur, 10*time.Millisecond)
+
+	// Scanning state should be reset to false after the error is processed.
+	require.Eventually(t, func() bool {
+		nc.clientMtx.Lock()
+		defer nc.clientMtx.Unlock()
+		return !nc.scanning
+	}, maxDur, 10*time.Millisecond)
+}
+
+// TestNeutrinoClientRescanRetriesOnError asserts that a rescan that fails with
+// an error retries with backoff and finishes once the retry succeeds.
+func TestNeutrinoClientRescanRetriesOnError(t *testing.T) {
+	nc := newMockNeutrinoClient()
+	nc.rescanMinBackoff = 10 * time.Millisecond
+
+	var attempts atomic.Int32
+	errCh := make(chan error, 1)
+
+	nc.newRescan = func(ro ...neutrino.RescanOption) rescanner {
+		attempt := attempts.Add(1)
+		if attempt == 1 {
+			return &mockRescanner{
+				updateArgs: list.New(),
+				startChan:  errCh,
+			}
+		}
+
+		return &mockRescanner{
+			updateArgs: list.New(),
+		}
+	}
+
+	require.NoError(t, nc.Start(t.Context()))
+	defer nc.Stop()
+
+	// Start from a block hash different from best block so attempt 1
+	// does not immediately complete.
+	startHash := chainhash.Hash{1}
+	require.NoError(t, nc.Rescan(&startHash, nil, nil))
+
+	// Simulate that attempt 1 delivered a block before failing.
+	nc.onFilteredBlockConnected(1, &wire.BlockHeader{}, nil)
+
+	// Now fail attempt 1.
+	errCh <- errors.New("temporary peer timeout")
+
+	// Attempt 1 should fail, then attempt 2 should be started on retry
+	// resuming from the delivered block header which matches best block.
+	require.Eventually(t, func() bool {
+		return attempts.Load() >= 2
+	}, maxDur, 10*time.Millisecond)
+
+	// RescanFinished notification should eventually arrive.
+	timeout := time.After(maxDur)
+	var gotFinished bool
+	for !gotFinished {
+		select {
+		case n := <-nc.Notifications():
+			if _, ok := n.(*RescanFinished); ok {
+				gotFinished = true
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for RescanFinished")
+		}
+	}
+
+	require.True(t, gotFinished)
+}
+
+// TestNeutrinoClientRescanRetryStopsOnShutdown asserts that a rescan that is
+// waiting to retry does not block client shutdown.
+func TestNeutrinoClientRescanRetryStopsOnShutdown(t *testing.T) {
+	nc := newMockNeutrinoClient()
+	// Use a long backoff to verify quit unblocks immediately.
+	nc.rescanMinBackoff = 1 * time.Hour
+
+	errCh := make(chan error, 1)
+	errCh <- errors.New("persistent error")
+
+	nc.newRescan = func(ro ...neutrino.RescanOption) rescanner {
+		return &mockRescanner{
+			updateArgs: list.New(),
+			startChan:  errCh,
+		}
+	}
+
+	require.NoError(t, nc.Start(t.Context()))
+
+	startHash := new(wire.BlockHeader).BlockHash()
+	require.NoError(t, nc.Rescan(&startHash, nil, nil))
+
+	// Wait until error channel is drained and retry sleep has started.
+	require.Eventually(t, func() bool {
+		return len(errCh) == 0
+	}, maxDur, 10*time.Millisecond)
+
+	// Stop client and verify shutdown completes without waiting
+	// out backoff.
+	done := make(chan struct{})
+	go func() {
+		nc.Stop()
+		nc.WaitForShutdown()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(maxDur):
+		t.Fatal("client did not shut down while rescan was retrying")
 	}
 }

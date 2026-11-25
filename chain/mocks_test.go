@@ -40,15 +40,19 @@ func newMockNeutrinoClient() *NeutrinoClient {
 	}
 
 	return &NeutrinoClient{
-		CS:        &mockChainService{},
-		newRescan: newRescanFunc,
+		CS:           &mockChainService{},
+		newRescan:    newRescanFunc,
+		rescanUpdate: make(chan struct{}, 1),
 	}
 }
 
 // mockRescanner is a mock implementation of a rescanner interface for use in
-// tests.  Only the Update method is implemented.
+// tests. Only the Update and Start methods are implemented.
 type mockRescanner struct {
 	updateArgs *list.List
+	startErr   error
+	startChan  chan error
+	startFunc  func() <-chan error
 }
 
 func (m *mockRescanner) Update(opts ...neutrino.UpdateOption) error {
@@ -57,6 +61,17 @@ func (m *mockRescanner) Update(opts ...neutrino.UpdateOption) error {
 }
 
 func (m *mockRescanner) Start() <-chan error {
+	if m.startFunc != nil {
+		return m.startFunc()
+	}
+	if m.startChan != nil {
+		return m.startChan
+	}
+	if m.startErr != nil {
+		errChan := make(chan error, 1)
+		errChan <- m.startErr
+		return errChan
+	}
 	return nil
 }
 
