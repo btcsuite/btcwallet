@@ -108,6 +108,16 @@ type Vault interface {
 	// read still returns ErrVaultLocked.
 	PubKey(ctx context.Context, sel signing.KeySelector) (*btcec.PublicKey,
 		error)
+
+	// SignDigest signs req.Digest with the selected key after applying
+	// req.Tweak. It checks in PubKey's order: a request that fails
+	// Validate returns its error (signing.ErrInvalidKeySelector or
+	// signing.ErrInvalidMode), then a locked vault returns ErrVaultLocked,
+	// both before any Store read. After the read it reports errors as
+	// PubKey does. The private key and every intermediate secret are
+	// cleared before it returns.
+	SignDigest(ctx context.Context, req signing.DigestRequest) (
+		signing.Signature, error)
 }
 
 // UnsafeVault is a Vault that also decrypts any stored ciphertext and returns
