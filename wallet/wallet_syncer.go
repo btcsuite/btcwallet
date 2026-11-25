@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -2930,6 +2931,59 @@ func (s *syncer) resolveDisconnectFork(block db.Block,
 	block.Timestamp = header.Timestamp
 
 	return db.BlockStampFromBlock(&block)
+}
+
+// findCanonicalBlockHashes binds the affected Wallet heights and candidate
+// fork to one source tip. Hashes read by height can span different branches.
+// On success, a present nil entry proves absence above the captured tip.
+// On error, callers must discard the map because it may contain partial proof.
+func (s *syncer) findCanonicalBlockHashes(ctx context.Context,
+	observed uint32, committedHeight int32,
+	fork, source waddrmgr.BlockStamp) (map[uint32]*chainhash.Hash, error) {
+
+	// Widen before adding one so a fork at MaxInt32 cannot overflow.
+	start, err := db.Int64ToUint32(int64(fork.Height) + 1)
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history start: %w", err)
+	}
+
+	tip, err := db.Int64ToUint32(int64(source.Height))
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history tip: %w", err)
+	}
+
+	history, err := s.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID: s.walletID, StartHeight: start, EndHeight: math.MaxInt32,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("disconnect history: %w", err)
+	}
+
+	// Include empty committed blocks and confirmations that were learned
+	// before a scan reached them. Above-tip entries stay explicitly absent.
+	canonical := map[uint32]*chainhash.Hash{observed: nil}
+	for h := start; int64(h) <= int64(committedHeight); h++ {
+		canonical[h] = nil
+	}
+
+	for _, tx := range history {
+		canonical[tx.Block.Height] = nil
+	}
+
+	// The fork anchors the destination of the rewind as well as the
+	// branch whose higher blocks the Store may invalidate.
+	lowest := tip
+	if fork.Height >= 0 {
+		lowest = start - 1
+	}
+
+	for h := range canonical {
+		lowest = min(lowest, h)
+	}
+
+	return canonical, s.verifyDisconnectAncestry(
+		ctx, lowest, tip, fork, source, canonical,
+	)
 }
 
 // verifyDisconnectAncestry reads every header from the captured tip back to
