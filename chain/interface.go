@@ -66,7 +66,25 @@ type Interface interface {
 	// behavior until its live-watch lifecycle receives a dedicated design.
 	WatchAddrsFromTip(context.Context, []address.Address) error
 	NotifyBlocks() error
+
+	// Notifications returns the client's shared, unbounded notification
+	// queue. Drain it continually to release queued events, including
+	// while subscriptions are active. On btcd and Neutrino, legacy
+	// dequeue also advances BlockStamp.
+	//
+	// Deprecated: Use [Interface.SubscribeChainEvents] for independent
+	// subscriptions.
 	Notifications() <-chan interface{}
+
+	// SubscribeChainEvents enrolls an independent reader on a started
+	// client. Only events published after enrollment are eligible. Each
+	// reader receives its buffered events in source order. An offer to a
+	// full buffer ends that subscription with
+	// [ErrEventSubscriptionBufferFull]. Other subscriptions continue. Call
+	// [EventSubscription.Err] after Done closes. Cancel ctx when the
+	// reader is no longer needed.
+	SubscribeChainEvents(ctx context.Context) EventSubscription
+
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
 	SubmitPackage(txns []*wire.MsgTx,
