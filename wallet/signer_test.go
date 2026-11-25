@@ -31,7 +31,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
-	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -589,189 +588,34 @@ func testLndTweaks(t *testing.T, basePub *btcec.PublicKey) []testTweakCase {
 	}
 }
 
-// TestNewKeyTweak tests that the tweak constructors refuse scalars at or above
-// the curve order and a zero multiplier, and return the identity as the zero
-// value, which keeps a derivation record's own key bytes.
-func TestNewKeyTweak(t *testing.T) {
+// TestKeyTweakErrorsWrapSignParam tests that the wallet's tweak constructors
+// and the PSBT record key helper report an invalid tweak as
+// ErrInvalidSignParam and keep ErrInvalidKeyTweak in the chain. The signing
+// package tests which tweaks are invalid; ComputeRawSig's Tweak Fail case
+// covers the signing path.
+func TestKeyTweakErrorsWrapSignParam(t *testing.T) {
 	t.Parallel()
 
-	// overOrder is the curve order plus one. Reduced, it would be a valid
-	// non-zero multiplier.
+	// Arrange: An addend above the curve order, a zero multiplier and a
+	// tweak that cancels the base key.
+	base, basePub := deterministicPrivKey(t)
+
 	var overOrder [32]byte
 	new(big.Int).Add(btcec.S256().N, big.NewInt(1)).FillBytes(overOrder[:])
-
-	one := [32]byte{31: 1}
-
-	tests := []struct {
-		name     string
-		mul      [32]byte
-		add      [32]byte
-		identity bool
-		wantErr  error
-	}{{
-		name: "valid",
-		mul:  one,
-		add:  one,
-	}, {
-		name:     "identity",
-		mul:      one,
-		identity: true,
-	}, {
-		name:    "multiplier above the curve order",
-		mul:     overOrder,
-		add:     one,
-		wantErr: ErrInvalidSignParam,
-	}, {
-		name:    "addend above the curve order",
-		mul:     one,
-		add:     overOrder,
-		wantErr: ErrInvalidSignParam,
-	}, {
-		name:    "zero multiplier",
-		add:     one,
-		wantErr: ErrInvalidSignParam,
-	}}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tweak, err := NewMulAddTweak(tc.mul, tc.add)
-
-			require.ErrorIs(t, err, tc.wantErr)
-
-			if tc.wantErr == nil {
-				require.Equal(
-					t, tc.identity, tweak == KeyTweak{},
-				)
-			}
-		})
-	}
-}
-
-// TestKeyTweakApply tests that a tweak sets the key to mul*d + add, that the
-// zero value leaves it unchanged, that a tweak cancelling the key is refused,
-// and that pubKey predicts the public key apply produces.
-func TestKeyTweakApply(t *testing.T) {
-	t.Parallel()
-
-	base, _ := deterministicPrivKey(t)
-
-	three := new(btcec.ModNScalar).SetInt(3)
-	five := new(btcec.ModNScalar).SetInt(5)
-
-	added, err := NewAddTweak(testScalarBytes(five))
-	require.NoError(t, err)
-
-	mulAdded, err := NewMulAddTweak(
-		testScalarBytes(three), testScalarBytes(five),
-	)
-	require.NoError(t, err)
 
 	negKey := base.Key
 	cancelling, err := NewAddTweak(testScalarBytes(negKey.Negate()))
 	require.NoError(t, err)
 
-	plusFive := base.Key
-	plusFive.Add(five)
+	// Act: Build and apply the invalid tweaks.
+	_, addErr := NewAddTweak(overOrder)
+	_, mulAddErr := NewMulAddTweak([32]byte{}, [32]byte{31: 1})
+	_, pubErr := tweakedPubKey(&cancelling, basePub)
 
-	timesThreePlusFive := base.Key
-	timesThreePlusFive.Mul(three).Add(five)
-
-	tests := []struct {
-		name    string
-		tweak   KeyTweak
-		want    btcec.ModNScalar
-		wantErr error
-	}{{
-		name: "zero value",
-		want: base.Key,
-	}, {
-		name:  "added tweak",
-		tweak: added,
-		want:  plusFive,
-	}, {
-		name:  "multiplied and added tweak",
-		tweak: mulAdded,
-		want:  timesThreePlusFive,
-	}, {
-		name:    "cancelling tweak",
-		tweak:   cancelling,
-		wantErr: signing.ErrInvalidKeyTweak,
-	}}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			key := &btcec.PrivateKey{Key: base.Key}
-
-			err := tc.tweak.Apply(key)
-			pubKey, pubErr := tweakedPubKey(&tc.tweak, base.PubKey())
-
-			require.ErrorIs(t, err, tc.wantErr)
-			require.ErrorIs(t, pubErr, tc.wantErr)
-
-			if tc.wantErr == nil {
-				require.True(t, key.Key.Equals(&tc.want))
-				require.True(t, pubKey.IsEqual(key.PubKey()))
-			}
-		})
-	}
-}
-
-// TestKeyTweakMatchesLndDerivations tests that the tweaks lnd builds give the
-// keys, and public keys, lnd derives today: a single tweak d + sha256(C || D),
-// a revocation key r*d + c*s with r = sha256(D || C) and c = sha256(C || D),
-// and a revocation followed by a single tweak. The Lightning hashes are
-// computed by the caller, as lnd would.
-func TestKeyTweakMatchesLndDerivations(t *testing.T) {
-	t.Parallel()
-
-	base, basePub := deterministicPrivKey(t)
-	lnd := newTestLndScalars(basePub)
-
-	// lnd's TweakPrivKey: d + single.
-	singleKey := base.Key
-	singleKey.Add(&lnd.single)
-
-	// lnd's DeriveRevocationPrivKey: r*d + c*s.
-	revocationKey := base.Key
-	revocationKey.Mul(&lnd.revoke).Add(&lnd.commitHalf)
-
-	// lnd's maybeTweakPrivKey with both tweaks: the revocation key, then
-	// the single tweak.
-	combinedKey := revocationKey
-	combinedKey.Add(&lnd.single)
-
-	wantKeys := map[string]btcec.ModNScalar{
-		"untweaked":                    base.Key,
-		"single tweak":                 singleKey,
-		"revocation tweak":             revocationKey,
-		"revocation then single tweak": combinedKey,
-	}
-
-	tweaks := testLndTweaks(t, basePub)
-	require.Len(t, tweaks, len(wantKeys))
-
-	for _, tc := range tweaks {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			want, ok := wantKeys[tc.name]
-			require.True(t, ok)
-
-			key := &btcec.PrivateKey{Key: base.Key}
-
-			err := tc.tweak.Apply(key)
-			require.NoError(t, err)
-
-			pubKey, err := tc.tweak.PubKey(basePub)
-			require.NoError(t, err)
-
-			require.True(t, key.Key.Equals(&want))
-			require.True(t, pubKey.IsEqual(key.PubKey()))
-		})
+	// Assert: Every error carries both sentinels.
+	for _, err := range []error{addErr, mulAddErr, pubErr} {
+		require.ErrorIs(t, err, ErrInvalidSignParam)
+		require.ErrorIs(t, err, ErrInvalidKeyTweak)
 	}
 }
 
