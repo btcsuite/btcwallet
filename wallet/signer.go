@@ -691,8 +691,9 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 // because the kvdb store adapter exports the legacy address manager's
 // encrypted account material through the same account-secret contract.
 //
-// This resolver is used by the path-driven signer entry points (SignDigest,
-// DerivePrivKey and ComputeRawSig/PSBT), which have only a derivation path.
+// This resolver is used by the path-driven entry points DerivePrivKey and
+// ComputeRawSig/PSBT, which have only a derivation path. SignDigest signs in
+// the vault instead.
 // Address-driven paths reach the same resolver through privKeyForAddressInfo
 // once the store has resolved the address to its derivation info, so both
 // address the account by number.
@@ -859,75 +860,11 @@ func (w *Wallet) SignDigest(ctx context.Context, path BIP32Path,
 	return result.signature, result.err
 }
 
-// handleSignDigest delivers the result of an accepted component request.
+// handleSignDigest delivers the result of an accepted component request. The
+// vault signs; Wallet never holds the private key.
 func (w *Wallet) handleSignDigest(r signDigestReq) {
-	// The operation zeroes its derived private key before delivery.
 	signature, err := w.signDigest(r.ctx, r.path, r.intent)
 	r.respChan <- signatureResp{signature: signature, err: err}
-}
-
-// signDigest signs the requested digest and zeroes its key before completion.
-func (w *Wallet) signDigest(ctx context.Context, path BIP32Path,
-	intent *SignDigestIntent) (Signature, error) {
-
-	privKey, err := w.derivePathPrivKey(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	defer privKey.Zero()
-
-	// Now, sign the message using the derived private key. This is all
-	// pure computation, so it can be done outside the DB transaction.
-	return signDigestWithPrivKey(privKey, intent)
-}
-
-// signDigestWithPrivKey performs the actual signing of a digest with a given
-// private key, based on the options specified in the SignDigestIntent. It
-// acts as a dispatcher to the appropriate signing algorithm.
-func signDigestWithPrivKey(privKey *btcec.PrivateKey,
-	intent *SignDigestIntent) (Signature, error) {
-
-	// If Schnorr is specified, we'll generate a Schnorr signature.
-	if intent.SigType == SigTypeSchnorr {
-		return signDigestSchnorr(privKey, intent)
-	}
-
-	// Otherwise, we'll generate an ECDSA signature.
-	return signDigestECDSA(privKey, intent)
-}
-
-// signDigestSchnorr performs the actual signing of a digest with a given
-// private key, using the Schnorr signature algorithm.
-func signDigestSchnorr(privKey *btcec.PrivateKey,
-	intent *SignDigestIntent) (Signature, error) {
-
-	if intent.TaprootTweak != nil {
-		privKey = txscript.TweakTaprootPrivKey(
-			*privKey, intent.TaprootTweak,
-		)
-	}
-
-	sig, err := schnorr.Sign(privKey, intent.Digest)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create schnorr sig: %w", err)
-	}
-
-	return SchnorrSignature{Signature: sig}, nil
-}
-
-// signDigestECDSA performs the actual signing of a digest with a given
-// private key, using the ECDSA signature algorithm.
-func signDigestECDSA(privKey *btcec.PrivateKey,
-	intent *SignDigestIntent) (Signature, error) {
-
-	if intent.CompactSig {
-		sig := ecdsa.SignCompact(privKey, intent.Digest, true)
-		return CompactSignature(sig), nil
-	}
-
-	sig := ecdsa.Sign(privKey, intent.Digest)
-
-	return ECDSASignature{Signature: sig}, nil
 }
 
 // ComputeUnlockingScript generates the full sigScript and witness required to

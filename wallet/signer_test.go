@@ -31,6 +31,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -491,6 +492,36 @@ func expectStoreSignerPrivKey(t *testing.T, mocks *mockWalletDeps,
 	return privKey, pubKey
 }
 
+// expectVaultSigner programs the mock vault to derive and sign with the leaf
+// key at path of the test account, as a real vault would, and returns that key
+// pair. The expectations are optional, so a test that fails before signing
+// does not trip them.
+func expectVaultSigner(t *testing.T, mocks *mockWalletDeps,
+	scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PrivateKey, *btcec.PublicKey) {
+
+	t.Helper()
+
+	privKey, pubKey := deriveLeafKeys(
+		t, testAccountXPrv(t), path.Branch, path.Index,
+	)
+	sel := signing.DerivedKey{KeyScope: scope, DerivationPath: path}
+
+	mocks.vault.On("PubKey", mock.Anything, sel).Return(pubKey, nil).Maybe()
+	mocks.vault.On("SignDigest", mock.Anything, mock.MatchedBy(
+		func(req signing.DigestRequest) bool {
+			return req.Key == sel
+		},
+	)).Return(func(req signing.DigestRequest) (Signature, error) {
+		key, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+		defer key.Zero()
+
+		return keyvault.SignDigestWithKey(key, &req)
+	}).Maybe()
+
+	return privKey, pubKey
+}
+
 // identityDecrypt is a vault decrypt stub that returns the ciphertext
 // unchanged, standing in for a real decrypt of never-encrypted test material.
 func identityDecrypt(b []byte) []byte {
@@ -754,14 +785,12 @@ func TestSignDigest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Set up a mock wallet whose store account
-			// secret resolves to a deterministic account xprv, so
-			// the signer derives a known leaf key for the path.
+			// Arrange: Set up a mock wallet whose vault signs with
+			// a known leaf key for the path.
 			w, mocks := createUnlockedWalletWithMocks(t)
 
-			privKey, pubKey := expectStoreSignerPrivKey(
-				t, mocks, w.id, path.KeyScope,
-				path.DerivationPath,
+			privKey, pubKey := expectVaultSigner(
+				t, mocks, path.KeyScope, path.DerivationPath,
 			)
 
 			// Act: Attempt to sign the message with the wallet.
@@ -775,28 +804,21 @@ func TestSignDigest(t *testing.T) {
 	}
 }
 
-// TestSignDigestFail tests failure modes of SignDigest through the store-routed
-// key path.
+// TestSignDigestFail tests that SignDigest maps the vault's key lookup errors
+// to the public signer errors.
 func TestSignDigestFail(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
-	accountNumber := path.DerivationPath.InternalAccount
-	query := db.GetAccountSecretQuery{
-		WalletID:      w.id,
-		Scope:         db.KeyScope(path.KeyScope),
-		AccountNumber: accountNumber,
-	}
-
 	digest := make([]byte, 32)
 	intent := &SignDigestIntent{Digest: digest}
 
 	// Test Case 1: The signing account is not in the store. We expect
 	// ErrAccountNotInStore to be returned.
-	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
-		(*db.AccountSecret)(nil), db.ErrAccountNotFound,
+	mocks.vault.On("SignDigest", mock.Anything, mock.Anything).Return(
+		nil, fmt.Errorf("lookup: %w", db.ErrAccountNotFound),
 	).Once()
 
 	_, err := w.SignDigest(t.Context(), path, intent)
@@ -804,8 +826,8 @@ func TestSignDigestFail(t *testing.T) {
 
 	// Test Case 2: The account exists but is watch-only (no encrypted
 	// private material). We expect ErrWatchOnlyAccount to be returned.
-	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
-		&db.AccountSecret{}, nil,
+	mocks.vault.On("SignDigest", mock.Anything, mock.Anything).Return(
+		nil, keyvault.ErrNoPrivateKey,
 	).Once()
 
 	_, err = w.SignDigest(t.Context(), path, intent)
