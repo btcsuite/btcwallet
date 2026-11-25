@@ -1913,7 +1913,7 @@ func testTweakedKey(t *testing.T, tweak KeyTweak,
 
 	t.Helper()
 
-	key, err := tweak.pubKey(base)
+	key, err := tweakedPubKey(&tweak, base)
 	require.NoError(t, err)
 
 	return key

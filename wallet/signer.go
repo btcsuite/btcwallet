@@ -265,11 +265,14 @@ type PrivKeyTweaker func(*btcec.PrivateKey) (*btcec.PrivateKey, error)
 
 // KeyTweak derives a signing key from the wallet's base key d as mul*d + add
 // modulo the curve order. Its zero value leaves the key unchanged. Build one
-// with NewAddTweak or NewMulAddTweak.
-type KeyTweak struct {
-	mul btcec.ModNScalar
-	add btcec.ModNScalar
-}
+// with NewAddTweak or NewMulAddTweak. Its Apply and PubKey methods report a
+// tweak that cancels the key with ErrInvalidKeyTweak.
+type KeyTweak = signing.KeyTweak
+
+// ErrInvalidKeyTweak reports a key tweak with a zero multiplier, a scalar at
+// or above the curve order, or a tweak that cancels the key. Wallet operations
+// wrap it in ErrInvalidSignParam.
+var ErrInvalidKeyTweak = signing.ErrInvalidKeyTweak
 
 // NewAddTweak returns the tweak d + add, such as lnd's single tweak. add is a
 // big-endian scalar below the curve order.
@@ -282,65 +285,26 @@ func NewAddTweak(add [32]byte) (KeyTweak, error) {
 // not be zero, which would leave nothing of the wallet's key. The identity,
 // mul 1 and add 0, is returned as the zero value.
 func NewMulAddTweak(mul, add [32]byte) (KeyTweak, error) {
-	var t KeyTweak
-	if t.mul.SetBytes(&mul) != 0 || t.add.SetBytes(&add) != 0 {
-		return KeyTweak{}, fmt.Errorf("%w: tweak exceeds the curve "+
-			"order", ErrInvalidSignParam)
-	}
-
-	if t.mul.IsZero() {
-		return KeyTweak{}, fmt.Errorf("%w: zero tweak multiplier",
-			ErrInvalidSignParam)
-	}
-
-	// The zero value keeps the derivation record's own key bytes, so the
-	// identity must be it.
-	one := new(btcec.ModNScalar).SetInt(1)
-	if t.mul.Equals(one) && t.add.IsZero() {
-		return KeyTweak{}, nil
+	t, err := signing.NewKeyTweak(mul, add)
+	if err != nil {
+		return KeyTweak{}, fmt.Errorf("%w: %w", ErrInvalidSignParam, err)
 	}
 
 	return t, nil
 }
 
-// apply tweaks a key the caller owns. A tweak that cancels the key is
-// refused.
-func (t KeyTweak) apply(key *btcec.PrivateKey) error {
-	if t == (KeyTweak{}) {
-		return nil
+// tweakedPubKey returns the public key that tweak produces from base's private
+// key, mul*base + add*G. A tweak that cancels the key returns
+// ErrInvalidSignParam.
+func tweakedPubKey(tweak *KeyTweak, base *btcec.PublicKey) (
+	*btcec.PublicKey, error) {
+
+	pub, err := tweak.PubKey(base)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSignParam, err)
 	}
 
-	key.Key.Mul(&t.mul).Add(&t.add)
-
-	if key.Key.IsZero() {
-		return fmt.Errorf("%w: tweak cancels the key",
-			ErrInvalidSignParam)
-	}
-
-	return nil
-}
-
-// pubKey returns the public key apply produces from base's private key:
-// mul*base + add*G.
-func (t KeyTweak) pubKey(base *btcec.PublicKey) (*btcec.PublicKey, error) {
-	if t == (KeyTweak{}) {
-		return base, nil
-	}
-
-	var point, mulPoint, addPoint, result btcec.JacobianPoint
-	base.AsJacobian(&point)
-	btcec.ScalarMultNonConst(&t.mul, &point, &mulPoint)
-	btcec.ScalarBaseMultNonConst(&t.add, &addPoint)
-	btcec.AddNonConst(&mulPoint, &addPoint, &result)
-
-	if (result.X.IsZero() && result.Y.IsZero()) || result.Z.IsZero() {
-		return nil, fmt.Errorf("%w: tweak cancels the key",
-			ErrInvalidSignParam)
-	}
-
-	result.ToAffine()
-
-	return btcec.NewPublicKey(&result.X, &result.Y), nil
+	return pub, nil
 }
 
 // UnlockingScriptParams provides all the necessary parameters to generate an
@@ -1638,9 +1602,9 @@ func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
 	}
 	defer privKey.Zero()
 
-	err = params.Tweak.apply(privKey)
+	err = params.Tweak.Apply(privKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSignParam, err)
 	}
 
 	if signer != nil && !recordKeyIs(signer, privKey.PubKey()) {

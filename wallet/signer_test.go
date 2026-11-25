@@ -31,6 +31,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -696,7 +697,7 @@ func TestKeyTweakApply(t *testing.T) {
 	}, {
 		name:    "cancelling tweak",
 		tweak:   cancelling,
-		wantErr: ErrInvalidSignParam,
+		wantErr: signing.ErrInvalidKeyTweak,
 	}}
 
 	for _, tc := range tests {
@@ -705,8 +706,8 @@ func TestKeyTweakApply(t *testing.T) {
 
 			key := &btcec.PrivateKey{Key: base.Key}
 
-			err := tc.tweak.apply(key)
-			pubKey, pubErr := tc.tweak.pubKey(base.PubKey())
+			err := tc.tweak.Apply(key)
+			pubKey, pubErr := tweakedPubKey(&tc.tweak, base.PubKey())
 
 			require.ErrorIs(t, err, tc.wantErr)
 			require.ErrorIs(t, pubErr, tc.wantErr)
@@ -762,10 +763,10 @@ func TestKeyTweakMatchesLndDerivations(t *testing.T) {
 
 			key := &btcec.PrivateKey{Key: base.Key}
 
-			err := tc.tweak.apply(key)
+			err := tc.tweak.Apply(key)
 			require.NoError(t, err)
 
-			pubKey, err := tc.tweak.pubKey(basePub)
+			pubKey, err := tc.tweak.PubKey(basePub)
 			require.NoError(t, err)
 
 			require.True(t, key.Key.Equals(&want))
