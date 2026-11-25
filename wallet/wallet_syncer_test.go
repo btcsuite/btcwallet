@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -9273,4 +9274,134 @@ func TestManagerRollbackKvdbOrphanCoinbaseSpends(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, coinbase.Hash, history[0].Hash)
+}
+
+// linkedDisconnectHeaders builds real header identities from a given parent.
+// Distinct nonces model two valid branches sharing the same fork.
+func linkedDisconnectHeaders(parent chainhash.Hash, count int,
+	nonce uint32) ([]chainhash.Hash, []*wire.BlockHeader) {
+
+	hashes := make([]chainhash.Hash, count)
+	headers := make([]*wire.BlockHeader, count)
+
+	// Hash each header before constructing its child so a batch can also
+	// be verified against a parent supplied by a different RPC call.
+	for i := range hashes {
+		headers[i] = &wire.BlockHeader{
+			PrevBlock: parent,
+			Nonce:     nonce,
+			Timestamp: time.Unix(int64(i), 0),
+		}
+		parent = headers[i].BlockHash()
+		hashes[i] = parent
+	}
+
+	return hashes, headers
+}
+
+// TestSyncerCollectsDisconnectEvidence verifies the proof covers this Wallet's
+// committed blocks and mined payments across two native header batches.
+func TestSyncerCollectsDisconnectEvidence(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a fork at genesis. The Wallet scanned height one, learned of
+	// a payment at the source tip, and observed a disconnect above it.
+	// The tip and scanned block are far enough apart to require two RPCs.
+	const (
+		tipHeight = recoveryBatchSize + 2
+		observed  = tipHeight + 1
+	)
+
+	hashes, headers := linkedDisconnectHeaders(
+		chainhash.Hash{}, tipHeight+1, 1,
+	)
+	fork := waddrmgr.BlockStamp{Hash: hashes[0]}
+	tip := waddrmgr.BlockStamp{Hash: hashes[tipHeight], Height: tipHeight}
+	store := &walletmock.Store{}
+	source := &bwmock.Chain{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		source.AssertExpectations(t)
+	})
+
+	s := newTestSyncer(Config{Chain: source}, nil, nil, nil, store, 7)
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: 7, StartHeight: 1, EndHeight: math.MaxInt32,
+	}).Return([]db.TxInfo{
+		{
+			Block: &db.Block{Height: tipHeight},
+		},
+	}, nil).Once()
+
+	// The newest window ends at height three going backwards. Only its
+	// parent can authenticate the older window containing the scanned block.
+	source.On("GetBlockHashes", int64(3), int64(tipHeight)).
+		Return(hashes[3:], nil).Once()
+	newerHeaders := source.On("GetBlockHeaders", hashes[3:]).
+		Return(headers[3:], nil).Once()
+	source.On("GetBlockHashes", int64(1), int64(2)).
+		Return(hashes[1:3], nil).Once()
+	olderHeaders := source.On("GetBlockHeaders", hashes[1:3]).
+		Return(headers[1:3], nil).Once()
+
+	// The tip recheck protects the proof only after both batches return.
+	source.On("GetBestBlock").Return(&tip.Hash, int32(tipHeight), nil).
+		Once().NotBefore(newerHeaders, olderHeaders)
+
+	// Act on the Wallet checkpoint and captured tip. The unrelated headers
+	// bridge the RPC boundary but contribute no Wallet history to rewind.
+	got, err := s.findCanonicalBlockHashes(
+		t.Context(), observed, 1, fork, tip,
+	)
+
+	// Assert that both stored heights retain their linked identities, the
+	// higher disconnect is explicitly absent, and no other row is selected.
+	require.NoError(t, err)
+	require.Equal(t, map[uint32]*chainhash.Hash{
+		1:         &hashes[1],
+		tipHeight: &hashes[tipHeight],
+		observed:  nil,
+	}, got)
+}
+
+// TestSyncerRejectsMismatchedDisconnectFork verifies that a valid header
+// from the captured tip cannot prove a different Wallet fork.
+func TestSyncerRejectsMismatchedDisconnectFork(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a one-block source window whose header names a different
+	// predecessor from the Wallet's proposed fork. No mined payment is
+	// needed because the observed block already selects that window.
+	const tipHeight = 5
+
+	hashes, headers := linkedDisconnectHeaders(chainhash.Hash{1}, 1, 1)
+	fork := waddrmgr.BlockStamp{
+		Height: tipHeight - 1,
+		Hash:   chainhash.Hash{2},
+	}
+	tip := waddrmgr.BlockStamp{Height: tipHeight, Hash: hashes[0]}
+	store := &walletmock.Store{}
+	source := &bwmock.Chain{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		source.AssertExpectations(t)
+	})
+
+	s := newTestSyncer(Config{Chain: source}, nil, nil, nil, store, 7)
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: 7, StartHeight: tipHeight, EndHeight: math.MaxInt32,
+	}).Return([]db.TxInfo(nil), nil).Once()
+	source.On("GetBlockHashes", int64(tipHeight), int64(tipHeight)).
+		Return(hashes, nil).Once()
+	source.On("GetBlockHeaders", hashes).Return(headers, nil).Once()
+
+	// Act through the collector so it verifies the captured header and
+	// checks its parent against the proposed fork.
+	_, err := s.findCanonicalBlockHashes(
+		t.Context(), tipHeight, fork.Height, fork, tip,
+	)
+
+	// Assert that the fork mismatch stops evidence collection before the
+	// final tip recheck. The chain mock expects only the header window.
+	require.Error(t, err)
 }
