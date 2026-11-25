@@ -27,6 +27,14 @@ import (
 // given interface.
 var ErrUnimplemented = errors.New("unimplemented")
 
+const (
+	// rescanRetryMinBackoff is the wait before retrying a failed rescan.
+	rescanRetryMinBackoff = time.Second
+
+	// rescanRetryMaxBackoff is the longest wait between rescan attempts.
+	rescanRetryMaxBackoff = time.Minute
+)
+
 // NeutrinoClient is an implementation of the btcwallet chain.Interface interface.
 type NeutrinoClient struct {
 	CS NeutrinoChainService
@@ -50,14 +58,23 @@ type NeutrinoClient struct {
 	lastFilteredBlockHeader *wire.BlockHeader
 	currentBlock            chan *waddrmgr.BlockStamp
 
-	quit       chan struct{}
-	rescanQuit chan struct{}
-	rescanErr  <-chan error
-	wg         sync.WaitGroup
-	started    bool
-	scanning   bool
-	finished   bool
-	isRescan   bool
+	quit         chan struct{}
+	rescanQuit   chan struct{}
+	rescanErr    <-chan error
+	rescanUpdate chan struct{}
+
+	rescanStartHash *chainhash.Hash
+	rescanAddrs     []address.Address
+	rescanOutPoints map[wire.OutPoint]address.Address
+
+	rescanMinBackoff time.Duration
+	rescanBackoff    time.Duration
+
+	wg       sync.WaitGroup
+	started  bool
+	scanning bool
+	finished bool
+	isRescan bool
 
 	// The clientMtx synchronizes access to the state variables of the client.
 	//
@@ -91,9 +108,10 @@ func NewNeutrinoClient(chainParams *chaincfg.Params,
 	}
 
 	return &NeutrinoClient{
-		CS:          chainService,
-		chainParams: chainParams,
-		newRescan:   newRescan,
+		CS:           chainService,
+		chainParams:  chainParams,
+		newRescan:    newRescan,
+		rescanUpdate: make(chan struct{}, 1),
 	}
 }
 
@@ -117,6 +135,7 @@ func (s *NeutrinoClient) Start(ctx context.Context) error {
 		s.dequeueNotification = make(chan interface{})
 		s.currentBlock = make(chan *waddrmgr.BlockStamp)
 		s.quit = make(chan struct{})
+		s.rescanUpdate = make(chan struct{}, 1)
 		s.started = true
 
 		// Go place a ClientConnected notification onto the queue.
@@ -414,6 +433,15 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 	return nil, err
 }
 
+// notifyRescanUpdate signals the notificationHandler that the rescan object or
+// its error channel has been updated.
+func (s *NeutrinoClient) notifyRescanUpdate() {
+	select {
+	case s.rescanUpdate <- struct{}{}:
+	default:
+	}
+}
+
 // Rescan replicates the RPC client's Rescan command.
 //
 //nolint:cyclop
@@ -431,6 +459,22 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash,
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
+	s.rescanStartHash = startHash
+	s.rescanAddrs = addrs
+	s.rescanOutPoints = outPoints
+	s.rescanBackoff = 0
+	s.clientMtx.Unlock()
+
+	return s.startRescan(startHash, addrs, outPoints)
+}
+
+// startRescan initializes and starts a new rescan. The caller must hold the
+// rescanMtx lock.
+func (s *NeutrinoClient) startRescan(startHash *chainhash.Hash,
+	addrs []address.Address,
+	outPoints map[wire.OutPoint]address.Address) error {
+
+	s.clientMtx.Lock()
 	if s.scanning {
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
@@ -447,6 +491,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash,
 	s.lastProgressSent = false
 	s.lastFilteredBlockHeader = nil
 	s.isRescan = true
+	s.rescanStartHash = startHash
 	s.clientMtx.Unlock()
 
 	bestBlock, err := s.CS.BestBlock()
@@ -514,6 +559,8 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash,
 	s.rescanErr = s.rescan.Start()
 	s.clientMtx.Unlock()
 
+	s.notifyRescanUpdate()
+
 	return nil
 }
 
@@ -567,6 +614,9 @@ func (s *NeutrinoClient) NotifyReceived(addrs []address.Address) error {
 	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
 	s.clientMtx.Unlock()
+
+	s.notifyRescanUpdate()
+
 	return nil
 }
 
@@ -739,6 +789,7 @@ func (s *NeutrinoClient) dispatchRescanFinished() {
 	}
 
 	header := s.lastFilteredBlockHeader
+	s.rescanBackoff = 0
 	s.clientMtx.Unlock()
 
 	select {
@@ -824,9 +875,36 @@ out:
 				dequeue = nil
 			}
 
-		case err := <-rescanErr:
+		case <-s.rescanUpdate:
+			// The rescan object or its error channel changed;
+			// loop to update rescanErr in the select.
+			continue
+
+		case err, ok := <-rescanErr:
+			if !ok {
+				s.clientMtx.Lock()
+				s.rescanErr = nil
+				s.clientMtx.Unlock()
+				continue
+			}
+
 			if err != nil {
-				log.Errorf("Neutrino rescan ended with error: %s", err)
+				log.Errorf(
+					"Neutrino rescan ended with error: %s",
+					err,
+				)
+			}
+
+			s.clientMtx.Lock()
+			s.scanning = false
+			s.rescanErr = nil
+			isRescan := s.isRescan
+			finished := s.finished
+			s.clientMtx.Unlock()
+
+			if isRescan && !finished && err != nil {
+				s.wg.Add(1)
+				go s.retryRescan()
 			}
 
 		case s.currentBlock <- bs:
@@ -839,6 +917,62 @@ out:
 	s.Stop()
 	close(s.dequeueNotification)
 	s.wg.Done()
+}
+
+// retryRescan retries a failed rescan after backoff, starting from the last
+// delivered block. It continues until the rescan finishes or the client shuts
+// down.
+func (s *NeutrinoClient) retryRescan() {
+	defer s.wg.Done()
+
+	s.clientMtx.Lock()
+	if !s.started || s.finished || !s.isRescan {
+		s.clientMtx.Unlock()
+		return
+	}
+	minBackoff := s.rescanMinBackoff
+	if minBackoff == 0 {
+		minBackoff = rescanRetryMinBackoff
+	}
+	backoff := s.rescanBackoff
+	if backoff == 0 {
+		backoff = minBackoff
+	}
+	s.clientMtx.Unlock()
+
+	log.Errorf("Unable to complete chain rescan, retrying in %v",
+		backoff)
+
+	select {
+	case <-time.After(backoff):
+	case <-s.quit:
+		return
+	}
+
+	s.rescanMtx.Lock()
+	defer s.rescanMtx.Unlock()
+
+	s.clientMtx.Lock()
+	if !s.started || s.finished || !s.isRescan {
+		s.clientMtx.Unlock()
+		return
+	}
+	s.rescanBackoff = min(backoff*2, rescanRetryMaxBackoff)
+
+	startHash := s.rescanStartHash
+	if s.lastFilteredBlockHeader != nil {
+		h := s.lastFilteredBlockHeader.BlockHash()
+		startHash = &h
+	}
+	addrs := s.rescanAddrs
+	outPoints := s.rescanOutPoints
+	s.clientMtx.Unlock()
+
+	if err := s.startRescan(startHash, addrs, outPoints); err != nil {
+		log.Errorf("Failed to restart Neutrino rescan: %v", err)
+		s.wg.Add(1)
+		go s.retryRescan()
+	}
 }
 
 // MapRPCErr takes an error returned from calling RPC methods from various
