@@ -1,14 +1,20 @@
 package chain
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -26,6 +32,373 @@ const (
 	// file. It is set to 30 seconds to allow for slow test environments.
 	defaultTestTimeout = 30 * time.Second
 )
+
+// newBitcoindStartupTestClient gives the real client a local RPC endpoint
+// whose tip request can fail before the notification queue is published.
+func newBitcoindStartupTestClient(t *testing.T,
+	tipError func() *btcjson.RPCError) *BitcoindClient {
+
+	t.Helper()
+
+	// Serve startup RPCs without a node or its notification transport.
+	serve := func(w http.ResponseWriter, r *http.Request) {
+		var req btcjson.Request
+
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+
+		response := btcjson.Response{Jsonrpc: req.Jsonrpc, ID: &req.ID}
+		switch req.Method {
+		case "getblockchaininfo":
+			// Inject a warmup error only in tests that need it.
+			if tipError != nil {
+				response.Error = tipError()
+			}
+
+			if response.Error == nil {
+				response.Result = json.RawMessage(
+					`{"bestblockhash":"01"}`,
+				)
+			}
+
+		case "getinfo":
+			// Bitcoind exposes its version via getnetworkinfo.
+			response.Error = btcjson.ErrRPCMethodNotFound
+
+		case "getnetworkinfo":
+			version := `{"subversion":"/Satoshi:32.0.0/"}`
+			response.Result = json.RawMessage(version)
+
+		case "getblockheader":
+			response.Result = json.RawMessage(`{"time":1}`)
+
+		default:
+			t.Errorf("unexpected startup RPC %q", req.Method)
+			return
+		}
+
+		err = json.NewEncoder(w).Encode(response)
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(serve))
+	t.Cleanup(server.Close)
+
+	// Supply explicit credentials so rpcclient targets this test server
+	// without looking for a local bitcoind cookie.
+	cfg := rpcclient.ConnConfig{
+		Host:         strings.TrimPrefix(server.URL, "http://"),
+		User:         "test",
+		Pass:         "test",
+		HTTPPostMode: true,
+		DisableTLS:   true,
+	}
+	rpc, err := rpcclient.New(&cfg, nil)
+	require.NoError(t, err)
+
+	t.Cleanup(rpc.WaitForShutdown)
+	t.Cleanup(rpc.Shutdown)
+
+	conn := &BitcoindConn{
+		cfg: BitcoindConfig{
+			Host: cfg.Host,
+			User: cfg.User,
+			Pass: cfg.Pass,
+		},
+		client: rpc,
+	}
+	client, err := conn.NewBitcoindClient()
+	require.NoError(t, err)
+
+	t.Cleanup(client.WaitForShutdown)
+	t.Cleanup(client.Stop)
+
+	return client
+}
+
+// TestBitcoindSubscriptionLiveDelivery checks that native history is excluded
+// and that overflow at a slow reader leaves the fast reader unaffected.
+func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a started client and drain the legacy startup marker so
+	// the next legacy read can check the same marker as a live reader.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+
+	hash := chainhash.Hash{1}
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+
+	fast := client.SubscribeChainEvents(t.Context())
+	slow := client.SubscribeChainEvents(t.Context())
+
+	// Bound each read and return the first event so a later matching
+	// marker cannot hide replay or a gap.
+	receive := func(events <-chan any) any {
+		t.Helper()
+
+		select {
+		case event := <-events:
+			return event
+		case <-time.After(defaultTestTimeout):
+			t.Fatal("reader missed a notification")
+		}
+
+		return nil
+	}
+
+	// Act by draining only the fast reader while sending enough events
+	// to overfill the slow reader. The legacy reader remains idle.
+	capacity := cap(slow.Events)
+	height := int32(2)
+
+	for range capacity + 1 {
+		client.onRescanProgress(&hash, height, time.Time{})
+		require.Equal(
+			t, &RescanProgress{Hash: hash, Height: height},
+			receive(fast.Events),
+		)
+		height++
+	}
+
+	// Assert the legacy reader also received the first live marker. The
+	// slow reader retains its prefix, and a late reader starts at the
+	// next marker after enrollment.
+	require.Equal(
+		t, &RescanProgress{Hash: hash, Height: 2}, receive(legacy),
+	)
+
+	late := client.SubscribeChainEvents(t.Context()).Events
+
+	retained := int32(2)
+
+	for range capacity {
+		require.Equal(
+			t, &RescanProgress{Hash: hash, Height: retained},
+			receive(slow.Events),
+		)
+		retained++
+	}
+
+	select {
+	case event := <-slow.Events:
+		t.Fatalf("slow reader unexpectedly received %v", event)
+	default:
+	}
+
+	client.onRescanProgress(&hash, height, time.Time{})
+	require.Equal(
+		t, &RescanProgress{Hash: hash, Height: height}, receive(late),
+	)
+}
+
+// TestBitcoindSubscriptionPreCanceled checks that an already-canceled
+// context returns a retired subscription.
+func TestBitcoindSubscriptionPreCanceled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a running source with a context canceled before enrollment.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act by subscribing with the context that already finished.
+	sub := client.SubscribeChainEvents(ctx)
+
+	// Assert both channels are closed when the rejected call returns,
+	// with the source still running.
+	select {
+	case <-sub.Done:
+	default:
+		t.Fatal("refused subscription stayed active")
+	}
+
+	select {
+	case _, ok := <-sub.Events:
+		require.False(t, ok)
+	default:
+		t.Fatal("refused subscription left Events open")
+	}
+}
+
+// TestBitcoindSubscriptionCancellation checks that an unread subscriber can
+// retire and events published during the resulting gap are ineligible.
+func TestBitcoindSubscriptionCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange one live subscriber with a pending event and no drain.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	first := client.SubscribeChainEvents(ctx)
+	hash := chainhash.Hash{3}
+	client.onRescanProgress(&hash, 1, time.Time{})
+
+	// Act by retiring the only subscriber, then publish while there is
+	// no reader. Leave the old reader's Events channel unread.
+	cancel()
+
+	select {
+	case <-first.Done:
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("unread events blocked subscription cancellation")
+	}
+
+	client.onRescanProgress(&hash, 2, time.Time{})
+
+	// The owner must finish publishing height 2 before it can accept
+	// height 3. Publication of height 3 itself may race registration.
+	client.onRescanProgress(&hash, 3, time.Time{})
+
+	next := client.SubscribeChainEvents(t.Context())
+	client.onRescanProgress(&hash, 4, time.Time{})
+
+	// Assert the reader can receive the racing height 3 and must receive
+	// height 4. Height 2 was published before enrollment and fails either
+	// expectation.
+	deadline := time.After(defaultTestTimeout)
+
+	for {
+		select {
+		case event := <-next.Events:
+			if progress, ok := event.(*RescanProgress); ok &&
+				progress.Height == 3 {
+
+				require.Equal(t, hash, progress.Hash)
+
+				continue
+			}
+
+			require.Equal(
+				t, &RescanProgress{Hash: hash, Height: 4}, event,
+			)
+
+			return
+
+		case <-deadline:
+			t.Fatal("new reader missed live delivery")
+		}
+	}
+}
+
+// TestBitcoindSubscriptionClientShutdown checks client Stop independently of
+// connection shutdown, including a live reader with an unread event.
+func TestBitcoindSubscriptionClientShutdown(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a started client and leave an eligible event unread.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+
+	sub := client.SubscribeChainEvents(t.Context())
+	hash := chainhash.Hash{4}
+	client.onRescanProgress(&hash, 1, time.Time{})
+
+	// Act by stopping the client while its subscription context is live.
+	client.Stop()
+
+	// Assert retirement does not require first draining the event. The
+	// existing buffered event remains readable on the closed channel.
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("subscription outlived the client")
+	}
+
+	require.Equal(t, &RescanProgress{Hash: hash, Height: 1}, <-sub.Events)
+	_, ok := <-sub.Events
+	require.False(t, ok)
+
+	// A call after retirement must return already-closed channels.
+	late := client.SubscribeChainEvents(t.Context())
+	select {
+	case <-late.Done:
+	default:
+		t.Fatal("a stopped client accepted a new subscriber")
+	}
+
+	select {
+	case _, open := <-late.Events:
+		require.False(t, open)
+	default:
+		t.Fatal("a stopped client left Events open")
+	}
+}
+
+// TestBitcoindSubscriptionAfterStartRetry verifies a failed Start leaves the
+// client retryable and a successful retry makes live subscriptions usable.
+func TestBitcoindSubscriptionAfterStartRetry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a node in warmup. The same RPC fixture can return its tip
+	// when the test clears the error.
+	var tipError atomic.Pointer[btcjson.RPCError]
+	tipError.Store(btcjson.NewRPCError(
+		btcjson.ErrRPCInWarmup, "Loading block index",
+	))
+	client := newBitcoindStartupTestClient(t, tipError.Load)
+
+	// Act by starting once while the node is in warmup, then retry on
+	// the same client after its tip RPC becomes available.
+	firstErr := client.Start(t.Context())
+
+	tipError.Store(nil)
+
+	retryErr := client.Start(t.Context())
+
+	// Assert the first call returns the actual RPC error. Verify the
+	// retry initialized the stream by receiving a live native marker.
+	var rpcErr *btcjson.RPCError
+	require.ErrorAs(t, firstErr, &rpcErr)
+	require.Equal(t, btcjson.ErrRPCInWarmup, rpcErr.Code)
+	require.NoError(t, retryErr)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	hash := chainhash.Hash{1}
+	client.onRescanProgress(&hash, 1, time.Time{})
+
+	select {
+	case event := <-sub.Events:
+		require.Equal(t, &RescanProgress{Hash: hash, Height: 1}, event)
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("retry did not enable live subscription delivery")
+	}
+}
+
+// TestBitcoindStartRetryAfterStop verifies a failed start cannot be retried
+// once Stop has retired the notification queue.
+func TestBitcoindStartRetryAfterStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an initial warmup failure before retiring the client.
+	var tipError atomic.Pointer[btcjson.RPCError]
+	tipError.Store(btcjson.NewRPCError(
+		btcjson.ErrRPCInWarmup, "Loading block index",
+	))
+	client := newBitcoindStartupTestClient(t, tipError.Load)
+
+	var rpcErr *btcjson.RPCError
+	require.ErrorAs(t, client.Start(t.Context()), &rpcErr)
+	require.Equal(t, btcjson.ErrRPCInWarmup, rpcErr.Code)
+	client.Stop()
+	tipError.Store(nil)
+
+	// Act after the node has recovered while the old client stays stopped.
+	err := client.Start(t.Context())
+
+	// Assert startup rejects the retry on the retired queue.
+	require.ErrorIs(t, err, ErrBitcoindClientShuttingDown)
+}
 
 // TestBitcoindEventsZMQ runs all bitcoind event tests using ZMQ subscriptions.
 //
@@ -49,6 +422,26 @@ func TestBitcoindEventsZMQ(t *testing.T) {
 //nolint:paralleltest
 func TestBitcoindEventsRPC(t *testing.T) {
 	runBitcoindEventsTests(t, true)
+
+	t.Run("SubscriptionSourceShutdown", func(t *testing.T) {
+		// Arrange a live subscription before the client registers any
+		// watches, so closure depends on observing the backing quit.
+		client := setupBitcoind(t, setupMiner(t), true)
+		sub := client.SubscribeChainEvents(t.Context())
+
+		// Act on the backing connection. The subscription precedes
+		// watch registration, so connection stop cannot find the
+		// client in the registered set to stop it directly.
+		client.chainConn.Stop()
+
+		// Assert the connection's terminal signal reaches the client
+		// even without a native watch on that connection.
+		select {
+		case <-sub.Done:
+		case <-time.After(defaultTestTimeout):
+			t.Fatal("subscription outlived its backing connection")
+		}
+	})
 }
 
 // runBitcoindEventsTests runs the suite of bitcoind event tests with the

@@ -208,6 +208,13 @@ func (c *MempoolChain) NotifyBlocks() error { return nil }
 // Notifications implements the chain.Interface interface.
 func (c *MempoolChain) Notifications() <-chan any { return nil }
 
+// SubscribeChainEvents disables live input for the broadcast benchmark.
+func (c *MempoolChain) SubscribeChainEvents(
+	_ context.Context) chain.EventSubscription {
+
+	return chain.EventSubscription{}
+}
+
 // BackEnd implements the chain.Interface interface.
 func (c *MempoolChain) BackEnd() string { return "mempool-fake" }
 

@@ -252,6 +252,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	m := &Manager{
 		wallets:     make(map[string]*Wallet),
 		requestChan: make(chan createWalletReq),
+		//nolint:staticcheck // Manager still reads the shared queue.
 		chainEvents: cfg.ChainSource.Notifications(),
 		backend:     backend,
 		config:      cfg,
