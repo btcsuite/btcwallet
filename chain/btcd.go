@@ -34,6 +34,7 @@ type RPCClient struct {
 
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
+	eventStream         *chainEventStream
 	currentBlock        chan *waddrmgr.BlockStamp
 
 	quit    chan struct{}
@@ -278,10 +279,14 @@ func (c *RPCClient) Start(_ context.Context) error {
 
 	c.quitMtx.Lock()
 	c.started = true
-	c.quitMtx.Unlock()
 
+	// Give the handler its registry before native events can reach it.
+	c.eventStream = newChainEventStream()
 	c.wg.Add(1)
 	go c.handler()
+
+	c.quitMtx.Unlock()
+
 	return nil
 }
 
@@ -389,6 +394,13 @@ func (c *RPCClient) WaitForShutdown() {
 // later reads.
 func (c *RPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
+}
+
+// SubscribeChainEvents enrolls a reader on the started RPCClient.
+func (c *RPCClient) SubscribeChainEvents(
+	ctx context.Context) EventSubscription {
+
+	return c.eventStream.subscribe(ctx)
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
@@ -585,14 +597,17 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 
 }
 
-// handler maintains a queue of notifications and the current state (best
-// block) of the chain.
+// handler delivers native notifications and maintains the last notified block.
 func (c *RPCClient) handler() {
+	defer c.wg.Done()
+
+	stream := c.eventStream
+	defer stream.close()
+
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
 		c.Stop()
-		c.wg.Done()
 		return
 	}
 
@@ -623,6 +638,11 @@ out:
 				enqueue = nil
 				continue
 			}
+
+			// Offer live events at intake so subscribers do not wait
+			// for a reader of the shared notification queue.
+			stream.publish(n)
+
 			if len(notifications) == 0 {
 				next = n
 				dequeue = c.dequeueNotification
@@ -659,7 +679,6 @@ out:
 
 	c.Stop()
 	close(c.dequeueNotification)
-	c.wg.Done()
 }
 
 // POSTClient creates the equivalent HTTP POST rpcclient.Client.

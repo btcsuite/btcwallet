@@ -45,6 +45,7 @@ type NeutrinoClient struct {
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
+	eventStream             *chainEventStream
 	startTime               time.Time
 	lastProgressSent        bool
 	lastFilteredBlockHeader *wire.BlockHeader
@@ -119,16 +120,8 @@ func (s *NeutrinoClient) Start(ctx context.Context) error {
 		s.quit = make(chan struct{})
 		s.started = true
 
-		// Go place a ClientConnected notification onto the queue.
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-
-			select {
-			case s.enqueueNotification <- ClientConnected{}:
-			case <-s.quit:
-			}
-		}()
+		// Each client run owns a fresh enrollment and cancellation scope.
+		s.eventStream = newChainEventStream()
 
 		// Go launch the notification handler.
 		s.wg.Add(1)
@@ -613,6 +606,18 @@ func (s *NeutrinoClient) Notifications() <-chan interface{} {
 	return s.dequeueNotification
 }
 
+// SubscribeChainEvents enrolls a reader on the started NeutrinoClient.
+func (s *NeutrinoClient) SubscribeChainEvents(
+	ctx context.Context) EventSubscription {
+
+	// Release the restart lock before enrolling with this generation.
+	s.clientMtx.Lock()
+	stream := s.eventStream
+	s.clientMtx.Unlock()
+
+	return stream.subscribe(ctx)
+}
+
 // SetStartTime sets the birthday used when the native rescan starts. Once a
 // scan is active, later hints leave its birthday unchanged; they do not restart
 // it. The client currently supports only one rescan at a time.
@@ -880,12 +885,16 @@ func (s *NeutrinoClient) dispatchRescanFinished() {
 // no bounds on the queue, so the dequeue channel should be read continually to
 // avoid running out of memory.
 func (s *NeutrinoClient) notificationHandler() {
+	defer s.wg.Done()
+
+	stream := s.eventStream
+	defer stream.close()
+
 	hash, height, err := s.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to get best block from chain service: %s",
 			err)
 		s.Stop()
-		s.wg.Done()
 		return
 	}
 
@@ -898,10 +907,13 @@ func (s *NeutrinoClient) notificationHandler() {
 	// need to process earlier blockconnected notifications still waiting
 	// here.
 
-	var notifications []interface{}
+	// Seed the startup marker directly so scheduling cannot publish a
+	// startup event to a live subscriber that enrolled after Start.
+	next := any(ClientConnected{})
+	notifications := []any{next}
 	enqueue := s.enqueueNotification
-	var dequeue chan interface{}
-	var next interface{}
+	dequeue := s.dequeueNotification
+
 out:
 	for {
 		s.clientMtx.Lock()
@@ -919,6 +931,11 @@ out:
 				enqueue = nil
 				continue
 			}
+
+			// Offer live events at intake so subscribers do not wait
+			// for a reader of the shared notification queue.
+			stream.publish(n)
+
 			if len(notifications) == 0 {
 				next = n
 				dequeue = s.dequeueNotification
@@ -960,7 +977,6 @@ out:
 
 	s.Stop()
 	close(s.dequeueNotification)
-	s.wg.Done()
 }
 
 // MapRPCErr takes an error returned from calling RPC methods from various
