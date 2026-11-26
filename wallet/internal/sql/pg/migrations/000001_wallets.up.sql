@@ -4,7 +4,7 @@
 -- This ensures migration tracking stays accurate and fails loudly if run twice.
 CREATE TABLE wallets (
     -- DB ID of the wallet, primary key. Only used for DB level relations.
-    id INTEGER PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
 
     -- Human friendly name for the wallet.
     wallet_name TEXT NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE wallets (
     -- Master HD public key of the wallet. NULL for certain wallet types that
     -- don't store extended public keys. Stored plaintext per ADR 0009
     -- (docs/developer/adr/0009-single-passphrase-encryption.md).
-    master_hd_pub_key BLOB
+    master_hd_pub_key BYTEA
 );
 
 -- Unique index to prevent duplicate wallet names.
@@ -31,13 +31,21 @@ CREATE UNIQUE INDEX uidx_wallets_name ON wallets (wallet_name);
 -- immutable. This closes the database-boundary hole where a raw wallet update
 -- could silently bypass the secret-table triggers by flipping the parent
 -- wallet between watch-only and spendable after insert.
+CREATE FUNCTION assert_wallet_is_watch_only_immutable() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.is_watch_only IS DISTINCT FROM OLD.is_watch_only THEN
+        RAISE EXCEPTION 'wallet is_watch_only cannot be changed after creation'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TRIGGER trg_assert_wallet_is_watch_only_immutable
 BEFORE UPDATE OF is_watch_only ON wallets
 FOR EACH ROW
-WHEN new.is_watch_only != old.is_watch_only
-BEGIN
-    SELECT raise(ABORT, 'wallet is_watch_only cannot be changed after creation');
-END;
+EXECUTE FUNCTION assert_wallet_is_watch_only_immutable();
 
 -- Wallet Secrets table to store rarely accessed, highly sensitive encrypted
 -- material with a strict one-to-one relationship with the wallets table.
@@ -47,30 +55,30 @@ END;
 CREATE TABLE wallet_secrets (
     -- Reference to the wallet these secrets belong to. Also serves as the
     -- primary key, enforcing one-to-one relationship.
-    wallet_id INTEGER PRIMARY KEY,
+    wallet_id BIGINT PRIMARY KEY,
 
     -- Params to derive the private master key. Required for every wallet,
     -- including watch-only wallets, because these derive the key that protects
     -- the script crypto key.
-    master_priv_params BLOB NOT NULL,
+    master_priv_params BYTEA NOT NULL,
 
     -- Encrypted key used to encrypt/decrypt wallet data related to private keys.
     -- NULL for watch-only wallets.
-    encrypted_crypto_priv_key BLOB,
+    encrypted_crypto_priv_key BYTEA,
 
     -- Encrypted key used to encrypt/decrypt wallet data related to scripts.
     -- NOT NULL and required for every wallet, including watch-only wallets, to
     -- protect script and imported-script material.
-    encrypted_crypto_script_key BLOB NOT NULL,
+    encrypted_crypto_script_key BYTEA NOT NULL,
 
     -- Encrypted HD private key of the wallet. NULL for watch-only wallets.
-    encrypted_master_hd_priv_key BLOB,
+    encrypted_master_hd_priv_key BYTEA,
 
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if secrets still exist.
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,
 
-    -- NOT NULL still allows zero-length BLOB values, so these CHECKs keep the
+    -- NOT NULL still allows zero-length bytea values, so these CHECKs keep the
     -- required-secret blobs non-empty at the DB boundary.
     CHECK (length(master_priv_params) > 0),
     CHECK (length(encrypted_crypto_script_key) > 0)
@@ -80,72 +88,52 @@ CREATE TABLE wallet_secrets (
 -- wallets require script-encryption material for imported scripts, but must
 -- never store private key material. Spendable wallets must store the encrypted
 -- private crypto key and encrypted master HD private key they need to unlock.
+CREATE FUNCTION assert_watch_only_wallet_secrets() RETURNS TRIGGER AS $$
+DECLARE
+    wallet_is_watch_only BOOLEAN;
+BEGIN
+    SELECT w.is_watch_only INTO wallet_is_watch_only
+    FROM wallets AS w
+    WHERE w.id = NEW.wallet_id;
+
+    IF wallet_is_watch_only AND (
+        NEW.encrypted_crypto_priv_key IS NOT NULL
+        OR NEW.encrypted_master_hd_priv_key IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'watch-only wallet private secret columns must be null'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    IF NOT wallet_is_watch_only AND (
+        NEW.encrypted_crypto_priv_key IS NULL
+        OR length(NEW.encrypted_crypto_priv_key) = 0
+        OR NEW.encrypted_master_hd_priv_key IS NULL
+        OR length(NEW.encrypted_master_hd_priv_key) = 0
+    ) THEN
+        RAISE EXCEPTION 'spendable wallet private secret columns must be non-empty'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TRIGGER trg_assert_watch_only_wallet_secrets_insert
 BEFORE INSERT ON wallet_secrets
 FOR EACH ROW
-BEGIN
-    SELECT raise(ABORT, 'watch-only wallet private secret columns must be null')
-    WHERE (
-        SELECT w.is_watch_only
-        FROM wallets AS w
-        WHERE w.id = new.wallet_id
-    ) AND (
-        new.encrypted_crypto_priv_key IS NOT NULL
-        OR new.encrypted_master_hd_priv_key IS NOT NULL
-    );
-
-    SELECT
-        raise(
-            ABORT, 'spendable wallet private secret columns must be non-empty'
-        )
-    WHERE NOT (
-        SELECT w.is_watch_only
-        FROM wallets AS w
-        WHERE w.id = new.wallet_id
-    ) AND (
-        new.encrypted_crypto_priv_key IS NULL
-        OR length(new.encrypted_crypto_priv_key) = 0
-        OR new.encrypted_master_hd_priv_key IS NULL
-        OR length(new.encrypted_master_hd_priv_key) = 0
-    );
-END;
+EXECUTE FUNCTION assert_watch_only_wallet_secrets();
 
 CREATE TRIGGER trg_assert_watch_only_wallet_secrets_update
 BEFORE UPDATE ON wallet_secrets
 FOR EACH ROW
-BEGIN
-    SELECT raise(ABORT, 'watch-only wallet private secret columns must be null')
-    WHERE (
-        SELECT w.is_watch_only
-        FROM wallets AS w
-        WHERE w.id = new.wallet_id
-    ) AND (
-        new.encrypted_crypto_priv_key IS NOT NULL
-        OR new.encrypted_master_hd_priv_key IS NOT NULL
-    );
-
-    SELECT
-        raise(
-            ABORT, 'spendable wallet private secret columns must be non-empty'
-        )
-    WHERE NOT (
-        SELECT w.is_watch_only
-        FROM wallets AS w
-        WHERE w.id = new.wallet_id
-    ) AND (
-        new.encrypted_crypto_priv_key IS NULL
-        OR length(new.encrypted_crypto_priv_key) = 0
-        OR new.encrypted_master_hd_priv_key IS NULL
-        OR length(new.encrypted_master_hd_priv_key) = 0
-    );
-END;
+EXECUTE FUNCTION assert_watch_only_wallet_secrets();
 
 -- Wallet-relative observations have identity independent of shared metadata.
 CREATE TABLE wallet_blocks (
-    wallet_id INTEGER NOT NULL REFERENCES wallets (id) ON DELETE RESTRICT,
+    wallet_id BIGINT NOT NULL REFERENCES wallets (id) ON DELETE RESTRICT,
     block_height INTEGER NOT NULL CHECK (block_height >= 0),
-    header_hash BLOB NOT NULL CHECK (length(header_hash) = 32),
-    block_timestamp INTEGER NOT NULL CHECK (block_timestamp >= 0),
+    header_hash BYTEA NOT NULL CHECK (octet_length(header_hash) = 32),
+    block_timestamp BIGINT NOT NULL CHECK (block_timestamp >= 0),
     PRIMARY KEY (wallet_id, block_height),
     UNIQUE (wallet_id, header_hash)
 );
@@ -156,34 +144,36 @@ CREATE TABLE wallet_blocks (
 CREATE TABLE wallet_sync_states (
     -- Reference to the wallet this sync state belongs to. Also serves as the
     -- primary key, enforcing one-to-one relationship.
-    wallet_id INTEGER PRIMARY KEY,
+    wallet_id BIGINT PRIMARY KEY,
 
-    -- Current sync status of the wallet (references blocks table). NULL for wallets
+    -- Current sync status of the wallet (references wallet_blocks table). NULL for wallets
     -- that haven't synced any blocks yet.
     synced_height INTEGER,
 
-    -- Birthday block height of the wallet (references blocks table). NULL if the
+    -- Birthday block height of the wallet (references wallet_blocks table). NULL if the
     -- wallet has no known birthday block. When set, indicates the block has been
     -- verified.
     birthday_height INTEGER,
 
     -- User-provided birthday timestamp for wallet rescan. NULL if not set.
-    birthday_timestamp DATETIME,
+    birthday_timestamp TIMESTAMP,
 
     -- Last updated timestamp stored in UTC without timezone info.
-    updated_at DATETIME NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
 
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if sync state still exists.
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,
 
-    -- Foreign key constraint to blocks. Using ON DELETE RESTRICT to ensure
-    -- that the block cannot be deleted if it is referenced by the sync state.
-    FOREIGN KEY (synced_height) REFERENCES blocks (block_height)
+    -- Foreign key constraint to wallet_blocks. Using ON DELETE RESTRICT to
+    -- ensure that the block cannot be deleted if referenced by the sync state.
+    FOREIGN KEY (wallet_id, synced_height)
+    REFERENCES wallet_blocks (wallet_id, block_height)
     ON DELETE RESTRICT,
 
-    -- Foreign key constraint to blocks. Using ON DELETE RESTRICT to ensure
-    -- that the block cannot be deleted if it is referenced by the sync state.
-    FOREIGN KEY (birthday_height) REFERENCES blocks (block_height)
+    -- Foreign key constraint to wallet_blocks. Using ON DELETE RESTRICT to
+    -- ensure that the block cannot be deleted if referenced by the sync state.
+    FOREIGN KEY (wallet_id, birthday_height)
+    REFERENCES wallet_blocks (wallet_id, block_height)
     ON DELETE RESTRICT
 );

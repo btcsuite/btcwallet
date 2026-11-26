@@ -23,9 +23,9 @@ CREATE TABLE transactions (
     -- NULL = Unconfirmed (mempool)
     -- INT  = Confirmed (mined)
     --
-    -- ON DELETE SET NULL: If a block is reorged, the transaction becomes
-    -- unconfirmed.
-    block_height INTEGER REFERENCES blocks (block_height) ON DELETE SET NULL,
+    -- The parent delete trigger clears the confirmation edge before its
+    -- composite FK is removed, retaining the transaction's Wallet identity.
+    block_height INTEGER,
 
     -- Monotonic token assigned when a row becomes confirmed. Confirmed range
     -- reads use it as the block-local tie-breaker so rows first seen as
@@ -61,6 +61,10 @@ CREATE TABLE transactions (
     -- CHECK to enforce the shared 500-character limit.
     tx_label TEXT NOT NULL DEFAULT ''
     CHECK (length(tx_label) <= 500),
+
+    -- Confirmation edges cannot cross Wallet ownership.
+    FOREIGN KEY (wallet_id, block_height)
+    REFERENCES wallet_blocks (wallet_id, block_height) ON DELETE RESTRICT,
 
     -- Secondary unique constraint used as the referenced key for wallet-scoped
     -- child relations such as utxos and tx_replacements.
@@ -143,26 +147,11 @@ WHERE block_height IS NOT NULL;
 CREATE INDEX idx_transactions_by_received_time
 ON transactions (wallet_id, received_time DESC);
 
--- Reorg handling for coinbase transactions.
---
--- SQLite evaluates this disconnect path differently from PostgreSQL. The block
--- delete would clear child `transactions.block_height` values through the FK
--- action, but SQLite checks row validity before a child-side AFTER UPDATE hook
--- can repair coinbase status. We therefore rewrite affected child rows from the
--- parent-table delete path instead.
---
--- The invariant is the same as PostgreSQL:
---   - coinbase + confirmed block => status = 1 (`published`)
---   - coinbase + no block        => status = 4 (`orphaned`)
---
--- The BEFORE DELETE trigger on blocks updates child rows into their final
--- disconnected shape before the parent block row is removed.
---
--- NOTE: Generic per-row block disconnects are intentionally unsupported here.
--- Wallet code should use dedicated rollback/rewind operations instead of
--- `UPDATE transactions SET block_height = NULL`.
+-- Disconnect only the owning Wallet's confirmation edges before its block
+-- disappears. Rewriting status and order in the same statement preserves
+-- coinbase CHECK constraints and never clears the composite FK's wallet_id.
 CREATE TRIGGER trg_disconnect_transactions_before_block_delete
-BEFORE DELETE ON blocks
+BEFORE DELETE ON wallet_blocks
 FOR EACH ROW
 BEGIN
     -- Rewrite every child transaction that points at the deleted block height.
@@ -179,7 +168,7 @@ BEGIN
         END,
         block_height = NULL,
         confirmed_order = NULL
-    WHERE block_height = old.block_height;
+    WHERE wallet_id = old.wallet_id AND block_height = old.block_height;
 END;
 
 -- Retain immutable input facts independently of wallet credit discovery.
