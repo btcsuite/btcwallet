@@ -225,14 +225,6 @@ type scanResult struct {
 	parentHash chainhash.Hash
 }
 
-// prepareRollbackReq asks the worker to finish earlier chain writes before
-// Manager rewinds shared storage. The worker closes readyForRollback and waits
-// for rollbackDone, which Manager closes after success or terminal cleanup.
-type prepareRollbackReq struct {
-	readyForRollback chan struct{}
-	rollbackDone     <-chan struct{}
-}
-
 // chainProcessor abstracts Wallet event processing and recovery, allowing
 // Wallet and controller tests to replace the existing worker.
 type chainProcessor interface {
@@ -299,6 +291,11 @@ type syncer struct {
 	// processor; every maintained Wallet receives its Manager's instance.
 	chainSyncer    chainRouter
 	chainEventChan <-chan chainEvent
+
+	// pendingDisconnect retains the first failed live disconnect so the
+	// next initialization replays it before startup rollback or later
+	// mailbox events can overtake it.
+	pendingDisconnect *wtxmgr.BlockMeta
 }
 
 // A compile-time assertion to ensure that syncer implements chainProcessor.
@@ -409,6 +406,15 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 		return fmt.Errorf("unable to wait for backend sync: %w", err)
 	}
 
+	// Retry a previously failed live disconnect before startup rollback so
+	// an orphaned confirmation above the saved checkpoint is not dropped.
+	if s.pendingDisconnect != nil {
+		err = s.disconnectBlock(ctx, *s.pendingDisconnect)
+		if err != nil {
+			return fmt.Errorf("retry pending disconnect: %w", err)
+		}
+	}
+
 	// Check for any reorgs that happened while we were down.
 	err = s.checkRollback(ctx)
 	if err != nil {
@@ -447,6 +453,13 @@ func (s *syncer) waitForRetry(ctx context.Context,
 	retry <-chan time.Time) error {
 
 	for {
+		// Pause mailbox reads while a failed disconnect awaits retry so
+		// queued events cannot overtake the pending rewind.
+		events := s.chainEventChan
+		if s.pendingDisconnect != nil {
+			events = nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -454,7 +467,7 @@ func (s *syncer) waitForRetry(ctx context.Context,
 		case <-retry:
 			return nil
 
-		case event := <-s.chainEventChan:
+		case event := <-events:
 			err := s.processChainEventBeforeSync(ctx, event)
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -482,10 +495,15 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 	defer t.Stop()
 
 	for {
+		// Pause mailbox reads while a failed disconnect awaits retry so
+		// queued events cannot overtake the pending rewind.
+		events := s.chainEventChan
+		if s.pendingDisconnect != nil {
+			events = nil
+		}
+
 		select {
-		case event := <-s.chainEventChan:
-			// Initialization cannot depend on a rollback that is itself
-			// waiting for this worker. Preserve mailbox order on this owner.
+		case event := <-events:
 			err := s.processChainEventBeforeSync(ctx, event)
 			if err != nil {
 				return err
@@ -968,8 +986,8 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 	return s.applyStoreTxBatch(ctx, matches, block, nil)
 }
 
-// blockMatchesCheckpoint validates a supplemental payload against the saved
-// tip or older shared history. Missing history contributes no new effects.
+// blockMatchesCheckpoint checks a queued live block against this Wallet's
+// checkpoint or stored history before recording its payments.
 func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
 	current waddrmgr.BlockStamp) (bool, error) {
 
@@ -1948,8 +1966,8 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	return s.putSyncBatch(ctx, scanState, results)
 }
 
-// handleChainUpdate logs legacy rescan progress notifications. Manager owns
-// disconnects, while prepared transaction events use their Store handlers.
+// handleChainUpdate logs legacy rescan progress. The Wallet worker applies
+// disconnects and matching payments before they reach this handler.
 func (s *syncer) handleChainUpdate(n any) {
 	switch msg := n.(type) {
 	case *chain.RescanProgress:
@@ -1983,24 +2001,14 @@ func (s *syncer) processChainEventBeforeSync(ctx context.Context,
 	return s.processChainEvent(ctx, event)
 }
 
-// processChainEvent applies Manager-prepared matches without parsing them
-// again. Rollback preparation waits for Manager to settle shared persistence.
+// processChainEvent orders a Wallet rewind with the same worker's payment
+// and historical writes. Manager supplies the matches for this stream.
 func (s *syncer) processChainEvent(ctx context.Context,
 	event chainEvent) error {
 
 	switch n := event.notification.(type) {
-	case prepareRollbackReq:
-		// Acknowledge only from the worker so historical and live writes
-		// are both quiescent until Manager releases this operation.
-		close(n.readyForRollback)
-
-		select {
-		case <-n.rollbackDone:
-			return nil
-
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	case chain.BlockDisconnected:
+		return s.disconnectBlock(ctx, wtxmgr.BlockMeta(n))
 
 	case chain.RelevantTx:
 		return s.putTxNotifications(ctx, event.matches, n.Block)
@@ -2033,7 +2041,7 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	return s.scanWithRewind(ctx, req)
 }
 
-// checkForRollbackBeforeCommit handles pending rollback preparation before a
+// checkForRollbackBeforeCommit handles a queued disconnect before a
 // scan commits. It returns ordinary queued events unprocessed; callers apply
 // them after the batch attempt, preserving prepared matches and result order.
 func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
@@ -2041,7 +2049,7 @@ func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
 
 	select {
 	case event := <-s.chainEventChan:
-		if _, ok := event.notification.(prepareRollbackReq); !ok {
+		if _, ok := event.notification.(chain.BlockDisconnected); !ok {
 			return event, nil
 		}
 
@@ -2056,7 +2064,6 @@ func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
 		return chainEvent{}, ErrStateChanged
 
 	default:
-		// No live event was queued, so there is no ordinary work to retain.
 		return chainEvent{}, nil
 	}
 }
@@ -3093,6 +3100,89 @@ func (s *syncer) readDisconnectWindow(ctx context.Context, low, high uint32,
 	}
 
 	return parent, nil
+}
+
+// disconnectBlock resolves canonical evidence before atomically rewinding this
+// Wallet. Its single worker orders this operation with live and scanned writes.
+func (s *syncer) disconnectBlock(ctx context.Context,
+	event wtxmgr.BlockMeta) error {
+
+	source, err := s.reconcileDisconnect(ctx, event)
+	if err != nil {
+		// Do not schedule or keep a retry after an indeterminate
+		// commit: the Store write may have committed and Store
+		// prohibits retrying the mutation.
+		if errors.Is(err, db.ErrIndeterminateCommit) {
+			s.pendingDisconnect = nil
+		} else if s.pendingDisconnect == nil {
+			// Retain the first failed disconnect so the next
+			// initChainSync replays it before checkRollback or
+			// later mailbox events.
+			pending := event
+			s.pendingDisconnect = &pending
+		}
+
+		s.state.Store(uint32(syncStateSyncing))
+
+		return err
+	}
+
+	s.pendingDisconnect = nil
+
+	state := s.syncState()
+	if state != syncStateSynced && state != syncStateRescanning {
+		return nil
+	}
+
+	tip, err := s.syncedTo(ctx)
+	if err != nil || tip.Height != source.Height || tip.Hash != source.Hash {
+		s.state.Store(uint32(syncStateSyncing))
+	}
+
+	return err
+}
+
+// reconcileDisconnect verifies the stored history against the captured chain
+// tip and applies the rewind. Its caller uses that tip to check readiness.
+func (s *syncer) reconcileDisconnect(ctx context.Context,
+	event wtxmgr.BlockMeta) (waddrmgr.BlockStamp, error) {
+
+	var source waddrmgr.BlockStamp
+
+	if !s.cfg.Chain.IsCurrent() {
+		return source, errors.New("disconnect source is not current")
+	}
+
+	block, err := storeBlockFromBlockMeta(event)
+	if err != nil {
+		return source, fmt.Errorf("disconnect block: %w", err)
+	}
+
+	synced, err := s.syncedTo(ctx)
+	if err != nil {
+		return source, err
+	}
+
+	sourceHash, sourceHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return source, fmt.Errorf("disconnect source tip: %w", err)
+	}
+
+	if synced.Height != sourceHeight || synced.Hash != *sourceHash {
+		s.state.Store(uint32(syncStateSyncing))
+	}
+
+	fork, err := s.findDisconnectFork(
+		ctx, event.Height-1, sourceHeight, synced,
+	)
+	if err != nil {
+		return source, err
+	}
+
+	source = waddrmgr.BlockStamp{Hash: *sourceHash, Height: sourceHeight}
+	err = s.applyDisconnect(ctx, *block, synced.Height, fork, source)
+
+	return source, err
 }
 
 // applyDisconnect verifies the collected fork against the captured source
