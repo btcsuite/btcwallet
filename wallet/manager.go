@@ -12,10 +12,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -152,7 +150,7 @@ type Manager struct {
 	started atomic.Bool
 
 	// wallets holds fully initialized and started Wallets keyed by unique
-	// name. The runtime loop serializes creation, delivery and rollback after
+	// name. The runtime loop serializes creation and delivery after
 	// synchronous startup publishes the initial set.
 	wallets map[string]*Wallet
 
@@ -456,8 +454,8 @@ type createWalletResp struct {
 	err    error
 }
 
-// mainLoop serializes creation, source delivery and shared rollback until the
-// lifetime is canceled. Normal Stop joins the owner before disposing resources.
+// mainLoop serializes creation and source delivery until the lifetime is
+// canceled. Normal Stop joins the owner before disposing resources.
 func (m *Manager) mainLoop() {
 	var chainErr error
 
@@ -503,7 +501,7 @@ func (m *Manager) mainLoop() {
 
 			chainErr = m.dispatchChainEvent(m.lifetimeCtx, event)
 			if chainErr != nil {
-				// Failed rewind can leave workers paused; exit to cleanup.
+				// Canceled delivery releases the source reader during shutdown.
 				return
 			}
 		}
@@ -523,15 +521,7 @@ func (m *Manager) chainRecipients() []*Wallet {
 // dispatchChainEvent admits source-ordered events to existing Wallet workers.
 // Capacity-one mailboxes deliberately backpressure the sole reader; Wallet
 // and reader cancellation both release delivery during terminal shutdown.
-// Shared storage disconnects settle rollback before the next source event.
 func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
-	// A disconnect changes the history that Wallet workers are writing.
-	// Settle their earlier writes and rewind Store once before the next
-	// source event; independent Wallet delivery cannot order that rewind.
-	if disconnect, ok := n.(chain.BlockDisconnected); ok {
-		return m.handleRollbackEvent(ctx, disconnect)
-	}
-
 	wallets := m.chainRecipients()
 
 	events := m.chainSyncer.routeChainEvent(n, wallets)
@@ -550,64 +540,6 @@ func (m *Manager) dispatchChainEvent(ctx context.Context, n any) error {
 		case w.chainEventChan <- event:
 		}
 	}
-
-	return nil
-}
-
-// prepareWalletsForRollback waits for earlier sync writes on every Wallet.
-// The caller keeps the Wallet set fixed while each worker pauses for rollback.
-func (m *Manager) prepareWalletsForRollback(ctx context.Context,
-	resume <-chan struct{}) error {
-
-	for _, wallet := range m.wallets {
-		err := wallet.pauseForRollback(ctx, resume)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// handleRollbackEvent settles published writers around one backend rollback.
-// Success releases workers and lets the source reader dispatch its next event.
-// A rollback error stops every Wallet before any worker can write again.
-func (m *Manager) handleRollbackEvent(ctx context.Context,
-	event chain.BlockDisconnected) error {
-
-	// Preserve hash and time as well as height for storage that needs to
-	// distinguish a stale disconnect from a replacement at the same height.
-	block, err := storeBlockFromBlockMeta(wtxmgr.BlockMeta(event))
-	if err != nil {
-		return fmt.Errorf("disconnect block: %w", err)
-	}
-
-	// Manager alone signals rollback completion. Terminal cleanup stops
-	// workers first, so a failed rewind cannot resume old writes.
-	rollbackDone := make(chan struct{})
-
-	err = m.prepareWalletsForRollback(ctx, rollbackDone)
-	if err != nil {
-		// Only Stop's lifetime cancellation interrupts preparation. Leave
-		// completion held and cleanup to that waiting caller so it receives
-		// close errors; prepared workers exit through Wallet cancellation.
-		return fmt.Errorf("wait for rollback writers: %w", err)
-	}
-
-	// Accepted persistence settles even if its caller or Stop cancels.
-	// The owner keeps Store open until this one rollback completes.
-	err = m.backend.rollbackToBlock(context.WithoutCancel(ctx), *block)
-	if err != nil {
-		err = fmt.Errorf("rollback chain: %w", err)
-		// Leave paused workers to the owner, which drains them on failure
-		// or handles the accepted Stop before another operation can run.
-		log.Errorf("Unable to roll back chain to height %d: %v",
-			block.Height, err)
-
-		return err
-	}
-
-	close(rollbackDone)
 
 	return nil
 }

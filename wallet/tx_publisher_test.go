@@ -2165,8 +2165,11 @@ func TestBroadcastReorgPublishFailureRetainsSpend(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			require.NoError(t, w.store.RollbackToBlock(
-				t.Context(), spendBlock.Height,
+			require.NoError(t, w.store.DisconnectBlock(
+				t.Context(), w.id, spendBlock, &fundingBlock,
+				map[uint32]*chainhash.Hash{
+					spendBlock.Height: nil,
+				},
 			))
 
 			// Pin the unmined row and input claim before retrying;
