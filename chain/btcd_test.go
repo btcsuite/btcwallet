@@ -368,3 +368,18 @@ func TestRPCClientWatchAddrsFromTipCanceled(t *testing.T) {
 	// before dereferencing or mutating the backend client.
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// TestRPCClientNotifySpentNilOutpoint verifies NotifySpent rejects nil
+// outpoints with ErrInvalidParam before invoking btcd RPCs.
+func TestRPCClientNotifySpentNilOutpoint(t *testing.T) {
+	t.Parallel()
+
+	// Create an uninitialized client so any RPC call would panic.
+	client := &RPCClient{}
+
+	// Call NotifySpent with a slice containing a nil outpoint.
+	err := client.NotifySpent([]*wire.OutPoint{nil})
+
+	// Confirm ErrInvalidParam is returned before touching the RPC client.
+	require.ErrorIs(t, err, ErrInvalidParam)
+}
