@@ -1,6 +1,8 @@
 package chain
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -156,22 +158,23 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		return nil, err
 	}
 
+	// Fetch getblockchaininfo while verifying the backend network. This
+	// allows us to validate custom signet challenges and to determine if
+	// the bitcoind node is pruned without issuing redundant RPC calls.
+	chainInfo, err := getBlockChainInfoDuringStartup(client)
+	if err != nil {
+		return nil, fmt.Errorf("unable to determine if bitcoind is "+
+			"pruned: %w", err)
+	}
+
 	// Verify that the node is running on the expected network.
-	net, err := getCurrentNet(client)
+	net, err := getCurrentNet(client, chainInfo, cfg.ChainParams.Net)
 	if err != nil {
 		return nil, err
 	}
 	if net != cfg.ChainParams.Net {
 		return nil, fmt.Errorf("expected network %v, got %v",
 			cfg.ChainParams.Net, net)
-	}
-
-	// Check if the node is pruned, as we'll need to perform additional
-	// operations if so.
-	chainInfo, err := client.GetBlockChainInfo()
-	if err != nil {
-		return nil, fmt.Errorf("unable to determine if bitcoind is "+
-			"pruned: %w", err)
 	}
 
 	// Only initialize the PrunedBlockDispatcher when the connected bitcoind
@@ -375,14 +378,82 @@ func getBlockHashDuringStartup(
 	}
 }
 
+// getBlockChainInfoResult models the data returned from the getblockchaininfo
+// command, embedding btcjson.GetBlockChainInfoResult and adding
+// SignetChallenge. Once btcwallet depends on a btcd/btcjson version that
+// exposes GetBlockChainInfoResult.SignetChallenge directly, this wrapper can be
+// replaced with btcjson.GetBlockChainInfoResult.
+type getBlockChainInfoResult struct {
+	btcjson.GetBlockChainInfoResult
+	SignetChallenge string `json:"signet_challenge,omitempty"`
+}
+
+// getBlockChainInfo returns information related to the processing state of
+// the blockchain from the bitcoind node, including the signet challenge if
+// running on a signet network.
+func getBlockChainInfo(client *rpcclient.Client) (*getBlockChainInfoResult, error) {
+	rawResp, err := client.RawRequest("getblockchaininfo", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var chainInfo getBlockChainInfoResult
+	if err := json.Unmarshal(rawResp, &chainInfo); err != nil {
+		return nil, err
+	}
+
+	return &chainInfo, nil
+}
+
+// getBlockChainInfoDuringStartup will attempt to call getblockchaininfo on the
+// bitcoind client. Since bitcoind could still be starting up when this is
+// called, we'll keep retrying until the RPC returns an answer or we time out.
+func getBlockChainInfoDuringStartup(client *rpcclient.Client) (*getBlockChainInfoResult, error) {
+	chainInfo, err := getBlockChainInfo(client)
+	if err == nil {
+		return chainInfo, nil
+	}
+
+	if !strings.Contains(err.Error(), errStillLoadingCode) {
+		return nil, err
+	}
+
+	timeout := time.After(bitcoindStartTimeout)
+	for {
+		select {
+		case <-timeout:
+			return nil, ErrBitcoindStartTimeout
+
+		case <-time.After(1 * time.Second):
+			chainInfo, err = getBlockChainInfo(client)
+			if err == nil {
+				return chainInfo, nil
+			}
+
+			if !strings.Contains(err.Error(), errStillLoadingCode) {
+				return nil, err
+			}
+		}
+	}
+}
+
 // getCurrentNet returns the network on which the bitcoind node is running.
-func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
+func getCurrentNet(client *rpcclient.Client, chainInfo *getBlockChainInfoResult,
+	expectedNet wire.BitcoinNet) (wire.BitcoinNet, error) {
+
 	hash, err := getBlockHashDuringStartup(client)
 	if err != nil {
 		return 0, err
 	}
 
-	switch *hash {
+	return parseCurrentNet(hash, chainInfo, expectedNet)
+}
+
+// parseCurrentNet maps the backend genesis hash and chain info to a network.
+func parseCurrentNet(genesisHash *chainhash.Hash, chainInfo *getBlockChainInfoResult,
+	expectedNet wire.BitcoinNet) (wire.BitcoinNet, error) {
+
+	switch *genesisHash {
 	case *chaincfg.TestNet3Params.GenesisHash:
 		return chaincfg.TestNet3Params.Net, nil
 	case *chaincfg.TestNet4Params.GenesisHash:
@@ -390,11 +461,32 @@ func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
 	case *chaincfg.RegressionNetParams.GenesisHash:
 		return chaincfg.RegressionNetParams.Net, nil
 	case *chaincfg.SigNetParams.GenesisHash:
-		return chaincfg.SigNetParams.Net, nil
+		// If the backend genesis hash is signet, read the
+		// signet_challenge from chainInfo to determine the exact
+		// signet network.
+		if chainInfo != nil && chainInfo.SignetChallenge != "" {
+			challenge, err := hex.DecodeString(chainInfo.SignetChallenge)
+			if err != nil {
+				return 0, fmt.Errorf("unable to decode backend "+
+					"signet challenge: %w", err)
+			}
+
+			return chaincfg.CustomSignetParams(challenge, nil).Net, nil
+		}
+
+		// Keep compatibility behavior or a clear error for older
+		// backends that do not expose signet_challenge.
+		if expectedNet == chaincfg.SigNetParams.Net {
+			return chaincfg.SigNetParams.Net, nil
+		}
+
+		return 0, errors.New("backend bitcoind does not expose " +
+			"signet_challenge to verify custom signet")
+
 	case *chaincfg.MainNetParams.GenesisHash:
 		return chaincfg.MainNetParams.Net, nil
 	default:
-		return 0, fmt.Errorf("unknown network with genesis hash %v", hash)
+		return 0, fmt.Errorf("unknown network with genesis hash %v", genesisHash)
 	}
 }
 
