@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 )
 
 // chainEventSubscriberBufferSize accommodates a burst of up to 50 ordinary
@@ -57,30 +60,168 @@ type eventListener struct {
 
 	// err holds the terminal result published before done closes.
 	err error
+
+	// scripts counts active WatchAddrs references per pkScript for
+	// rollback and cleanup. Guarded by stream.mu.
+	scripts map[string]int
+
+	// outpoints counts active WatchOutputs and auto-indexed references per
+	// outpoint for rollback and cleanup. Guarded by stream.mu.
+	outpoints map[wire.OutPoint]int
 }
 
 // close publishes the terminal result before releasing callers waiting on Done.
 func (l *eventListener) close(err error) {
 	l.err = err
+	l.scripts = nil
+	l.outpoints = nil
 	close(l.events)
 	close(l.done)
 }
 
+// watchIndex maps a comparable watch key to subscribed listeners.
+type watchIndex[K comparable] map[K]map[*eventListener]struct{}
+
 // chainEventStream tracks listeners for one native notification handler.
 type chainEventStream struct {
+	// params defines the Bitcoin network used when extracting scripts from
+	// multi-key outputs such as bare multisig.
+	params *chaincfg.Params
+
+	// client is the backing chain backend used to register address and
+	// outpoint watches for active subscriptions. Guarded by mu; cleared on
+	// close.
+	client Interface
+
 	// mu protects admission, publication and channel closure.
 	mu sync.Mutex
 
 	// members maps each listener to the function that stops its context
 	// cancellation callback. A nil map means the owner retired the stream.
 	members map[*eventListener]func() bool
+
+	// scriptListeners maps watched pkScripts to active listeners.
+	scriptListeners watchIndex[string]
+
+	// outpointListeners maps watched outpoints to active listeners.
+	//
+	// TODO(yy): Prune confirmed spent outpoints past a reorg-safe depth.
+	outpointListeners watchIndex[wire.OutPoint]
 }
 
 // newChainEventStream creates the registry for one running native owner.
-func newChainEventStream() *chainEventStream {
+func newChainEventStream(params *chaincfg.Params,
+	client Interface) *chainEventStream {
+
 	return &chainEventStream{
-		members: make(map[*eventListener]func() bool),
+		params:            params,
+		client:            client,
+		members:           make(map[*eventListener]func() bool),
+		scriptListeners:   make(watchIndex[string]),
+		outpointListeners: make(watchIndex[wire.OutPoint]),
 	}
+}
+
+// indexWatch records key in index and increments its refcount in owned. Caller
+// must hold s.mu.
+func indexWatch[K comparable](index watchIndex[K], owned map[K]int,
+	l *eventListener, key K) {
+
+	if index[key] == nil {
+		index[key] = make(map[*eventListener]struct{})
+	}
+
+	index[key][l] = struct{}{}
+	owned[key]++
+}
+
+// unindexWatches removes l from index for every key in owned. Caller holds mu.
+func unindexWatches[K comparable](index watchIndex[K], owned map[K]int,
+	l *eventListener) {
+
+	for key := range owned {
+		delete(index[key], l)
+
+		if len(index[key]) == 0 {
+			delete(index, key)
+		}
+	}
+}
+
+// canRegisterWatch checks whether l may register watches. Call-site ctx.Err is
+// checked first so shared deadlines preserve DeadlineExceeded. Caller must
+// hold s.mu.
+func (s *chainEventStream) canRegisterWatch(ctx context.Context,
+	l *eventListener, canceled <-chan struct{}) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-canceled:
+		return context.Canceled
+	default:
+	}
+
+	if _, ok := s.members[l]; !ok {
+		if l.err != nil {
+			return l.err
+		}
+
+		return context.Canceled
+	}
+
+	return nil
+}
+
+// registerWatchKeys validates enrollment, indexes keys under s.mu, and returns
+// the stream's backing client for watch delegation.
+func registerWatchKeys[K comparable](ctx context.Context, s *chainEventStream,
+	l *eventListener, canceled <-chan struct{}, index *watchIndex[K],
+	owned *map[K]int, keys []K) (Interface, error) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := s.canRegisterWatch(ctx, l, canceled)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(keys) == 0 {
+		return s.client, nil
+	}
+
+	if *owned == nil {
+		*owned = make(map[K]int, len(keys))
+	}
+
+	for _, key := range keys {
+		indexWatch(*index, *owned, l, key)
+	}
+
+	return s.client, nil
+}
+
+// removeSubscriber removes l, unindexes its watches, and closes l with err.
+// Caller must hold s.mu.
+func (s *chainEventStream) removeSubscriber(l *eventListener, err error) {
+	stop, ok := s.members[l]
+	if !ok {
+		log.Debugf("Subscriber already removed (err=%v)", err)
+
+		return
+	}
+
+	delete(s.members, l)
+	stop()
+
+	unindexWatches(s.scriptListeners, l.scripts, l)
+	unindexWatches(s.outpointListeners, l.outpoints, l)
+
+	l.close(err)
 }
 
 // subscribe registers the listener directly at the publication boundary.
@@ -108,25 +249,13 @@ func (s *chainEventStream) subscribe(ctx context.Context) EventSubscription {
 
 	// Canceling an idle subscription does not require a native event.
 	s.members[l] = context.AfterFunc(ctx, func() {
-		s.removeListener(l)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		s.removeSubscriber(l, nil)
 	})
 
 	return sub
-}
-
-// removeListener retires a listener whose context has been canceled.
-func (s *chainEventStream) removeListener(l *eventListener) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Shutdown or overflow may retire the listener while its cancellation
-	// callback is waiting for the mutex.
-	if _, ok := s.members[l]; !ok {
-		return
-	}
-
-	delete(s.members, l)
-	l.close(nil)
 }
 
 // publish synchronously offers the event to each subscriber on the native
@@ -144,9 +273,10 @@ func (s *chainEventStream) publish(event any) {
 		default:
 			// End delivery at the first gap and release the
 			// cancellation callback even if the context stays live.
-			delete(s.members, l)
-			stop()
-			l.close(ErrEventSubscriptionBufferFull)
+			_ = stop
+			s.removeSubscriber(
+				l, ErrEventSubscriptionBufferFull,
+			)
 		}
 	}
 }
@@ -162,5 +292,8 @@ func (s *chainEventStream) close() {
 	}
 
 	// A stopped client can outlive its subscriptions and their buffers.
+	s.client = nil
 	s.members = nil
+	s.scriptListeners = nil
+	s.outpointListeners = nil
 }

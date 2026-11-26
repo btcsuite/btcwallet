@@ -658,7 +658,7 @@ func (c *BitcoindClient) Start(_ context.Context) error {
 		Timestamp: time.Unix(bestHeader.Time, 0),
 	}
 
-	stream := newChainEventStream()
+	stream := newChainEventStream(c.chainConn.cfg.ChainParams, c)
 
 	// The startup marker predates enrollment. Seed it in the FIFO so
 	// only future intake can publish to subscribers.

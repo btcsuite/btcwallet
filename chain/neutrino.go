@@ -121,7 +121,7 @@ func (s *NeutrinoClient) Start(ctx context.Context) error {
 		s.started = true
 
 		// Each client run owns a fresh enrollment and cancellation scope.
-		s.eventStream = newChainEventStream()
+		s.eventStream = newChainEventStream(s.chainParams, s)
 
 		// Go launch the notification handler.
 		s.wg.Add(1)
