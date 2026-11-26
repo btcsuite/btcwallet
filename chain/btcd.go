@@ -58,13 +58,15 @@ var _ Interface = (*RPCClient)(nil)
 // NewRPCClient and NewRPCClientWithConfig.
 func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
 	return &rpcclient.NotificationHandlers{
-		OnClientConnected:   c.onClientConnect,
-		OnBlockConnected:    c.onBlockConnected,
-		OnBlockDisconnected: c.onBlockDisconnected,
-		OnRecvTx:            c.onRecvTx,
-		OnRedeemingTx:       c.onRedeemingTx,
-		OnRescanFinished:    c.onRescanFinished,
-		OnRescanProgress:    c.onRescanProgress,
+		OnClientConnected:        c.onClientConnect,
+		OnBlockConnected:         c.onBlockConnected,
+		OnBlockDisconnected:      c.onBlockDisconnected,
+		OnFilteredBlockConnected: c.onFilteredBlockConnected,
+		OnRelevantTxAccepted:     c.onRelevantTxAccepted,
+		OnRecvTx:                 c.onRecvTx,
+		OnRedeemingTx:            c.onRedeemingTx,
+		OnRescanFinished:         c.onRescanFinished,
+		OnRescanProgress:         c.onRescanProgress,
 	}
 }
 
@@ -101,6 +103,7 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
+
 	rpcClient, err := rpcclient.New(
 		client.connConfig, client.notificationHandlers(),
 	)
@@ -718,6 +721,11 @@ func publishBtcdStream(stream *chainEventStream, n any) bool {
 }
 
 // handler delivers native notifications and maintains the last notified block.
+//
+// Legacy queue drain loop intentionally stays in one select; only stream
+// routing was added.
+//
+//nolint:cyclop
 func (c *RPCClient) handler() {
 	defer c.wg.Done()
 
@@ -759,9 +767,11 @@ out:
 				continue
 			}
 
-			// Offer live events at intake so subscribers do not wait
-			// for a reader of the shared notification queue.
-			stream.publish(n)
+			// Offer live events at intake so subscribers do not
+			// wait for a reader of the shared notification queue.
+			if publishBtcdStream(stream, n) {
+				continue
+			}
 
 			if len(notifications) == 0 {
 				next = n
