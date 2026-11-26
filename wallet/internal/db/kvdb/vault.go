@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -167,6 +168,85 @@ func (v *LegacyWalletVault) ECDH(ctx context.Context, scope waddrmgr.KeyScope,
 	defer privKey.Zero()
 
 	return keyvault.ECDHSecret(privKey, remote), nil
+}
+
+// PubKey implements keyvault.Vault.PubKey for kvdb wallets.
+//
+// Deprecated: kvdb support is being removed; delete this method with it.
+func (v *LegacyWalletVault) PubKey(ctx context.Context,
+	sel signing.KeySelector) (*btcec.PublicKey, error) {
+
+	var pub *btcec.PublicKey
+
+	err := v.useKey(ctx, sel, func(key *btcec.PrivateKey) error {
+		pub = key.PubKey()
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pub, nil
+}
+
+// useKey reads the selected key through the kvdb Store, decrypts it with the
+// legacy manager and runs use with the private key, so the key never reaches
+// Wallet. It refuses an invalid selector, then returns keyvault.ErrVaultLocked
+// for a locked manager, both before the Store read; a Lock that lands after the
+// read fails the decrypt the same way. A watch-only manager is never unlocked,
+// so it skips the lock check and the lookup reports keyvault.ErrNoPrivateKey,
+// as the SQL vault does. kvdb reports a script it does not know like a
+// watch-only import, so a missing import returns keyvault.ErrNoPrivateKey too.
+// As for ECDH, the manager's Lock does not wait for this use: its lock covers
+// only the decrypt. Every secret is cleared before return.
+func (v *LegacyWalletVault) useKey(ctx context.Context,
+	sel signing.KeySelector, use func(*btcec.PrivateKey) error) error {
+
+	err := signing.ValidateKeySelector(sel)
+	if err != nil {
+		return fmt.Errorf("kvdb vault: %w", err)
+	}
+
+	if v.mgr.IsLocked() && !v.mgr.WatchOnly() {
+		return fmt.Errorf("kvdb vault: %w", keyvault.ErrVaultLocked)
+	}
+
+	ciphertext, toKey, err := keyvault.LoadEncryptedKey(
+		ctx, NewStore(v.db, nil, v.mgr), 0, sel,
+	)
+	defer clear(ciphertext)
+
+	if err != nil {
+		return fmt.Errorf("kvdb vault: %w", err)
+	}
+
+	return v.useDecryptedKey(ciphertext, toKey, use)
+}
+
+// useDecryptedKey decrypts ciphertext with the legacy manager, turns the
+// plaintext into the private key with toKey and runs use with it. The plaintext
+// and the key are cleared before return.
+func (v *LegacyWalletVault) useDecryptedKey(ciphertext []byte,
+	toKey func([]byte) (*btcec.PrivateKey, error),
+	use func(*btcec.PrivateKey) error) error {
+
+	plaintext, err := v.crypt(
+		v.mgr.Decrypt, waddrmgr.CKTPrivate, ciphertext, "decrypt",
+	)
+	defer clear(plaintext)
+
+	if err != nil {
+		return fmt.Errorf("kvdb vault decrypt private key: %w", err)
+	}
+
+	key, err := toKey(plaintext)
+	if err != nil {
+		return fmt.Errorf("kvdb vault: %w", err)
+	}
+	defer key.Zero()
+
+	return use(key)
 }
 
 // crypt forwards a cipher operation to the address manager and maps its
