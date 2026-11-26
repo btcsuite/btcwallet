@@ -82,7 +82,7 @@ func TestCreateTxSkipsDuplicateConfirmedTransaction(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 261)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 261)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},

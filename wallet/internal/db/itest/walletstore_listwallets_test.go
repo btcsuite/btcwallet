@@ -280,8 +280,8 @@ func TestListWalletsPagedWithSyncMetadata(t *testing.T) {
 	wallet2, err := store.CreateWallet(t.Context(), params2)
 	require.NoError(t, err)
 
-	block1 := CreateBlockFixture(t, queries, 100)
-	block2 := CreateBlockFixture(t, queries, 101)
+	block1 := CreateBlockFixture(t, queries, wallet1.ID, 100)
+	block2 := CreateBlockFixture(t, queries, wallet1.ID, 101)
 
 	err = store.UpdateWallet(t.Context(), db.UpdateWalletParams{
 		WalletID:      wallet1.ID,

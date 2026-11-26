@@ -283,7 +283,7 @@ func newTxGraphConflict(t *testing.T) (*pgTestStore, db.CreateTxParams,
 		[]wire.OutPoint{f},
 		[]*wire.TxOut{{Value: 5500, PkScript: []byte{0x51}}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 1)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 1)
 	require.NoError(
 		t, store.CreateTx(
 			t.Context(), db.CreateTxParams{
@@ -351,7 +351,7 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 		[]wire.OutPoint{{Hash: root.TxHash()}, q},
 		[]*wire.TxOut{{Value: 11000, PkScript: addr.ScriptPubKey}},
 	)
-	block := CreateBlockFixture(t, store.Queries(), 1)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	require.NoError(
@@ -769,7 +769,7 @@ func TestLeaseAcquisitionConcurrentConfirmationPostgres(t *testing.T) {
 						{Value: 5000, PkScript: []byte{0x51}},
 					},
 				)
-				block := CreateBlockFixture(t, store.Queries(), 600)
+				block := CreateBlockFixture(t, store.Queries(), walletID, 600)
 
 				// Act: Start acquisition before confirmation. Release the
 				// credit once recording commits or waits behind acquisition.

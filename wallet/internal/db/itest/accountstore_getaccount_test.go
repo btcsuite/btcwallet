@@ -219,8 +219,8 @@ func TestGetAccountPopulatesBalance(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	queries := store.Queries()
-	syncBlock := CreateBlockFixture(t, queries, 200)
-	confirmedBlock := CreateBlockFixture(t, queries, 100)
+	syncBlock := CreateBlockFixture(t, queries, walletID, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 100)
 
 	err := store.UpdateWallet(
 		t.Context(), db.UpdateWalletParams{
@@ -375,8 +375,8 @@ func TestGetAccountSkipBalanceZerosFields(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	queries := store.Queries()
-	syncBlock := CreateBlockFixture(t, queries, 200)
-	confirmedBlock := CreateBlockFixture(t, queries, 100)
+	syncBlock := CreateBlockFixture(t, queries, walletID, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 100)
 
 	err := store.UpdateWallet(
 		t.Context(), db.UpdateWalletParams{

@@ -55,7 +55,7 @@ func TestConfirmedSpendDeletesLeases(t *testing.T) {
 	walletID, _, spend := newLeasedSpendFixture(
 		t, store, "wallet-lease-confirmed-spend",
 	)
-	block := CreateBlockFixture(t, store.Queries(), 500)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 500)
 
 	// Act: Record the spend as confirmed, then disconnect and remove it.
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
@@ -96,7 +96,7 @@ func TestUpdateTxConfirmedSpendDeletesLeases(t *testing.T) {
 	walletID, _, spend := newLeasedSpendFixture(
 		t, store, "wallet-lease-update-confirmed-spend",
 	)
-	block := CreateBlockFixture(t, store.Queries(), 500)
+	block := CreateBlockFixture(t, store.Queries(), walletID, 500)
 
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
