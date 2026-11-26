@@ -1,12 +1,14 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -382,4 +384,94 @@ func TestRPCClientNotifySpentNilOutpoint(t *testing.T) {
 
 	// Confirm ErrInvalidParam is returned before touching the RPC client.
 	require.ErrorIs(t, err, ErrInvalidParam)
+}
+
+// testWPKHKey holds a regtest key pair, its P2WPKH address, and its pkScript.
+type testWPKHKey struct {
+	priv     *btcec.PrivateKey
+	addr     address.Address
+	pkScript []byte
+}
+
+// newTestWPKHKey generates a regtest P2WPKH key bundle.
+func newTestWPKHKey(t *testing.T) testWPKHKey {
+	t.Helper()
+
+	params := &chaincfg.RegressionNetParams
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	pubAddr, err := address.NewAddressPubKey(
+		priv.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		pubAddr.AddressPubKeyHash().ScriptAddress(), params,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return testWPKHKey{priv: priv, addr: addr, pkScript: pkScript}
+}
+
+// signWPKHSpend constructs and signs a single-input SegWit tx spending input
+// owned by key/inAmt to a single output.
+func signWPKHSpend(t *testing.T, input wire.OutPoint, key testWPKHKey,
+	inAmt int64, destScript []byte, sendAmt int64) *wire.MsgTx {
+
+	t.Helper()
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(sendAmt, destScript))
+
+	fetcher := txscript.NewCannedPrevOutputFetcher(key.pkScript, inAmt)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	wit, err := txscript.WitnessSignature(
+		tx, sigHashes, 0, inAmt, key.pkScript, txscript.SigHashAll,
+		key.priv, true,
+	)
+	require.NoError(t, err)
+
+	tx.TxIn[0].Witness = wit
+
+	return tx
+}
+
+// TestRPCClientRelevantTxWitnessTxid verifies onRelevantTxAccepted decodes raw
+// SegWit txns using their canonical txid rather than their witness hash.
+func TestRPCClientRelevantTxWitnessTxid(t *testing.T) {
+	t.Parallel()
+
+	// Construct a signed SegWit spend whose txid differs from its witness
+	// hash and serialize it with witness data as btcd sends on the wire.
+	key := newTestWPKHKey(t)
+	dest := newTestWPKHKey(t)
+	tx := signWPKHSpend(
+		t, wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0}, key,
+		10000, dest.pkScript, 9000,
+	)
+	require.NotEqual(t, tx.TxHash(), tx.WitnessHash())
+
+	var raw bytes.Buffer
+	require.NoError(t, tx.Serialize(&raw))
+
+	client := &RPCClient{
+		enqueueNotification: make(chan any, 1),
+		quit:                make(chan struct{}),
+	}
+
+	// Feed the serialized witness tx into onRelevantTxAccepted.
+	client.onRelevantTxAccepted(raw.Bytes())
+
+	// Confirm a stream-only unconfirmed RelevantTx with canonical txid was
+	// enqueued.
+	ntfn := <-client.enqueueNotification
+	wrapped, ok := ntfn.(btcdStreamOnly)
+	require.True(t, ok)
+
+	rel, ok := wrapped.ntfn.(RelevantTx)
+	require.True(t, ok)
+	require.Nil(t, rel.Block)
+	require.Equal(t, tx.TxHash(), rel.TxRecord.Hash)
 }

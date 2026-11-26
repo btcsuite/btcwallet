@@ -5,6 +5,7 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,10 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// btcdStreamOnly marks filtered notifications routed solely to
+// SubscribeChainEvents and excluded from legacy Notifications().
+type btcdStreamOnly struct{ ntfn any }
 
 // RPCClient represents a persistent client connection to a bitcoin RPC server
 // for information regarding the current best block chain.
@@ -600,6 +605,63 @@ func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time
 	}
 }
 
+// onFilteredBlockConnected wraps btcd's atomic filtered block callback as a
+// stream-only notification preserving websocket wire order.
+func (c *RPCClient) onFilteredBlockConnected(height int32,
+	header *wire.BlockHeader, txs []*btcutil.Tx) {
+
+	recs := make([]*wtxmgr.TxRecord, 0, len(txs))
+	for _, tx := range txs {
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(
+			tx.MsgTx(), header.Timestamp,
+		)
+		if err != nil {
+			log.Errorf("Cannot create filtered block tx: %v", err)
+			continue
+		}
+
+		recs = append(recs, rec)
+	}
+
+	blk := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Hash: header.BlockHash(), Height: height},
+		Time:  header.Timestamp,
+	}
+
+	ntfn := btcdStreamOnly{FilteredBlockConnected{
+		Block: blk, RelevantTxs: recs,
+	}}
+	select {
+	case c.enqueueNotification <- ntfn:
+	case <-c.quit:
+	}
+}
+
+// onRelevantTxAccepted decodes rawTx via wire.MsgTx so witness txns keep their
+// canonical txid, and enqueues a stream-only mempool RelevantTx.
+func (c *RPCClient) onRelevantTxAccepted(rawTx []byte) {
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(rawTx))
+	if err != nil {
+		log.Errorf("Cannot deserialize relevant tx: %v", err)
+
+		return
+	}
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(&msgTx, time.Now())
+	if err != nil {
+		log.Errorf("Cannot create relevant tx record: %v", err)
+
+		return
+	}
+
+	select {
+	case c.enqueueNotification <- btcdStreamOnly{RelevantTx{rec, nil}}:
+	case <-c.quit:
+	}
+}
+
 func (c *RPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	blk, err := parseBlock(block)
 	if err != nil {
@@ -638,6 +700,21 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 	case <-c.quit:
 	}
 
+}
+
+// publishBtcdStream publishes btcd stream-eligible notifications onto stream
+// and reports whether n is stream-only (excluded from legacy Notifications()).
+func publishBtcdStream(stream *chainEventStream, n any) bool {
+	switch v := n.(type) {
+	case btcdStreamOnly:
+		stream.publish(v.ntfn)
+
+		return true
+	case BlockDisconnected:
+		stream.publish(v)
+	}
+
+	return false
 }
 
 // handler delivers native notifications and maintains the last notified block.
