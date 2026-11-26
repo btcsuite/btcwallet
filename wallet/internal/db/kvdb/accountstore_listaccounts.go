@@ -20,12 +20,9 @@ func (s *Store) ListAccounts(_ context.Context,
 
 	mgr := s.addrStore
 
-	var (
-		accounts        []db.AccountInfo
-		internalNumbers []uint32
-	)
+	var accounts []db.AccountInfo
 
-	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err := s.db.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return nil
@@ -35,6 +32,9 @@ func (s *Store) ListAccounts(_ context.Context,
 		if err != nil {
 			return err
 		}
+
+		// Balance lookup uses the account numbers from this attempt.
+		var internalNumbers []uint32
 
 		walletWatchOnly := mgr.WatchOnly()
 		for _, scopedMgr := range scopedMgrs {
@@ -54,6 +54,9 @@ func (s *Store) ListAccounts(_ context.Context,
 		return s.maybeAttachListBalances(
 			ns, tx, query, accounts, internalNumbers,
 		)
+	}, func() {
+		// A replay may select different accounts, including none.
+		accounts = nil
 	})
 	if err != nil {
 		return nil, err

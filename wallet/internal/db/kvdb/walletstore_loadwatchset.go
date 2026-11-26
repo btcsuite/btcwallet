@@ -25,7 +25,7 @@ func (s *Store) LoadWatchSet(ctx context.Context, _ uint32) (db.WatchSet,
 
 	var watches db.WatchSet
 
-	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+	err = s.db.View(func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return errMissingAddrmgrNamespace
@@ -68,6 +68,9 @@ func (s *Store) LoadWatchSet(ctx context.Context, _ uint32) (db.WatchSet,
 		}
 
 		return nil
+	}, func() {
+		// Both interest lists must come from the successful attempt.
+		watches = db.WatchSet{}
 	})
 	if err != nil {
 		return db.WatchSet{}, fmt.Errorf("load watch set: %w", err)

@@ -1248,6 +1248,101 @@ func testPsbtManagerSignRejectMismatchedSignature(h *bwtest.HarnessTest) {
 	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
 }
 
+// testPsbtManagerFinalizeOwnedInputs verifies that FinalizePsbt signs and
+// finalizes wallet-owned inputs of every spend type on its own.
+func testPsbtManagerFinalizeOwnedInputs(h *bwtest.HarnessTest) {
+	// Arrange: Own one coin of each spend type, with no signature yet.
+	w, legacy := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.PubKeyHash,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	nested := h.FundWalletOfType(w, waddrmgr.NestedWitnessPubKey, oneBTC)
+	segwit := h.FundWalletOfType(w, waddrmgr.WitnessPubKey, oneBTC)
+	taproot := h.FundWalletOfType(w, waddrmgr.TaprootPubKey, oneBTC)
+	packet := newDecoratedPsbt(
+		h, w, legacy.WalletOutpoints[0], nested.WalletOutpoints[0],
+		segwit.WalletOutpoints[0], taproot.WalletOutpoints[0],
+	)
+
+	// Act: Finalize directly.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The transaction it produced spends every previous output.
+	require.NoError(h, err)
+	h.AssertPsbtExecutes(packet)
+}
+
+// testPsbtManagerFinalizeSignedTapscript verifies that FinalizePsbt completes a
+// Taproot script-path input from the signature SignPsbt left. FinalizePsbt
+// signs only outputs that pay a key directly, so it cannot sign this input.
+func testPsbtManagerFinalizeSignedTapscript(h *bwtest.HarnessTest) {
+	// Arrange: SignPsbt signs the leaf of a script-path input.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	packet := newTapscriptPsbt(h, w)
+
+	_, err := w.SignPsbt(ctx, &wallet.SignPsbtParams{Packet: packet})
+	require.NoError(h, err)
+
+	// Act: Finalize the signed packet.
+	err = w.FinalizePsbt(ctx, packet)
+
+	// Assert: The transaction spends the output through the leaf.
+	require.NoError(h, err)
+	h.AssertPsbtExecutes(packet)
+}
+
+// testPsbtManagerFinalizeExternalSignatures verifies that FinalizePsbt
+// completes another signer's signed input beside the Wallet's own coin.
+func testPsbtManagerFinalizeExternalSignatures(h *bwtest.HarnessTest) {
+	// Arrange: One packet mixes a Wallet coin with the other signer's signed
+	// input.
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(
+		h, w, funding.WalletOutpoints[0], unknownOutpoint(),
+	)
+	scriptCode := addExternalPsbtInput(h, &packet.Inputs[1])
+	addExternalPsbtSig(h, packet, 1, scriptCode)
+
+	// Act: Finalize the packet.
+	err := w.FinalizePsbt(h.Context(), packet)
+
+	// Assert: The transaction spends both previous outputs.
+	require.NoError(h, err)
+	h.AssertPsbtExecutes(packet)
+}
+
+// testPsbtManagerFinalizeFinalizedPacket verifies that finalizing a packet that
+// is already final succeeds and changes nothing.
+func testPsbtManagerFinalizeFinalizedPacket(h *bwtest.HarnessTest) {
+	// Arrange: Finalize a Wallet spend.
+	ctx := h.Context()
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.WitnessPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+	packet := newDecoratedPsbt(h, w, funding.WalletOutpoints[0])
+	require.NoError(h, w.FinalizePsbt(ctx, packet))
+
+	original := psbtTestSnapshot(h.T, packet)
+
+	// Act: Finalize the final packet again.
+	err := w.FinalizePsbt(ctx, packet)
+
+	// Assert: It is accepted, stays byte for byte the same, and still
+	// spends its previous output.
+	require.NoError(h, err)
+
+	require.Equal(h, original, psbtTestSnapshot(h.T, packet))
+	h.AssertPsbtExecutes(packet)
+}
+
 // testPsbtManagerCompleteWorkflow proves the public PSBT methods compose into a
 // publishable transaction. DecorateInputs runs before FundPsbt because funding
 // leases its inputs and decoration refuses leased coins. The final transaction

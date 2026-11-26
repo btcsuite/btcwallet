@@ -230,3 +230,33 @@ func (m *mockGetRawTxReceiver) Receive() (*btcutil.Tx, error) {
 
 // Compile time assert the implementation.
 var _ getRawTxReceiver = (*mockGetRawTxReceiver)(nil)
+
+// scopedWatchRescannerMock mocks rescanner with testify/mock expectations for
+// verifying Neutrino scoped watch delegation.
+type scopedWatchRescannerMock struct {
+	mock.Mock
+}
+
+// Update records and returns the configured mock error.
+func (m *scopedWatchRescannerMock) Update(
+	opts ...neutrino.UpdateOption) error {
+
+	args := m.Called(opts)
+
+	return args.Error(0)
+}
+
+// Start records the call and returns the configured error channel.
+func (m *scopedWatchRescannerMock) Start() <-chan error {
+	args := m.Called()
+	ch, _ := args.Get(0).(<-chan error)
+
+	return ch
+}
+
+// WaitForShutdown records the shutdown wait call.
+func (m *scopedWatchRescannerMock) WaitForShutdown() {
+	m.Called()
+}
+
+var _ rescanner = (*scopedWatchRescannerMock)(nil)
