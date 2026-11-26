@@ -6,7 +6,9 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // chainEventSubscriberBufferSize accommodates a burst of up to 50 ordinary
@@ -68,6 +70,11 @@ type eventListener struct {
 	// outpoints counts active WatchOutputs and auto-indexed references per
 	// outpoint for rollback and cleanup. Guarded by stream.mu.
 	outpoints map[wire.OutPoint]int
+
+	// autoOutpoints tracks received outpoints already auto-indexed on
+	// delivery so each received output contributes one independent
+	// reference to outpoints. Guarded by stream.mu.
+	autoOutpoints map[wire.OutPoint]struct{}
 }
 
 // close publishes the terminal result before releasing callers waiting on Done.
@@ -75,6 +82,7 @@ func (l *eventListener) close(err error) {
 	l.err = err
 	l.scripts = nil
 	l.outpoints = nil
+	l.autoOutpoints = nil
 	close(l.events)
 	close(l.done)
 }
@@ -222,6 +230,151 @@ func (s *chainEventStream) removeSubscriber(l *eventListener, err error) {
 	unindexWatches(s.outpointListeners, l.outpoints, l)
 
 	l.close(err)
+}
+
+// recordOutputMatches adds every listener in listeners to matched and
+// auto-indexes op for each matched listener so subsequent spends of that
+// received output are routed to the owning subscription. Caller holds s.mu.
+func (s *chainEventStream) recordOutputMatches(
+	listeners map[*eventListener]struct{}, op wire.OutPoint,
+	matched *map[*eventListener]struct{}) {
+
+	if len(listeners) == 0 {
+		return
+	}
+
+	if *matched == nil {
+		*matched = make(map[*eventListener]struct{}, len(listeners))
+	}
+
+	for l := range listeners {
+		(*matched)[l] = struct{}{}
+		if _, ok := l.autoOutpoints[op]; ok {
+			continue
+		}
+
+		if l.autoOutpoints == nil {
+			l.autoOutpoints = make(map[wire.OutPoint]struct{})
+		}
+
+		l.autoOutpoints[op] = struct{}{}
+		if l.outpoints == nil {
+			l.outpoints = make(map[wire.OutPoint]int)
+		}
+
+		indexWatch(s.outpointListeners, l.outpoints, l, op)
+	}
+}
+
+// matchOutput checks whether pkScript matches any watched script directly or
+// via extracted bare multisig pubkeys, adding matching listeners to matched
+// and auto-indexing op for them. Caller must hold s.mu.
+func (s *chainEventStream) matchOutput(pkScript []byte, op wire.OutPoint,
+	matched *map[*eventListener]struct{}) {
+
+	s.recordOutputMatches(s.scriptListeners[string(pkScript)], op, matched)
+
+	// Bare multisig scripts do not match a single address pkScript, so
+	// extract their constituent pubkeys and match against P2PK watches
+	// without conflating P2PKH watches.
+	if len(pkScript) == 0 ||
+		pkScript[len(pkScript)-1] != txscript.OP_CHECKMULTISIG {
+
+		return
+	}
+
+	class, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		pkScript, s.params,
+	)
+	if err != nil || class != txscript.MultiSigTy {
+		return
+	}
+
+	for _, addr := range addrs {
+		subScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			continue
+		}
+
+		s.recordOutputMatches(
+			s.scriptListeners[string(subScript)], op, matched,
+		)
+	}
+}
+
+// addMatchedListeners inserts every listener from src into dst, lazily
+// allocating dst on the first non-empty source set.
+func addMatchedListeners(dst *map[*eventListener]struct{},
+	src map[*eventListener]struct{}) {
+
+	if len(src) == 0 {
+		return
+	}
+
+	if *dst == nil {
+		*dst = make(map[*eventListener]struct{}, len(src))
+	}
+
+	for l := range src {
+		(*dst)[l] = struct{}{}
+	}
+}
+
+// matchTxInputs checks every input of rec against watched outpoints and
+// ComputePkScript-derived scripts. Caller must hold s.mu.
+func (s *chainEventStream) matchTxInputs(rec *wtxmgr.TxRecord,
+	matched *map[*eventListener]struct{}) {
+
+	for _, txIn := range rec.MsgTx.TxIn {
+		addMatchedListeners(
+			matched, s.outpointListeners[txIn.PreviousOutPoint],
+		)
+
+		if len(s.scriptListeners) == 0 {
+			continue
+		}
+
+		pkScript, err := txscript.ComputePkScript(
+			txIn.SignatureScript, txIn.Witness,
+		)
+		if err != nil {
+			continue
+		}
+
+		addMatchedListeners(
+			matched, s.scriptListeners[string(pkScript.Script())],
+		)
+	}
+}
+
+// matchTx inspects each input and output of rec at most once and returns the
+// set of listeners interested in rec, auto-indexing matched output outpoints
+// for their owning listeners. Caller must hold s.mu.
+func (s *chainEventStream) matchTx(
+	rec *wtxmgr.TxRecord) map[*eventListener]struct{} {
+
+	if len(s.scriptListeners) == 0 && len(s.outpointListeners) == 0 {
+		return nil
+	}
+
+	var matched map[*eventListener]struct{}
+
+	s.matchTxInputs(rec, &matched)
+
+	if len(s.scriptListeners) > 0 {
+		var idx uint32
+		for _, txOut := range rec.MsgTx.TxOut {
+			op := wire.OutPoint{
+				Hash:  rec.Hash,
+				Index: idx,
+			}
+			s.matchOutput(txOut.PkScript, op, &matched)
+
+			idx++
+		}
+	}
+
+	return matched
 }
 
 // subscribe registers the listener directly at the publication boundary.
