@@ -3,13 +3,20 @@ package kvdb
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -487,4 +494,310 @@ func TestLegacyWalletVaultForwardsExplicitKeyClass(t *testing.T) {
 			require.Equal(t, plaintext, got)
 		})
 	}
+}
+
+// TestLegacyWalletVaultPubKey verifies that the legacy vault returns the
+// public key of the account child it derives through the private key,
+// including a hardened child, which an account XPub cannot derive, and of an
+// imported key.
+func TestLegacyWalletVaultPubKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked legacy vault with an imported key, the public key
+	// at m/84'/1'/0'/0/1 read from the account xpub, and a hardened child
+	// derived by the unlocked manager.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	vault := NewLegacyWalletVault(dbConn, mgr)
+	require.NoError(t, vault.Unlock(t.Context(), testPrivPass))
+	t.Cleanup(vault.Lock)
+
+	path := waddrmgr.DerivationPath{Branch: 0, Index: 1}
+	walletPub := legacyAccountChildPubKey(
+		t, dbConn, mgr, waddrmgr.KeyScopeBIP0084, path,
+	)
+
+	hardenedPath := waddrmgr.DerivationPath{
+		Index: hdkeychain.HardenedKeyStart,
+	}
+	hardenedPub := legacyManagerPubKey(
+		t, dbConn, mgr, waddrmgr.KeyScopeBIP0084, hardenedPath,
+	)
+
+	importedKey, importedScript := importLegacyPrivKey(t, dbConn, mgr)
+
+	// Act: Derive the key at the path, the hardened child and the import.
+	pub, err := vault.PubKey(t.Context(), signing.DerivedKey{
+		KeyScope:       waddrmgr.KeyScopeBIP0084,
+		DerivationPath: path,
+	})
+	hardened, hardenedErr := vault.PubKey(t.Context(), signing.DerivedKey{
+		KeyScope:       waddrmgr.KeyScopeBIP0084,
+		DerivationPath: hardenedPath,
+	})
+	imported, importedErr := vault.PubKey(t.Context(), signing.ImportedKey{
+		ScriptPubKey: importedScript,
+	})
+
+	// Assert: The vault derived each key through its private key.
+	require.NoError(t, err)
+	require.True(t, pub.IsEqual(walletPub))
+	require.NoError(t, hardenedErr)
+	require.True(t, hardened.IsEqual(hardenedPub))
+	require.NoError(t, importedErr)
+	require.True(t, imported.IsEqual(importedKey.PubKey()))
+}
+
+// legacyManagerPubKey derives the public key at path with the unlocked
+// manager's own private derivation, independently of the vault.
+func legacyManagerPubKey(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) *btcec.PublicKey {
+
+	t.Helper()
+
+	scoped, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var addr waddrmgr.ManagedAddress
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var viewErr error
+
+		addr, viewErr = scoped.DeriveFromKeyPath(ns, path)
+
+		return viewErr
+	})
+	require.NoError(t, err)
+
+	pubAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+	require.True(t, ok)
+
+	return pubAddr.PubKey()
+}
+
+// importLegacyPrivKey imports a new private key into the unlocked manager's
+// BIP84 scope and returns the key and its output script.
+func importLegacyPrivKey(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager) (*btcec.PrivateKey, []byte) {
+
+	t.Helper()
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	wif, err := btcutil.NewWIF(privKey, mgr.ChainParams(), true)
+	require.NoError(t, err)
+
+	scoped, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	var script []byte
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		addr, importErr := scoped.ImportPrivateKey(ns, wif, nil)
+		if importErr != nil {
+			return importErr
+		}
+
+		script, importErr = txscript.PayToAddrScript(addr.Address())
+
+		return importErr
+	})
+	require.NoError(t, err)
+
+	return privKey, script
+}
+
+// importLegacyPubKey imports pub into the manager's BIP84 scope as a
+// watch-only address and returns its output script.
+func importLegacyPubKey(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, pub *btcec.PublicKey) []byte {
+
+	t.Helper()
+
+	scoped, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	var script []byte
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		addr, importErr := scoped.ImportPublicKey(ns, pub, nil)
+		if importErr != nil {
+			return importErr
+		}
+
+		script, importErr = txscript.PayToAddrScript(addr.Address())
+
+		return importErr
+	})
+	require.NoError(t, err)
+
+	return script
+}
+
+// legacyP2WKHScript returns the simnet P2WPKH output script of the public key
+// of the private key with the given seed.
+func legacyP2WKHScript(t *testing.T, seed string) (*btcec.PublicKey, []byte) {
+	t.Helper()
+
+	keyBytes := sha256.Sum256([]byte(seed))
+	_, pub := btcec.PrivKeyFromBytes(keyBytes[:])
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pub.SerializeCompressed()), &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return pub, script
+}
+
+// TestLegacyWalletVaultPubKeyLocked verifies that a locked manager refuses an
+// invalid selector with the SQL vault's sentinel and any other key with
+// keyvault.ErrVaultLocked, both before the Store lookup.
+func TestLegacyWalletVaultPubKeyLocked(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		key     signing.KeySelector
+		wantErr error
+	}{
+		{
+			name: "missing account while locked",
+			key: signing.DerivedKey{
+				KeyScope: waddrmgr.KeyScopeBIP0084,
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: 99,
+				},
+			},
+			wantErr: keyvault.ErrVaultLocked,
+		},
+		{
+			name:    "empty import script while locked",
+			key:     signing.ImportedKey{},
+			wantErr: signing.ErrInvalidKeySelector,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: A locked legacy vault.
+			dbConn, cleanup := newTestDB(t)
+			t.Cleanup(cleanup)
+
+			mgr := newSpendableAddrMgr(t, dbConn)
+			vault := NewLegacyWalletVault(dbConn, mgr)
+
+			// Act: Ask for the row's key.
+			pub, err := vault.PubKey(t.Context(), test.key)
+
+			// Assert: The row's error identity and no key.
+			require.ErrorIs(t, err, test.wantErr)
+			require.Nil(t, pub)
+		})
+	}
+}
+
+// TestLegacyWalletVaultPubKeyErrors verifies the error identities the Wallet
+// maps to its public signer errors on an unlocked manager: a missing account
+// keeps the Store's identity, and a watch-only import reports
+// keyvault.ErrNoPrivateKey. kvdb reports a script it does not know like a
+// watch-only import, so an unknown script reports keyvault.ErrNoPrivateKey
+// too.
+func TestLegacyWalletVaultPubKeyErrors(t *testing.T) {
+	t.Parallel()
+
+	watchOnlyPub, watchOnlyScript := legacyP2WKHScript(t, "watch-only")
+	_, unknownScript := legacyP2WKHScript(t, "unknown")
+
+	tests := []struct {
+		name    string
+		key     signing.KeySelector
+		wantErr error
+	}{
+		{
+			name: "missing account",
+			key: signing.DerivedKey{
+				KeyScope: waddrmgr.KeyScopeBIP0084,
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: 99,
+				},
+			},
+			wantErr: db.ErrAccountNotFound,
+		},
+		{
+			name:    "watch-only import",
+			key:     signing.ImportedKey{ScriptPubKey: watchOnlyScript},
+			wantErr: keyvault.ErrNoPrivateKey,
+		},
+		{
+			name:    "unknown script",
+			key:     signing.ImportedKey{ScriptPubKey: unknownScript},
+			wantErr: keyvault.ErrNoPrivateKey,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: An unlocked legacy vault holding a watch-only
+			// import.
+			dbConn, cleanup := newTestDB(t)
+			t.Cleanup(cleanup)
+
+			mgr := newSpendableAddrMgr(t, dbConn)
+			vault := NewLegacyWalletVault(dbConn, mgr)
+			require.NoError(t, vault.Unlock(t.Context(), testPrivPass))
+			t.Cleanup(vault.Lock)
+
+			script := importLegacyPubKey(t, dbConn, mgr, watchOnlyPub)
+			require.Equal(t, watchOnlyScript, script)
+
+			// Act: Ask for the row's key.
+			pub, err := vault.PubKey(t.Context(), test.key)
+
+			// Assert: The row's error identity and no key.
+			require.ErrorIs(t, err, test.wantErr)
+			require.Nil(t, pub)
+		})
+	}
+}
+
+// TestLegacyWalletVaultPubKeyWatchOnlyManager verifies that a watch-only
+// manager, which can never be unlocked, skips the lock check and reports
+// keyvault.ErrNoPrivateKey for an account key.
+func TestLegacyWalletVaultPubKeyWatchOnlyManager(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A legacy vault over a watch-only manager.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	vault := NewLegacyWalletVault(dbConn, mgr)
+	convertAddrStoreToWatchOnly(t, dbConn, mgr)
+
+	// Act: Ask for a key of the default account.
+	pub, err := vault.PubKey(t.Context(), signing.DerivedKey{
+		KeyScope: waddrmgr.KeyScopeBIP0084,
+	})
+
+	// Assert: The account has no private key, and no key is returned.
+	require.ErrorIs(t, err, keyvault.ErrNoPrivateKey)
+	require.Nil(t, pub)
 }
