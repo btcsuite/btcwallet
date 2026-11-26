@@ -3,8 +3,10 @@ package chain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -79,8 +81,11 @@ type EventSubscription struct {
 	// overflow. Buffered events remain readable after closure.
 	Done <-chan struct{}
 
-	// listener gives Err access to the result stored before closure.
+	// stream, listener, client, and canceled back scoped watch methods.
+	stream   *chainEventStream
 	listener *eventListener
+	client   Interface
+	canceled <-chan struct{}
 }
 
 // Err returns the terminal result after Done closes. Cancellation and source
@@ -99,6 +104,104 @@ func (s EventSubscription) Err() error {
 	default:
 		return nil
 	}
+}
+
+// checkWatchable validates ctx and ensures the handle is attached to a live
+// stream and client before indexing watches.
+func (s EventSubscription) checkWatchable(ctx context.Context) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	if s.stream == nil || s.listener == nil || s.client == nil {
+		err := s.Err()
+		if err != nil {
+			return err
+		}
+
+		return context.Canceled
+	}
+
+	return nil
+}
+
+// WatchAddrs registers addrs on this subscription and delegates to
+// WatchAddrsFromTip. Received outputs are auto-indexed on delivery;
+// NotifyBlocks is required for block events and block-confirmed spend tracking.
+func (s EventSubscription) WatchAddrs(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := s.checkWatchable(ctx)
+	if err != nil {
+		return err
+	}
+
+	scripts := make([]string, len(addrs))
+	for i, addr := range addrs {
+		if addr == nil {
+			return fmt.Errorf("%w: nil addr %d", ErrInvalidParam, i)
+		}
+
+		pkScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return fmt.Errorf("pkScript for %v: %w", addr, err)
+		}
+
+		scripts[i] = string(pkScript)
+	}
+
+	// Install keys under s.mu and release the lock before delegating so
+	// any synchronous notification emitted during WatchAddrsFromTip sees
+	// the watch without reentering s.mu.
+	err = s.stream.indexScripts(ctx, s.listener, s.canceled, scripts)
+	if err != nil {
+		return err
+	}
+
+	err = s.client.WatchAddrsFromTip(ctx, addrs)
+	if err != nil {
+		return fmt.Errorf("register address watches: %w", err)
+	}
+
+	return nil
+}
+
+// WatchOutputs registers points on this subscription and delegates to
+// NotifySpent, keeping its no-complete-mempool-snapshot contract (Neutrino's
+// NotifySpent is a no-op so it only scopes txns surfaced by its active scan).
+func (s EventSubscription) WatchOutputs(ctx context.Context,
+	points []*wire.OutPoint) error {
+
+	err := s.checkWatchable(ctx)
+	if err != nil {
+		return err
+	}
+
+	flat := make([]wire.OutPoint, len(points))
+	for i, op := range points {
+		if op == nil {
+			return fmt.Errorf("%w: nil op %d", ErrInvalidParam, i)
+		}
+
+		flat[i] = *op
+	}
+
+	// Install keys under s.mu and release the lock before delegating so
+	// synchronous spend delivery during NotifySpent (for example, Bitcoin
+	// Core reporting an existing mempool spend) sees the watch without
+	// reentering s.mu.
+	err = s.stream.indexOutpoints(ctx, s.listener, s.canceled, flat)
+	if err != nil {
+		return err
+	}
+
+	err = s.client.NotifySpent(points)
+	if err != nil {
+		return fmt.Errorf("register output watches: %w", err)
+	}
+
+	return nil
 }
 
 // eventListener owns the writable ends for one subscription.
@@ -437,7 +540,9 @@ func (s *chainEventStream) subscribe(ctx context.Context) EventSubscription {
 	sub := EventSubscription{
 		Events:   l.events,
 		Done:     l.done,
+		stream:   s,
 		listener: l,
+		canceled: ctx.Done(),
 	}
 
 	s.mu.Lock()

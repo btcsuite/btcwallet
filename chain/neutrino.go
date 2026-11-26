@@ -616,7 +616,10 @@ func (s *NeutrinoClient) SubscribeChainEvents(
 	stream := s.eventStream
 	s.clientMtx.Unlock()
 
-	return stream.subscribe(ctx)
+	sub := stream.subscribe(ctx)
+	sub.client = s
+
+	return sub
 }
 
 // SetStartTime sets the birthday used when the native rescan starts. Once a

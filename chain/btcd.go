@@ -451,7 +451,10 @@ func (c *RPCClient) Notifications() <-chan interface{} {
 func (c *RPCClient) SubscribeChainEvents(
 	ctx context.Context) EventSubscription {
 
-	return c.eventStream.subscribe(ctx)
+	sub := c.eventStream.subscribe(ctx)
+	sub.client = c
+
+	return sub
 }
 
 // BlockStamp returns the latest block notified by the client, or an error

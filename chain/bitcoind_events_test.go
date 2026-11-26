@@ -25,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1448,6 +1449,63 @@ func TestChainEventSubscriptionUnindexOnCancel(t *testing.T) {
 	)
 }
 
+// TestChainEventSubscriptionOverflowUnindexesWatches verifies that overflowing
+// a slow listener retires it with ErrEventSubscriptionBufferFull, unindexes
+// its watches immediately, and leaves subsequent publications panic-free.
+func TestChainEventSubscriptionOverflowUnindexesWatches(t *testing.T) {
+	t.Parallel()
+
+	// Enroll a slow listener with watches and an active fast sibling.
+	stream := newChainEventStream(&chaincfg.RegressionNetParams)
+	slow := stream.subscribe(t.Context())
+	fast := stream.subscribe(t.Context())
+
+	op := wire.OutPoint{Hash: chainhash.Hash{5}, Index: 0}
+
+	require.NoError(t, stream.indexScripts(
+		t.Context(), slow.listener, t.Context().Done(),
+		[]string{"overflow-script"},
+	))
+	require.NoError(t, stream.indexOutpoints(
+		t.Context(), slow.listener, t.Context().Done(),
+		[]wire.OutPoint{op},
+	))
+
+	// Overflow slow's buffer while draining fast, then publish once more.
+	for i := range chainEventSubscriberBufferSize + 1 {
+		blk := BlockDisconnected{
+			Block: wtxmgr.Block{Height: int32(i)},
+		}
+		stream.publish(blk)
+
+		ev := <-fast.Events
+		require.Equal(t, ChainEventBlockDisconnected, ev.Type)
+		require.Equal(t, int32(i), ev.Block.Height)
+	}
+
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 999}})
+
+	ev := <-fast.Events
+	require.Equal(t, int32(999), ev.Block.Height)
+
+	// Assert slow retired with ErrEventSubscriptionBufferFull and released
+	// all reverse-index entries and local maps.
+	waitSubDone(t, slow)
+	require.ErrorIs(t, slow.Err(), ErrEventSubscriptionBufferFull)
+	require.ErrorIs(t, stream.indexScripts(
+		t.Context(), slow.listener, t.Context().Done(),
+		[]string{"late-script"},
+	), ErrEventSubscriptionBufferFull)
+
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	require.Nil(t, slow.listener.scripts)
+	require.Nil(t, slow.listener.outpoints)
+	require.Empty(t, stream.scriptListeners)
+	require.Empty(t, stream.outpointListeners)
+}
+
 // TestChainEventSubscriptionMatchTx verifies single-pass transaction matching:
 // empty-index fast path, bare multisig vs P2PKH distinction, received-output
 // auto-indexing followed by cross-subscriber spend matching, and unknown-
@@ -1570,5 +1628,156 @@ func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	stream.mu.Unlock()
 	require.Len(t, wpkhMatched, 1)
 	require.Contains(t, wpkhMatched, subWPKH.listener)
+}
+
+// watchClientMock implements Interface for testing EventSubscription watch
+// delegation using testify/mock.
+type watchClientMock struct {
+	mock.Mock
+	Interface
+}
+
+// WatchAddrsFromTip records and returns the configured mock error.
+func (m *watchClientMock) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	args := m.Called(ctx, addrs)
+
+	return args.Error(0)
+}
+
+// NotifySpent records and returns the configured mock error.
+func (m *watchClientMock) NotifySpent(points []*wire.OutPoint) error {
+	args := m.Called(points)
+
+	return args.Error(0)
+}
+
+// randTestP2PKHAddr generates a random regtest P2PKH address and its pkScript.
+func randTestP2PKHAddr(t *testing.T) (address.Address, []byte) {
+	t.Helper()
+
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	pubAddr, err := address.NewAddressPubKey(
+		priv.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	addr := pubAddr.AddressPubKeyHash()
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return addr, pkScript
+}
+
+// TestChainEventSubscriptionWatchRegistration verifies WatchAddrs and
+// WatchOutputs index keys locally, delegate to the backend client, and handle
+// zero-value subscriptions safely without panicking.
+func TestChainEventSubscriptionWatchRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Set up a random address, outpoint, zero-value subscription, and a
+	// live subscription backed by a mock client expecting one call each.
+	addr, pkScript := randTestP2PKHAddr(t)
+	op := &wire.OutPoint{Hash: chainhash.Hash{11}, Index: 0}
+
+	var zero EventSubscription
+
+	stream, mc, sub := newMockWatchSub(t.Context())
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr},
+	).Return(nil).Once()
+	mc.On("NotifySpent", []*wire.OutPoint{op}).Return(nil).Once()
+
+	// Invoke watch registration on both the zero-value handle and the live
+	// subscription.
+	zeroAddrErr := zero.WatchAddrs(t.Context(), []address.Address{addr})
+	zeroOutErr := zero.WatchOutputs(t.Context(), []*wire.OutPoint{op})
+	liveAddrErr := sub.WatchAddrs(t.Context(), []address.Address{addr})
+	liveOutErr := sub.WatchOutputs(t.Context(), []*wire.OutPoint{op})
+
+	// Verify zero-value calls fail with context.Canceled while live calls
+	// install both reverse-index entries and invoke the backend mock.
+	require.ErrorIs(t, zeroAddrErr, context.Canceled)
+	require.ErrorIs(t, zeroOutErr, context.Canceled)
+	require.NoError(t, liveAddrErr)
+	require.NoError(t, liveOutErr)
+
+	stream.mu.Lock()
+	require.Contains(
+		t, stream.scriptListeners[string(pkScript)], sub.listener,
+	)
+	require.Contains(t, stream.outpointListeners[*op], sub.listener)
+	stream.mu.Unlock()
+	mc.AssertExpectations(t)
+}
+
+// newMockWatchSub creates a regtest stream, mock client, and attached handle.
+func newMockWatchSub(
+	ctx context.Context) (*chainEventStream, *watchClientMock,
+	EventSubscription) {
+
+	stream := newChainEventStream(&chaincfg.RegressionNetParams)
+	mc := &watchClientMock{}
+	sub := stream.subscribe(ctx)
+	sub.client = mc
+
+	return stream, mc, sub
+}
+
+// TestChainEventSubscriptionWatchAddrsError verifies WatchAddrs rejects nil
+// addresses and expired deadline contexts without invoking the backend client.
+func TestChainEventSubscriptionWatchAddrsError(t *testing.T) {
+	t.Parallel()
+
+	// Set up an active subscription for invalid-input checks and an
+	// already-expired deadline subscription for deadline preservation.
+	_, mcLive, liveSub := newMockWatchSub(t.Context())
+
+	expiredCtx, cancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer cancel()
+
+	_, mcExpired, expiredSub := newMockWatchSub(expiredCtx)
+
+	// Attempt both invalid WatchAddrs registrations.
+	nilErr := liveSub.WatchAddrs(t.Context(), []address.Address{nil})
+	deadlineErr := expiredSub.WatchAddrs(expiredCtx, nil)
+
+	// Confirm expected errors are returned without any backend calls.
+	require.ErrorIs(t, nilErr, ErrInvalidParam)
+	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
+	mcLive.AssertExpectations(t)
+	mcExpired.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionWatchOutputsError verifies WatchOutputs rejects
+// nil outpoints and expired deadline contexts without invoking the backend.
+func TestChainEventSubscriptionWatchOutputsError(t *testing.T) {
+	t.Parallel()
+
+	// Set up an active subscription for nil-outpoint validation and an
+	// already-expired deadline subscription for deadline preservation.
+	_, mcLive, liveSub := newMockWatchSub(t.Context())
+
+	expiredCtx, cancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer cancel()
+
+	_, mcExpired, expiredSub := newMockWatchSub(expiredCtx)
+
+	// Attempt both invalid WatchOutputs registrations.
+	nilErr := liveSub.WatchOutputs(t.Context(), []*wire.OutPoint{nil})
+	deadlineErr := expiredSub.WatchOutputs(expiredCtx, nil)
+
+	// Confirm expected errors are returned without invoking NotifySpent.
+	require.ErrorIs(t, nilErr, ErrInvalidParam)
+	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
+	mcLive.AssertExpectations(t)
+	mcExpired.AssertExpectations(t)
 }
 

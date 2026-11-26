@@ -360,7 +360,10 @@ func (c *BitcoindClient) Notifications() <-chan interface{} {
 func (c *BitcoindClient) SubscribeChainEvents(
 	ctx context.Context) EventSubscription {
 
-	return c.eventStream.subscribe(ctx)
+	sub := c.eventStream.subscribe(ctx)
+	sub.client = c
+
+	return sub
 }
 
 // NotifyReceived allows the chain backend to notify the caller whenever a
