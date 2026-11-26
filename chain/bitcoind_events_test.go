@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain/port"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1375,4 +1376,200 @@ func waitSubDone(t *testing.T, sub EventSubscription) {
 	case <-time.After(defaultTestTimeout):
 		require.FailNow(t, "timed out waiting for subscription done")
 	}
+}
+
+// TestChainEventSubscriptionUnindexOnCancel verifies that canceling one
+// listener unindexes its exclusive watches, leaves shared watches intact for
+// remaining listeners, and releases the retired listener's own watch maps.
+func TestChainEventSubscriptionUnindexOnCancel(t *testing.T) {
+	t.Parallel()
+
+	// Set up a stream with two active listeners that share one script and
+	// one outpoint while the first listener also owns exclusive keys.
+	stream := newChainEventStream(&chaincfg.RegressionNetParams, nil)
+	ctxA, cancelA := context.WithCancel(t.Context())
+	subA := stream.subscribe(ctxA)
+	subB := stream.subscribe(t.Context())
+
+	sharedScript, onlyAScript := "shared-script", "only-a-script"
+	sharedOP := wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0}
+	onlyAOP := wire.OutPoint{Hash: chainhash.Hash{2}, Index: 1}
+
+	_, err := registerWatchKeys(
+		ctxA, stream, subA.listener, ctxA.Done(),
+		&stream.scriptListeners, &subA.listener.scripts,
+		[]string{sharedScript, onlyAScript},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		ctxA, stream, subA.listener, ctxA.Done(),
+		&stream.outpointListeners, &subA.listener.outpoints,
+		[]wire.OutPoint{sharedOP, onlyAOP},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subB.listener, t.Context().Done(),
+		&stream.scriptListeners, &subB.listener.scripts,
+		[]string{sharedScript},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subB.listener, t.Context().Done(),
+		&stream.outpointListeners, &subB.listener.outpoints,
+		[]wire.OutPoint{sharedOP},
+	)
+	require.NoError(t, err)
+
+	// Cancel the first subscription and wait for retirement to complete.
+	cancelA()
+	waitSubDone(t, subA)
+
+	// Verify subA's exclusive keys were removed, shared keys still map to
+	// subB, and subA's listener watch maps were cleared for GC.
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	require.NoError(t, subA.Err())
+	require.Nil(t, subA.listener.scripts)
+	require.Nil(t, subA.listener.outpoints)
+	require.NotContains(t, stream.scriptListeners, onlyAScript)
+	require.NotContains(t, stream.outpointListeners, onlyAOP)
+	require.Contains(t, stream.scriptListeners[sharedScript], subB.listener)
+	require.NotContains(
+		t, stream.scriptListeners[sharedScript], subA.listener,
+	)
+	require.Contains(t, stream.outpointListeners[sharedOP], subB.listener)
+	require.NotContains(
+		t, stream.outpointListeners[sharedOP], subA.listener,
+	)
+}
+
+// TestChainEventSubscriptionMatchTx verifies single-pass transaction matching:
+// empty-index fast path, bare multisig vs P2PKH distinction, received-output
+// auto-indexing followed by cross-subscriber spend matching, and unknown-
+// outpoint input matching via ComputePkScript.
+func TestChainEventSubscriptionMatchTx(t *testing.T) {
+	t.Parallel()
+
+	params := &chaincfg.RegressionNetParams
+
+	// Generate two distinct key pairs and build P2PK, P2PKH, P2WPKH, and
+	// 1-of-2 bare multisig scripts for testing script matching rules.
+	privA, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	privB, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKeyAddrA, err := address.NewAddressPubKey(
+		privA.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+	pubKeyAddrB, err := address.NewAddressPubKey(
+		privB.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	p2pkhAddrA := pubKeyAddrA.AddressPubKeyHash()
+	wpkhAddrA, err := address.NewAddressWitnessPubKeyHash(
+		p2pkhAddrA.ScriptAddress(), params,
+	)
+	require.NoError(t, err)
+
+	p2pkScriptA, err := txscript.PayToAddrScript(pubKeyAddrA)
+	require.NoError(t, err)
+	p2pkhScriptA, err := txscript.PayToAddrScript(p2pkhAddrA)
+	require.NoError(t, err)
+	wpkhScriptA, err := txscript.PayToAddrScript(wpkhAddrA)
+	require.NoError(t, err)
+	multisigScript, err := txscript.MultiSigScript(
+		[]*address.AddressPubKey{pubKeyAddrA, pubKeyAddrB}, 1,
+	)
+	require.NoError(t, err)
+
+	// Verify the empty-index fast path returns nil without errors.
+	stream := newChainEventStream(params, nil)
+	emptyTx := wire.NewMsgTx(wire.TxVersion)
+	emptyTx.AddTxOut(wire.NewTxOut(1000, p2pkhScriptA))
+	emptyRec, err := wtxmgr.NewTxRecordFromMsgTx(emptyTx, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	require.Nil(t, stream.matchTx(emptyRec))
+	stream.mu.Unlock()
+
+	// Enroll three listeners: subP2PK watches P2PK(A), subP2PKH watches
+	// P2PKH(A), and subWPKH watches P2WPKH(A).
+	subP2PK := stream.subscribe(t.Context())
+	subP2PKH := stream.subscribe(t.Context())
+	subWPKH := stream.subscribe(t.Context())
+	_, err = registerWatchKeys(
+		t.Context(), stream, subP2PK.listener, t.Context().Done(),
+		&stream.scriptListeners, &subP2PK.listener.scripts,
+		[]string{string(p2pkScriptA)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subP2PKH.listener, t.Context().Done(),
+		&stream.scriptListeners, &subP2PKH.listener.scripts,
+		[]string{string(p2pkhScriptA)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subWPKH.listener, t.Context().Done(),
+		&stream.scriptListeners, &subWPKH.listener.scripts,
+		[]string{string(wpkhScriptA)},
+	)
+	require.NoError(t, err)
+
+	// Match a bare multisig output: only subP2PK matches (not subP2PKH),
+	// and the received output outpoint is auto-indexed for subP2PK.
+	msTx := wire.NewMsgTx(wire.TxVersion)
+	msTx.AddTxOut(wire.NewTxOut(2000, multisigScript))
+	msRec, err := wtxmgr.NewTxRecordFromMsgTx(msTx, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	msMatched := stream.matchTx(msRec)
+	stream.mu.Unlock()
+	require.Len(t, msMatched, 1)
+	require.Contains(t, msMatched, subP2PK.listener)
+	require.NotContains(t, msMatched, subP2PKH.listener)
+
+	// Match a subsequent spend of the auto-indexed multisig outpoint that
+	// pays to subP2PKH: both subP2PK (via outpoint) and subP2PKH (via
+	// output) match in one pass.
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&msRec.Hash, 0), nil, nil,
+	))
+	spendTx.AddTxOut(wire.NewTxOut(1500, p2pkhScriptA))
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	spendMatched := stream.matchTx(spendRec)
+	stream.mu.Unlock()
+	require.Len(t, spendMatched, 2)
+	require.Contains(t, spendMatched, subP2PK.listener)
+	require.Contains(t, spendMatched, subP2PKH.listener)
+
+	// Match an unknown-outpoint spend whose P2WPKH witness derives
+	// wpkhScriptA via ComputePkScript without prior outpoint indexing.
+	unknownSpend := wire.NewMsgTx(wire.TxVersion)
+	unknownSpend.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&chainhash.Hash{9}, 0),
+		nil,
+		wire.TxWitness{
+			[]byte{0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01},
+			privA.PubKey().SerializeCompressed(),
+		},
+	))
+	unknownRec, err := wtxmgr.NewTxRecordFromMsgTx(unknownSpend, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	wpkhMatched := stream.matchTx(unknownRec)
+	stream.mu.Unlock()
+	require.Len(t, wpkhMatched, 1)
+	require.Contains(t, wpkhMatched, subWPKH.listener)
 }
