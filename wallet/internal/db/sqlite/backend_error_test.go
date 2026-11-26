@@ -43,7 +43,6 @@ func TestTxStoreOpsWrapBackendErrors(t *testing.T) {
 		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}
 	invalidateOps := invalidateUnminedTxOps{qtx: qtx}
-	rollbackOps := rollbackToBlockOps{qtx: qtx}
 	updateOps := &updateTxOps{qtx: qtx}
 	releaseOps := releaseOutputOps{qtx: qtx}
 
@@ -58,18 +57,6 @@ func TestTxStoreOpsWrapBackendErrors(t *testing.T) {
 
 	err = invalidateOps.MarkTxnsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark txns failed")
-
-	_, err = rollbackOps.ListRollbackRootHashes(t.Context(), 1)
-	require.ErrorContains(t, err, "query rollback coinbase roots")
-
-	err = rollbackOps.RewindWalletSyncStateHeights(t.Context(), 1)
-	require.ErrorContains(t, err, "rewind wallet sync state heights query")
-
-	err = rollbackOps.DeleteBlocksAtOrAboveHeight(t.Context(), 1)
-	require.ErrorContains(t, err, "delete blocks at or above height query")
-
-	err = rollbackOps.MarkTxRootsOrphaned(t.Context(), 1, []chainhash.Hash{{1}})
-	require.ErrorContains(t, err, "update rollback coinbase state query")
 
 	updateOps.blockHeight = sql.NullInt64{}
 	updateOps.status = int64(db.TxStatusPublished)

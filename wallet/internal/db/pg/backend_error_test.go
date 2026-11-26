@@ -68,16 +68,15 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	dbtx := &mockDBTX{}
 	dbtx.On(
 		"Exec", mock.Anything, mock.Anything, mock.Anything,
-	).Return(pgconn.CommandTag{}, errDummy).Times(9)
+	).Return(pgconn.CommandTag{}, errDummy).Times(6)
 	dbtx.On(
 		"Query", mock.Anything, mock.Anything, mock.Anything,
-	).Return(nil, errDummy).Times(2)
+	).Return(nil, errDummy).Once()
 	qtx := sqlc.New(dbtx)
 	createOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}
 	invalidateOps := invalidateUnminedTxOps{qtx: qtx}
-	rollbackOps := rollbackToBlockOps{qtx: qtx}
 	updateOps := &updateTxOps{qtx: qtx}
 	releaseOps := releaseOutputOps{qtx: qtx}
 
@@ -101,20 +100,6 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 
 	err = invalidateOps.MarkTxnsFailed(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark txns failed")
-
-	_, err = rollbackOps.ListRollbackRootHashes(t.Context(), 1)
-	require.ErrorContains(t, err, "query rollback coinbase roots")
-
-	err = rollbackOps.RewindWalletSyncStateHeights(t.Context(), 1)
-	require.ErrorContains(t, err, "rewind wallet sync state heights query")
-
-	err = rollbackOps.DeleteBlocksAtOrAboveHeight(t.Context(), 1)
-	require.ErrorContains(t, err, "delete blocks at or above height query")
-
-	err = rollbackOps.MarkTxRootsOrphaned(
-		t.Context(), 1, []chainhash.Hash{{1}},
-	)
-	require.ErrorContains(t, err, "update rollback coinbase state query")
 
 	updateOps.blockHeight = sql.NullInt32{}
 	updateOps.status = int16(db.TxStatusPublished)
@@ -145,16 +130,6 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 
 	// Assert: Every conversion reports its specific context before querying.
 	require.ErrorContains(t, err, "convert credit index")
-
-	err = rollbackToBlockOps{}.RewindWalletSyncStateHeights(
-		t.Context(), ^uint32(0),
-	)
-	require.ErrorContains(t, err, "convert rollback height")
-
-	err = rollbackToBlockOps{}.DeleteBlocksAtOrAboveHeight(
-		t.Context(), ^uint32(0),
-	)
-	require.ErrorContains(t, err, "convert rollback height")
 
 	leaseOps := &leaseOutputOps{}
 

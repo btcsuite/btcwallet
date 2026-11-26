@@ -1428,74 +1428,9 @@ func (s *Store) RewindWallet(_ context.Context,
 	return nil
 }
 
-// RollbackToBlock atomically rolls legacy transaction state back to the
-// provided height and rewinds wallet sync metadata to the same fork point in
-// one walletdb update, mirroring the legacy SetSyncedTo + wtxmgr Rollback
-// rewind.
-//
-// It is the chain-reorg rollback API: a rewind must move the sync tip back and
-// disconnect the now-orphaned blocks and transactions together. Performing the
-// sync-tip update and the rollback as two separate writes is unsafe, because a
-// failure between them would leave the wallet sync tip rewound while
-// transaction state still referenced the abandoned chain (or vice versa). Both
-// effects therefore share one write transaction so the rewind is
-// all-or-nothing.
-//
-// The new sync tip and birthday block are derived from the greatest retained
-// block below the rollback boundary. Each field is only rewound when it points
-// at or above the rollback boundary, matching the SQL backends, which clamp
-// only affected wallet sync-state heights.
-func (s *Store) RollbackToBlock(_ context.Context, height uint32) error {
-	height32, err := db.Uint32ToInt32(height)
-	if err != nil {
-		return fmt.Errorf("kvdb.Store.RollbackToBlock: height: %w", err)
-	}
-
-	var target *rollbackTarget
-
-	// Hold the Store write lock through the commit-failure restore below. This
-	// keeps the cache restore ordered before a following Store write can commit
-	// the same tip and create an ABA match.
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		if txmgrNs == nil {
-			return errMissingTxmgrNamespace
-		}
-
-		target, err = s.computeRollbackTarget(tx, height, height32)
-		if err != nil {
-			return err
-		}
-
-		err = s.txStore.Rollback(txmgrNs, target.txHeight)
-		if err != nil {
-			return err
-		}
-
-		// Rewind live wallet metadata only after transaction rollback
-		// succeeds. SetSyncedTo updates the address manager's in-memory tip
-		// immediately after its DB write, so doing this last avoids leaving
-		// memory rewound if the transaction rollback fails.
-		return s.rewindRollbackState(tx, txmgrNs, target)
-	})
-	if err != nil {
-		s.restoreRollbackState(target)
-
-		return fmt.Errorf("kvdb.Store.RollbackToBlock: %w", err)
-	}
-
-	return nil
-}
-
-// rollbackTarget is the effective transaction and sync-state target for one
-// rollback request.
+// rollbackTarget is the effective tx and sync-state target for one rollback
+// request.
 type rollbackTarget struct {
-	// txHeight is the height passed to wtxmgr.Rollback.
-	txHeight int32
-
 	// rewindSyncTip reports whether the wallet sync tip should be rewound.
 	rewindSyncTip bool
 
@@ -1537,14 +1472,14 @@ type rollbackTarget struct {
 }
 
 // computeRollbackTarget derives the effective rollback target from the caller's
-// rollback boundary and any retained fork block below it.
-func (s *Store) computeRollbackTarget(tx walletdb.ReadWriteTx, height uint32,
-	height32 int32) (*rollbackTarget, error) {
+// rollback boundary and the proven retained fork block below it.
+func (s *Store) computeRollbackTarget(tx walletdb.ReadWriteTx, height int32,
+	fork *waddrmgr.BlockStamp) (*rollbackTarget, error) {
 
-	target := &rollbackTarget{txHeight: height32}
+	target := &rollbackTarget{}
 
 	// Without an address manager there is no wallet sync state to rewind in
-	// this store, so the rollback is transaction-only.
+	// this store, so the rollback is tx-only.
 	if s.addrStore == nil {
 		return target, nil
 	}
@@ -1557,49 +1492,25 @@ func (s *Store) computeRollbackTarget(tx walletdb.ReadWriteTx, height uint32,
 	}
 
 	err := s.computeRollbackBirthdayBlockTarget(
-		addrmgrNs, height32, target,
+		addrmgrNs, height, target,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// A rollback to height zero removes all transaction blocks and resets the
-	// wallet sync tip to the stored start block. Any birthday block also points
-	// at a block being disconnected, so delete it with the rest of the state.
+	// A rollback to height zero removes all tx blocks and resets the wallet
+	// sync tip to the stored start block. Any birthday block also points at
+	// a block being disconnected, so delete it with the rest of the state.
 	if height == 0 {
 		target.rewindSyncTip = true
 
 		return target, nil
 	}
 
-	return s.computeRollbackForkTarget(addrmgrNs, height, height32, target)
-}
-
-// computeRollbackForkTarget completes a non-zero rollback target by looking up
-// the retained fork block when sync metadata crosses the rollback boundary.
-func (s *Store) computeRollbackForkTarget(ns walletdb.ReadBucket,
-	height uint32, height32 int32,
-	target *rollbackTarget) (*rollbackTarget, error) {
-
-	rewindSyncTip := target.currentTip.Height >= height32
-	if !rewindSyncTip && !target.rewindBirthdayBlock {
-		return target, nil
+	target.rewindSyncTip = target.currentTip.Height >= height
+	if target.rewindSyncTip || target.rewindBirthdayBlock {
+		target.forkBlock = fork
 	}
-
-	// Only sync tips or birthday blocks at or above the rollback boundary need
-	// a fork lookup. If neither does, the transaction rollback should keep
-	// using the requested boundary.
-	forkBlock, foundFork, err := s.rollbackForkBlock(ns, height)
-	if err != nil {
-		return nil, err
-	}
-
-	target.rewindSyncTip = rewindSyncTip
-	if !foundFork {
-		return target, nil
-	}
-
-	target.forkBlock = forkBlock
 
 	return target, nil
 }
@@ -1874,36 +1785,6 @@ func (s *Store) restoreRollbackState(target *rollbackTarget) {
 	s.addrStore.RestoreSyncedToIfCurrent(
 		target.currentTip, target.rewoundTip,
 	)
-}
-
-// rollbackForkBlock returns the greatest stored block below the rollback
-// boundary and reports whether any retained block survives below that boundary.
-func (s *Store) rollbackForkBlock(ns walletdb.ReadBucket,
-	height uint32) (*waddrmgr.BlockStamp, bool, error) {
-
-	for searchHeight := height - 1; ; searchHeight-- {
-		forkHeight, err := db.Uint32ToInt32(searchHeight)
-		if err != nil {
-			return nil, false, fmt.Errorf("fork height: %w", err)
-		}
-
-		forkHash, err := s.addrStore.BlockHash(ns, forkHeight)
-		if err == nil {
-			return &waddrmgr.BlockStamp{
-				Height: forkHeight,
-				Hash:   *forkHash,
-			}, true, nil
-		}
-
-		if !waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) {
-			return nil, false, fmt.Errorf("fork block at height %d: %w",
-				forkHeight, err)
-		}
-
-		if searchHeight == 0 {
-			return nil, false, nil
-		}
-	}
 }
 
 // scanHorizonRollback records one horizon extension's pre-batch state so its
@@ -2466,21 +2347,16 @@ func (s *Store) disconnectStoredHistory(tx walletdb.ReadWriteTx, block db.Block,
 		return &rollbackTarget{}, nil
 	}
 
-	// Keep birthday/cache rules but replace the local predecessor guess
-	// with the complete stamp whose canonical membership was proven.
-	boundary, err := db.Int64ToUint32(int64(start))
-	if err != nil {
-		return nil, err
-	}
-
-	target, err := s.computeRollbackTarget(tx, boundary, start)
-	if err != nil {
-		return nil, err
-	}
-
-	target.forkBlock = nil
+	// Pass the proven fork block directly so birthday, sync-tip, and cache
+	// restoration decisions use the verified canonical predecessor.
+	var forkBlock *waddrmgr.BlockStamp
 	if fork.Height >= 0 {
-		target.forkBlock = &fork
+		forkBlock = &fork
+	}
+
+	target, err := s.computeRollbackTarget(tx, start, forkBlock)
+	if err != nil {
+		return nil, err
 	}
 
 	return target, s.rewindRollbackState(tx, ns, target)

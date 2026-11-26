@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -361,10 +362,10 @@ func TestDeleteTxRejectsCorruptedLiveChild(t *testing.T) {
 	require.ErrorContains(t, err, "tx hash")
 }
 
-// TestRollbackToBlockRejectsCorruptedCoinbaseRootHash verifies that rollback
-// fails loudly when a disconnected coinbase root carries an invalid stored
-// hash.
-func TestRollbackToBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
+// TestDisconnectBlockRejectsCorruptedCoinbaseRootHash verifies that
+// DisconnectBlock fails loudly when a disconnected coinbase root carries an
+// invalid stored hash.
+func TestDisconnectBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -395,8 +396,11 @@ func TestRollbackToBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
 		t, store, walletID, coinbaseTx.TxHash(), []byte{1, 2, 3},
 	)
 
-	err = store.RollbackToBlock(t.Context(), coinbaseBlock.Height)
-	require.ErrorContains(t, err, "rollback coinbase hash")
+	err = store.DisconnectBlock(
+		t.Context(), walletID, coinbaseBlock, nil,
+		map[uint32]*chainhash.Hash{coinbaseBlock.Height: nil},
+	)
+	require.ErrorContains(t, err, "tx hash")
 }
 
 // TestCreateTxReturnsQueryErrorWhenTransactionsTableMissing verifies that the
@@ -494,17 +498,22 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	require.ErrorContains(t, err, "delete spent utxo leases")
 }
 
-// TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing checks that a
-// missing block table stops rollback, whichever query first reads the table.
-func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
+// TestDisconnectBlockReturnsQueryErrorWhenBlocksTableMissing checks that a
+// missing block table stops DisconnectBlock, whichever query first reads it.
+func TestDisconnectBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Drop the shared block table so rollback cannot read history.
+	// Arrange: Create a Wallet and drop wallet_blocks so disconnect cannot
+	// read history.
 	store := NewTestStore(t)
-	dropTableForCorruption(t, store, "blocks")
+	walletID := newWallet(t, store, "wallet-missing-blocks-table")
+	dropTableForCorruption(t, store, "wallet_blocks")
 
-	// Act: Ask rollback to disconnect blocks from height one.
-	err := store.RollbackToBlock(t.Context(), 1)
+	// Act: Ask disconnect to remove height one for the Wallet.
+	err := store.DisconnectBlock(
+		t.Context(), walletID, db.Block{Height: 1}, nil,
+		map[uint32]*chainhash.Hash{1: nil},
+	)
 
 	// Assert: Require the SQL wrapper and native code, so wrapper text cannot
 	// pass this check. Missing tables use SQLSTATE 42P01 on PostgreSQL and

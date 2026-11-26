@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
@@ -75,8 +76,11 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnFailure(t *testing.T) {
 
 	// The rollback (boundary = coinbase height) must fail while deleting the
 	// rollback block after rewinding the sync state to the fork point.
-	err = store.RollbackToBlock(t.Context(), coinbaseBlock.Height)
-	require.ErrorContains(t, err, "delete blocks at or above height")
+	err = store.DisconnectBlock(
+		t.Context(), walletID, coinbaseBlock, &forkBlock,
+		map[uint32]*chainhash.Hash{coinbaseBlock.Height: nil},
+	)
+	require.ErrorContains(t, err, "delete wallet blocks")
 
 	// The sync tip must be unchanged: the failed rollback rolled the sync-tip
 	// rewind back with it, so the wallet still points at the coinbase block.
@@ -129,7 +133,10 @@ func TestRollbackToBlockRewindsSyncTipAndRollsBack(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), confirmedBlock.Height)
+	err = store.DisconnectBlock(
+		t.Context(), walletID, confirmedBlock, &forkBlock,
+		map[uint32]*chainhash.Hash{confirmedBlock.Height: nil},
+	)
 	require.NoError(t, err)
 
 	// The sync tip moved back to the fork point at height-1.
