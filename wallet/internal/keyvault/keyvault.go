@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 )
 
 // ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
@@ -91,6 +92,22 @@ type Vault interface {
 	// parameters before re-wrapping under the new one.
 	ChangePassphrase(ctx context.Context,
 		params ChangePassphraseParams) error
+
+	// PubKey returns the public key of the selected private key. It
+	// derives through the private key, so it also serves hardened
+	// children, which an account XPub cannot derive.
+	//
+	// A selector that signing.ValidateKeySelector refuses returns
+	// signing.ErrInvalidKeySelector, and a locked vault returns
+	// ErrVaultLocked, both before any Store read. An unlocked vault returns
+	// ErrNoPrivateKey for an account or import without a private key,
+	// including an import the Store reports as db.ErrSecretNotFound; kvdb
+	// reports a script it does not know that way too. Other Store errors,
+	// such as db.ErrAccountNotFound or the SQL db.ErrAddressNotFound for a
+	// missing key, keep their identity. A Lock that lands after the Store
+	// read still returns ErrVaultLocked.
+	PubKey(ctx context.Context, sel signing.KeySelector) (*btcec.PublicKey,
+		error)
 }
 
 // UnsafeVault is a Vault that also decrypts any stored ciphertext and returns
