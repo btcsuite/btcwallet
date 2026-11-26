@@ -10,8 +10,10 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -441,4 +443,71 @@ func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 
 		require.Equal(t, wantMsgs, gotMsgs)
 	}
+}
+
+// TestNeutrinoClientScopedWatch verifies NeutrinoClient delegates WatchAddrs
+// to start the native rescan once and scopes EventBlockConnected tx
+// delivery strictly to the watched subscription.
+func TestNeutrinoClientScopedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Configure a mock chain service and reuse mockRescanner while counting
+	// rescan starts triggered by WatchAddrs.
+	var rescanStarts int
+
+	client := &NeutrinoClient{
+		CS:          &mockChainService{},
+		chainParams: &chaincfg.RegressionNetParams,
+		newRescan: func(...neutrino.RescanOption) rescanner {
+			rescanStarts++
+
+			return &mockRescanner{}
+		},
+	}
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+	service.On("Start").Return(nil).Once()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{
+		Height: 10,
+	}, nil).Twice()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	// Enroll watched and unwatched subscriptions and register addr on
+	// watched.
+	addr, pkScript := randTestP2PKHAddr(t)
+	watched := client.SubscribeChainEvents(t.Context())
+	unwatched := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addr}),
+	)
+	require.Equal(t, 1, rescanStarts)
+
+	// Emit a filtered block containing a tx paying to addr.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(wire.NewTxOut(5000, pkScript))
+	txHash := tx.TxHash()
+	hdr := &wire.BlockHeader{Timestamp: time.Now()}
+	client.onFilteredBlockConnected(11, hdr, []*btcutil.Tx{
+		btcutil.NewTx(tx),
+	})
+
+	// Watched receives the tx inside EventBlockConnected; unwatched
+	// receives the block with zero relevant txns.
+	wBlk := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventBlockConnected, wBlk.Type)
+	require.Equal(t, int32(11), wBlk.Block.Height)
+	require.Len(t, wBlk.RelevantTxs, 1)
+	require.Equal(t, txHash, wBlk.RelevantTxs[0].Hash)
+
+	uBlk := waitChainEvent(t, unwatched.Events)
+	require.Equal(t, EventBlockConnected, uBlk.Type)
+	require.Equal(t, int32(11), uBlk.Block.Height)
+	require.Empty(t, uBlk.RelevantTxs)
+
+	service.AssertExpectations(t)
 }
