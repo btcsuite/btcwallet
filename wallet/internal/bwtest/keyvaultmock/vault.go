@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -117,6 +118,17 @@ func (m *Vault) ECDH(ctx context.Context, scope waddrmgr.KeyScope,
 	digest, _ := args.Get(0).([32]byte)
 
 	return digest, args.Error(1)
+}
+
+// PubKey forwards to the configured testify expectations.
+func (m *Vault) PubKey(ctx context.Context,
+	sel signing.KeySelector) (*btcec.PublicKey, error) {
+
+	args := m.Called(ctx, sel)
+
+	pub, _ := args.Get(0).(*btcec.PublicKey)
+
+	return pub, args.Error(1)
 }
 
 // A compile-time check that the mock satisfies the interface it stands in for.
