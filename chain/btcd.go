@@ -281,7 +281,7 @@ func (c *RPCClient) Start(_ context.Context) error {
 	c.started = true
 
 	// Give the handler its registry before native events can reach it.
-	c.eventStream = newChainEventStream()
+	c.eventStream = newChainEventStream(c.chainParams, c)
 	c.wg.Add(1)
 	go c.handler()
 

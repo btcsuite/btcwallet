@@ -1365,3 +1365,14 @@ func waitForRelevantTx(t *testing.T, ntfns <-chan any, hash *chainhash.Hash) {
 		}
 	}
 }
+
+// waitSubDone waits until sub.Done closes or fails the test on timeout.
+func waitSubDone(t *testing.T, sub EventSubscription) {
+	t.Helper()
+
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for subscription done")
+	}
+}
