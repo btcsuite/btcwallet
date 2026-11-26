@@ -10,8 +10,10 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -439,4 +441,79 @@ func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 
 		require.Equal(t, wantMsgs, gotMsgs)
 	}
+}
+
+// TestNeutrinoClientScopedWatch verifies NeutrinoClient delegates WatchAddrs
+// to start the native rescan once and scopes ChainEventBlockConnected tx
+// delivery strictly to the watched subscription.
+func TestNeutrinoClientScopedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Configure a mock chain service and mock rescanner returning a single
+	// error channel when Start is invoked.
+	errCh := make(chan error, 1)
+	rescanMock := &scopedWatchRescannerMock{}
+	rescanMock.On("Start").Return((<-chan error)(errCh)).Once()
+
+	client := &NeutrinoClient{
+		CS:          &mockChainService{},
+		chainParams: &chaincfg.RegressionNetParams,
+		newRescan: func(...neutrino.RescanOption) rescanner {
+			return rescanMock
+		},
+	}
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+	service.On("Start").Return(nil).Once()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{
+		Height: 10,
+	}, nil).Twice()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	// Enroll watched and unwatched subscriptions and register addr on
+	// watched.
+	addr, pkScript := randTestP2PKHAddr(t)
+	watched := client.SubscribeChainEvents(t.Context())
+	unwatched := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addr}),
+	)
+
+	// Emit a filtered block containing a tx paying to addr.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(wire.NewTxOut(5000, pkScript))
+	txHash := tx.TxHash()
+	hdr := &wire.BlockHeader{Timestamp: time.Now()}
+	client.onFilteredBlockConnected(11, hdr, []*btcutil.Tx{
+		btcutil.NewTx(tx),
+	})
+
+	// Watched receives the tx inside ChainEventBlockConnected; unwatched
+	// receives the block with zero relevant txns.
+	select {
+	case ev := <-watched.Events:
+		require.Equal(t, ChainEventBlockConnected, ev.Type)
+		require.Equal(t, int32(11), ev.Block.Height)
+		require.Len(t, ev.RelevantTxs, 1)
+		require.Equal(t, txHash, ev.RelevantTxs[0].Hash)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "watched missed ChainEventBlockConnected")
+	}
+
+	select {
+	case ev := <-unwatched.Events:
+		require.Equal(t, ChainEventBlockConnected, ev.Type)
+		require.Equal(t, int32(11), ev.Block.Height)
+		require.Empty(t, ev.RelevantTxs)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "unwatched missed ChainEventBlockConnected")
+	}
+
+	rescanMock.AssertExpectations(t)
+	service.AssertExpectations(t)
 }

@@ -423,6 +423,36 @@ func newTestWPKHKey(t *testing.T) testWPKHKey {
 	return testWPKHKey{priv: priv, addr: addr, pkScript: pkScript}
 }
 
+// fundConfirmedWPKH funds k with 10000 satoshis in a mined block on miner and
+// returns the funded outpoint.
+func fundConfirmedWPKH(t *testing.T, miner *rpctest.Harness,
+	k testWPKHKey) wire.OutPoint {
+
+	t.Helper()
+
+	tx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 10000, PkScript: k.pkScript}}, 5, false,
+	)
+	require.NoError(t, err)
+	_, err = miner.GenerateAndSubmitBlock(
+		[]*btcutil.Tx{btcutil.NewTx(tx)}, -1, time.Time{},
+	)
+	require.NoError(t, err)
+
+	for i, out := range tx.TxOut {
+		if string(out.PkScript) == string(k.pkScript) {
+			return wire.OutPoint{
+				Hash:  tx.TxHash(),
+				Index: uint32(i),
+			}
+		}
+	}
+
+	require.FailNow(t, "funded output not found")
+
+	return wire.OutPoint{}
+}
+
 // signWPKHSpend constructs and signs a single-input SegWit tx spending input
 // owned by key/inAmt to a single output.
 func signWPKHSpend(t *testing.T, input wire.OutPoint, key testWPKHKey,
@@ -483,4 +513,188 @@ func TestRPCClientRelevantTxWitnessTxid(t *testing.T) {
 	require.True(t, ok)
 	require.Nil(t, rel.Block)
 	require.Equal(t, tx.TxHash(), rel.TxRecord.Hash)
+}
+
+// waitChainEvent reads the next ChainEvent from ch or fails on timeout.
+func waitChainEvent(t *testing.T, ch <-chan ChainEvent) ChainEvent {
+	t.Helper()
+
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "unexpected closed ChainEvent channel")
+		return ev
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for ChainEvent")
+		return ChainEvent{}
+	}
+}
+
+// TestRPCClientScopedWatch verifies live btcd scoped watch delivery: watched
+// receives ChainEventMempoolTx on broadcast and one atomic
+// ChainEventBlockConnected with the tx when mined, while unwatched stays
+// isolated.
+func TestRPCClientScopedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Start btcd with block notifications and enroll watched and unwatched
+	// subscriptions, registering dest only on watched.
+	miner, client := setupBtcd(t)
+	require.NoError(t, client.NotifyBlocks())
+
+	watched := client.SubscribeChainEvents(t.Context())
+	unwatched := client.SubscribeChainEvents(t.Context())
+	dest := newTestWPKHKey(t)
+	err := watched.WatchAddrs(t.Context(), []address.Address{dest.addr})
+	require.NoError(t, err)
+
+	// Broadcast a payment to dest and confirm it in the next mined block.
+	tx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 5000, PkScript: dest.pkScript}}, 5, false,
+	)
+	require.NoError(t, err)
+
+	txHash := tx.TxHash()
+	_, err = client.SendRawTransaction(tx, true)
+	require.NoError(t, err)
+
+	// Verify watched receives ChainEventMempoolTx then the mined block
+	// carrying txHash, while unwatched receives an empty block event.
+	memEv := waitChainEvent(t, watched.Events)
+	require.Equal(t, ChainEventMempoolTx, memEv.Type)
+	require.Nil(t, memEv.Block)
+	require.Len(t, memEv.RelevantTxs, 1)
+	require.Equal(t, txHash, memEv.RelevantTxs[0].Hash)
+
+	hashes, err := miner.Client.Generate(1)
+	require.NoError(t, err)
+
+	wBlk := waitChainEvent(t, watched.Events)
+	require.Equal(t, ChainEventBlockConnected, wBlk.Type)
+	require.Equal(t, *hashes[0], wBlk.Block.Hash)
+	require.Len(t, wBlk.RelevantTxs, 1)
+	require.Equal(t, txHash, wBlk.RelevantTxs[0].Hash)
+
+	uBlk := waitChainEvent(t, unwatched.Events)
+	require.Equal(t, ChainEventBlockConnected, uBlk.Type)
+	require.Equal(t, *hashes[0], uBlk.Block.Hash)
+	require.Empty(t, uBlk.RelevantTxs)
+}
+
+// TestRPCClientFilteredBlockDelivery verifies confirmed self-spend and
+// same-block parent-to-child spend arrive deduplicated in block order via
+// OnFilteredBlockConnected, interleaved legacy Rescan does not contaminate
+// EventSubscription, and legacy Notifications() stays intact.
+func TestRPCClientFilteredBlockDelivery(t *testing.T) {
+	t.Parallel()
+
+	// Fund a confirmed output for keyA and subscribe with both keyA's
+	// address and fundOP watched alongside legacy Notifications().
+	miner := setupBtcdMiner(t)
+	keyA := newTestWPKHKey(t)
+	keyOther := newTestWPKHKey(t)
+	fundOP := fundConfirmedWPKH(t, miner, keyA)
+
+	client := setupBtcdClient(t, miner)
+	require.NoError(t, client.NotifyBlocks())
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, sub.WatchAddrs(t.Context(), []address.Address{keyA.addr}),
+	)
+	require.NoError(
+		t, sub.WatchOutputs(t.Context(), []*wire.OutPoint{&fundOP}),
+	)
+
+	// Build a self-spend parent and same-block child, trigger a legacy
+	// Rescan, and mine both transactions directly in one block.
+	parent := signWPKHSpend(
+		t, fundOP, keyA, 10000, keyA.pkScript, 9000,
+	)
+	parentOP := wire.OutPoint{Hash: parent.TxHash(), Index: 0}
+	child := signWPKHSpend(
+		t, parentOP, keyA, 9000, keyOther.pkScript, 8000,
+	)
+
+	startHash, err := miner.Client.GetBlockHash(0)
+	require.NoError(t, err)
+	err = client.Rescan(startHash, []address.Address{keyA.addr}, nil)
+	require.NoError(t, err)
+
+	minedBlk, err := miner.GenerateAndSubmitBlock(
+		[]*btcutil.Tx{btcutil.NewTx(parent), btcutil.NewTx(child)},
+		-1, time.Time{},
+	)
+	require.NoError(t, err)
+
+	// Verify sub observes parent then child inside one block event with no
+	// leaked rescan markers, while legacy Notifications() receives parent.
+	blkEv := waitChainEvent(t, sub.Events)
+	require.Equal(t, ChainEventBlockConnected, blkEv.Type)
+	require.Equal(t, *minedBlk.Hash(), blkEv.Block.Hash)
+	require.Len(t, blkEv.RelevantTxs, 2)
+	require.Equal(t, parent.TxHash(), blkEv.RelevantTxs[0].Hash)
+	require.Equal(t, child.TxHash(), blkEv.RelevantTxs[1].Hash)
+
+	parentHash := parent.TxHash()
+	waitForRelevantTx(t, legacy, &parentHash)
+}
+
+// TestRPCClientWatchKeepsLegacyBlockOptIn verifies calling WatchAddrs without
+// NotifyBlocks does not stealth-enable legacy BlockConnected notifications on
+// Notifications() while still delivering watched ChainEventMempoolTx events.
+func TestRPCClientWatchKeepsLegacyBlockOptIn(t *testing.T) {
+	t.Parallel()
+
+	// Start btcd without calling NotifyBlocks, drain the initial connect
+	// marker, and register a scoped address watch.
+	miner, client := setupBtcd(t)
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	dest := newTestWPKHKey(t)
+	require.NoError(
+		t, sub.WatchAddrs(t.Context(), []address.Address{dest.addr}),
+	)
+
+	// Mine an empty block first, then broadcast a watched mempool payment.
+	_, err := miner.Client.Generate(1)
+	require.NoError(t, err)
+
+	tx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 3000, PkScript: dest.pkScript}}, 5, false,
+	)
+	require.NoError(t, err)
+
+	txHash := tx.TxHash()
+	_, err = client.SendRawTransaction(tx, true)
+	require.NoError(t, err)
+
+	// Verify sub receives the mempool tx and legacy Notifications() sees
+	// no unrequested BlockConnected before the matching RelevantTx.
+	memEv := waitChainEvent(t, sub.Events)
+	require.Equal(t, ChainEventMempoolTx, memEv.Type)
+	require.Equal(t, txHash, memEv.RelevantTxs[0].Hash)
+
+	deadline := time.After(defaultTestTimeout)
+	for {
+		select {
+		case ntfn := <-legacy:
+			_, isBlk := ntfn.(BlockConnected)
+			require.False(
+				t, isBlk, "WatchAddrs stealth-enabled "+
+					"BlockConnected",
+			)
+
+			if rel, ok := ntfn.(RelevantTx); ok &&
+				rel.TxRecord.Hash.IsEqual(&txHash) {
+
+				return
+			}
+		case <-deadline:
+			require.FailNow(t, "legacy Notifications missed tx")
+		}
+	}
 }

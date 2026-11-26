@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -1781,3 +1784,338 @@ func TestChainEventSubscriptionWatchOutputsError(t *testing.T) {
 	mcExpired.AssertExpectations(t)
 }
 
+// hasGoroutineMatching reports whether any live goroutine stack trace contains
+// every required substring within the same goroutine block.
+func hasGoroutineMatching(parts ...string) bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+
+	for _, block := range strings.Split(string(buf[:n]), "\n\n") {
+		matched := true
+		for _, p := range parts {
+			if !strings.Contains(block, p) {
+				matched = false
+
+				break
+			}
+		}
+
+		if matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+// TestChainEventSubscriptionWatchSurvivesDrain verifies that a concurrent
+// WatchAddrs call blocked on stream.mu while retiring the sole prior script
+// owner replaces scriptListeners still installs its watch into the new map and
+// receives subsequent matching txns before a disconnect barrier.
+func TestChainEventSubscriptionWatchSurvivesDrain(t *testing.T) {
+	t.Parallel()
+
+	// Enroll oldSub watching addrOld and newSub waiting to watch addrNew,
+	// attach a mock client accepting both registrations, and prepare a
+	// payment tx targeting addrNew.
+	addrOld, _ := randTestP2PKHAddr(t)
+	addrNew, scriptNew := randTestP2PKHAddr(t)
+	stream, mc, oldSub := newMockWatchSub(t.Context())
+	newSub := stream.subscribe(t.Context())
+	newSub.client = mc
+
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addrOld},
+	).Return(nil).Once()
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addrNew},
+	).Return(nil).Once()
+	require.NoError(
+		t, oldSub.WatchAddrs(t.Context(), []address.Address{addrOld}),
+	)
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(wire.NewTxOut(2500, scriptNew))
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	// Hold stream.mu while newSub.WatchAddrs parks inside
+	// registerWatchKeys, retire oldSub to drain and replace
+	// scriptListeners, release stream.mu, wait for registration, and
+	// publish the payment followed by a disconnect barrier.
+	stream.mu.Lock()
+	oldPtr := reflect.ValueOf(stream.scriptListeners).Pointer()
+
+	watchDone := make(chan error, 1)
+	go func() {
+		watchDone <- newSub.WatchAddrs(
+			t.Context(), []address.Address{addrNew},
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		return hasGoroutineMatching(
+			"[sync.Mutex.Lock]", "registerWatchKeys",
+			"TestChainEventSubscriptionWatchSurvivesDrain",
+		)
+	}, defaultTestTimeout, 5*time.Millisecond)
+
+	stream.retireListenerLocked(oldSub.listener, nil)
+	newPtr := reflect.ValueOf(stream.scriptListeners).Pointer()
+	stream.mu.Unlock()
+
+	watchErr := <-watchDone
+
+	stream.publish(RelevantTx{TxRecord: rec, Block: nil})
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 7}})
+
+	// Verify draining replaced scriptListeners, newSub's concurrent watch
+	// succeeded into the replacement map, and newSub observed the matching
+	// mempool tx before the disconnect barrier.
+	require.NotEqual(t, oldPtr, newPtr)
+	require.NoError(t, watchErr)
+
+	ev := <-newSub.Events
+	require.Equal(t, ChainEventMempoolTx, ev.Type)
+	require.Len(t, ev.RelevantTxs, 1)
+	require.Equal(t, rec.Hash, ev.RelevantTxs[0].Hash)
+	require.Equal(t, ChainEventBlockDisconnected, (<-newSub.Events).Type)
+	mc.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionMempoolTx verifies unconfirmed RelevantTx emits
+// ChainEventMempoolTx only to matched listeners while confirmed RelevantTx is
+// ignored on EventSubscription.
+func TestChainEventSubscriptionMempoolTx(t *testing.T) {
+	t.Parallel()
+
+	// Set up a watched subscription, an unwatched sibling, and two
+	// distinct txns paying to the watched address so a leaked confirmed tx
+	// cannot masquerade as the unconfirmed mempool tx.
+	addrA, scriptA := randTestP2PKHAddr(t)
+	stream, mc, watched := newMockWatchSub(t.Context())
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addrA},
+	).Return(nil).Once()
+
+	unwatched := stream.subscribe(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addrA}),
+	)
+
+	confirmedTx := wire.NewMsgTx(wire.TxVersion)
+	confirmedTx.AddTxOut(wire.NewTxOut(1000, scriptA))
+	confirmedRec, err := wtxmgr.NewTxRecordFromMsgTx(
+		confirmedTx, time.Now(),
+	)
+	require.NoError(t, err)
+
+	mempoolTx := wire.NewMsgTx(wire.TxVersion)
+	mempoolTx.AddTxOut(wire.NewTxOut(2000, scriptA))
+	mempoolRec, err := wtxmgr.NewTxRecordFromMsgTx(mempoolTx, time.Now())
+	require.NoError(t, err)
+
+	// Publish the confirmed RelevantTx, the unconfirmed RelevantTx, and a
+	// block-disconnect barrier.
+	stream.publish(RelevantTx{
+		TxRecord: confirmedRec,
+		Block:    &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 1}},
+	})
+	stream.publish(RelevantTx{TxRecord: mempoolRec, Block: nil})
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 2}})
+
+	// Confirm watched receives only the unconfirmed mempool tx immediately
+	// followed by the disconnect barrier, while unwatched skips straight
+	// to the disconnect barrier.
+	ev := <-watched.Events
+	require.Equal(t, ChainEventMempoolTx, ev.Type)
+	require.Nil(t, ev.Block)
+	require.Equal(t, []*wtxmgr.TxRecord{mempoolRec}, ev.RelevantTxs)
+
+	barrier := <-watched.Events
+	require.Equal(t, ChainEventBlockDisconnected, barrier.Type)
+	require.Equal(t, int32(2), barrier.Block.Height)
+	require.Equal(t, ChainEventBlockDisconnected, (<-unwatched.Events).Type)
+	mc.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionBlockEvents verifies FilteredBlockConnected
+// scoping (including same-block parent-to-child spends without mutating the
+// input slice), BlockDisconnected delivery, and suppression of legacy markers.
+func TestChainEventSubscriptionBlockEvents(t *testing.T) {
+	t.Parallel()
+
+	// Enroll watched and unwatched subscriptions and build a block
+	// containing a watched parent, an unrelated tx, and a child spending
+	// the parent's output.
+	addrA, scriptA := randTestP2PKHAddr(t)
+	_, scriptOther := randTestP2PKHAddr(t)
+	stream, mc, watched := newMockWatchSub(t.Context())
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addrA},
+	).Return(nil).Once()
+
+	unwatched := stream.subscribe(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addrA}),
+	)
+
+	makeRec := func(tx *wire.MsgTx) *wtxmgr.TxRecord {
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, err)
+
+		return rec
+	}
+	parent := wire.NewMsgTx(wire.TxVersion)
+	parent.AddTxOut(wire.NewTxOut(5000, scriptA))
+	parentRec := makeRec(parent)
+
+	unrelated := wire.NewMsgTx(wire.TxVersion)
+	unrelated.AddTxOut(wire.NewTxOut(1000, scriptOther))
+	unrelatedRec := makeRec(unrelated)
+
+	child := wire.NewMsgTx(wire.TxVersion)
+	child.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&parentRec.Hash, 0), nil, nil,
+	))
+	child.AddTxOut(wire.NewTxOut(4000, scriptOther))
+	childRec := makeRec(child)
+
+	origSlice := []*wtxmgr.TxRecord{parentRec, unrelatedRec, childRec}
+	blk := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Hash: chainhash.Hash{22}, Height: 5},
+	}
+
+	// Publish suppressed legacy markers, the filtered block, and a block
+	// disconnect.
+	stream.publish(ClientConnected{})
+	stream.publish(BlockConnected(*blk))
+	stream.publish(&RescanProgress{Hash: blk.Hash, Height: blk.Height})
+	stream.publish(FilteredBlockConnected{
+		Block: blk, RelevantTxs: origSlice,
+	})
+	stream.publish(BlockDisconnected(*blk))
+
+	// Confirm watched receives only parent and child in block order without
+	// mutating origSlice, unwatched receives an empty block, and the
+	// disconnect follows.
+	wBlk := <-watched.Events
+	require.Equal(t, ChainEventBlockConnected, wBlk.Type)
+	require.Equal(t, blk, wBlk.Block)
+	require.Equal(
+		t, []*wtxmgr.TxRecord{parentRec, childRec}, wBlk.RelevantTxs,
+	)
+	require.Equal(
+		t, []*wtxmgr.TxRecord{parentRec, unrelatedRec, childRec},
+		origSlice,
+	)
+
+	uBlk := <-unwatched.Events
+	require.Equal(t, ChainEventBlockConnected, uBlk.Type)
+	require.Nil(t, uBlk.RelevantTxs)
+
+	wDisc := <-watched.Events
+	require.Equal(t, ChainEventBlockDisconnected, wDisc.Type)
+	require.Equal(t, blk.Hash, wDisc.Block.Hash)
+	mc.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionRegistration verifies synchronous mempool spend
+// delivery during WatchOutputs, unwatched sibling isolation, and post-cancel
+// rejection.
+func TestChainEventSubscriptionRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Set up a mock client whose NotifySpent synchronously publishes a
+	// matching mempool spend while WatchOutputs is in flight, alongside an
+	// unwatched sibling subscription.
+	op := &wire.OutPoint{Hash: chainhash.Hash{33}, Index: 1}
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(wire.NewTxIn(op, nil, nil))
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stream, mc, watched := newMockWatchSub(ctx)
+	mc.On("NotifySpent", []*wire.OutPoint{op}).Run(
+		func(mock.Arguments) {
+			stream.publish(RelevantTx{TxRecord: spendRec})
+		},
+	).Return(nil).Once()
+
+	unwatched := stream.subscribe(t.Context())
+
+	// Register the outpoint watch, publish a barrier for unwatched, then
+	// cancel watched and attempt a post-cancel WatchOutputs call.
+	regErr := watched.WatchOutputs(ctx, []*wire.OutPoint{op})
+
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 9}})
+
+	cancel()
+	waitSubDone(t, watched)
+
+	postCancelErr := watched.WatchOutputs(t.Context(), []*wire.OutPoint{op})
+
+	// Confirm watched captured the synchronous spend, unwatched skipped
+	// straight to the barrier, and the post-cancel call returned Canceled.
+	require.NoError(t, regErr)
+
+	ev := <-watched.Events
+	require.Equal(t, ChainEventMempoolTx, ev.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, ev.RelevantTxs)
+	require.Equal(t, ChainEventBlockDisconnected, (<-unwatched.Events).Type)
+	require.ErrorIs(t, postCancelErr, context.Canceled)
+	mc.AssertExpectations(t)
+}
+
+// TestBitcoindScopedWatch verifies BitcoindClient scopes mempool RelevantTx
+// delivery to watched subscriptions while keeping unwatched siblings isolated
+// through a queue-ordered FilteredBlockConnected barrier.
+func TestBitcoindScopedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Start a BitcoindClient fixture configured for regtest with block
+	// notifications enabled.
+	client := newBitcoindStartupTestClient(t, nil)
+	client.chainConn.cfg.ChainParams = &chaincfg.RegressionNetParams
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	addr, pkScript := randTestP2PKHAddr(t)
+	watched := client.SubscribeChainEvents(t.Context())
+	unwatched := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addr}),
+	)
+
+	// Drive a mempool tx through filterTx followed by a block barrier.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(wire.NewTxOut(2500, pkScript))
+	isRelevant, rec, err := client.filterTx(btcutil.NewTx(tx), nil, true)
+	require.NoError(t, err)
+	require.True(t, isRelevant)
+
+	hdr := &wire.BlockHeader{Timestamp: time.Now()}
+	client.onFilteredBlockConnected(10, hdr, nil)
+
+	// Watched receives ChainEventMempoolTx then the barrier block;
+	// unwatched receives only the empty barrier block.
+	select {
+	case ev := <-watched.Events:
+		require.Equal(t, ChainEventMempoolTx, ev.Type)
+		require.Nil(t, ev.Block)
+		require.Len(t, ev.RelevantTxs, 1)
+		require.Equal(t, rec.Hash, ev.RelevantTxs[0].Hash)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "watched missed ChainEventMempoolTx")
+	}
+
+	select {
+	case ev := <-unwatched.Events:
+		require.Equal(t, ChainEventBlockConnected, ev.Type)
+		require.Equal(t, int32(10), ev.Block.Height)
+		require.Empty(t, ev.RelevantTxs)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "unwatched missed barrier block")
+	}
+}
