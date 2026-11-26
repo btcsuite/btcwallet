@@ -100,16 +100,6 @@ type Querier interface {
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
-	DeleteBlock(ctx context.Context, blockHeight int64) error
-	// Deletes blocks at and after the provided height.
-	//
-	// How:
-	// - Deletes directly from blocks by the natural height key.
-	// - Relies on FK/trigger side effects to null transaction block references and
-	//   orphan coinbase rows.
-	// Performance:
-	// - Executes as a range delete over the block-height primary key.
-	DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int64) (int64, error)
 	// Deletes all expired lease rows for a wallet.
 	//
 	// How:
@@ -213,8 +203,6 @@ type Querier interface {
 	// Atomically gets the next internal/change address index and increments the counter.
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
-	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
-	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
 	// GetDatabaseIdentity reads only a canonical SQLite value tuple so dynamic
 	// storage classes and out-of-range integers become a malformed missing row.
 	GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error)
@@ -299,7 +287,6 @@ type Querier interface {
 	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
-	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	// InsertDatabaseIdentity writes the only permitted row after catalog checks
 	// prove that an unmarked SQLite file is empty and safe to claim.
 	InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error
@@ -468,19 +455,6 @@ type Querier interface {
 	// Performance:
 	// - Uses the replacement-edge index without joining transactions.
 	ListReplacementTxIDsByReplacedTxID(ctx context.Context, arg ListReplacementTxIDsByReplacedTxIDParams) ([]ListReplacementTxIDsByReplacedTxIDRow, error)
-	// Lists wallet-scoped coinbase transaction hashes at or above the rollback
-	// boundary that seed descendant invalidation.
-	//
-	// How:
-	// - Reads only confirmed coinbase rows at or above the rollback boundary.
-	// - Returns wallet scope alongside each tx hash so callers can treat these
-	//   coinbase transactions as rollback roots when invalidating now-invalid
-	//   descendants inside the same rollback transaction.
-	// - This is a rollback-specific helper, not a generic "coinbase txs from one
-	//   block" listing query.
-	// Performance:
-	// - Uses the block-height index to bound the scan to the rollback range.
-	ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int64) ([]ListRollbackCoinbaseRootsRow, error)
 	// Lists all confirmed transactions for a wallet in the provided height range.
 	//
 	// How:
@@ -499,7 +473,7 @@ type Querier interface {
 	// - Includes the active unmined set (`pending` and `published`) together with
 	//   retained invalid history such as `failed`, `replaced`, or `orphaned`
 	//   rows.
-	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	// - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 	//   so sqlc preserves the nullable block columns while the row shape stays
 	//   aligned with the confirmed query below.
 	// Performance:
@@ -512,7 +486,7 @@ type Querier interface {
 	//   in unmined `pending` or `published` status.
 	// - Excludes orphaned/replaced/failed history so delete and rollback logic do
 	//   not treat retained invalid rows as active mempool spends.
-	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	// - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 	//   so sqlc preserves the nullable block columns while the row shape stays
 	//   aligned with other transaction queries.
 	// Performance:
@@ -558,21 +532,6 @@ type Querier interface {
 	ReleaseUtxoLease(ctx context.Context, arg ReleaseUtxoLeaseParams) (int64, error)
 	// Rewind scanned progress across removed history; move birthday only on removal.
 	RewindWalletReferencesForDisconnect(ctx context.Context, arg RewindWalletReferencesForDisconnectParams) (int64, error)
-	// Rewrites wallet sync-state heights so they stop referencing blocks that are
-	// about to be deleted during RollbackToBlock.
-	//
-	// How:
-	// - Computes the greatest stored block below the rollback boundary.
-	// - Rewrites both synced_height and birthday_height in one statement so the
-	//   subsequent block delete does not violate `ON DELETE RESTRICT`.
-	// - Example: if `rollback_height = 195`, affected sync heights rewind to the
-	//   greatest stored block below 195, not necessarily 194 on sparse block tables.
-	// - If there is no stored block below the boundary, the sync state no longer
-	//   points at any surviving block row.
-	// Performance:
-	// - Touches only wallet_sync_states rows whose heights are at or above the
-	//   rollback boundary.
-	RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int64) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and current name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames a derived account identified by wallet id, scope tuple, and number.

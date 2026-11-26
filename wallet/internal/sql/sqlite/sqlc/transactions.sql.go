@@ -12,28 +12,6 @@ import (
 	"time"
 )
 
-const DeleteBlocksAtOrAboveHeight = `-- name: DeleteBlocksAtOrAboveHeight :execrows
-DELETE FROM blocks
-WHERE block_height >= ?
-`
-
-// Deletes blocks at and after the provided height.
-//
-// How:
-//   - Deletes directly from blocks by the natural height key.
-//   - Relies on FK/trigger side effects to null transaction block references and
-//     orphan coinbase rows.
-//
-// Performance:
-// - Executes as a range delete over the block-height primary key.
-func (q *Queries) DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int64) (int64, error) {
-	result, err := q.exec(ctx, q.deleteBlocksAtOrAboveHeightStmt, DeleteBlocksAtOrAboveHeight, blockHeight)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
 const DeleteUnminedTransactionByHash = `-- name: DeleteUnminedTransactionByHash :execrows
 DELETE FROM transactions
 WHERE
@@ -114,7 +92,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON t.block_height = b.block_height
+LEFT JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE t.wallet_id = ? AND t.tx_hash = ?
 `
 
@@ -423,58 +404,6 @@ func (q *Queries) ListOwnedOutputsByTxIDs(ctx context.Context, arg ListOwnedOutp
 	return items, nil
 }
 
-const ListRollbackCoinbaseRoots = `-- name: ListRollbackCoinbaseRoots :many
-SELECT
-    wallet_id,
-    tx_hash
-FROM transactions
-WHERE
-    block_height >= cast(?1 AS INTEGER)
-    AND is_coinbase
-ORDER BY wallet_id, id
-`
-
-type ListRollbackCoinbaseRootsRow struct {
-	WalletID int64
-	TxHash   []byte
-}
-
-// Lists wallet-scoped coinbase transaction hashes at or above the rollback
-// boundary that seed descendant invalidation.
-//
-// How:
-//   - Reads only confirmed coinbase rows at or above the rollback boundary.
-//   - Returns wallet scope alongside each tx hash so callers can treat these
-//     coinbase transactions as rollback roots when invalidating now-invalid
-//     descendants inside the same rollback transaction.
-//   - This is a rollback-specific helper, not a generic "coinbase txs from one
-//     block" listing query.
-//
-// Performance:
-// - Uses the block-height index to bound the scan to the rollback range.
-func (q *Queries) ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int64) ([]ListRollbackCoinbaseRootsRow, error) {
-	rows, err := q.query(ctx, q.listRollbackCoinbaseRootsStmt, ListRollbackCoinbaseRoots, rollbackHeight)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListRollbackCoinbaseRootsRow
-	for rows.Next() {
-		var i ListRollbackCoinbaseRootsRow
-		if err := rows.Scan(&i.WalletID, &i.TxHash); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const ListTransactionsByHeightRange = `-- name: ListTransactionsByHeightRange :many
 SELECT
     t.id,
@@ -488,7 +417,10 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-INNER JOIN blocks AS b ON t.block_height = b.block_height
+INNER JOIN wallet_blocks AS b
+    ON
+        t.block_height = b.block_height
+        AND t.wallet_id = b.wallet_id
 WHERE
     t.wallet_id = ?1
     AND t.block_height >= cast(?2 AS INTEGER)
@@ -573,7 +505,7 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON 1 = 0
+LEFT JOIN wallet_blocks AS b ON 1 = 0
 WHERE
     t.wallet_id = ?
     AND t.block_height IS NULL
@@ -600,7 +532,7 @@ type ListTransactionsWithoutBlockRow struct {
 //   - Includes the active unmined set (`pending` and `published`) together with
 //     retained invalid history such as `failed`, `replaced`, or `orphaned`
 //     rows.
-//   - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+//   - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 //     so sqlc preserves the nullable block columns while the row shape stays
 //     aligned with the confirmed query below.
 //
@@ -653,7 +585,7 @@ SELECT
     t.tx_status,
     t.tx_label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON 1 = 0
+LEFT JOIN wallet_blocks AS b ON 1 = 0
 WHERE
     t.wallet_id = ?
     AND t.block_height IS NULL
@@ -681,7 +613,7 @@ type ListUnminedTransactionsRow struct {
 //     in unmined `pending` or `published` status.
 //   - Excludes orphaned/replaced/failed history so delete and rollback logic do
 //     not treat retained invalid rows as active mempool spends.
-//   - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+//   - Projects typed NULL block metadata through `LEFT JOIN wallet_blocks AS b ON 1 = 0`
 //     so sqlc preserves the nullable block columns while the row shape stays
 //     aligned with other transaction queries.
 //
@@ -720,66 +652,6 @@ func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) (
 		return nil, err
 	}
 	return items, nil
-}
-
-const RewindWalletSyncStateHeightsForRollback = `-- name: RewindWalletSyncStateHeightsForRollback :execrows
-UPDATE wallet_sync_states
-SET
-    synced_height = CASE
-        WHEN
-            synced_height IS NOT NULL
-            AND synced_height >= cast(?1 AS INTEGER)
-            THEN (
-                SELECT max(block_height)
-                FROM blocks
-                WHERE block_height < cast(?1 AS INTEGER)
-            )
-        ELSE synced_height
-    END,
-    birthday_height = CASE
-        WHEN
-            birthday_height IS NOT NULL
-            AND birthday_height >= cast(?1 AS INTEGER)
-            THEN (
-                SELECT max(block_height)
-                FROM blocks
-                WHERE block_height < cast(?1 AS INTEGER)
-            )
-        ELSE birthday_height
-    END,
-    updated_at = current_timestamp
-WHERE
-    (
-        synced_height IS NOT NULL
-        AND synced_height >= cast(?1 AS INTEGER)
-    )
-    OR (
-        birthday_height IS NOT NULL
-        AND birthday_height >= cast(?1 AS INTEGER)
-    )
-`
-
-// Rewrites wallet sync-state heights so they stop referencing blocks that are
-// about to be deleted during RollbackToBlock.
-//
-// How:
-//   - Computes the greatest stored block below the rollback boundary.
-//   - Rewrites both synced_height and birthday_height in one statement so the
-//     subsequent block delete does not violate `ON DELETE RESTRICT`.
-//   - Example: if `rollback_height = 195`, affected sync heights rewind to the
-//     greatest stored block below 195, not necessarily 194 on sparse block tables.
-//   - If there is no stored block below the boundary, the sync state no longer
-//     points at any surviving block row.
-//
-// Performance:
-//   - Touches only wallet_sync_states rows whose heights are at or above the
-//     rollback boundary.
-func (q *Queries) RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int64) (int64, error) {
-	result, err := q.exec(ctx, q.rewindWalletSyncStateHeightsForRollbackStmt, RewindWalletSyncStateHeightsForRollback, rollbackHeight)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
 }
 
 const UpdateTransactionLabelByHash = `-- name: UpdateTransactionLabelByHash :execrows
