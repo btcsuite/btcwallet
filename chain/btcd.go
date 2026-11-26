@@ -54,13 +54,15 @@ var _ Interface = (*RPCClient)(nil)
 // NewRPCClient and NewRPCClientWithConfig.
 func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
 	return &rpcclient.NotificationHandlers{
-		OnClientConnected:   c.onClientConnect,
-		OnBlockConnected:    c.onBlockConnected,
-		OnBlockDisconnected: c.onBlockDisconnected,
-		OnRecvTx:            c.onRecvTx,
-		OnRedeemingTx:       c.onRedeemingTx,
-		OnRescanFinished:    c.onRescanFinished,
-		OnRescanProgress:    c.onRescanProgress,
+		OnClientConnected:        c.onClientConnect,
+		OnBlockConnected:         c.onBlockConnected,
+		OnBlockDisconnected:      c.onBlockDisconnected,
+		OnFilteredBlockConnected: c.onFilteredBlockConnected,
+		OnRelevantTxAccepted:     c.onRelevantTxAccepted,
+		OnRecvTx:                 c.onRecvTx,
+		OnRedeemingTx:            c.onRedeemingTx,
+		OnRescanFinished:         c.onRescanFinished,
+		OnRescanProgress:         c.onRescanProgress,
 	}
 }
 
@@ -97,6 +99,8 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
+	client.eventStream = newChainEventStream(chainParams, client)
+
 	rpcClient, err := rpcclient.New(
 		client.connConfig, client.notificationHandlers(),
 	)
@@ -588,14 +592,19 @@ func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time ti
 }
 
 func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time) {
-	select {
-	case c.enqueueNotification <- BlockDisconnected{
+	ntfn := BlockDisconnected{
 		Block: wtxmgr.Block{
 			Hash:   *hash,
 			Height: height,
 		},
 		Time: time,
-	}:
+	}
+	if c.eventStream.hasSubscribers() {
+		c.eventStream.publish(ntfn)
+	}
+
+	select {
+	case c.enqueueNotification <- ntfn:
 	case <-c.quit:
 	}
 }
@@ -739,10 +748,6 @@ out:
 				enqueue = nil
 				continue
 			}
-
-			// Offer live events at intake so subscribers do not wait
-			// for a reader of the shared notification queue.
-			stream.publish(n)
 
 			if len(notifications) == 0 {
 				next = n

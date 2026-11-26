@@ -11,20 +11,66 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// chainEventSubscriberBufferSize accommodates a burst of up to 50 ordinary
-// two-event Bitcoin Core block pairs.
+// chainEventSubscriberBufferSize holds up to 100 normalized Events per
+// subscription (one event per connected or disconnected block plus matching
+// mempool txns).
 const chainEventSubscriberBufferSize = 100
 
 // ErrEventSubscriptionBufferFull means a new event found a full buffer and
 // ended that subscription.
 var ErrEventSubscriptionBufferFull = errors.New("chain event buffer full")
 
-// EventSubscription delivers native events in source order until it ends.
-// Event payloads may be shared across subscribers. Copy any data you intend
-// to modify.
+// EventType identifies the kind of normalized event delivered on an
+// EventSubscription.
+type EventType uint8
+
+const (
+	// EventUnknown identifies an unset or zero-value EventType.
+	// Subscriptions never emit this value for a live event.
+	EventUnknown EventType = iota
+
+	// EventBlockConnected reports one connected block carrying both Block
+	// metadata and matching RelevantTxs in block order. Callers must invoke
+	// NotifyBlocks to receive block connection events.
+	EventBlockConnected
+
+	// EventBlockDisconnected reports one disconnected block carrying Block
+	// metadata. It is the sole signal across backends when a detached block
+	// silently reinserts txns into the backend mempool. Callers must invoke
+	// NotifyBlocks to receive disconnect events.
+	EventBlockDisconnected
+
+	// EventMempoolTx reports one matching non-block tx announcement
+	// (Block == nil, RelevantTxs holding that single tx). On Bitcoin Core
+	// in ZMQ mode, rawtx also publishes directly-mined block txns without
+	// block metadata, so a directly-mined tx may appear as both
+	// EventMempoolTx and EventBlockConnected. Neutrino never emits
+	// EventMempoolTx.
+	EventMempoolTx
+)
+
+// Event is a normalized chain notification delivered on an EventSubscription.
+type Event struct {
+	// Type distinguishes connected blocks, disconnected blocks, and
+	// non-block mempool tx announcements.
+	Type EventType
+
+	// Block carries block metadata for EventBlockConnected and
+	// EventBlockDisconnected, and is nil for EventMempoolTx.
+	Block *wtxmgr.BlockMeta
+
+	// RelevantTxs carries matching txns in block order for
+	// EventBlockConnected, the single matching tx for EventMempoolTx, and
+	// is nil for EventBlockDisconnected.
+	RelevantTxs []*wtxmgr.TxRecord
+}
+
+// EventSubscription delivers normalized chain events in source order until it
+// ends. Payloads may be shared across subscribers; copy before mutating.
+// Watches and auto-indexed outpoints grow unboundedly until retirement.
 type EventSubscription struct {
-	// Events carries buffered notifications published after enrollment.
-	Events <-chan any
+	// Events carries buffered Events published after enrollment.
+	Events <-chan Event
 
 	// Done closes after Events on cancellation, source shutdown, or buffer
 	// overflow. Buffered events remain readable after closure.
@@ -35,7 +81,7 @@ type EventSubscription struct {
 }
 
 // Err returns the terminal result after Done closes. Cancellation and source
-// shutdown return nil. An offer to a full buffer ends the subscription with
+// shutdown return nil. Sending to a full buffer ends the subscription with
 // [ErrEventSubscriptionBufferFull].
 func (s EventSubscription) Err() error {
 	// Handles supplied by test doubles may only contain public channels.
@@ -55,9 +101,9 @@ func (s EventSubscription) Err() error {
 // eventListener owns the writable ends for one subscription.
 type eventListener struct {
 	// events holds this listener's bounded buffer.
-	events chan any
+	events chan Event
 
-	// done signals that the listener can receive no further offers.
+	// done signals that no further events will be sent to this listener.
 	done chan struct{}
 
 	// err holds the terminal result published before done closes.
@@ -380,7 +426,7 @@ func (s *chainEventStream) matchTx(
 // subscribe registers the listener directly at the publication boundary.
 func (s *chainEventStream) subscribe(ctx context.Context) EventSubscription {
 	l := &eventListener{
-		events: make(chan any, chainEventSubscriberBufferSize),
+		events: make(chan Event, chainEventSubscriberBufferSize),
 		done:   make(chan struct{}),
 	}
 	sub := EventSubscription{
@@ -419,26 +465,95 @@ func (s *chainEventStream) hasSubscribers() bool {
 	return len(s.members) > 0
 }
 
-// publish synchronously offers the event to each subscriber on the native
-// owner. Delivery is asynchronous because the nonblocking send can place
-// the event in the subscriber's buffer before the subscriber reads it.
-// A failed offer retires only that subscriber and leaves its accepted
-// events readable.
+// sendEvent attempts a non-blocking send of ev to l and removes l with
+// ErrEventSubscriptionBufferFull if its buffer is full. Caller must hold s.mu.
+func (s *chainEventStream) sendEvent(l *eventListener, ev Event) {
+	select {
+	case l.events <- ev:
+	default:
+		// End delivery at the first gap, unindex the removed
+		// subscriber's watches, and release its cancellation callback
+		// even if the context stays live.
+		s.removeSubscriber(l, ErrEventSubscriptionBufferFull)
+	}
+}
+
+// publishFilteredBlock routes each tx in n to matching listeners in block
+// order and sends one EventBlockConnected per active listener. Caller must hold
+// s.mu.
+func (s *chainEventStream) publishFilteredBlock(n FilteredBlockConnected) {
+	var byListener map[*eventListener][]*wtxmgr.TxRecord
+	if len(n.RelevantTxs) > 0 {
+		byListener = make(map[*eventListener][]*wtxmgr.TxRecord)
+	}
+
+	for _, rec := range n.RelevantTxs {
+		for l := range s.matchTx(rec) {
+			byListener[l] = append(byListener[l], rec)
+		}
+	}
+
+	for l := range s.members {
+		s.sendEvent(l, Event{
+			Type:        EventBlockConnected,
+			Block:       n.Block,
+			RelevantTxs: byListener[l],
+		})
+	}
+}
+
+// publishBlockDisconnected sends one EventBlockDisconnected for n to every
+// active listener. Caller must hold s.mu.
+func (s *chainEventStream) publishBlockDisconnected(n BlockDisconnected) {
+	blk := wtxmgr.BlockMeta(n)
+
+	ev := Event{
+		Type:  EventBlockDisconnected,
+		Block: &blk,
+	}
+	for l := range s.members {
+		s.sendEvent(l, ev)
+	}
+}
+
+// publishMempoolTx routes an unconfirmed tx in n to each matching listener.
+// Confirmed RelevantTx notifications are ignored because block-confirmed txns
+// are delivered in FilteredBlockConnected. Caller must hold s.mu.
+func (s *chainEventStream) publishMempoolTx(n RelevantTx) {
+	if n.Block != nil {
+		return
+	}
+
+	matched := s.matchTx(n.TxRecord)
+	if len(matched) == 0 {
+		return
+	}
+
+	ev := Event{
+		Type:        EventMempoolTx,
+		RelevantTxs: []*wtxmgr.TxRecord{n.TxRecord},
+	}
+	for l := range matched {
+		s.sendEvent(l, ev)
+	}
+}
+
+// publish synchronously normalizes and sends event to each matching
+// subscriber on the native owner. A failed send removes only that subscriber
+// and leaves its accepted events readable.
 func (s *chainEventStream) publish(event any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for l, stop := range s.members {
-		select {
-		case l.events <- event:
-		default:
-			// End delivery at the first gap and release the
-			// cancellation callback even if the context stays live.
-			_ = stop
-			s.removeSubscriber(
-				l, ErrEventSubscriptionBufferFull,
-			)
-		}
+	switch n := event.(type) {
+	case FilteredBlockConnected:
+		s.publishFilteredBlock(n)
+
+	case BlockDisconnected:
+		s.publishBlockDisconnected(n)
+
+	case RelevantTx:
+		s.publishMempoolTx(n)
 	}
 }
 

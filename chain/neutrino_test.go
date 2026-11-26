@@ -163,7 +163,15 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	first := client.SubscribeChainEvents(t.Context())
 	hash := chainhash.Hash{1}
 	client.onBlockDisconnected(&hash, 1, time.Time{})
-	require.Equal(t, hash, waitForBlockNtfn(t, first.Events, 1, false))
+
+	select {
+	case ev := <-first.Events:
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, hash, ev.Block.Hash)
+		require.Equal(t, int32(1), ev.Block.Height)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "first generation missed disconnect event")
+	}
 
 	// Act by joining the first run before reopening the same client. The
 	// new subscriber and its marker belong to the second handler only.
@@ -183,10 +191,17 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	select {
 	case <-first.Done:
 	default:
-		t.Fatal("first generation is still subscribed after join")
+		require.FailNow(t, "first generation still subscribed")
 	}
 
-	require.Equal(t, nextHash, waitForBlockNtfn(t, second.Events, 2, false))
+	select {
+	case ev := <-second.Events:
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, nextHash, ev.Block.Hash)
+		require.Equal(t, int32(2), ev.Block.Height)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "second generation missed disconnect event")
+	}
 
 	// The second generation also offers the marker to its legacy reader.
 	legacyHash := waitForBlockNtfn(t, client.Notifications(), 2, false)
@@ -205,6 +220,8 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 // TestNeutrinoClientNotifyReceived verifies live watch updates preserve the
 // birthday selected before the native scan starts, including concurrent hints.
 func TestNeutrinoClientNotifyReceived(t *testing.T) {
+	t.Parallel()
+
 	// Arrange: Activate the native scan with an early birthday, then route
 	// callbacks through its existing notification channels without a service
 	// worker. A block between the two birthdays exposes any later mutation.

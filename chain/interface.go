@@ -77,12 +77,16 @@ type Interface interface {
 	Notifications() <-chan interface{}
 
 	// SubscribeChainEvents enrolls an independent reader on a started
-	// client. Only events published after enrollment are eligible. Each
-	// reader receives its buffered events in source order. An offer to a
-	// full buffer ends that subscription with
-	// [ErrEventSubscriptionBufferFull]. Other subscriptions continue. Call
-	// [EventSubscription.Err] after Done closes. Cancel ctx when the
-	// reader is no longer needed.
+	// client, delivering normalized [Event] values in source order.
+	// Call NotifyBlocks for block events and block-confirmed output spend
+	// tracking. Use [EventSubscription.WatchAddrs] and
+	// [EventSubscription.WatchOutputs] for scoped tx watches; local watch
+	// routing is retained until retirement, while backend-wide filter
+	// resets (LoadTxFilter) or Neutrino Rescan replacements clear native
+	// coverage unless watches are re-registered. Buffer overflow ends the
+	// subscription with [ErrEventSubscriptionBufferFull]. Check
+	// [EventSubscription.Err] after Done closes, and cancel ctx when
+	// finished.
 	SubscribeChainEvents(ctx context.Context) EventSubscription
 
 	BackEnd() string
