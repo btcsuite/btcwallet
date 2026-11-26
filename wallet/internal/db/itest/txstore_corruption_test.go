@@ -400,7 +400,7 @@ func TestDisconnectBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
 		t.Context(), walletID, coinbaseBlock, nil,
 		map[uint32]*chainhash.Hash{coinbaseBlock.Height: nil},
 	)
-	require.ErrorContains(t, err, "tx hash")
+	require.ErrorContains(t, err, "disconnect transaction hash")
 }
 
 // TestCreateTxReturnsQueryErrorWhenTransactionsTableMissing verifies that the

@@ -120,20 +120,33 @@ func TestUpdateWalletBirthday(t *testing.T) {
 	require.Nil(t, retrieved.SyncedTo)
 }
 
-// TestUpdateWalletNotFound verifies that updating a non-existent wallet fails.
+// TestUpdateWalletNotFound verifies that updating a non-existent wallet fails
+// with ErrWalletNotFound both with and without checkpoint block writes.
 func TestUpdateWalletNotFound(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Prepare a fresh store and snapshot its stats baseline.
 	store := NewTestStore(t)
 	before := store.StatsSnapshot()
 
-	updateParams := db.UpdateWalletParams{
-		WalletID: 99999, // Non-existent ID.
-	}
+	// Act: Update a non-existent wallet ID both without blocks and with a
+	// SyncedTo checkpoint that exercises wallet_blocks insertion.
+	bareErr := store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: 99999,
+	})
+	checkpointErr := store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: 99999,
+		SyncedTo: &db.Block{
+			Height:    100,
+			Hash:      RandomHash(),
+			Timestamp: time.Unix(100, 0).UTC(),
+		},
+	})
 
-	err := store.UpdateWallet(t.Context(), updateParams)
-	require.Error(t, err)
-	require.ErrorIs(t, err, db.ErrWalletNotFound)
+	// Assert: Both updates return ErrWalletNotFound without incrementing
+	// SQL error statistics.
+	require.ErrorIs(t, bareErr, db.ErrWalletNotFound)
+	require.ErrorIs(t, checkpointErr, db.ErrWalletNotFound)
 
 	after := store.StatsSnapshot()
 	require.Equal(t, before, after)
