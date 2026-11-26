@@ -68,6 +68,22 @@ func newTestSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	)
 }
 
+// expectDisconnectHeaders arranges one native batch with explicit parent
+// links. Its first header must descend from the lower Wallet block.
+func expectDisconnectHeaders(source *bwmock.Chain, low int64,
+	parent chainhash.Hash, hashes ...chainhash.Hash) {
+
+	headers := make([]*wire.BlockHeader, len(hashes))
+	for i, hash := range hashes {
+		headers[i] = &wire.BlockHeader{PrevBlock: parent}
+		parent = hash
+	}
+
+	source.On("GetBlockHashes", low, low+int64(len(hashes))-1).
+		Return(hashes, nil).Once()
+	source.On("GetBlockHeaders", hashes).Return(headers, nil).Once()
+}
+
 // TestSyncerRollbackRejectsStaleBatch rejects old-branch facts fetched before
 // the historical sync commit path acknowledges a database-wide rollback.
 func TestSyncerRollbackRejectsStaleBatch(t *testing.T) {
@@ -858,6 +874,7 @@ func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {
 		&db.WalletInfo{SyncedTo: &db.Block{Hash: tip.Hash, Height: 100}}, nil,
 	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(nil, db.ErrBlockNotFound).Once()
@@ -865,6 +882,7 @@ func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {
 	// The individual tip is unavailable too; retain the existing remote
 	// identity proof rather than treating the whole range as corrupt.
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 100,
 		EndHeight:   100,
 	}).Return(nil, db.ErrBlockNotFound).Once()
@@ -929,6 +947,28 @@ func TestResolveMissingHistoricalBlockChainLookupError(t *testing.T) {
 	mockChain.AssertExpectations(t)
 }
 
+// expectStartupDisconnect requires the captured Wallet tip and fork to reach
+// the selective Store write. Heights beyond the returned hashes are absent.
+func expectStartupDisconnect(store *walletmock.Store, id uint32, tip db.Block,
+	fork db.Block, current []chainhash.Hash) {
+
+	proof := make(map[uint32]*chainhash.Hash)
+	for h := fork.Height + 1; h <= tip.Height; h++ {
+		i := h - fork.Height - 1
+
+		proof[h] = nil
+		if uint64(i) < uint64(len(current)) {
+			proof[h] = &current[i]
+		}
+	}
+
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: id, StartHeight: fork.Height + 1, EndHeight: math.MaxInt32,
+	}).Return([]db.TxInfo(nil), nil).Once()
+	store.On("DisconnectBlock", mock.Anything, id, tip, &fork, proof).
+		Return(nil).Once()
+}
+
 // TestCheckRollbackDetected verifies checkRollback when reorg is detected.
 func TestCheckRollbackDetected(t *testing.T) {
 	t.Parallel()
@@ -958,6 +998,7 @@ func TestCheckRollbackDetected(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
@@ -979,19 +1020,19 @@ func TestCheckRollbackDetected(t *testing.T) {
 	).Return(remoteHashes, nil).Once()
 
 	mockChain.On("GetBestBlock").
-		Return(&chainhash.Hash{}, int32(100), nil).Once()
+		Return(&remoteHashes[9], int32(100), nil).Twice()
 
 	// Mock header retrieval for the detected fork point at height 95.
 	forkHash := chainhash.Hash{byte(95)}
 	header := &wire.BlockHeader{Timestamp: time.Now()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// Expect a single atomic rollback to the common ancestor: rewindToBlock
-	// rolls transaction state back and rewinds the sync tip together via
-	// RollbackToBlock for the rollback boundary (fork height 95 + 1).
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
-	).Return(nil).Once()
+	// The Store gets only anchored hashes above the common ancestor.
+	expectDisconnectHeaders(mockChain, 96, forkHash, remoteHashes[5:]...)
+	expectStartupDisconnect(store, s.walletID,
+		db.Block{Height: 100, Hash: tip.Hash}, db.Block{
+			Height: 95, Hash: forkHash, Timestamp: header.Timestamp.UTC(),
+		}, remoteHashes[5:])
 
 	// Act: Compare the committed Store history against the diverging branch.
 	err := s.checkRollback(t.Context())
@@ -1023,11 +1064,13 @@ func TestCheckRollbackSparseFork(t *testing.T) {
 	for _, height := range []uint32{100, 99, 98} {
 		store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: height - 9,
 				EndHeight:   height,
 			}).Return([]db.Block(nil), db.ErrBlockNotFound).Once()
 		store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: height,
 				EndHeight:   height,
 			}).Return([]db.Block{
@@ -1040,10 +1083,14 @@ func TestCheckRollbackSparseFork(t *testing.T) {
 			Return([]chainhash.Hash{forkHash}, nil).Once()
 	}
 
-	client.On("GetBestBlock").Return(&tip.Hash, int32(100), nil).Times(3)
+	client.On("GetBestBlock").Return(&forkHash, int32(100), nil).Times(4)
 	client.On("GetBlockHeader", &forkHash).
 		Return(&wire.BlockHeader{Timestamp: time.Unix(98, 0)}, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(99)).Return(nil).Once()
+	current := []chainhash.Hash{forkHash, forkHash}
+	expectDisconnectHeaders(client, 99, forkHash, current...)
+	expectStartupDisconnect(store, s.walletID, tip, db.Block{
+		Height: 98, Hash: forkHash, Timestamp: time.Unix(98, 0).UTC(),
+	}, current)
 
 	// Act: Recover against the diverging sparse history using Store reads.
 	err := s.checkRollback(t.Context())
@@ -1082,6 +1129,7 @@ func TestCheckRollbackShorterTip(t *testing.T) {
 
 		store.On("ListSyncedBlocks", mock.Anything,
 			db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: end - 9,
 				EndHeight:   end,
 			}).Return(blocks, nil).Once()
@@ -1092,12 +1140,14 @@ func TestCheckRollbackShorterTip(t *testing.T) {
 		remoteHashes = append(remoteHashes, chainhash.Hash{height})
 	}
 
-	client.On("GetBestBlock").Return(&forkHash, int32(90), nil).Twice()
+	client.On("GetBestBlock").Return(&forkHash, int32(90), nil).Times(3)
 	client.On("GetBlockHashes", int64(81), int64(90)).
 		Return(remoteHashes, nil).Once()
 	client.On("GetBlockHeader", &forkHash).
 		Return(&wire.BlockHeader{Timestamp: time.Unix(90, 0)}, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(91)).Return(nil).Once()
+	expectStartupDisconnect(store, s.walletID, tip, db.Block{
+		Height: 90, Hash: forkHash, Timestamp: time.Unix(90, 0).UTC(),
+	}, nil)
 
 	// Act: Compare the stored tip against the shorter current chain.
 	err := s.checkRollback(t.Context())
@@ -1132,10 +1182,12 @@ func TestCheckRollbackGenesisFork(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 1,
 		EndHeight:   10,
 	}).Return(blocks, nil).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 0,
 		EndHeight:   0,
 	}).Return([]db.Block{
@@ -1143,14 +1195,20 @@ func TestCheckRollbackGenesisFork(t *testing.T) {
 			Hash: *chainParams.GenesisHash,
 		},
 	}, nil).Once()
-	client.On("GetBestBlock").Return(&tip.Hash, int32(10), nil).Twice()
+	client.On("GetBestBlock").Return(&chainhash.Hash{}, int32(10), nil).Times(3)
 	client.On("GetBlockHashes", int64(1), int64(10)).
 		Return(make([]chainhash.Hash, 10), nil).Once()
 	client.On("GetBlockHashes", int64(0), int64(0)).
 		Return([]chainhash.Hash{*chainParams.GenesisHash}, nil).Once()
 	client.On("GetBlockHeader", chainParams.GenesisHash).
 		Return(&chainParams.GenesisBlock.Header, nil).Once()
-	store.On("RollbackToBlock", mock.Anything, uint32(1)).Return(nil).Once()
+
+	current := make([]chainhash.Hash, 10)
+	expectDisconnectHeaders(client, 1, *chainParams.GenesisHash, current...)
+	expectStartupDisconnect(store, s.walletID, tip, db.Block{
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: chainParams.GenesisBlock.Header.Timestamp.UTC(),
+	}, current)
 
 	// Act: Search backwards beyond the mismatching first batch.
 	err := s.checkRollback(t.Context())
@@ -1185,10 +1243,12 @@ func TestCheckRollbackNoRecordedAncestor(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 1,
 		EndHeight:   10,
 	}).Return(blocks, nil).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 0,
 		EndHeight:   0,
 	}).Return([]db.Block{
@@ -2637,6 +2697,7 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		&db.WalletInfo{SyncedTo: &db.Block{Height: 102}}, nil,
 	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 101,
 		EndHeight:   101,
 	}).Return([]db.Block{
@@ -2786,6 +2847,7 @@ func TestProcessFilteredBlockHistoryIdentity(t *testing.T) {
 			).Once()
 			store.On("ListSyncedBlocks", mock.Anything,
 				db.ListSyncedBlocksQuery{
+					WalletID:    s.walletID,
 					StartHeight: 101,
 					EndHeight:   101,
 				},
@@ -5931,6 +5993,7 @@ func TestCheckRollback_RemoteError(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
@@ -6098,6 +6161,7 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 92,
 		EndHeight:   101,
 	}).Return(localBlocks, nil).Once()
@@ -6833,6 +6897,7 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 		},
 	}
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 100,
 		EndHeight:   101,
 	}).Return(blocks, nil).Once()
@@ -6846,33 +6911,6 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 	require.Len(t, hashes, 2)
 	require.Equal(t, blocks[0].Hash, *hashes[0])
 	require.Equal(t, blocks[1].Hash, *hashes[1])
-	store.AssertExpectations(t)
-}
-
-// TestRewindToBlockRoutesStore verifies the store rewind path issues a single
-// atomic RollbackToBlock for the rollback boundary, which rewinds the wallet
-// sync tip and rolls transaction state back together, rather than two
-// independent sync-tip and rollback writes.
-func TestRewindToBlockRoutesStore(t *testing.T) {
-	t.Parallel()
-
-	store := &walletmock.Store{}
-	s := newTestSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
-	s.store = store
-	s.walletID = 99
-
-	fork := waddrmgr.BlockStamp{
-		Hash:      chainhash.Hash{99},
-		Height:    100,
-		Timestamp: time.Unix(1710003900, 0),
-	}
-
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(101),
-	).Return(nil).Once()
-
-	err := s.rewindToBlock(t.Context(), fork)
-	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
 
@@ -7856,6 +7894,7 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	}
 
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		WalletID:    s.walletID,
 		StartHeight: 91,
 		EndHeight:   100,
 	}).Return(localBlocks, nil).Once()
@@ -7868,7 +7907,7 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	}
 
 	mockChain.On("GetBestBlock").
-		Return(&chainhash.Hash{95}, int32(95), nil).Once()
+		Return(&chainhash.Hash{95}, int32(95), nil).Twice()
 	mockChain.On("GetBlockHashes", int64(91), int64(95)).
 		Return(remoteHashes, nil).Once()
 
@@ -7876,13 +7915,13 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 	header := &wire.BlockHeader{Timestamp: time.Unix(95, 0).UTC()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// The rollback is written atomically through the Store to the fork
-	// height plus one (96). RollbackToBlock derives the new sync tip from
-	// the stored fork-point block, so the caller only supplies the rollback
-	// boundary.
-	store.On(
-		"RollbackToBlock", mock.Anything, uint32(96),
-	).Return(nil).Once()
+	// The source ends at the fork. Every higher committed row must carry
+	// explicit absence into the same Wallet-scoped write.
+	expectStartupDisconnect(store, s.walletID, db.Block{
+		Height: 100, Hash: chainhash.Hash{1},
+	}, db.Block{
+		Height: 95, Hash: forkHash, Timestamp: header.Timestamp.UTC(),
+	}, nil)
 
 	// Act: Check the saved tip against the shorter current branch.
 	err := s.checkRollback(t.Context())
@@ -7992,7 +8031,7 @@ func TestScanWithRewindStoreSyncedTip(t *testing.T) {
 		require.NoError(t, err)
 		store.AssertExpectations(t)
 		store.AssertNotCalled(
-			t, "RollbackToBlock", mock.Anything, mock.Anything,
+			t, "RewindWallet", mock.Anything, mock.Anything,
 		)
 	})
 }
@@ -8484,7 +8523,7 @@ func TestScanBatchAncestry(t *testing.T) {
 	nextHash := next.BlockHash()
 
 	client.On("GetBestBlock").Unset()
-	client.On("GetBestBlock").Return(&nextHash, int32(2), nil).Times(5)
+	client.On("GetBestBlock").Return(&nextHash, int32(2), nil).Times(6)
 	client.On("GetBlockHashes", int64(2), int64(2)).
 		Return([]chainhash.Hash{nextHash}, nil).Once()
 	client.On("GetBlocks", []chainhash.Hash{nextHash}).
@@ -8495,6 +8534,9 @@ func TestScanBatchAncestry(t *testing.T) {
 	client.On("GetBlockHeader", chainParams.GenesisHash).Unset()
 	client.On("GetBlockHeader", chainParams.GenesisHash).
 		Return(&chainParams.GenesisBlock.Header, nil).Once()
+
+	expectDisconnectHeaders(client, 1, *chainParams.GenesisHash,
+		newHash, nextHash)
 
 	// Arrange: After rollback, the first block extends genesis, but the
 	// second still names a different parent. A later fetch returns a connected
@@ -9404,4 +9446,42 @@ func TestSyncerRejectsMismatchedDisconnectFork(t *testing.T) {
 	// Assert that the fork mismatch stops evidence collection before the
 	// final tip recheck. The chain mock expects only the header window.
 	require.Error(t, err)
+}
+
+// TestSyncerReadsOwnedSyncedBlocks verifies that syncedBlockHashes reads
+// blocks scoped to the syncer's own WalletID on a real SQLite Store.
+func TestSyncerReadsOwnedSyncedBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist blocks for one non-zero SQLite Wallet and query
+	// them through a syncer configured with that WalletID.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	require.NotZero(t, id)
+
+	block := db.Block{
+		Height:    5,
+		Hash:      chainhash.Hash{5},
+		Timestamp: time.Unix(5, 0).UTC(),
+	}
+	require.NoError(t, store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{block},
+	}))
+
+	s := newTestSyncer(
+		Config{
+			Name:        "sql-watch-only-scripts",
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, id,
+	)
+
+	// Act: Read the stored height through syncedBlockHashes.
+	hashes, startHeight, err := s.syncedBlockHashes(ctx, 5, 5)
+
+	// Assert: The syncer reads its own Wallet's block hash.
+	require.NoError(t, err)
+	require.Equal(t, int32(5), startHeight)
+	require.Len(t, hashes, 1)
+	require.Equal(t, block.Hash, *hashes[0])
 }

@@ -239,9 +239,9 @@ type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
-	// processChainEventBeforeSync services ordered observations and rollback
-	// preparation without advancing a checkpoint before watches are ready.
-	processChainEventBeforeSync(ctx context.Context, event chainEvent) error
+	// waitForRetry services eligible events until the Wallet's retry timer
+	// expires or its lifetime ends.
+	waitForRetry(ctx context.Context, retry <-chan time.Time) error
 
 	// requestScan submits a rescan job to the syncer.
 	requestScan(ctx context.Context, req *scanReq) error
@@ -441,6 +441,33 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	return nil
 }
 
+// waitForRetry lets the worker service mailbox events across retries while the
+// Wallet controls the retry deadline.
+func (s *syncer) waitForRetry(ctx context.Context,
+	retry <-chan time.Time) error {
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case <-retry:
+			return nil
+
+		case event := <-s.chainEventChan:
+			err := s.processChainEventBeforeSync(ctx, event)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			if err != nil {
+				log.Errorf("Chain event processing failed "+
+					"during retry: %v", err)
+			}
+		}
+	}
+}
+
 // waitUntilBackendSynced blocks until the chain backend considers itself
 // "current".
 func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
@@ -535,7 +562,7 @@ func (s *syncer) checkRollbackBatch(ctx context.Context,
 
 	// A shorter current branch cannot serve hashes above its own tip.
 	// Preserve local-read order; a higher batch retries from that tip.
-	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	bestHash, bestHeight, err := s.cfg.Chain.GetBestBlock()
 	if err != nil {
 		return 0, true, fmt.Errorf("get rollback chain tip: %w", err)
 	}
@@ -579,11 +606,17 @@ func (s *syncer) checkRollbackBatch(ctx context.Context,
 		return 0, true, fmt.Errorf("get fork header: %w", err)
 	}
 
-	return 0, true, s.rewindToBlock(ctx, waddrmgr.BlockStamp{
+	observed := db.OptionalBlockFromBlockStamp(syncedTo)
+	fork := waddrmgr.BlockStamp{
 		Height:    forkHeight,
 		Hash:      *forkHash,
 		Timestamp: header.Timestamp,
-	})
+	}
+	source := waddrmgr.BlockStamp{Hash: *bestHash, Height: bestHeight}
+
+	return 0, true, s.applyDisconnect(
+		ctx, *observed, syncedTo.Height, fork, source,
+	)
 }
 
 // resolveMissingHistoricalBlock accepts a missing historical block when the
@@ -605,31 +638,6 @@ func (s *syncer) resolveMissingHistoricalBlock(listErr error,
 	}
 
 	return listErr
-}
-
-// rewindToBlock rewinds wallet sync and transaction state to the given fork
-// point.
-func (s *syncer) rewindToBlock(ctx context.Context,
-	block waddrmgr.BlockStamp) error {
-
-	rollbackBoundary := int64(block.Height) + 1
-
-	rollbackHeight, err := db.Int64ToUint32(rollbackBoundary)
-	if err != nil {
-		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
-	}
-
-	// Roll transaction state back and rewind the wallet sync tip to the same
-	// fork point in one atomic store call so a failure cannot leave the sync
-	// tip rewound while transaction state still references the abandoned
-	// chain. RollbackToBlock derives the new sync tip from the stored
-	// fork-point block, so the caller only supplies the rollback boundary.
-	err = s.store.RollbackToBlock(ctx, rollbackHeight)
-	if err != nil {
-		return fmt.Errorf("rollback to block: %w", err)
-	}
-
-	return nil
 }
 
 // rewindWallet rewinds this wallet's sync and transaction state for a manual
@@ -709,6 +717,7 @@ func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 
 	blocks, err := s.store.ListSyncedBlocks(
 		ctx, db.ListSyncedBlocksQuery{
+			WalletID:    s.walletID,
 			StartHeight: start,
 			EndHeight:   end,
 		},
@@ -970,6 +979,7 @@ func (s *syncer) blockMatchesCheckpoint(ctx context.Context, block db.Block,
 	if int64(block.Height) < int64(current.Height) {
 		blocks, err := s.store.ListSyncedBlocks(
 			ctx, db.ListSyncedBlocksQuery{
+				WalletID:    s.walletID,
 				StartHeight: block.Height,
 				EndHeight:   block.Height,
 			},
@@ -3083,4 +3093,31 @@ func (s *syncer) readDisconnectWindow(ctx context.Context, low, high uint32,
 	}
 
 	return parent, nil
+}
+
+// applyDisconnect verifies the collected fork against the captured source
+// before a live notification or divergent startup changes Wallet history.
+func (s *syncer) applyDisconnect(ctx context.Context, block db.Block,
+	committedHeight int32, fork, source waddrmgr.BlockStamp) error {
+
+	canonical, err := s.findCanonicalBlockHashes(
+		ctx, block.Height, committedHeight, fork, source,
+	)
+	if err != nil {
+		return err
+	}
+
+	if block.Hash.IsEqual(canonical[block.Height]) {
+		return nil
+	}
+
+	err = s.store.DisconnectBlock(
+		ctx, s.walletID, block, db.OptionalBlockFromBlockStamp(fork),
+		canonical,
+	)
+	if err != nil {
+		return fmt.Errorf("disconnect Wallet history: %w", err)
+	}
+
+	return nil
 }

@@ -386,8 +386,9 @@ func TestManagerChainRollbackDuringInitializationRetry(t *testing.T) {
 		deps.store.On("GetWallet", mock.Anything, testWalletName).
 			Return(&db.WalletInfo{SyncedTo: &tip}, nil).Once()
 		deps.store.On("ListSyncedBlocks", mock.Anything,
-			db.ListSyncedBlocksQuery{StartHeight: 0, EndHeight: 2}).
-			Return([]db.Block{tip}, nil).Once()
+			db.ListSyncedBlocksQuery{
+				WalletID: w.id, StartHeight: 0, EndHeight: 2,
+			}).Return([]db.Block{tip}, nil).Once()
 		deps.chain.On("GetBestBlock").
 			Return((*chainhash.Hash)(nil), int32(0), errChainMock).Once()
 		priorWrite := deps.store.On("ApplyTxBatch", mock.Anything,

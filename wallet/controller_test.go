@@ -2884,6 +2884,7 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 	// timer seam that records the reset value while firing immediately.
 	retryInterval := 3 * time.Second
 	w := &Wallet{
+		sync:        &syncer{},
 		lifetimeCtx: context.Background(),
 		cfg: Config{
 			WalletSyncRetryInterval: retryInterval,
@@ -2914,8 +2915,9 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 func TestWaitForBackoff_UnstableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet.
+	// Arrange: Create a wallet with an open, idle mailbox.
 	w := &Wallet{
+		sync:        &syncer{chainEventChan: make(chan chainEvent)},
 		lifetimeCtx: context.Background(),
 	}
 
@@ -2949,6 +2951,7 @@ func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
 
 	// Arrange: Create a wallet.
 	w := &Wallet{
+		sync:        &syncer{},
 		lifetimeCtx: context.Background(),
 	}
 
@@ -2984,6 +2987,7 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 	cancel()
 
 	w := &Wallet{
+		sync:        &syncer{},
 		lifetimeCtx: ctx,
 	}
 
