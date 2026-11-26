@@ -76,7 +76,8 @@ type NeutrinoClient struct {
 var _ Interface = (*NeutrinoClient)(nil)
 
 // NewNeutrinoClient creates a new NeutrinoClient struct with a backing
-// ChainService.
+// ChainService. Callers must pass non-nil chainParams matching the network of
+// chainService.
 func NewNeutrinoClient(chainParams *chaincfg.Params,
 	chainService *neutrino.ChainService) *NeutrinoClient {
 
@@ -121,7 +122,7 @@ func (s *NeutrinoClient) Start(ctx context.Context) error {
 		s.started = true
 
 		// Each client run owns a fresh enrollment and cancellation scope.
-		s.eventStream = newChainEventStream()
+		s.eventStream = newChainEventStream(s.chainParams)
 
 		// Go launch the notification handler.
 		s.wg.Add(1)

@@ -1365,3 +1365,72 @@ func waitForRelevantTx(t *testing.T, ntfns <-chan any, hash *chainhash.Hash) {
 		}
 	}
 }
+
+// waitSubDone waits until sub.Done closes or fails the test on timeout.
+func waitSubDone(t *testing.T, sub EventSubscription) {
+	t.Helper()
+
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for subscription done")
+	}
+}
+
+// TestChainEventSubscriptionUnindexOnCancel verifies that canceling one
+// listener unindexes its exclusive watches, leaves shared watches intact for
+// remaining listeners, and releases the retired listener's own watch maps.
+func TestChainEventSubscriptionUnindexOnCancel(t *testing.T) {
+	t.Parallel()
+
+	// Set up a stream with two active listeners that share one script and
+	// one outpoint while the first listener also owns exclusive keys.
+	stream := newChainEventStream(&chaincfg.RegressionNetParams)
+	ctxA, cancelA := context.WithCancel(t.Context())
+	subA := stream.subscribe(ctxA)
+	subB := stream.subscribe(t.Context())
+
+	sharedScript, onlyAScript := "shared-script", "only-a-script"
+	sharedOP := wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0}
+	onlyAOP := wire.OutPoint{Hash: chainhash.Hash{2}, Index: 1}
+
+	require.NoError(t, stream.indexScripts(
+		ctxA, subA.listener, ctxA.Done(),
+		[]string{sharedScript, onlyAScript},
+	))
+	require.NoError(t, stream.indexOutpoints(
+		ctxA, subA.listener, ctxA.Done(),
+		[]wire.OutPoint{sharedOP, onlyAOP},
+	))
+	require.NoError(t, stream.indexScripts(
+		t.Context(), subB.listener, t.Context().Done(),
+		[]string{sharedScript},
+	))
+	require.NoError(t, stream.indexOutpoints(
+		t.Context(), subB.listener, t.Context().Done(),
+		[]wire.OutPoint{sharedOP},
+	))
+
+	// Cancel the first subscription and wait for retirement to complete.
+	cancelA()
+	waitSubDone(t, subA)
+
+	// Verify subA's exclusive keys were removed, shared keys still map to
+	// subB, and subA's listener watch maps were cleared for GC.
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	require.NoError(t, subA.Err())
+	require.Nil(t, subA.listener.scripts)
+	require.Nil(t, subA.listener.outpoints)
+	require.NotContains(t, stream.scriptListeners, onlyAScript)
+	require.NotContains(t, stream.outpointListeners, onlyAOP)
+	require.Contains(t, stream.scriptListeners[sharedScript], subB.listener)
+	require.NotContains(
+		t, stream.scriptListeners[sharedScript], subA.listener,
+	)
+	require.Contains(t, stream.outpointListeners[sharedOP], subB.listener)
+	require.NotContains(
+		t, stream.outpointListeners[sharedOP], subA.listener,
+	)
+}

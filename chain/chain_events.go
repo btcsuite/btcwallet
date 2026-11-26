@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 )
 
 // chainEventSubscriberBufferSize accommodates a burst of up to 50 ordinary
@@ -57,30 +60,185 @@ type eventListener struct {
 
 	// err holds the terminal result published before done closes.
 	err error
+
+	// scripts tracks watched pkScripts for cleanup. Guarded by stream.mu.
+	scripts map[string]struct{}
+
+	// outpoints tracks watched outpoints for cleanup. Guarded by stream.mu.
+	outpoints map[wire.OutPoint]struct{}
 }
 
 // close publishes the terminal result before releasing callers waiting on Done.
 func (l *eventListener) close(err error) {
 	l.err = err
+	l.scripts = nil
+	l.outpoints = nil
 	close(l.events)
 	close(l.done)
 }
 
+// watchIndex maps a comparable watch key to subscribed listeners.
+type watchIndex[K comparable] map[K]map[*eventListener]struct{}
+
 // chainEventStream tracks listeners for one native notification handler.
 type chainEventStream struct {
+	// params defines the Bitcoin network used when extracting scripts from
+	// multi-key outputs such as bare multisig.
+	params *chaincfg.Params
+
 	// mu protects admission, publication and channel closure.
 	mu sync.Mutex
 
 	// members maps each listener to the function that stops its context
 	// cancellation callback. A nil map means the owner retired the stream.
 	members map[*eventListener]func() bool
+
+	// scriptListeners maps watched pkScripts to active listeners.
+	scriptListeners watchIndex[string]
+
+	// outpointListeners maps watched outpoints to active listeners.
+	//
+	// TODO(yy): Prune confirmed spent outpoints past a reorg-safe depth.
+	outpointListeners watchIndex[wire.OutPoint]
 }
 
 // newChainEventStream creates the registry for one running native owner.
-func newChainEventStream() *chainEventStream {
+func newChainEventStream(params *chaincfg.Params) *chainEventStream {
 	return &chainEventStream{
-		members: make(map[*eventListener]func() bool),
+		params:            params,
+		members:           make(map[*eventListener]func() bool),
+		scriptListeners:   make(watchIndex[string]),
+		outpointListeners: make(watchIndex[wire.OutPoint]),
 	}
+}
+
+// indexWatch records key in index and owned. Caller must hold s.mu.
+func indexWatch[K comparable](index watchIndex[K], owned map[K]struct{},
+	l *eventListener, key K) {
+
+	if index[key] == nil {
+		index[key] = make(map[*eventListener]struct{})
+	}
+
+	index[key][l] = struct{}{}
+	owned[key] = struct{}{}
+}
+
+// unindexWatches removes l from index for every key in owned. Caller holds mu.
+func unindexWatches[K comparable](index watchIndex[K], owned map[K]struct{},
+	l *eventListener) {
+
+	for key := range owned {
+		delete(index[key], l)
+
+		if len(index[key]) == 0 {
+			delete(index, key)
+		}
+	}
+}
+
+// canRegisterWatchLocked checks whether l may register watches. Call-site
+// ctx.Err is checked first so shared deadlines preserve DeadlineExceeded.
+func (s *chainEventStream) canRegisterWatchLocked(ctx context.Context,
+	l *eventListener, canceled <-chan struct{}) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-canceled:
+		return context.Canceled
+	default:
+	}
+
+	if _, ok := s.members[l]; !ok {
+		if l.err != nil {
+			return l.err
+		}
+
+		return context.Canceled
+	}
+
+	return nil
+}
+
+// registerWatchKeys validates enrollment and indexes keys under s.mu.
+func registerWatchKeys[K comparable](ctx context.Context, s *chainEventStream,
+	l *eventListener, canceled <-chan struct{}, index *watchIndex[K],
+	owned *map[K]struct{}, keys []K) error {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := s.canRegisterWatchLocked(ctx, l, canceled)
+	if err != nil {
+		return err
+	}
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	if *owned == nil {
+		*owned = make(map[K]struct{}, len(keys))
+	}
+
+	for _, key := range keys {
+		indexWatch(*index, *owned, l, key)
+	}
+
+	return nil
+}
+
+// indexScripts installs pkScripts into the reverse script index for l.
+func (s *chainEventStream) indexScripts(ctx context.Context, l *eventListener,
+	canceled <-chan struct{}, scripts []string) error {
+
+	return registerWatchKeys(
+		ctx, s, l, canceled, &s.scriptListeners, &l.scripts, scripts,
+	)
+}
+
+// indexOutpoints installs outpoints into the reverse outpoint index for l.
+func (s *chainEventStream) indexOutpoints(ctx context.Context,
+	l *eventListener, canceled <-chan struct{},
+	points []wire.OutPoint) error {
+
+	return registerWatchKeys(
+		ctx, s, l, canceled, &s.outpointListeners, &l.outpoints, points,
+	)
+}
+
+// retireListenerLocked removes l, unindexes its watches, resets drained
+// top-level maps, and closes l with err. Caller must hold s.mu.
+func (s *chainEventStream) retireListenerLocked(l *eventListener, err error) {
+	stop, ok := s.members[l]
+	if !ok {
+		return
+	}
+
+	delete(s.members, l)
+	stop()
+
+	hadScripts, hadOutpoints := len(l.scripts) > 0, len(l.outpoints) > 0
+	unindexWatches(s.scriptListeners, l.scripts, l)
+	unindexWatches(s.outpointListeners, l.outpoints, l)
+
+	if len(s.members) == 0 {
+		s.members = make(map[*eventListener]func() bool)
+	}
+
+	if hadScripts && len(s.scriptListeners) == 0 {
+		s.scriptListeners = make(watchIndex[string])
+	}
+
+	if hadOutpoints && len(s.outpointListeners) == 0 {
+		s.outpointListeners = make(watchIndex[wire.OutPoint])
+	}
+
+	l.close(err)
 }
 
 // subscribe registers the listener directly at the publication boundary.
@@ -119,14 +277,7 @@ func (s *chainEventStream) removeListener(l *eventListener) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Shutdown or overflow may retire the listener while its cancellation
-	// callback is waiting for the mutex.
-	if _, ok := s.members[l]; !ok {
-		return
-	}
-
-	delete(s.members, l)
-	l.close(nil)
+	s.retireListenerLocked(l, nil)
 }
 
 // publish synchronously offers the event to each subscriber on the native
@@ -144,9 +295,10 @@ func (s *chainEventStream) publish(event any) {
 		default:
 			// End delivery at the first gap and release the
 			// cancellation callback even if the context stays live.
-			delete(s.members, l)
-			stop()
-			l.close(ErrEventSubscriptionBufferFull)
+			_ = stop
+			s.retireListenerLocked(
+				l, ErrEventSubscriptionBufferFull,
+			)
 		}
 	}
 }
@@ -163,4 +315,6 @@ func (s *chainEventStream) close() {
 
 	// A stopped client can outlive its subscriptions and their buffers.
 	s.members = nil
+	s.scriptListeners = nil
+	s.outpointListeners = nil
 }
