@@ -40,12 +40,12 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnFailure(t *testing.T) {
 	)
 
 	// The fork block survives the rollback; the sync tip would rewind to it.
-	forkBlock := CreateBlockFixture(t, queries, 419)
+	forkBlock := CreateBlockFixture(t, queries, walletID, 419)
 
 	// Confirm a coinbase transaction at the next block and point the wallet
 	// sync tip at it, so a successful rollback would visibly move the tip back
 	// to the fork block.
-	coinbaseBlock := CreateBlockFixture(t, queries, 420)
+	coinbaseBlock := CreateBlockFixture(t, queries, walletID, 420)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 	err := store.CreateTx(t.Context(), db.CreateTxParams{
 		WalletID: walletID,
@@ -106,9 +106,9 @@ func TestRollbackToBlockRewindsSyncTipAndRollsBack(t *testing.T) {
 
 	// The fork block at height-1 survives the rollback and becomes the new
 	// sync tip.
-	forkBlock := CreateBlockFixture(t, queries, 439)
+	forkBlock := CreateBlockFixture(t, queries, walletID, 439)
 
-	confirmedBlock := CreateBlockFixture(t, queries, 440)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 440)
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 6000, PkScript: addr.ScriptPubKey}},

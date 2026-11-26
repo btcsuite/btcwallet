@@ -1401,7 +1401,8 @@ type UpdateTxOps interface {
 
 	// PrepareState validates and caches any backend-specific block/status
 	// params needed for the later row update.
-	PrepareState(ctx context.Context, state UpdateTxState) error
+	PrepareState(ctx context.Context, walletID uint32,
+		state UpdateTxState) error
 
 	// CheckGraphState rejects terminal recovery or confirmation changes
 	// involving competing transactions; CreateTx and rollback own those flows.
@@ -1433,7 +1434,7 @@ func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
 	}
 
 	if params.State != nil {
-		err = ops.PrepareState(ctx, *params.State)
+		err = ops.PrepareState(ctx, params.WalletID, *params.State)
 		if err != nil {
 			return fmt.Errorf("prepare tx state update: %w", err)
 		}

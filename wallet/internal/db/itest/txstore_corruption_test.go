@@ -43,7 +43,7 @@ func TestGetAndListTxRejectCorruptedStatus(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 265)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 265)
 
 	pendingTx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -273,7 +273,7 @@ func TestGetTxRejectsCorruptedConfirmedBlockHeight(t *testing.T) {
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-corrupted-confirmed-height")
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 280)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 280)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -375,7 +375,7 @@ func TestRollbackToBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	coinbaseBlock := CreateBlockFixture(t, queries, 290)
+	coinbaseBlock := CreateBlockFixture(t, queries, walletID, 290)
 	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
 
 	err := store.CreateTx(
@@ -472,7 +472,7 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 292)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), walletID, 292)
 	dropTableForCorruption(t, store, "utxos")
 
 	// Act: Confirm a fresh competitor whose input facts remain readable.
@@ -534,7 +534,7 @@ func TestLeaseAndReleaseReturnQueryErrorsWhenLeaseTablesMissing(t *testing.T) {
 	addr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 293)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), walletID, 293)
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
 		[]*wire.TxOut{{Value: 5700, PkScript: addr.ScriptPubKey}},
@@ -627,7 +627,7 @@ func TestCreateTxRejectsCorruptedConflictRootHash(t *testing.T) {
 		t, store, walletID, conflictRoot.TxHash(), []byte{1, 2, 3},
 	)
 
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 291)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), walletID, 291)
 	winnerTx := newRegularTx(
 		[]wire.OutPoint{{Hash: parentTx.TxHash(), Index: 0}},
 		[]*wire.TxOut{{Value: 5200, PkScript: []byte{0x52}}},

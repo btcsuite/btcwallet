@@ -44,10 +44,13 @@ func (s *Store) ListSyncedBlocks(ctx context.Context,
 		// One range read returns every stored block in the window in
 		// ascending height order, replacing the previous per-height
 		// lookup loop.
-		rows, err := q.GetBlocksInRange(ctx, sqlc.GetBlocksInRangeParams{
-			StartHeight: int64(query.StartHeight),
-			EndHeight:   int64(query.EndHeight),
-		})
+		rows, err := q.GetWalletBlocksInRange(
+			ctx, sqlc.GetWalletBlocksInRangeParams{
+				WalletID:    int64(query.WalletID),
+				StartHeight: int64(query.StartHeight),
+				EndHeight:   int64(query.EndHeight),
+			},
+		)
 		if err != nil {
 			return fmt.Errorf("get blocks in range [%d, %d]: %w",
 				query.StartHeight, query.EndHeight, err)

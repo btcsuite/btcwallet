@@ -135,18 +135,25 @@ func TestListSyncedBlocksReadsStoredBlock(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	t.Cleanup(cleanup)
 
+	// Arrange: Create the owner before persisting its block history.
+	wallet, err := store.CreateWallet(
+		t.Context(), testWalletParams("block-owner"),
+	)
+	require.NoError(t, err)
+
 	block := &db.Block{
 		Hash:      chainhash.Hash{8, 9, 10},
 		Height:    144,
 		Timestamp: time.Unix(1710003500, 0),
 	}
-	err := store.execWrite(t.Context(), func(qtx *sqlc.Queries) error {
-		return ensureBlockExists(t.Context(), qtx, block)
+	err = store.execWrite(t.Context(), func(qtx *sqlc.Queries) error {
+		return ensureBlockExists(t.Context(), qtx, wallet.ID, block)
 	})
 	require.NoError(t, err)
 
 	blocks, err := store.ListSyncedBlocks(
 		t.Context(), db.ListSyncedBlocksQuery{
+			WalletID:    wallet.ID,
 			StartHeight: block.Height,
 			EndHeight:   block.Height,
 		},
@@ -164,6 +171,12 @@ func TestEnsureBlockExistsRejectsConflictingBlock(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	t.Cleanup(cleanup)
 
+	// Arrange: Create the owner before persisting its block history.
+	wallet, err := store.CreateWallet(
+		t.Context(), testWalletParams("block-owner"),
+	)
+	require.NoError(t, err)
+
 	block := &db.Block{
 		Hash:      chainhash.Hash{8, 9, 10},
 		Height:    144,
@@ -174,13 +187,13 @@ func TestEnsureBlockExistsRejectsConflictingBlock(t *testing.T) {
 		Height:    block.Height,
 		Timestamp: block.Timestamp,
 	}
-	err := store.execWrite(t.Context(), func(qtx *sqlc.Queries) error {
-		err := ensureBlockExists(t.Context(), qtx, block)
+	err = store.execWrite(t.Context(), func(qtx *sqlc.Queries) error {
+		err := ensureBlockExists(t.Context(), qtx, wallet.ID, block)
 		if err != nil {
 			return err
 		}
 
-		return ensureBlockExists(t.Context(), qtx, conflict)
+		return ensureBlockExists(t.Context(), qtx, wallet.ID, conflict)
 	})
 	require.ErrorIs(t, err, db.ErrBlockMismatch)
 }

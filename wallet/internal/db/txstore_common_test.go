@@ -1521,9 +1521,9 @@ func (m *mockUpdateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 
 // PrepareState implements UpdateTxOps.
 func (m *mockUpdateTxOps) PrepareState(ctx context.Context,
-	state UpdateTxState) error {
+	walletID uint32, state UpdateTxState) error {
 
-	args := m.Called(ctx, state)
+	args := m.Called(ctx, walletID, state)
 
 	return args.Error(0)
 }
@@ -1873,7 +1873,7 @@ func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
 	ops.On("LoadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).
 		Return(false, nil).Once()
 
-	ops.On("PrepareState", mock.Anything, UpdateTxState{
+	ops.On("PrepareState", mock.Anything, uint32(5), UpdateTxState{
 		Status: TxStatusPublished,
 	}).Return(nil).Once()
 	ops.On("CheckGraphState", mock.Anything, uint32(5), chainhash.Hash{1}).

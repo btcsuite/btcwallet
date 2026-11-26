@@ -65,7 +65,7 @@ func TestReleaseOutputTwiceIsNoOp(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 270)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 270)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -137,7 +137,7 @@ func TestDeleteExpiredLeasesRemovesOnlyExpired(t *testing.T) {
 	addr1 := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
-	confirmedBlock := CreateBlockFixture(t, store.Queries(), 271)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), walletID, 271)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -206,7 +206,7 @@ func TestListLeasedOutputsRejectsCorruptedLockID(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 271)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 271)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
@@ -258,7 +258,7 @@ func TestListLeasedOutputsRejectsCorruptedOutputIndex(t *testing.T) {
 		t, store, walletID, db.KeyScopeBIP0084, "default", false,
 	)
 	queries := store.Queries()
-	confirmedBlock := CreateBlockFixture(t, queries, 272)
+	confirmedBlock := CreateBlockFixture(t, queries, walletID, 272)
 
 	tx := newRegularTx(
 		[]wire.OutPoint{randomOutPoint()},
