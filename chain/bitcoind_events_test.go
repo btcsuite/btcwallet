@@ -130,6 +130,7 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	// the next legacy read can check the same marker as a live reader.
 	client := newBitcoindStartupTestClient(t, nil)
 	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
 
 	hash := chainhash.Hash{1}
 	legacy := client.Notifications()
@@ -140,14 +141,26 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 
 	// Bound each read and return the first event so a later matching
 	// marker cannot hide replay or a gap.
-	receive := func(events <-chan any) any {
+	receiveEvent := func(events <-chan Event) Event {
 		t.Helper()
 
 		select {
 		case event := <-events:
 			return event
 		case <-time.After(defaultTestTimeout):
-			t.Fatal("reader missed a notification")
+			require.FailNow(t, "reader missed an Event")
+		}
+
+		return Event{}
+	}
+	receiveLegacy := func(events <-chan any) any {
+		t.Helper()
+
+		select {
+		case event := <-events:
+			return event
+		case <-time.After(defaultTestTimeout):
+			require.FailNow(t, "legacy reader missed event")
 		}
 
 		return nil
@@ -161,46 +174,44 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	height := int32(2)
 
 	for range capacity {
-		client.onRescanProgress(&hash, height, time.Time{})
-		require.Equal(
-			t, &RescanProgress{Hash: hash, Height: height},
-			receive(fast.Events),
-		)
+		client.onBlockDisconnected(&hash, height, time.Time{})
+
+		ev := receiveEvent(fast.Events)
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, hash, ev.Block.Hash)
+		require.Equal(t, height, ev.Block.Height)
 		height++
 	}
 
 	// Assert coexistence on the first legacy marker. Drain through the
 	// last marker because legacy enqueue follows all live offers.
 	require.Equal(
-		t, &RescanProgress{Hash: hash, Height: 2}, receive(legacy),
+		t, BlockDisconnected{
+			Block: wtxmgr.Block{Hash: hash, Height: 2},
+		}, receiveLegacy(legacy),
 	)
 
 	for range capacity - 1 {
-		receive(legacy)
+		receiveLegacy(legacy)
 	}
 
 	// All slots are occupied. Closure requires a failed offer.
 	select {
 	case <-slow.Done:
-		t.Fatal("filling the buffer retired the subscription")
+		require.FailNow(t, "filling the buffer retired subscription")
 	default:
 	}
 
 	// The next marker cannot fit for the slow reader. It still fits for
 	// the fast reader and exposes the slow reader's terminal result.
-	client.onRescanProgress(&hash, height, time.Time{})
-	require.Equal(
-		t, &RescanProgress{Hash: hash, Height: height},
-		receive(fast.Events),
-	)
+	client.onBlockDisconnected(&hash, height, time.Time{})
+
+	ev := receiveEvent(fast.Events)
+	require.Equal(t, EventBlockDisconnected, ev.Type)
+	require.Equal(t, height, ev.Block.Height)
 	height++
 
-	select {
-	case <-slow.Done:
-	case <-time.After(defaultTestTimeout):
-		t.Fatal("overflow did not retire the subscription")
-	}
-
+	waitSubDone(t, slow)
 	require.ErrorIs(t, slow.Err(), ErrEventSubscriptionBufferFull)
 
 	late := client.SubscribeChainEvents(t.Context()).Events
@@ -209,10 +220,10 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	retained := int32(2)
 
 	for range capacity {
-		require.Equal(
-			t, &RescanProgress{Hash: hash, Height: retained},
-			receive(slow.Events),
-		)
+		ev := receiveEvent(slow.Events)
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, hash, ev.Block.Hash)
+		require.Equal(t, retained, ev.Block.Height)
 		retained++
 	}
 
@@ -220,10 +231,15 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	require.False(t, open)
 
 	// Check late enrollment and continued fast delivery after overflow.
-	client.onRescanProgress(&hash, height, time.Time{})
-	next := &RescanProgress{Hash: hash, Height: height}
-	require.Equal(t, next, receive(late))
-	require.Equal(t, next, receive(fast.Events))
+	client.onBlockDisconnected(&hash, height, time.Time{})
+	want := Event{
+		Type: EventBlockDisconnected,
+		Block: &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Hash: hash, Height: height},
+		},
+	}
+	require.Equal(t, want, receiveEvent(late))
+	require.Equal(t, want, receiveEvent(fast.Events))
 }
 
 // TestBitcoindSubscriptionPreCanceled checks that an already-canceled
@@ -267,34 +283,29 @@ func TestBitcoindSubscriptionCancellation(t *testing.T) {
 	// Arrange one live subscriber with a pending event and no drain.
 	client := newBitcoindStartupTestClient(t, nil)
 	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	first := client.SubscribeChainEvents(ctx)
 	hash := chainhash.Hash{3}
-	client.onRescanProgress(&hash, 1, time.Time{})
+	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	// Act by retiring the only subscriber, then publish while there is
 	// no reader. Leave the old reader's Events channel unread.
 	cancel()
-
-	select {
-	case <-first.Done:
-	case <-time.After(defaultTestTimeout):
-		t.Fatal("unread events blocked subscription cancellation")
-	}
-
+	waitSubDone(t, first)
 	require.NoError(t, first.Err())
 
-	client.onRescanProgress(&hash, 2, time.Time{})
+	client.onBlockDisconnected(&hash, 2, time.Time{})
 
 	// The owner must finish publishing height 2 before it can accept
 	// height 3. Publication of height 3 itself may race registration.
-	client.onRescanProgress(&hash, 3, time.Time{})
+	client.onBlockDisconnected(&hash, 3, time.Time{})
 
 	next := client.SubscribeChainEvents(t.Context())
-	client.onRescanProgress(&hash, 4, time.Time{})
+	client.onBlockDisconnected(&hash, 4, time.Time{})
 
 	// Assert the reader can receive the racing height 3 and must receive
 	// height 4. Height 2 was published before enrollment and fails either
@@ -304,22 +315,22 @@ func TestBitcoindSubscriptionCancellation(t *testing.T) {
 	for {
 		select {
 		case event := <-next.Events:
-			if progress, ok := event.(*RescanProgress); ok &&
-				progress.Height == 3 {
+			require.Equal(
+				t, EventBlockDisconnected, event.Type,
+			)
 
-				require.Equal(t, hash, progress.Hash)
-
+			if event.Block.Height == 3 {
+				require.Equal(t, hash, event.Block.Hash)
 				continue
 			}
 
-			require.Equal(
-				t, &RescanProgress{Hash: hash, Height: 4}, event,
-			)
+			require.Equal(t, hash, event.Block.Hash)
+			require.Equal(t, int32(4), event.Block.Height)
 
 			return
 
 		case <-deadline:
-			t.Fatal("new reader missed live delivery")
+			require.FailNow(t, "new reader missed live delivery")
 		}
 	}
 }
@@ -332,25 +343,25 @@ func TestBitcoindSubscriptionClientShutdown(t *testing.T) {
 	// Arrange a started client and leave an eligible event unread.
 	client := newBitcoindStartupTestClient(t, nil)
 	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
 
 	sub := client.SubscribeChainEvents(t.Context())
 	hash := chainhash.Hash{4}
-	client.onRescanProgress(&hash, 1, time.Time{})
+	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	// Act by stopping the client while its subscription context is live.
 	client.Stop()
 
 	// Assert retirement does not require first draining the event. The
 	// existing buffered event remains readable on the closed channel.
-	select {
-	case <-sub.Done:
-	case <-time.After(defaultTestTimeout):
-		t.Fatal("subscription outlived the client")
-	}
-
+	waitSubDone(t, sub)
 	require.NoError(t, sub.Err())
 
-	require.Equal(t, &RescanProgress{Hash: hash, Height: 1}, <-sub.Events)
+	ev := <-sub.Events
+	require.Equal(t, EventBlockDisconnected, ev.Type)
+	require.Equal(t, hash, ev.Block.Hash)
+	require.Equal(t, int32(1), ev.Block.Height)
+
 	_, ok := <-sub.Events
 	require.False(t, ok)
 
@@ -398,15 +409,18 @@ func TestBitcoindSubscriptionAfterStartRetry(t *testing.T) {
 	require.Equal(t, btcjson.ErrRPCInWarmup, rpcErr.Code)
 	require.NoError(t, retryErr)
 
+	atomic.StoreUint32(&client.notifyBlocks, 1)
 	sub := client.SubscribeChainEvents(t.Context())
 	hash := chainhash.Hash{1}
-	client.onRescanProgress(&hash, 1, time.Time{})
+	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	select {
 	case event := <-sub.Events:
-		require.Equal(t, &RescanProgress{Hash: hash, Height: 1}, event)
+		require.Equal(t, EventBlockDisconnected, event.Type)
+		require.Equal(t, hash, event.Block.Hash)
+		require.Equal(t, int32(1), event.Block.Height)
 	case <-time.After(defaultTestTimeout):
-		t.Fatal("retry did not enable live subscription delivery")
+		require.FailNow(t, "retry did not enable live delivery")
 	}
 }
 
@@ -1573,3 +1587,4 @@ func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	require.Len(t, wpkhMatched, 1)
 	require.Contains(t, wpkhMatched, subWPKH.listener)
 }
+

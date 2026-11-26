@@ -10,7 +10,6 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -241,46 +240,55 @@ func TestRPCClientWatchAddrsFromTip(t *testing.T) {
 }
 
 // TestRPCClientSubscriptionLifecycle checks live delivery, cancellation, and
-// shutdown through btcd's native notification handler.
+// shutdown through btcd's native filtered notification handler.
 func TestRPCClientSubscriptionLifecycle(t *testing.T) {
 	t.Parallel()
 
-	// Arrange a live client and a cancellable reader before calling the
-	// native notification callback with a distinct block marker.
-	_, client := setupBtcd(t)
+	// Arrange a live client opted into block notifications and a
+	// cancellable subscription.
+	miner, client := setupBtcd(t)
+	require.NoError(t, client.NotifyBlocks())
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	sub := client.SubscribeChainEvents(ctx)
-	hash := chainhash.Hash{1}
+	_, startHeight, err := miner.Client.GetBestBlock()
+	require.NoError(t, err)
 
-	// Act by publishing the marker after enrollment and receiving it
-	// despite any connection notification from the running client.
-	client.onBlockConnected(&hash, 2, time.Time{})
-	require.Equal(t, hash, waitForBlockNtfn(t, sub.Events, 2, true))
+	wantHeight := startHeight + 1
 
-	// The original reader can still receive the same native marker.
-	legacyHash := waitForBlockNtfn(t, client.Notifications(), 2, true)
-	require.Equal(t, hash, legacyHash)
+	// Act by mining a block after enrollment and reading it from both the
+	// filtered subscription and legacy Notifications().
+	hashes, err := miner.Client.Generate(1)
+	require.NoError(t, err)
+	require.Len(t, hashes, 1)
+
+	select {
+	case ev := <-sub.Events:
+		require.Equal(t, EventBlockConnected, ev.Type)
+		require.NotNil(t, ev.Block)
+		require.Equal(t, *hashes[0], ev.Block.Hash)
+		require.Equal(t, wantHeight, ev.Block.Height)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "missed EventBlockConnected")
+	}
+
+	legacyHash := waitForBlockNtfn(
+		t, client.Notifications(), wantHeight, true,
+	)
+	require.Equal(t, *hashes[0], legacyHash)
 	cancel()
 
 	// Assert cancellation retires this reader while the owner is still
 	// running. A different live context then exercises handler shutdown.
-	select {
-	case <-sub.Done:
-	case <-time.After(defaultTestTimeout):
-		t.Fatal("btcd subscription did not cancel")
-	}
+	waitSubDone(t, sub)
+	require.NoError(t, sub.Err())
 
 	live := client.SubscribeChainEvents(t.Context())
 	client.Stop()
-
-	select {
-	case <-live.Done:
-	case <-time.After(defaultTestTimeout):
-		t.Fatal("btcd subscription outlived the client")
-	}
+	waitSubDone(t, live)
+	require.NoError(t, live.Err())
 }
 
 // mineHistoricalWatchAddr confirms a payment before a notification client is
