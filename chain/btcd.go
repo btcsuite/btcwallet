@@ -49,6 +49,20 @@ type RPCClient struct {
 // interface.
 var _ Interface = (*RPCClient)(nil)
 
+// notificationHandlers builds the default btcd websocket callbacks shared by
+// NewRPCClient and NewRPCClientWithConfig.
+func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
+	return &rpcclient.NotificationHandlers{
+		OnClientConnected:   c.onClientConnect,
+		OnBlockConnected:    c.onBlockConnected,
+		OnBlockDisconnected: c.onBlockDisconnected,
+		OnRecvTx:            c.onRecvTx,
+		OnRedeemingTx:       c.onRedeemingTx,
+		OnRescanFinished:    c.onRescanFinished,
+		OnRescanProgress:    c.onRescanProgress,
+	}
+}
+
 // NewRPCClient creates a client connection to the server described by the
 // connect string.  If disableTLS is false, the remote RPC certificate must be
 // provided in the certs slice.  The connection is not established immediately,
@@ -82,16 +96,9 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
-	ntfnCallbacks := &rpcclient.NotificationHandlers{
-		OnClientConnected:   client.onClientConnect,
-		OnBlockConnected:    client.onBlockConnected,
-		OnBlockDisconnected: client.onBlockDisconnected,
-		OnRecvTx:            client.onRecvTx,
-		OnRedeemingTx:       client.onRedeemingTx,
-		OnRescanFinished:    client.onRescanFinished,
-		OnRescanProgress:    client.onRescanProgress,
-	}
-	rpcClient, err := rpcclient.New(client.connConfig, ntfnCallbacks)
+	rpcClient, err := rpcclient.New(
+		client.connConfig, client.notificationHandlers(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -199,15 +206,7 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 	// callbacks defined in this package.
 	ntfnCallbacks := cfg.NotificationHandlers
 	if ntfnCallbacks == nil {
-		ntfnCallbacks = &rpcclient.NotificationHandlers{
-			OnClientConnected:   client.onClientConnect,
-			OnBlockConnected:    client.onBlockConnected,
-			OnBlockDisconnected: client.onBlockDisconnected,
-			OnRecvTx:            client.onRecvTx,
-			OnRedeemingTx:       client.onRedeemingTx,
-			OnRescanFinished:    client.onRescanFinished,
-			OnRescanProgress:    client.onRescanProgress,
-		}
+		ntfnCallbacks = client.notificationHandlers()
 	}
 
 	// Create the RPC client using the above config.
@@ -341,9 +340,57 @@ func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []address.Address,
 	return c.Client.Rescan(startHash, addrs, flatOutpoints) // nolint:staticcheck
 }
 
-// WatchAddrsFromTip registers addresses with btcd's existing transaction
-// notification filter without issuing a rescan. The context is checked before
-// registration so a canceled delivery attempt cannot introduce new watches.
+// NotifyReceived registers addresses with both btcd's legacy notification
+// filter and LoadTxFilter so legacy Notifications() receives matching txns and
+// btcd's shared filter includes them; EventSubscription delivery still
+// requires enrolling watches via EventSubscription.WatchAddrs.
+func (c *RPCClient) NotifyReceived(addrs []address.Address) error {
+	// Keep legacy NotifyReceived for OnRecvTx consumers alongside
+	// LoadTxFilter.
+	//nolint:staticcheck
+	err := c.Client.NotifyReceived(addrs)
+	if err != nil {
+		return err
+	}
+
+	if len(addrs) == 0 {
+		return nil
+	}
+
+	return c.LoadTxFilter(false, addrs, nil)
+}
+
+// NotifySpent registers outpoints with both btcd's legacy notification filter
+// and LoadTxFilter without stealth-enabling NotifyBlocks.
+func (c *RPCClient) NotifySpent(points []*wire.OutPoint) error {
+	flat := make([]wire.OutPoint, len(points))
+	for i, op := range points {
+		if op == nil {
+			return fmt.Errorf("%w: nil outpoint at index %d",
+				ErrInvalidParam, i)
+		}
+
+		flat[i] = *op
+	}
+
+	// Keep legacy NotifySpent for OnRedeemingTx consumers alongside
+	// LoadTxFilter.
+	//nolint:staticcheck
+	err := c.Client.NotifySpent(points)
+	if err != nil {
+		return err
+	}
+
+	if len(flat) == 0 {
+		return nil
+	}
+
+	return c.LoadTxFilter(false, nil, flat)
+}
+
+// WatchAddrsFromTip registers addresses with btcd's transaction notification
+// filters without issuing a rescan. The context is checked before registration
+// so a canceled delivery attempt cannot introduce new watches.
 func (c *RPCClient) WatchAddrsFromTip(ctx context.Context,
 	addrs []address.Address) error {
 
@@ -352,11 +399,7 @@ func (c *RPCClient) WatchAddrsFromTip(ctx context.Context,
 		return err
 	}
 
-	// Staticcheck recommends LoadTxFilter because NotifyReceived is
-	// deprecated. This adapter intentionally keeps NotifyReceived because
-	// its handlers consume OnRecvTx and OnRedeemingTx; LoadTxFilter delivers
-	// through the newer relevant-transaction notification path instead.
-	return c.Client.NotifyReceived(addrs) //nolint:staticcheck
+	return c.NotifyReceived(addrs)
 }
 
 // GetCFilter returns a compact filter for the given block hash and filter
