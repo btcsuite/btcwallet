@@ -68,7 +68,7 @@ func (cq *ConcurrentQueue) run(stream *chainEventStream,
 		select {
 		case item := <-cq.chanIn:
 			// A live offer does not depend on the FIFO reader.
-			if stream != nil {
+			if stream != nil && stream.hasSubscribers() {
 				stream.publish(item)
 			}
 

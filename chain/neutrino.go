@@ -934,7 +934,9 @@ out:
 
 			// Offer live events at intake so subscribers do not wait
 			// for a reader of the shared notification queue.
-			stream.publish(n)
+			if stream.hasSubscribers() {
+				stream.publish(n)
+			}
 
 			if len(notifications) == 0 {
 				next = n
