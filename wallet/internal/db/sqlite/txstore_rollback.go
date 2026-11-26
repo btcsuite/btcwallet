@@ -117,19 +117,7 @@ func (s *Store) DisconnectBlock(ctx context.Context, walletID uint32,
 	})
 }
 
-// RollbackToBlock atomically removes every block at or above the provided
-// height and rewrites wallet sync-state references so the block delete can
-// succeed.
-func (s *Store) RollbackToBlock(ctx context.Context,
-	height uint32) error {
-
-	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		return db.RollbackToBlockWithOps(ctx, height,
-			rollbackToBlockOps{qtx: qtx})
-	})
-}
-
-// rollbackToBlockOps adapts sqlite sqlc queries to the shared rollback
+// rollbackToBlockOps adapts sqlite sqlc queries to the shared disconnect
 // sequence.
 type rollbackToBlockOps struct {
 	qtx *sqlc.Queries
@@ -138,81 +126,7 @@ type rollbackToBlockOps struct {
 	walletID uint32
 }
 
-var _ db.RollbackToBlockOps = (*rollbackToBlockOps)(nil)
-
 var _ db.DisconnectBlockOps = (*rollbackToBlockOps)(nil)
-
-// ListRollbackRootHashes loads the coinbase roots that a rollback disconnects
-// and groups them by wallet.
-func (o rollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
-	height uint32) (map[uint32][]chainhash.Hash, error) {
-
-	rows, err := o.qtx.ListRollbackCoinbaseRoots(ctx, int64(height))
-	if err != nil {
-		return nil, fmt.Errorf("query rollback coinbase roots: %w", err)
-	}
-
-	return groupRollbackCoinbaseRoots(rows)
-}
-
-// RewindWalletSyncStateHeights clamps wallet sync-state references below the
-// rollback boundary before the block rows are deleted.
-func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
-	ctx context.Context, height uint32) error {
-
-	_, err := o.qtx.RewindWalletSyncStateHeightsForRollback(
-		ctx, int64(height),
-	)
-	if err != nil {
-		return fmt.Errorf("rewind wallet sync state heights query: %w", err)
-	}
-
-	return nil
-}
-
-// DeleteBlocksAtOrAboveHeight removes the shared block rows after sync-state
-// references have been rewound.
-func (o rollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
-	ctx context.Context, height uint32) error {
-
-	_, err := o.qtx.DeleteBlocksAtOrAboveHeight(ctx, int64(height))
-	if err != nil {
-		return fmt.Errorf("delete blocks at or above height query: %w", err)
-	}
-
-	return nil
-}
-
-// MarkTxRootsOrphaned rewrites each disconnected coinbase root to the
-// orphaned state once its confirming block has been deleted.
-func (o rollbackToBlockOps) MarkTxRootsOrphaned(
-	ctx context.Context, walletID uint32,
-	rootHashes []chainhash.Hash) error {
-
-	for _, txHash := range rootHashes {
-		// Rollback already removed the confirming block rows.
-		// The remaining coinbase row must therefore clear its
-		// block reference and become orphaned in the same
-		// row-local state patch.
-		rows, err := o.qtx.UpdateTransactionStateByHash(
-			ctx, sqlc.UpdateTransactionStateByHashParams{
-				BlockHeight: sql.NullInt64{},
-				Status:      int64(db.TxStatusOrphaned),
-				WalletID:    int64(walletID),
-				TxHash:      txHash[:],
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("update rollback coinbase state query: %w", err)
-		}
-
-		if rows == 0 {
-			return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
-		}
-	}
-
-	return nil
-}
 
 // ListUnminedTxRecords loads and decodes every unmined transaction row for the
 // wallet so the shared helper can inspect raw inputs for descendant edges.
@@ -250,34 +164,6 @@ func (o rollbackToBlockOps) MarkDescendantsFailed(
 	}
 
 	return nil
-}
-
-// groupRollbackCoinbaseRoots groups rollback-affected coinbase hashes by
-// wallet while preserving the query order inside each wallet bucket.
-func groupRollbackCoinbaseRoots(
-	rows []sqlc.ListRollbackCoinbaseRootsRow) (
-	map[uint32][]chainhash.Hash, error) {
-
-	rootHashesByWallet := make(
-		map[uint32][]chainhash.Hash, len(rows),
-	)
-	for _, row := range rows {
-		walletID, err := db.Int64ToUint32(row.WalletID)
-		if err != nil {
-			return nil, fmt.Errorf("rollback coinbase wallet id: %w", err)
-		}
-
-		txHash, err := chainhash.NewHash(row.TxHash)
-		if err != nil {
-			return nil, fmt.Errorf("rollback coinbase hash: %w", err)
-		}
-
-		rootHashesByWallet[walletID] = append(
-			rootHashesByWallet[walletID], *txHash,
-		)
-	}
-
-	return rootHashesByWallet, nil
 }
 
 // GetDisconnectBlock reads one owned identity before applying a native event.

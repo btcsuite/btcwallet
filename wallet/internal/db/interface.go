@@ -140,7 +140,7 @@ var (
 	ErrTxAlreadyExists = errors.New("tx already exists")
 
 	// ErrBlockNotFound is returned when a transaction operation references a
-	// block height that does not exist in the shared blocks table.
+	// block height that does not exist in the Wallet's recorded block history.
 	ErrBlockNotFound = errors.New("block not found")
 
 	// ErrBlockMismatch is returned when a transaction operation references a
@@ -481,7 +481,7 @@ type TxStore interface {
 	// created credits, or spent-input edges.
 	//
 	// UpdateTx changes only the requested transaction's metadata. Use
-	// CreateTx, InvalidateUnminedTx or RollbackToBlock when competing or
+	// CreateTx, InvalidateUnminedTx or DisconnectBlock when competing or
 	// dependent transactions also need their states changed.
 	// SQL stores return ErrInvalidParam before changing state or label if a
 	// status/block update targets a Replaced, Failed or Orphaned row, or
@@ -504,9 +504,8 @@ type TxStore interface {
 
 	// RewindWallet atomically detaches one wallet's confirmed transactions at
 	// and above the block after params.Block, and updates only that wallet's
-	// synced tip to params.Block. Unlike RollbackToBlock, this method is
-	// wallet-scoped and must not delete shared block rows or mutate other
-	// wallets' sync states.
+	// synced tip to params.Block. Unlike DisconnectBlock, this method is for
+	// manual rescans and preserves existing block history rows.
 	RewindWallet(ctx context.Context, params RewindWalletParams) error
 
 	// GetTx retrieves a transaction record by its hash. It takes a context
@@ -587,22 +586,6 @@ type TxStore interface {
 	// affected mined history and trusts the caller-verified previous fork.
 	DisconnectBlock(ctx context.Context, walletID uint32, block Block,
 		previous *Block, canonical map[uint32]*chainhash.Hash) error
-
-	// RollbackToBlock removes all blocks at and after a given height,
-	// moving any transactions within those blocks back to the unconfirmed
-	// pool. This operation is performed as a single, atomic database
-	// transaction to ensure data integrity. Breaking it into smaller,
-	// separate interface methods would risk leaving the database in an
-	// inconsistent state if an error occurred mid-process. The current
-	// approach guarantees that the rollback is either fully completed or
-	// not at all.
-	//
-	// NOTE: This method has no wallet ID parameter and is therefore a
-	// DB-wide operation affecting all wallets that share the same `blocks`
-	// table.
-	//
-	// TODO(yy): explore performance improvement for this method.
-	RollbackToBlock(ctx context.Context, height uint32) error
 }
 
 // UTXOStore defines the database actions for managing the UTXO set.

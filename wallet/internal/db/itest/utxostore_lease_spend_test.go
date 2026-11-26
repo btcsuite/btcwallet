@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
@@ -67,7 +68,10 @@ func TestConfirmedSpendDeletesLeases(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), block.Height)
+	err = store.DisconnectBlock(
+		t.Context(), walletID, block, nil,
+		map[uint32]*chainhash.Hash{block.Height: nil},
+	)
 	require.NoError(t, err)
 
 	err = store.DeleteTx(t.Context(), db.DeleteTxParams{
@@ -117,7 +121,10 @@ func TestUpdateTxConfirmedSpendDeletesLeases(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), block.Height)
+	err = store.DisconnectBlock(
+		t.Context(), walletID, block, nil,
+		map[uint32]*chainhash.Hash{block.Height: nil},
+	)
 	require.NoError(t, err)
 
 	err = store.DeleteTx(t.Context(), db.DeleteTxParams{

@@ -580,13 +580,6 @@ func (m *Store) InvalidateUnminedTx(ctx context.Context,
 	return args.Error(0)
 }
 
-// RollbackToBlock implements the db.TxStore interface.
-func (m *Store) RollbackToBlock(ctx context.Context, height uint32) error {
-	args := m.Called(ctx, height)
-
-	return args.Error(0)
-}
-
 // DisconnectBlock records the target wallet ID, observed block, fork anchor,
 // and canonical hashes together so tests can assert which wallet is rewound
 // and what proof was supplied, returning the arranged storage error.

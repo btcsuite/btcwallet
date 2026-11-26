@@ -1976,7 +1976,7 @@ func TestDeleteTxRemovesParentWithFailedChild(t *testing.T) {
 	require.False(t, ok)
 }
 
-// TestRollbackToBlockFailsCoinbaseDescendants verifies that RollbackToBlock
+// TestDisconnectBlockFailsCoinbaseDescendants verifies that DisconnectBlock
 // marks every unmined descendant of a disconnected coinbase root as failed and
 // excludes their retained input claims from current eligibility.
 //
@@ -1991,13 +1991,13 @@ func TestDeleteTxRemovesParentWithFailedChild(t *testing.T) {
 //   - Insert one grandchild that spends the child's wallet-owned output.
 //
 // Action:
-//   - Roll back the block that confirmed the coinbase root.
+//   - Disconnect the block that confirmed the coinbase root.
 //
 // Assertions:
 //   - The disconnected coinbase root becomes orphaned.
 //   - Both unmined descendants become failed.
 //   - Failed descendants no longer reserve their parent outputs.
-func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
+func TestDisconnectBlockFailsCoinbaseDescendants(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -2050,7 +2050,10 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 		1)
 	require.Len(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()), 1)
 
-	err = store.RollbackToBlock(t.Context(), block.Height)
+	err = store.DisconnectBlock(
+		t.Context(), walletID, block, nil,
+		map[uint32]*chainhash.Hash{block.Height: nil},
+	)
 	require.NoError(t, err)
 
 	coinbaseInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
@@ -2083,10 +2086,10 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 	require.Empty(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()))
 }
 
-// TestRollbackToBlockRewindsSyncToStoredLowerBlock verifies rollback rewinds
-// wallet sync references to the greatest stored block below the rollback
-// boundary instead of assuming height-1 exists in sparse block tables.
-func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
+// TestDisconnectBlockRewindsSyncToSuppliedSparseFork verifies DisconnectBlock
+// rewinds wallet sync references to the caller-supplied sparse fork block
+// instead of assuming height-1 exists in sparse block tables.
+func TestDisconnectBlockRewindsSyncToSuppliedSparseFork(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -2109,7 +2112,10 @@ func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), rollbackBlock.Height)
+	err = store.DisconnectBlock(
+		t.Context(), walletID, rollbackBlock, &forkBlock,
+		map[uint32]*chainhash.Hash{rollbackBlock.Height: nil},
+	)
 	require.NoError(t, err)
 
 	walletInfo, err := store.GetWallet(t.Context(), walletName)
@@ -2273,7 +2279,10 @@ func TestCreateTxReconfirmsOrphanedCoinbase(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.RollbackToBlock(t.Context(), block.Height)
+	err = store.DisconnectBlock(
+		t.Context(), walletID, block, nil,
+		map[uint32]*chainhash.Hash{block.Height: nil},
+	)
 	require.NoError(t, err)
 
 	orphanInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
@@ -5431,7 +5440,10 @@ func TestCreateTxConfirmsRetainedReplaced(t *testing.T) {
 			},
 		),
 	)
-	require.NoError(t, store.RollbackToBlock(t.Context(), oldBlock.Height))
+	require.NoError(t, store.DisconnectBlock(
+		t.Context(), walletID, oldBlock, nil,
+		map[uint32]*chainhash.Hash{oldBlock.Height: nil},
+	))
 	old, err := store.GetTx(
 		t.Context(), db.GetTxQuery{
 			WalletID: walletID, Txid: a.TxHash(),
@@ -5518,7 +5530,10 @@ func TestCreateTxConfirmsRetainedFailed(t *testing.T) {
 			},
 		),
 	)
-	require.NoError(t, store.RollbackToBlock(t.Context(), oldBlock.Height))
+	require.NoError(t, store.DisconnectBlock(
+		t.Context(), walletID, oldBlock, nil,
+		map[uint32]*chainhash.Hash{oldBlock.Height: nil},
+	))
 	old, err := store.GetTx(
 		t.Context(), db.GetTxQuery{
 			WalletID: walletID, Txid: child.TxHash(),

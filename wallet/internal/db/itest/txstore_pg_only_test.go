@@ -76,14 +76,18 @@ func TestListTxnsRejectHeightOverflowPostgres(t *testing.T) {
 	require.ErrorContains(t, err, "convert end height")
 }
 
-// TestRollbackToBlockRejectsHeightOverflowPostgres verifies postgres-specific
-// rollback height conversion failures.
-func TestRollbackToBlockRejectsHeightOverflowPostgres(t *testing.T) {
+// TestDisconnectBlockRejectsHeightOverflowPostgres verifies postgres-specific
+// DisconnectBlock height conversion failures.
+func TestDisconnectBlockRejectsHeightOverflowPostgres(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	err := store.RollbackToBlock(t.Context(), ^uint32(0))
-	require.ErrorContains(t, err, "convert rollback height")
+	walletID := newWallet(t, store, "wallet-disconnect-height-overflow")
+	err := store.DisconnectBlock(
+		t.Context(), walletID, db.Block{Height: ^uint32(0)}, nil,
+		map[uint32]*chainhash.Hash{^uint32(0): nil},
+	)
+	require.ErrorIs(t, err, db.ErrCastingOverflow)
 }
 
 // TestTxGraphChildBeforeConflictPostgres checks that a confirmed conflict also
@@ -397,7 +401,10 @@ func TestTxGraphChildBeforeRollbackPostgres(t *testing.T) {
 	waitTxGraphCall(t, ctx, store.DB(), childCall, 1)
 	rollbackCall := startTxGraphCall(
 		t, cancel, func() error {
-			return store.RollbackToBlock(ctx, 1)
+			return store.DisconnectBlock(
+				ctx, walletID, block, nil,
+				map[uint32]*chainhash.Hash{block.Height: nil},
+			)
 		},
 	)
 	waitTxGraphCall(t, ctx, store.DB(), rollbackCall, 2)
@@ -813,7 +820,10 @@ func TestLeaseAcquisitionConcurrentConfirmationPostgres(t *testing.T) {
 				require.NoError(t, barrier.Rollback())
 				require.NoError(t, <-leaseCall)
 				require.NoError(t, <-confirmation)
-				require.NoError(t, store.RollbackToBlock(ctx, block.Height))
+				require.NoError(t, store.DisconnectBlock(
+					ctx, walletID, block, nil,
+					map[uint32]*chainhash.Hash{block.Height: nil},
+				))
 				require.NoError(
 					t, store.DeleteTx(
 						ctx, db.DeleteTxParams{

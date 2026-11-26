@@ -1571,42 +1571,6 @@ type disconnectDescendantOps interface {
 		descendantIDs []int64) error
 }
 
-// RollbackToBlockOps adapts one SQL backend to the full RollbackToBlock
-// sequence, including sync-state rewinds, block deletion, and descendant
-// invalidation.
-//
-// The shared rollback algorithm is intentionally ordered:
-//   - collect rollback root hashes before block rows are removed
-//   - rewind sync-state heights that still point at the removed blocks
-//   - delete the shared block rows at or above the rollback height
-//   - mark the disconnected coinbase roots orphaned once their confirming
-//     blocks have been removed
-//   - walk the disconnected roots and invalidate dependent descendants
-//
-// The adapter methods map directly to those stages so the shared helper can own
-// the rollback sequencing while the backends keep only query details.
-type RollbackToBlockOps interface {
-	// ListRollbackRootHashes returns the coinbase roots disconnected by the
-	// rollback, grouped by wallet for the later descendant walk.
-	ListRollbackRootHashes(ctx context.Context,
-		height uint32) (map[uint32][]chainhash.Hash, error)
-
-	// RewindWalletSyncStateHeights clamps wallet sync-state references
-	// below the rollback boundary before block rows are removed.
-	RewindWalletSyncStateHeights(ctx context.Context, height uint32) error
-
-	// DeleteBlocksAtOrAboveHeight removes the shared block rows at or above the
-	// rollback boundary after sync-state references have been rewound.
-	DeleteBlocksAtOrAboveHeight(ctx context.Context, height uint32) error
-
-	// MarkTxRootsOrphaned rewrites the disconnected coinbase roots to the
-	// orphaned state after their confirming blocks are deleted.
-	MarkTxRootsOrphaned(ctx context.Context, walletID uint32,
-		rootHashes []chainhash.Hash) error
-
-	disconnectDescendantOps
-}
-
 // newUnminedTxRecord decodes one normalized unmined transaction row into the
 // shared dependency-walk shape.
 func newUnminedTxRecord(id int64, hash []byte,
@@ -1823,60 +1787,6 @@ func InvalidateRollbackDescendants(ctx context.Context,
 	ops disconnectDescendantOps) error {
 
 	return invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
-}
-
-// MarkTxRootsOrphaned rewrites every disconnected coinbase root to the
-// orphaned state before descendant invalidation completes.
-func MarkTxRootsOrphaned(ctx context.Context,
-	rootHashesByWallet map[uint32][]chainhash.Hash,
-	ops RollbackToBlockOps) error {
-
-	for walletID, rootHashes := range rootHashesByWallet {
-		err := ops.MarkTxRootsOrphaned(ctx, walletID, rootHashes)
-		if err != nil {
-			return fmt.Errorf("mark rollback coinbase roots orphaned for "+
-				"wallet %d: %w", walletID, err)
-		}
-	}
-
-	return nil
-}
-
-// RollbackToBlockWithOps runs the shared RollbackToBlock sequence inside one
-// backend-specific SQL transaction.
-//
-// The helper rewinds sync-state heights before deleting blocks, then clears and
-// fails any now-invalid unmined descendants rooted in disconnected coinbase
-// history so rollback cannot leave dangling references behind.
-func RollbackToBlockWithOps(ctx context.Context, height uint32,
-	ops RollbackToBlockOps) error {
-
-	rootHashesByWallet, err := ops.ListRollbackRootHashes(ctx, height)
-	if err != nil {
-		return fmt.Errorf("list rollback coinbase roots: %w", err)
-	}
-
-	err = ops.RewindWalletSyncStateHeights(ctx, height)
-	if err != nil {
-		return fmt.Errorf("rewind wallet sync state heights: %w", err)
-	}
-
-	err = ops.DeleteBlocksAtOrAboveHeight(ctx, height)
-	if err != nil {
-		return fmt.Errorf("delete blocks at or above height: %w", err)
-	}
-
-	err = MarkTxRootsOrphaned(ctx, rootHashesByWallet, ops)
-	if err != nil {
-		return err
-	}
-
-	err = invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // DisconnectTx carries only the persisted facts used by disconnect policy.
