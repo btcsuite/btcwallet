@@ -5,6 +5,7 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -201,6 +202,7 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
+	client.eventStream = newChainEventStream(cfg.Chain, client)
 
 	// Use the configed notification callbacks, if not set, default to the
 	// callbacks defined in this package.
@@ -278,9 +280,6 @@ func (c *RPCClient) Start(_ context.Context) error {
 
 	c.quitMtx.Lock()
 	c.started = true
-
-	// Give the handler its registry before native events can reach it.
-	c.eventStream = newChainEventStream(c.chainParams, c)
 	c.wg.Add(1)
 	go c.handler()
 
@@ -303,6 +302,7 @@ func (c *RPCClient) Stop() {
 		c.batchClient.WaitForShutdown()
 
 		if !c.started {
+			c.eventStream.close()
 			close(c.dequeueNotification)
 		}
 	}
@@ -598,6 +598,64 @@ func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time
 	}:
 	case <-c.quit:
 	}
+}
+
+// onFilteredBlockConnected publishes btcd's atomic filtered block notification
+// directly to EventSubscription in websocket wire order.
+func (c *RPCClient) onFilteredBlockConnected(height int32,
+	header *wire.BlockHeader, txs []*btcutil.Tx) {
+
+	if !c.eventStream.hasSubscribers() {
+		return
+	}
+
+	recs := make([]*wtxmgr.TxRecord, 0, len(txs))
+	for _, tx := range txs {
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(
+			tx.MsgTx(), header.Timestamp,
+		)
+		if err != nil {
+			log.Errorf("Cannot create filtered block tx: %v", err)
+			continue
+		}
+
+		recs = append(recs, rec)
+	}
+
+	blk := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Hash: header.BlockHash(), Height: height},
+		Time:  header.Timestamp,
+	}
+
+	c.eventStream.publish(FilteredBlockConnected{
+		Block: blk, RelevantTxs: recs,
+	})
+}
+
+// onRelevantTxAccepted decodes rawTx via wire.MsgTx so witness txns keep their
+// canonical txid, and publishes an unconfirmed RelevantTx to EventSubscription.
+func (c *RPCClient) onRelevantTxAccepted(rawTx []byte) {
+	if !c.eventStream.hasSubscribers() {
+		return
+	}
+
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(rawTx))
+	if err != nil {
+		log.Errorf("Cannot deserialize relevant tx: %v", err)
+
+		return
+	}
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(&msgTx, time.Now())
+	if err != nil {
+		log.Errorf("Cannot create relevant tx record: %v", err)
+
+		return
+	}
+
+	c.eventStream.publish(RelevantTx{rec, nil})
 }
 
 func (c *RPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {

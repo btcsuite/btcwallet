@@ -411,6 +411,14 @@ func (s *chainEventStream) subscribe(ctx context.Context) EventSubscription {
 	return sub
 }
 
+// hasSubscribers reports whether at least one subscriber is enrolled.
+func (s *chainEventStream) hasSubscribers() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.members) > 0
+}
+
 // publish synchronously offers the event to each subscriber on the native
 // owner. Delivery is asynchronous because the nonblocking send can place
 // the event in the subscriber's buffer before the subscriber reads it.

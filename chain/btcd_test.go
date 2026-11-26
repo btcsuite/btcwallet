@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -382,4 +383,61 @@ func TestRPCClientNotifySpentNilOutpoint(t *testing.T) {
 
 	// Confirm ErrInvalidParam is returned before touching the RPC client.
 	require.ErrorIs(t, err, ErrInvalidParam)
+}
+
+// testWPKHKey holds a regtest key pair, its P2WPKH address, and its pkScript.
+type testWPKHKey struct {
+	// priv is the signing key for the P2WPKH output.
+	priv *btcec.PrivateKey
+
+	// addr is the regtest P2WPKH address derived from priv.
+	addr address.Address
+
+	// pkScript is the PayToAddrScript for addr.
+	pkScript []byte
+}
+
+// newTestWPKHKey generates a regtest P2WPKH key bundle.
+func newTestWPKHKey(t *testing.T) testWPKHKey {
+	t.Helper()
+
+	params := &chaincfg.RegressionNetParams
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	pubAddr, err := address.NewAddressPubKey(
+		priv.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		pubAddr.AddressPubKeyHash().ScriptAddress(), params,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return testWPKHKey{priv: priv, addr: addr, pkScript: pkScript}
+}
+
+// signWPKHSpend constructs and signs a single-input SegWit tx spending input
+// owned by key/inAmt to a single output.
+func signWPKHSpend(t *testing.T, input wire.OutPoint, key testWPKHKey,
+	inAmt int64, destScript []byte, sendAmt int64) *wire.MsgTx {
+
+	t.Helper()
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(wire.NewTxIn(&input, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(sendAmt, destScript))
+
+	fetcher := txscript.NewCannedPrevOutputFetcher(key.pkScript, inAmt)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	wit, err := txscript.WitnessSignature(
+		tx, sigHashes, 0, inAmt, key.pkScript, txscript.SigHashAll,
+		key.priv, true,
+	)
+	require.NoError(t, err)
+
+	tx.TxIn[0].Witness = wit
+
+	return tx
 }
