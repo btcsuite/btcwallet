@@ -25,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1588,3 +1589,108 @@ func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	require.Contains(t, wpkhMatched, subWPKH.listener)
 }
 
+
+// randTestP2PKHAddr generates a random regtest P2PKH address and its pkScript.
+func randTestP2PKHAddr(t *testing.T) (address.Address, []byte) {
+	t.Helper()
+
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	pubAddr, err := address.NewAddressPubKey(
+		priv.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	addr := pubAddr.AddressPubKeyHash()
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return addr, pkScript
+}
+
+// TestChainEventSubscriptionWatchRegistration verifies zero-value watch
+// rejection without panicking, live WatchOutputs delegation with synchronous
+// mempool spend delivery, unwatched sibling isolation, and post-cancel
+// rejection.
+func TestChainEventSubscriptionWatchRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Set up a random address, outpoint, zero-value subscription, a live
+	// subscription whose NotifySpent synchronously publishes a spend tx,
+	// and an unwatched sibling subscription.
+	addr, _ := randTestP2PKHAddr(t)
+	op := &wire.OutPoint{Hash: chainhash.Hash{11}, Index: 0}
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(wire.NewTxIn(op, nil, nil))
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	var zero EventSubscription
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stream, mc, watched := newMockWatchSub(ctx)
+	unwatched := stream.subscribe(t.Context())
+
+	mc.On("NotifySpent", []*wire.OutPoint{op}).Run(
+		func(mock.Arguments) {
+			stream.publish(RelevantTx{TxRecord: spendRec})
+		},
+	).Return(nil).Once()
+
+	// Register on zero-value and live handles, publish a barrier for the
+	// unwatched sibling, cancel watched, and verify post-cancel rejection.
+	zeroAddrErr := zero.WatchAddrs(t.Context(), []address.Address{addr})
+	zeroOutErr := zero.WatchOutputs(t.Context(), []*wire.OutPoint{op})
+	liveOutErr := watched.WatchOutputs(ctx, []*wire.OutPoint{op})
+
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 9}})
+
+	// Zero-value calls return Canceled; WatchOutputs delivers the
+	// synchronous spend only to watched.
+	require.ErrorIs(t, zeroAddrErr, context.Canceled)
+	require.ErrorIs(t, zeroOutErr, context.Canceled)
+	require.NoError(t, liveOutErr)
+
+	ev := <-watched.Events
+	require.Equal(t, EventMempoolTx, ev.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, ev.RelevantTxs)
+	require.Equal(t, EventBlockDisconnected, (<-unwatched.Events).Type)
+
+	cancel()
+	waitSubDone(t, watched)
+	require.ErrorIs(
+		t, watched.WatchOutputs(t.Context(), []*wire.OutPoint{op}),
+		context.Canceled,
+	)
+	mc.AssertExpectations(t)
+}
+
+// newMockWatchSub creates a regtest stream, mock client, and handle.
+func newMockWatchSub(
+	ctx context.Context) (*chainEventStream, *mockChainClient,
+	EventSubscription) {
+
+	mc := &mockChainClient{}
+	stream := newChainEventStream(&chaincfg.RegressionNetParams, mc)
+	sub := stream.subscribe(ctx)
+
+	return stream, mc, sub
+}
+
+// newExpiredWatchSub creates an already-expired deadline context, mock client,
+// and handle.
+func newExpiredWatchSub(
+	t *testing.T) (context.Context, *mockChainClient, EventSubscription) {
+
+	t.Helper()
+
+	expiredCtx, cancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	t.Cleanup(cancel)
+
+	_, mc, sub := newMockWatchSub(expiredCtx)
+
+	return expiredCtx, mc, sub
+}

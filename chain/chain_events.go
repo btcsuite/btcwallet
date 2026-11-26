@@ -3,8 +3,10 @@ package chain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -76,8 +78,17 @@ type EventSubscription struct {
 	// overflow. Buffered events remain readable after closure.
 	Done <-chan struct{}
 
-	// listener gives Err access to the result stored before closure.
+	// stream is the owning event stream that manages watch indices and
+	// delegates watch registration to the backing chain client.
+	stream *chainEventStream
+
+	// listener gives Err and watch registration access to this
+	// subscription's state and terminal result.
 	listener *eventListener
+
+	// canceled mirrors the subscription context's Done channel so watch
+	// registration fails promptly once the subscription is canceled.
+	canceled <-chan struct{}
 }
 
 // Err returns the terminal result after Done closes. Cancellation and source
@@ -96,6 +107,115 @@ func (s EventSubscription) Err() error {
 	default:
 		return nil
 	}
+}
+
+// checkWatchable validates ctx and ensures the handle is attached to a live
+// stream before indexing watches.
+func (s EventSubscription) checkWatchable(ctx context.Context) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	if s.stream == nil {
+		return context.Canceled
+	}
+
+	return nil
+}
+
+// WatchAddrs registers addrs on this subscription and delegates to
+// WatchAddrsFromTip. Received outputs are auto-indexed on delivery;
+// NotifyBlocks is required for block events and block-confirmed spend tracking.
+func (s EventSubscription) WatchAddrs(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := s.checkWatchable(ctx)
+	if err != nil {
+		return err
+	}
+
+	scripts := make([]string, len(addrs))
+	for i, addr := range addrs {
+		if addr == nil {
+			return fmt.Errorf("%w: nil addr %d", ErrInvalidParam, i)
+		}
+
+		pkScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return fmt.Errorf("pkScript for %v: %w", addr, err)
+		}
+
+		scripts[i] = string(pkScript)
+	}
+
+	// Install keys under s.mu and release the lock before delegating so
+	// any synchronous notification emitted during WatchAddrsFromTip sees
+	// the watch without reentering s.mu.
+	client, err := registerWatchKeys(
+		ctx, s.stream, s.listener, s.canceled,
+		&s.stream.scriptListeners, &s.listener.scripts, scripts,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = client.WatchAddrsFromTip(ctx, addrs)
+	if err != nil {
+		rollbackWatchKeys(
+			s.stream, s.listener, &s.stream.scriptListeners,
+			&s.listener.scripts, scripts,
+		)
+
+		return fmt.Errorf("register address watches: %w", err)
+	}
+
+	return nil
+}
+
+// WatchOutputs registers points on this subscription and delegates to
+// NotifySpent, keeping its no-complete-mempool-snapshot contract (Neutrino's
+// NotifySpent is a no-op so it only scopes txns surfaced by its active scan).
+func (s EventSubscription) WatchOutputs(ctx context.Context,
+	points []*wire.OutPoint) error {
+
+	err := s.checkWatchable(ctx)
+	if err != nil {
+		return err
+	}
+
+	flat := make([]wire.OutPoint, len(points))
+	for i, op := range points {
+		if op == nil {
+			return fmt.Errorf("%w: nil op %d", ErrInvalidParam, i)
+		}
+
+		flat[i] = *op
+	}
+
+	// Install keys under s.mu and release the lock before delegating so
+	// synchronous spend delivery during NotifySpent (for example, Bitcoin
+	// Core reporting an existing mempool spend) sees the watch without
+	// reentering s.mu.
+	client, err := registerWatchKeys(
+		ctx, s.stream, s.listener, s.canceled,
+		&s.stream.outpointListeners, &s.listener.outpoints, flat,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = client.NotifySpent(points)
+	if err != nil {
+		rollbackWatchKeys(
+			s.stream, s.listener, &s.stream.outpointListeners,
+			&s.listener.outpoints, flat,
+		)
+
+		return fmt.Errorf("register output watches: %w", err)
+	}
+
+	return nil
 }
 
 // eventListener owns the writable ends for one subscription.
@@ -257,6 +377,42 @@ func registerWatchKeys[K comparable](ctx context.Context, s *chainEventStream,
 	}
 
 	return s.client, nil
+}
+
+// rollbackWatchKeys decrements each key in keys for l after a failed backend
+// registration, unindexing only keys whose reference count reaches zero.
+func rollbackWatchKeys[K comparable](s *chainEventStream, l *eventListener,
+	index *watchIndex[K], owned *map[K]int, keys []K) {
+
+	if len(keys) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.members[l]; !ok {
+		return
+	}
+
+	for _, key := range keys {
+		if count := (*owned)[key] - 1; count > 0 {
+			(*owned)[key] = count
+
+			continue
+		}
+
+		delete(*owned, key)
+		delete((*index)[key], l)
+
+		if len((*index)[key]) == 0 {
+			delete(*index, key)
+		}
+	}
+
+	if len(*owned) == 0 {
+		*owned = nil
+	}
 }
 
 // removeSubscriber removes l, unindexes its watches, and closes l with err.
@@ -432,7 +588,9 @@ func (s *chainEventStream) subscribe(ctx context.Context) EventSubscription {
 	sub := EventSubscription{
 		Events:   l.events,
 		Done:     l.done,
+		stream:   s,
 		listener: l,
+		canceled: ctx.Done(),
 	}
 
 	s.mu.Lock()
