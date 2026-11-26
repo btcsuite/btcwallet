@@ -6,9 +6,110 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcwallet/snacl"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 )
+
+// PubKey returns the public key of the selected private key. See Vault for
+// the lock and cleanup contract.
+func (v *WalletVault) PubKey(ctx context.Context,
+	sel signing.KeySelector) (*btcec.PublicKey, error) {
+
+	var pub *btcec.PublicKey
+
+	err := v.useKey(ctx, sel, func(key *btcec.PrivateKey) error {
+		pub = key.PubKey()
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wallet %d vault PubKey: %w", v.walletID,
+			err)
+	}
+
+	return pub, nil
+}
+
+// useKey resolves the selected private key and runs use with it under the
+// vault guard.
+//
+// It refuses an invalid selector, then returns ErrVaultLocked for a locked
+// vault, both before the Store read. The read runs without the guard, so a
+// Lock can still land before the guard is taken; the guarded phase checks the
+// lock again. use is vault code, not caller code: it must not keep the key,
+// call the Store or call another vault method. Every secret is cleared before
+// useKey returns or panics.
+func (v *WalletVault) useKey(ctx context.Context, sel signing.KeySelector,
+	use func(*btcec.PrivateKey) error) error {
+
+	err := signing.ValidateKeySelector(sel)
+	if err != nil {
+		return err
+	}
+
+	// Read the lock state directly, as DecryptScript does: vault code
+	// does not call the vault's own public methods.
+	v.mtx.Lock()
+	locked := v.unlockedState == nil
+	v.mtx.Unlock()
+
+	if locked {
+		return ErrVaultLocked
+	}
+
+	ciphertext, toKey, err := LoadEncryptedKey(ctx, v.store, v.walletID, sel)
+
+	// The vault owns the encrypted copy from the Store, so clear it on
+	// every path.
+	defer clear(ciphertext)
+
+	if err != nil {
+		return err
+	}
+
+	return v.useDecryptedKey(
+		ciphertext, (*snacl.CryptoKey).Decrypt, toKey, use,
+	)
+}
+
+// useDecryptedKey owns the guarded phase after lookup: it decrypts ciphertext,
+// turns the plaintext into the private key with toKey and runs use with it.
+// decrypt, toKey and use are vault-owned; none may retain a key or access the
+// Store. The plaintext and the key are cleared before it returns or panics.
+func (v *WalletVault) useDecryptedKey(ciphertext []byte,
+	decrypt accountDecryptor,
+	toKey func([]byte) (*btcec.PrivateKey, error),
+	use func(*btcec.PrivateKey) error) error {
+
+	v.mtx.Lock()
+	defer v.mtx.Unlock()
+
+	if v.unlockedState == nil {
+		return ErrVaultLocked
+	}
+
+	cryptoKey, err := v.selectUnlockedCryptoKey(waddrmgr.CKTPrivate)
+	if err != nil {
+		return err
+	}
+
+	plaintext, err := decrypt(cryptoKey, ciphertext)
+	defer clear(plaintext)
+
+	if err != nil {
+		return fmt.Errorf("decrypt private key: %w", err)
+	}
+
+	key, err := toKey(plaintext)
+	if err != nil {
+		return err
+	}
+	defer key.Zero()
+
+	return use(key)
+}
 
 // LoadEncryptedKey reads the encrypted private key that sel names. It returns
 // that ciphertext and a function that turns its decrypted plaintext into the
