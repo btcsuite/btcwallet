@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
@@ -540,6 +541,22 @@ func (h *HarnessTest) setUpChainClient() {
 
 	h.Cleanup(cleanup)
 	h.ChainClient = chainClient
+
+	// External full-node backends (btcd and bitcoind) attach to a pre-mined
+	// regtest chain. Wait until initial sync reaches the miner tip before
+	// returning; leave Neutrino unsynced so tests exercise real initial
+	// catch-up during wallet startup.
+	if h.Backend.Name() == backendNeutrino {
+		return
+	}
+
+	minerTip, _ := h.GetBestBlock()
+	require.Eventually(h, func() bool {
+		tip, _, err := chainClient.GetBestBlock()
+
+		return err == nil && minerTip.IsEqual(tip) &&
+			chainClient.IsCurrent()
+	}, defaultTestTimeout, wait.PollInterval)
 }
 
 // setUpWalletDB prepares an isolated wallet data source for the configured
