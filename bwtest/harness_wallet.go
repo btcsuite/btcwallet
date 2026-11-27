@@ -348,7 +348,7 @@ func (h *HarnessTest) NewWalletAddressesOfType(w *wallet.Wallet,
 	batch, err := w.NewBulkAddresses(
 		h.Context(), wallet.NewAccountSelectorByName(
 			scope, waddrmgr.DefaultAccountName,
-		), false, uint32(count), //nolint:gosec
+		), false, uint32(count),
 	)
 	require.NoError(h, err, "failed to create wallet addresses")
 
@@ -468,7 +468,7 @@ func (h *HarnessTest) FundUnimportedAccount(w *wallet.Wallet,
 
 	outputs := make([]*wire.TxOut, 0, len(amounts))
 	for i, amount := range amounts {
-		child, err := external.Derive(uint32(i)) //nolint:gosec
+		child, err := external.Derive(uint32(i))
 		require.NoError(h, err, "failed to derive receive key")
 
 		pubKey, err := child.ECPubKey()
@@ -557,7 +557,7 @@ func (h *HarnessTest) payOutputs(outputs []*wire.TxOut) WalletFunding {
 		require.NotEqual(h, -1, index,
 			"funding output missing from transaction")
 
-		outputIndex := uint32(index) //nolint:gosec
+		outputIndex := uint32(index)
 		owned[outputIndex] = struct{}{}
 
 		funding.WalletOutpoints = append(
@@ -571,7 +571,7 @@ func (h *HarnessTest) payOutputs(outputs []*wire.TxOut) WalletFunding {
 	// Whatever the transaction pays elsewhere belongs to the miner, and is
 	// reported as it stands rather than assumed to exist.
 	for i := range tx.TxOut {
-		outputIndex := uint32(i) //nolint:gosec
+		outputIndex := uint32(i)
 		if _, ok := owned[outputIndex]; ok {
 			continue
 		}
