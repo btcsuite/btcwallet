@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -38,6 +39,15 @@ type RPCClient struct {
 	eventStream         *chainEventStream
 	currentBlock        chan *waddrmgr.BlockStamp
 
+	// reconnectEpoch monotonically counts websocket disconnects. Zero
+	// lets onClientConnect skip watch replay on initial connect. A
+	// monotonic counter (rather than a bool) prevents an ABA race where an
+	// async onClientConnect goroutine from an older socket fails
+	// LoadTxFilter after a later disconnect has already opened a newer
+	// socket, ensuring it does not call Disconnect() on the replacement
+	// connection.
+	reconnectEpoch atomic.Uint64
+
 	quit    chan struct{}
 	wg      sync.WaitGroup
 	started bool
@@ -56,6 +66,7 @@ var _ Interface = (*RPCClient)(nil)
 func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
 	return &rpcclient.NotificationHandlers{
 		OnClientConnected:        c.onClientConnect,
+		OnClientDisconnected:     c.onClientDisconnect,
 		OnBlockConnected:         c.onBlockConnected,
 		OnBlockDisconnected:      c.onBlockDisconnected,
 		OnFilteredBlockConnected: c.onFilteredBlockConnected,
@@ -612,11 +623,70 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	return blk, nil
 }
 
+// onClientDisconnect advances reconnectEpoch when a websocket disconnects so
+// onClientConnect replays active stream watches onto the replacement socket.
+func (c *RPCClient) onClientDisconnect() {
+	c.reconnectEpoch.Add(1)
+}
+
+// onClientConnect replays active EventSubscription watches after automatic
+// reconnects before forwarding ClientConnected to the legacy notification
+// queue.
 func (c *RPCClient) onClientConnect() {
+	epoch := c.reconnectEpoch.Load()
+	if epoch > 0 && !c.replayWatchesOnReconnect(epoch) {
+		return
+	}
+
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
 	case <-c.quit:
 	}
+}
+
+// isReplayStale reports whether shutdown began or another disconnect
+// superseded epoch.
+func (c *RPCClient) isReplayStale(epoch uint64) bool {
+	select {
+	case <-c.quit:
+		return true
+	default:
+	}
+
+	return c.reconnectEpoch.Load() != epoch
+}
+
+// replayWatchesOnReconnect replays all active stream watches (including
+// auto-indexed received outpoints) onto the reconnected btcd socket via
+// additive LoadTxFilter. It reports whether this reconnect epoch completed
+// replay.
+func (c *RPCClient) replayWatchesOnReconnect(epoch uint64) bool {
+	if c.isReplayStale(epoch) {
+		return false
+	}
+
+	addrs, outpoints := c.eventStream.watchSnapshot()
+	if len(addrs) > 0 || len(outpoints) > 0 {
+		// Use reload=false so concurrent additive WatchAddrs or
+		// WatchOutputs calls on the new socket are preserved while a
+		// fresh server filter is populated with all active watches
+		// including auto-indexed outpoints.
+		err := c.LoadTxFilter(false, addrs, outpoints)
+		if err != nil {
+			if c.isReplayStale(epoch) ||
+				errors.Is(err, rpcclient.ErrClientShutdown) {
+
+				return false
+			}
+
+			log.Warnf("btcd reconnect watch replay failed: %v", err)
+			c.Disconnect()
+
+			return false
+		}
+	}
+
+	return !c.isReplayStale(epoch)
 }
 
 func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time) {
@@ -666,6 +736,7 @@ func (c *RPCClient) onFilteredBlockConnected(height int32,
 		)
 		if err != nil {
 			log.Errorf("Cannot create filtered block tx: %v", err)
+
 			continue
 		}
 

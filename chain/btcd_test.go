@@ -701,3 +701,101 @@ func TestRPCClientStartAfterStopError(t *testing.T) {
 
 	require.NoError(t, sub.Err())
 }
+
+// TestRPCClientReconnectReplaysFilterAndAutoOutpoint verifies that a btcd
+// websocket reconnect keeps EventSubscription alive and replays both explicit
+// address watches and auto-indexed received outpoints via LoadTxFilter.
+func TestRPCClientReconnectReplaysFilterAndAutoOutpoint(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a regtest btcd client with a watched address and an initial
+	// funding tx whose received outpoint is auto-indexed by eventStream.
+	miner, client := setupBtcd(t)
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+	require.NoError(t, client.NotifyBlocks())
+
+	keyA := newTestWPKHKey(t)
+	keyOther := newTestWPKHKey(t)
+	sub := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, sub.WatchAddrs(t.Context(), []address.Address{keyA.addr}),
+	)
+
+	fundOP := fundConfirmedWPKH(t, miner, keyA)
+	fundEv := waitChainEvent(t, sub.Events)
+	require.Equal(t, EventBlockConnected, fundEv.Type)
+	require.Len(t, fundEv.RelevantTxs, 1)
+	require.Equal(t, fundOP.Hash, fundEv.RelevantTxs[0].Hash)
+
+	// Act: disconnect socket 1 so btcd wipes its connection-scoped tx
+	// filter, wait for reconnect, then mine a block spending fundOP to an
+	// unwatched address.
+	client.Disconnect()
+	waitForClientConnected(t, legacy)
+
+	spendTx := signWPKHSpend(
+		t, fundOP, keyA, 10000, keyOther.pkScript, 9000,
+	)
+	spendBlk, err := miner.GenerateAndSubmitBlock(
+		[]*btcutil.Tx{btcutil.NewTx(spendTx)}, -1, time.Time{},
+	)
+	require.NoError(t, err)
+
+	// Assert: sub stays open and delivers the spend matched purely through
+	// the replayed auto-indexed outpoint.
+	spendEv := waitChainEvent(t, sub.Events)
+	select {
+	case <-sub.Done:
+		require.FailNowf(
+			t, "subscription closed unexpectedly", "err=%v",
+			sub.Err(),
+		)
+	default:
+	}
+
+	require.Equal(t, EventBlockConnected, spendEv.Type)
+	require.Equal(t, *spendBlk.Hash(), spendEv.Block.Hash)
+	require.Len(t, spendEv.RelevantTxs, 1)
+	require.Equal(t, spendTx.TxHash(), spendEv.RelevantTxs[0].Hash)
+}
+
+// TestRPCClientDisconnectDoesNotDropLiveBlock verifies that a live filtered
+// block received after a disconnect and before a subsequent disconnect (such as
+// a failed reconnect watch replay) is published immediately instead of being
+// buffered and discarded.
+func TestRPCClientDisconnectDoesNotDropLiveBlock(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an RPCClient with an active EventSubscription and simulate a
+	// websocket disconnect advancing reconnectEpoch.
+	stream := newChainEventStream(&chaincfg.RegressionNetParams, nil)
+	sub := stream.subscribe(t.Context())
+	client := &RPCClient{
+		eventStream: stream,
+		quit:        make(chan struct{}),
+	}
+
+	client.onClientDisconnect()
+	firstEpoch := client.reconnectEpoch.Load()
+
+	// Act: deliver a live filtered block before watch replay finishes, then
+	// simulate another disconnect superseding firstEpoch.
+	header := wire.BlockHeader{
+		Version:   1,
+		Timestamp: time.Unix(1700000000, 0),
+		Nonce:     11,
+	}
+	client.onFilteredBlockConnected(11, &header, nil)
+	client.onClientDisconnect()
+
+	// Assert: the live block was delivered immediately rather than dropped,
+	// and firstEpoch is marked stale while the new epoch remains current.
+	ev := waitChainEvent(t, sub.Events)
+	require.Equal(t, EventBlockConnected, ev.Type)
+	require.NotNil(t, ev.Block)
+	require.Equal(t, int32(11), ev.Block.Height)
+	require.Equal(t, header.BlockHash(), ev.Block.Hash)
+	require.True(t, client.isReplayStale(firstEpoch))
+	require.False(t, client.isReplayStale(client.reconnectEpoch.Load()))
+}
