@@ -19,6 +19,8 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -2854,9 +2856,12 @@ func TestSignPsbtRejectsEcdsaDerivedKeyMismatch(t *testing.T) {
 	// Act: sign the packet.
 	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
 
-	// Assert: the mismatch is refused and the caller's packet is
-	// unchanged.
+	// Assert: the mismatch is refused before the vault is asked to sign,
+	// and the caller's packet is unchanged.
 	require.ErrorIs(t, err, ErrSigningKeyMismatch)
+	mocks.vault.AssertNotCalled(
+		t, "SignDigest", mock.Anything, mock.Anything,
+	)
 	require.Equal(t, before, clonePacket(packet))
 }
 
@@ -2883,9 +2888,51 @@ func TestSignPsbtRejectsTaprootDerivedKeyMismatch(t *testing.T) {
 	// Act: sign the packet.
 	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
 
-	// Assert: the mismatch is refused and the caller's packet is
-	// unchanged.
+	// Assert: the mismatch is refused before the vault is asked to sign,
+	// and the caller's packet is unchanged.
 	require.ErrorIs(t, err, ErrSigningKeyMismatch)
+	mocks.vault.AssertNotCalled(
+		t, "SignDigest", mock.Anything, mock.Anything,
+	)
+	require.Equal(t, before, clonePacket(packet))
+}
+
+// TestSignPsbtChecksVaultSignatureKey tests that SignPsbt refuses a signature
+// the vault makes with a key other than the one its PubKey reported for the
+// record. The record check before signing passes, so only the check of the
+// returned signature can keep a vault whose two calls resolve different keys
+// from having its signature filed under the record's key.
+func TestSignPsbtChecksVaultSignatureKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an input paying the wallet key, and a vault that reports
+	// that key but signs with another one.
+	packet := testP2WPKHSignPacket(t, 0)
+	before := clonePacket(packet)
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	other := testAuthKeys()[0]
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	mocks.vault.On("PubKey", mock.Anything, mock.Anything).Return(
+		walletPub, nil,
+	).Once()
+	mocks.vault.On("SignDigest", mock.Anything, mock.Anything).Return(
+		func(req signing.DigestRequest) (Signature, error) {
+			key, _ := btcec.PrivKeyFromBytes(other.Serialize())
+			defer key.Zero()
+
+			return keyvault.SignDigestWithKey(key, &req)
+		},
+	).Once()
+
+	// Act: sign the packet.
+	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
+
+	// Assert: the vault signed, the signature is refused, and the
+	// caller's packet is unchanged.
+	require.ErrorIs(t, err, ErrSigningKeyMismatch)
+	mocks.vault.AssertNumberOfCalls(t, "SignDigest", 1)
 	require.Equal(t, before, clonePacket(packet))
 }
 

@@ -3727,46 +3727,92 @@ func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 	require.Equal(t, before, after)
 }
 
-// TestSignPsbtClassifiesSignError tests that SignPsbt skips explicit ownership
-// failures while returning cancellation and operational Store errors, from
-// both the vault key lookup before a P2WPKH signature and the vault base key
-// read a tweaked Taproot input makes while it is planned.
-func TestSignPsbtClassifiesSignError(t *testing.T) {
+// signKeyRead is an input whose signing reads the wallet's key from the
+// vault at a distinct point.
+type signKeyRead struct {
+	name   string
+	packet *psbt.Packet
+	tweaks map[int]KeyTweak
+}
+
+// signKeyReads returns the two inputs whose signing reads a key from the
+// vault: a P2WPKH input, whose key is read when it is signed, and a tweaked
+// Taproot input, whose base key is read while it is planned.
+func signKeyReads(t *testing.T) []signKeyRead {
+	t.Helper()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	tweak, err := NewAddTweak([32]byte{31: 7})
+	require.NoError(t, err)
+
+	return []signKeyRead{
+		{
+			name:   "key lookup",
+			packet: testP2WPKHSignPacket(t, 0),
+		},
+		{
+			name: "taproot base key read",
+			packet: testTaprootSignPacket(
+				t, testBip86Output(
+					t, testTweakedKey(t, tweak, walletPub),
+				), nil,
+			),
+			tweaks: map[int]KeyTweak{0: tweak},
+		},
+	}
+}
+
+// TestSignPsbtSkipsMissingAccount tests that SignPsbt skips an input whose
+// account the Store lacks as another signer's, whether the vault reports the
+// missing account at the key lookup before a P2WPKH signature or at the base
+// key read a tweaked Taproot input makes while it is planned.
+func TestSignPsbtSkipsMissingAccount(t *testing.T) {
+	t.Parallel()
+
+	for _, read := range signKeyReads(t) {
+		t.Run(read.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input of an account the Store lacks. The
+			// vault reports it once, and nothing is signed.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			packet := clonePacket(read.packet)
+
+			mocks.vault.On(
+				"PubKey", mock.Anything, mock.Anything,
+			).Return(
+				nil, fmt.Errorf("get account secret: %w",
+					db.ErrAccountNotFound),
+			).Once()
+
+			// Act: sign the packet.
+			result, err := w.SignPsbt(t.Context(), &SignPsbtParams{
+				Packet: packet, InputTweaks: read.tweaks,
+			})
+
+			// Assert: the input is skipped without an error.
+			require.NoError(t, err)
+			require.Empty(t, result.SignedInputs)
+		})
+	}
+}
+
+// TestSignPsbtReturnsKeyReadError tests that SignPsbt returns cancellation and
+// operational Store errors the vault reports, rather than skipping the input,
+// from both the key lookup before a P2WPKH signature and the base key read a
+// tweaked Taproot input makes while it is planned.
+func TestSignPsbtReturnsKeyReadError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		storeErr  error
-		wantError error
+		name     string
+		storeErr error
 	}{
-		{
-			name:     "missing account skips input",
-			storeErr: db.ErrAccountNotFound,
-		},
-		{
-			name:      "canceled context returns error",
-			storeErr:  context.Canceled,
-			wantError: context.Canceled,
-		},
-		{
-			name:      "store failure returns error",
-			storeErr:  errDb,
-			wantError: errDb,
-		},
+		{name: "canceled context", storeErr: context.Canceled},
+		{name: "store failure", storeErr: errDb},
 	}
 
-	reads := []struct {
-		name string
-
-		// taproot fails the base key read of a tweaked Taproot input
-		// rather than the key lookup of a P2WPKH input.
-		taproot bool
-	}{
-		{name: "key lookup"},
-		{name: "taproot base key read", taproot: true},
-	}
-
-	for _, read := range reads {
+	for _, read := range signKeyReads(t) {
 		for _, tc := range tests {
 			t.Run(read.name+" "+tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -3777,30 +3823,8 @@ func TestSignPsbtClassifiesSignError(t *testing.T) {
 				// any signature, so only that read is
 				// programmed, once.
 				w, mocks := createUnlockedWalletWithMocks(t)
+				packet := clonePacket(read.packet)
 
-				packet := testP2WPKHSignPacket(t, 0)
-
-				var tweaks map[int]KeyTweak
-				if read.taproot {
-					_, walletPub := deriveLeafKeys(
-						t, testAccountXPrv(t), 0, 0,
-					)
-
-					tweak, err := NewAddTweak([32]byte{31: 7})
-					require.NoError(t, err)
-
-					packet = testTaprootSignPacket(
-						t, testBip86Output(
-							t, testTweakedKey(
-								t, tweak, walletPub,
-							),
-						), nil,
-					)
-					tweaks = map[int]KeyTweak{0: tweak}
-				}
-
-				// The vault resolves the key through the Store
-				// before any signature.
 				storeErr := fmt.Errorf("get account secret: %w",
 					tc.storeErr)
 				mocks.vault.On(
@@ -3811,19 +3835,15 @@ func TestSignPsbtClassifiesSignError(t *testing.T) {
 				// vault in an admitted public call. A
 				// pre-canceled context could reject before
 				// reaching the vault.
-				result, err := w.SignPsbt(t.Context(), &SignPsbtParams{
-					Packet: packet, InputTweaks: tweaks,
-				})
-
-				// Assert: Only explicit ownership failures are
-				// skipped.
-				if tc.wantError != nil {
-					require.ErrorIs(t, err, tc.wantError)
-					return
+				params := &SignPsbtParams{
+					Packet:      packet,
+					InputTweaks: read.tweaks,
 				}
+				result, err := w.SignPsbt(t.Context(), params)
 
-				require.NoError(t, err)
-				require.Empty(t, result.SignedInputs)
+				// Assert: the error is returned, not skipped.
+				require.ErrorIs(t, err, tc.storeErr)
+				require.Nil(t, result)
 			})
 		}
 	}
@@ -8087,6 +8107,8 @@ func TestSignPsbtReconcilesMatchingOrigins(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []uint32{0}, first.SignedInputs)
 			require.Empty(t, second.SignedInputs)
+			mocks.vault.AssertNumberOfCalls(t, "PubKey", 1)
+			mocks.vault.AssertNumberOfCalls(t, "SignDigest", 1)
 			require.Equal(t, signed, tc.packet)
 			require.Equal(
 				t, before.Bip32Derivation,
