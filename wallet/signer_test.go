@@ -502,12 +502,33 @@ func expectVaultSigner(t *testing.T, mocks *mockWalletDeps,
 	privKey, pubKey := deriveLeafKeys(
 		t, testAccountXPrv(t), path.Branch, path.Index,
 	)
-	sel := signing.DerivedKey{KeyScope: scope, DerivationPath: path}
+	selects := func(sel signing.KeySelector) bool {
+		derived, ok := sel.(signing.DerivedKey)
 
-	mocks.vault.On("PubKey", mock.Anything, sel).Return(pubKey, nil).Maybe()
+		got := derived.DerivationPath
+
+		return ok && derived.KeyScope == scope &&
+			got.InternalAccount == path.InternalAccount &&
+			got.Branch == path.Branch && got.Index == path.Index
+	}
+	expectVaultKey(t, mocks, selects, privKey)
+
+	return privKey, pubKey
+}
+
+// expectVaultKey programs optional PubKey and SignDigest expectations for the
+// selectors that selects accepts, served with privKey as a vault would.
+func expectVaultKey(t *testing.T, mocks *mockWalletDeps,
+	selects func(signing.KeySelector) bool, privKey *btcec.PrivateKey) {
+
+	t.Helper()
+
+	mocks.vault.On("PubKey", mock.Anything, mock.MatchedBy(selects)).Return(
+		privKey.PubKey(), nil,
+	).Maybe()
 	mocks.vault.On("SignDigest", mock.Anything, mock.MatchedBy(
 		func(req signing.DigestRequest) bool {
-			return req.Key == sel
+			return selects(req.Key)
 		},
 	)).Return(func(req signing.DigestRequest) (Signature, error) {
 		key, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
@@ -515,8 +536,6 @@ func expectVaultSigner(t *testing.T, mocks *mockWalletDeps,
 
 		return keyvault.SignDigestWithKey(key, &req)
 	}).Maybe()
-
-	return privKey, pubKey
 }
 
 // identityDecrypt is a vault decrypt stub that returns the ciphertext
@@ -2289,13 +2308,13 @@ func testAccountDerivationFunc() db.AccountDerivationFunc {
 func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and mocks. The signing key is resolved
-	// through the store account secret.
+	// Arrange: Set up the wallet and mocks. The mock vault signs with the
+	// test key at the path.
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	_, pubKey := expectStoreSignerPrivKey(
-		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	_, pubKey := expectVaultSigner(
+		t, mocks, path.KeyScope, path.DerivationPath,
 	)
 
 	// Create a P2PKH address from the derived leaf public key.
@@ -2356,12 +2375,12 @@ func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 func TestComputeRawSigLegacyP2SH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet with mocks. The signing key is resolved
-	// through the store account secret. P2SH addresses use BIP0049 scope.
+	// Arrange: Set up the wallet with mocks. The mock vault signs with the
+	// test key at the path. P2SH addresses use BIP0049 scope.
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0049Plus}
-	_, pubKey := expectStoreSignerPrivKey(
-		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	_, pubKey := expectVaultSigner(
+		t, mocks, path.KeyScope, path.DerivationPath,
 	)
 
 	// Create a P2SH redeem script. This involves pushing the public key
@@ -2428,13 +2447,13 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 func TestComputeRawSigSegwitV0(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and mocks. The signing key is resolved
-	// through the store account secret.
+	// Arrange: Set up the wallet and mocks. The mock vault signs with the
+	// test key at the path.
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	_, pubKey := expectStoreSignerPrivKey(
-		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	_, pubKey := expectVaultSigner(
+		t, mocks, path.KeyScope, path.DerivationPath,
 	)
 
 	// Create a P2WKH address from the derived leaf public key.
@@ -2497,13 +2516,13 @@ func TestComputeRawSigSegwitV0(t *testing.T) {
 func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and mocks. The signing key is resolved
-	// through the store account secret.
+	// Arrange: Set up the wallet and mocks. The mock vault signs with the
+	// test key at the path.
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
-	_, internalKey := expectStoreSignerPrivKey(
-		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	_, internalKey := expectVaultSigner(
+		t, mocks, path.KeyScope, path.DerivationPath,
 	)
 
 	// Create a P2TR address from the derived leaf public key.
@@ -2561,13 +2580,13 @@ func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 func TestComputeRawSigTaprootScriptPath(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and mocks. The signing key is resolved
-	// through the store account secret.
+	// Arrange: Set up the wallet and mocks. The mock vault signs with the
+	// test key at the path.
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
-	_, internalKey := expectStoreSignerPrivKey(
-		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	_, internalKey := expectVaultSigner(
+		t, mocks, path.KeyScope, path.DerivationPath,
 	)
 
 	// Create a script to spend, committing to the derived leaf key.
@@ -2653,30 +2672,14 @@ func TestComputeRawSigFail(t *testing.T) {
 	)
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-	// storeSecretQuery builds the account-secret query the signer issues
-	// for the default account under the given scope.
-	storeSecretQuery := func(w *Wallet,
-		scope waddrmgr.KeyScope) db.GetAccountSecretQuery {
-
-		accountNumber := uint32(0)
-
-		return db.GetAccountSecretQuery{
-			WalletID:      w.id,
-			Scope:         db.KeyScope(scope),
-			AccountNumber: accountNumber,
-		}
-	}
-
-	// This subtest ensures that if the store account-secret lookup fails
-	// during the raw signature computation, the error is correctly
-	// propagated.
-	t.Run("Fetch Address Fail", func(t *testing.T) {
+	// This subtest ensures that if the vault fails to sign, its error is
+	// correctly propagated.
+	t.Run("Vault Sign Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.store.On("GetAccountSecret", mock.Anything,
-			storeSecretQuery(w, path.KeyScope)).Return(
-			(*db.AccountSecret)(nil), errManagerNotFound,
-		).Once()
+		mocks.vault.On(
+			"SignDigest", mock.Anything, mock.Anything,
+		).Return(nil, errManagerNotFound).Once()
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2693,13 +2696,12 @@ func TestComputeRawSigFail(t *testing.T) {
 
 	// This subtest ensures that a watch-only signing account yields the
 	// watch-only error during raw signature computation.
-	t.Run("PrivKey Fail", func(t *testing.T) {
+	t.Run("Watch-only Account", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.store.On("GetAccountSecret", mock.Anything,
-			storeSecretQuery(w, path.KeyScope)).Return(
-			&db.AccountSecret{}, nil,
-		).Once()
+		mocks.vault.On(
+			"SignDigest", mock.Anything, mock.Anything,
+		).Return(nil, keyvault.ErrNoPrivateKey).Once()
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2719,8 +2721,8 @@ func TestComputeRawSigFail(t *testing.T) {
 	t.Run("Tweak Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		leafPriv, _ := expectStoreSignerPrivKey(
-			t, mocks, w.id, path.KeyScope, path.DerivationPath,
+		leafPriv, _ := expectVaultSigner(
+			t, mocks, path.KeyScope, path.DerivationPath,
 		)
 
 		var negated [32]byte
@@ -2750,16 +2752,11 @@ func TestComputeRawSigFail(t *testing.T) {
 	// invalid configurations.
 	t.Run("Invalid Taproot Path", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := createUnlockedWalletWithMocks(t)
-
-		scope := waddrmgr.KeyScopeBIP0086
-		expectStoreSignerPrivKey(
-			t, mocks, w.id, scope, waddrmgr.DerivationPath{},
-		)
+		w, _ := createUnlockedWalletWithMocks(t)
 
 		params := &RawSigParams{
 			Tx:   wire.NewMsgTx(2),
-			Path: BIP32Path{KeyScope: scope},
+			Path: BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086},
 			Details: TaprootSpendDetails{
 				SpendPath: TaprootSpendPath(99), // Invalid path
 			},
@@ -2769,15 +2766,12 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.ErrorIs(t, err, ErrUnknownSignMethod)
 	})
 
-	// This subtest verifies that if the SegWit v0 signing process fails
-	// (e.g., due to invalid parameters like an invalid hash type), the
-	// error is correctly propagated.
-	t.Run("Segwit Sign Fail", func(t *testing.T) {
+	// This subtest verifies that if the SegWit v0 signature hash cannot be
+	// computed (e.g., due to an invalid hash type), the error is correctly
+	// propagated.
+	t.Run("Segwit SigHash Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := createUnlockedWalletWithMocks(t)
-		expectStoreSignerPrivKey(
-			t, mocks, w.id, path.KeyScope, path.DerivationPath,
-		)
+		w, _ := createUnlockedWalletWithMocks(t)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2794,15 +2788,12 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	// This subtest verifies that if the Taproot KeyPath signing process
-	// fails (e.g., due to invalid parameters), the error is correctly
-	// propagated.
-	t.Run("Taproot KeyPath Sign Fail", func(t *testing.T) {
+	// This subtest verifies that if the Taproot KeyPath signature hash
+	// cannot be computed (e.g., due to an invalid hash type), the error is
+	// correctly propagated.
+	t.Run("Taproot KeyPath SigHash Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := createUnlockedWalletWithMocks(t)
-		expectStoreSignerPrivKey(
-			t, mocks, w.id, path.KeyScope, path.DerivationPath,
-		)
+		w, _ := createUnlockedWalletWithMocks(t)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2817,15 +2808,12 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	// This subtest verifies that if the Taproot ScriptPath signing process
-	// fails (e.g., due to invalid parameters), the error is correctly
-	// propagated.
-	t.Run("Taproot ScriptPath Sign Fail", func(t *testing.T) {
+	// This subtest verifies that if the Taproot ScriptPath signature hash
+	// cannot be computed (e.g., due to an invalid hash type), the error is
+	// correctly propagated.
+	t.Run("Taproot ScriptPath SigHash Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := createUnlockedWalletWithMocks(t)
-		expectStoreSignerPrivKey(
-			t, mocks, w.id, path.KeyScope, path.DerivationPath,
-		)
+		w, _ := createUnlockedWalletWithMocks(t)
 
 		params := &RawSigParams{
 			Tx:        tx,

@@ -809,8 +809,8 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 // encrypted account material through the same account-secret contract.
 //
 // This resolver is used by the path-driven entry points DerivePrivKey and
-// ComputeRawSig/PSBT, which have only a derivation path. SignDigest signs in
-// the vault instead.
+// PSBT signing, which have only a derivation path. SignDigest and the other
+// ComputeRawSig requests sign in the vault instead.
 // Address-driven paths reach the same resolver through privKeyForAddressInfo
 // once the store has resolved the address to its derivation info, so both
 // address the account by number.
@@ -1638,17 +1638,22 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 
 // handleComputeRawSig delivers the result of an accepted component request.
 func (w *Wallet) handleComputeRawSig(r rawSigReq) {
-	// Reuse raw signing shared with PSBTs and finish key cleanup before
-	// delivery.
+	// Without a signer record, raw signing runs in the vault.
 	signature, err := w.computeRawSig(r.ctx, r.params, nil)
 	r.respChan <- rawSigResp{signature: signature, err: err}
 }
 
-// computeRawSig signs and zeroes its key inside the accepted request. With
-// signer set, the tweaked key must be signer, as PSBT records name keys, before
-// it signs.
+// computeRawSig signs inside the accepted request. Without signer, the vault
+// signs. With signer set, as PSBT records name keys, Wallet derives the key,
+// checks that the tweaked key is signer, signs and zeroes the key.
 func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
 	signer []byte) (RawSignature, error) {
+
+	// The vault signs without giving the key to Wallet code. PSBT
+	// signing, which names the signer, keeps the Wallet key path for now.
+	if signer == nil {
+		return w.computeRawSigInVault(ctx, params)
+	}
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
@@ -1661,7 +1666,7 @@ func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
 		return nil, fmt.Errorf("%w: %w", ErrInvalidSignParam, err)
 	}
 
-	if signer != nil && !recordKeyIs(signer, privKey.PubKey()) {
+	if !recordKeyIs(signer, privKey.PubKey()) {
 		return nil, fmt.Errorf("%w: derived key differs",
 			ErrSigningKeyMismatch)
 	}
