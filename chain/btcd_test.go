@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -667,4 +668,315 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 			require.FailNow(t, "legacy Notifications missed tx")
 		}
 	}
+}
+
+// setupBtcdFenced starts a btcd harness and RPCClient and waits until the
+// initial async ClientConnected callback has been admitted by handler() so
+// legacy prefix assertions do not race with initial connection delivery.
+func setupBtcdFenced(t *testing.T) (*rpctest.Harness, *RPCClient) {
+	t.Helper()
+
+	miner := setupBtcdMiner(t)
+	rpcConf := miner.RPCConfig()
+	connected := make(chan struct{})
+
+	var (
+		connectedOnce sync.Once
+		client        *RPCClient
+	)
+
+	handlers := &rpcclient.NotificationHandlers{
+		OnClientConnected: func() {
+			client.onClientConnect()
+			connectedOnce.Do(func() {
+				close(connected)
+			})
+		},
+		//nolint:staticcheck // Forward btcd's OnBlockConnected callback.
+		OnBlockConnected: func(hash *chainhash.Hash, height int32,
+			at time.Time) {
+
+			client.onBlockConnected(hash, height, at)
+		},
+		OnFilteredBlockConnected: func(height int32,
+			header *wire.BlockHeader, txns []*btcutil.Tx) {
+
+			client.onFilteredBlockConnected(height, header, txns)
+		},
+		//nolint:staticcheck // Forward btcd's OnRescanFinished callback.
+		OnRescanFinished: func(hash *chainhash.Hash, height int32,
+			blkTime time.Time) {
+
+			client.onRescanFinished(hash, height, blkTime)
+		},
+	}
+
+	c, err := NewRPCClientWithConfig(&RPCClientConfig{
+		ReconnectAttempts: 1,
+		Chain:             &chaincfg.RegressionNetParams,
+		Conn: &rpcclient.ConnConfig{
+			Host:         rpcConf.Host,
+			User:         rpcConf.User,
+			Pass:         rpcConf.Pass,
+			Certificates: rpcConf.Certificates,
+			Endpoint:     "ws",
+		},
+		NotificationHandlers: handlers,
+	})
+	require.NoError(t, err)
+
+	client = c
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	select {
+	case <-connected:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "OnClientConnected did not enqueue marker")
+	}
+
+	// Fence handler() admission of ClientConnected before callers generate
+	// blocks so ClientConnected is deterministically first in the FIFO.
+	_, err = client.BlockStamp()
+	require.NoError(t, err)
+
+	return miner, client
+}
+
+// TestRPCClientLegacyQueueBoundedUntilNotifications verifies that RPCClient
+// caps unread legacy notifications at legacyPreActivationCap before
+// Notifications() is called and delivers unbounded FIFO once activated.
+func TestRPCClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start a live btcd client with ClientConnected fenced in
+	// handler(), NotifyBlocks enabled, and a scoped subscription, without
+	// calling Notifications().
+	miner, client := setupBtcdFenced(t)
+	require.NoError(t, client.NotifyBlocks())
+
+	_, startHeight, err := miner.Client.GetBestBlock()
+	require.NoError(t, err)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	burst := legacyPreActivationCap + 5
+
+	// Act: mine more than legacyPreActivationCap blocks while unactivated,
+	// fencing handler() intake via BlockStamp(), then open Notifications(),
+	// mine a sentinel block, and mine a post-activation burst without
+	// draining legacy until sub.Events() observes the entire burst.
+	_, err = miner.Client.Generate(uint32(burst))
+	require.NoError(t, err)
+
+	for range burst {
+		ev := waitChainEvent(t, sub.Events())
+		require.Equal(t, EventBlockConnected, ev.Type)
+	}
+
+	preTip := startHeight + int32(burst)
+	require.Eventually(t, func() bool {
+		bs, bsErr := client.BlockStamp()
+		return bsErr == nil && bs.Height == preTip
+	}, defaultTestTimeout, 10*time.Millisecond)
+
+	legacy := client.Notifications()
+
+	sentinelHeight := preTip + 1
+	_, err = miner.Client.Generate(uint32(burst + 1))
+	require.NoError(t, err)
+
+	for range burst + 1 {
+		ev := waitChainEvent(t, sub.Events())
+		require.Equal(t, EventBlockConnected, ev.Type)
+	}
+
+	// Assert: ClientConnected and 19 prefix blocks precede the sentinel,
+	// followed by every post-activation BlockConnected in height order.
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+		require.True(t, ok, "expected prefix BlockConnected")
+		require.Equal(t, startHeight+i, blk.Height)
+	}
+
+	sentinel, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+	require.True(t, ok, "expected sentinel BlockConnected")
+	require.Equal(t, sentinelHeight, sentinel.Height)
+
+	for i := int32(1); i <= int32(burst); i++ {
+		blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+		require.True(t, ok, "expected post-activation BlockConnected")
+		require.Equal(t, sentinelHeight+i, blk.Height)
+	}
+}
+
+// TestRPCClientPreActivationRetainsClientConnected verifies that
+// RPCClient.handler reserves a slot in the pre-activation prefix for the
+// initial asynchronous ClientConnected marker even when 20 blocks arrive first.
+func TestRPCClientPreActivationRetainsClientConnected(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: connect an RPCClient whose OnClientConnected callback waits
+	// on release while OnBlockConnected forwards normally.
+	miner := setupBtcdMiner(t)
+	rpcConf := miner.RPCConfig()
+	release := make(chan struct{})
+	connected := make(chan struct{})
+
+	var (
+		releaseOnce bool
+		client      *RPCClient
+	)
+
+	handlers := &rpcclient.NotificationHandlers{
+		OnClientConnected: func() {
+			<-release
+			client.onClientConnect()
+			close(connected)
+		},
+		//nolint:staticcheck // Forward btcd's OnBlockConnected callback.
+		OnBlockConnected: func(hash *chainhash.Hash, height int32,
+			at time.Time) {
+
+			client.onBlockConnected(hash, height, at)
+		},
+	}
+
+	c, err := NewRPCClientWithConfig(&RPCClientConfig{
+		ReconnectAttempts: 1,
+		Chain:             &chaincfg.RegressionNetParams,
+		Conn: &rpcclient.ConnConfig{
+			Host:         rpcConf.Host,
+			User:         rpcConf.User,
+			Pass:         rpcConf.Pass,
+			Certificates: rpcConf.Certificates,
+			Endpoint:     "ws",
+		},
+		NotificationHandlers: handlers,
+	})
+	require.NoError(t, err)
+
+	client = c
+	t.Cleanup(func() {
+		if !releaseOnce {
+			close(release)
+		}
+
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	// Wait for handler() to finish its startup GetBestBlock RPC before
+	// enabling block notifications so a BlockConnected callback cannot
+	// block wsInHandler before the startup response is read.
+	_, err = client.BlockStamp()
+	require.NoError(t, err)
+
+	require.NoError(t, client.NotifyBlocks())
+
+	_, startHeight, err := miner.Client.GetBestBlock()
+	require.NoError(t, err)
+
+	// Act: fill the pre-activation prefix with 20 blocks before releasing
+	// OnClientConnected, fencing handler() intake via BlockStamp().
+	_, err = miner.Client.Generate(uint32(legacyPreActivationCap))
+	require.NoError(t, err)
+
+	wantTip := startHeight + int32(legacyPreActivationCap)
+	require.Eventually(t, func() bool {
+		bs, bsErr := client.BlockStamp()
+		return bsErr == nil && bs.Height == wantTip
+	}, defaultTestTimeout, 10*time.Millisecond)
+
+	releaseOnce = true
+
+	close(release)
+
+	select {
+	case <-connected:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "OnClientConnected did not enqueue marker")
+	}
+
+	// Fence handler() admission of ClientConnected before activating
+	// Notifications() so the unactivated drop guard is exercised before
+	// legacyNotificationsActive flips.
+	_, err = client.BlockStamp()
+	require.NoError(t, err)
+
+	legacy := client.Notifications()
+
+	// Assert: the first 19 retained entries are BlockConnected and entry 20
+	// is the preserved initial ClientConnected marker.
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+		require.True(t, ok, "expected BlockConnected")
+		require.Equal(t, startHeight+i, blk.Height)
+	}
+
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+}
+
+// TestRPCClientRescanActivatesLegacyQueue verifies that calling
+// RPCClient.Rescan before Notifications() activates lossless legacy delivery
+// so RescanFinished survives a full pre-activation startup prefix.
+func TestRPCClientRescanActivatesLegacyQueue(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start btcd with ClientConnected fenced in handler() and
+	// NotifyBlocks enabled, fill the startup prefix without opening
+	// Notifications(), and fence intake at the tip.
+	miner, client := setupBtcdFenced(t)
+	require.NoError(t, client.NotifyBlocks())
+
+	_, startHeight, err := miner.Client.GetBestBlock()
+	require.NoError(t, err)
+
+	burst := legacyPreActivationCap + 5
+	_, err = miner.Client.Generate(uint32(burst))
+	require.NoError(t, err)
+
+	wantTip := startHeight + int32(burst)
+
+	var tipHash chainhash.Hash
+
+	require.Eventually(t, func() bool {
+		bs, bsErr := client.BlockStamp()
+		if bsErr != nil || bs.Height != wantTip {
+			return false
+		}
+
+		tipHash = bs.Hash
+
+		return true
+	}, defaultTestTimeout, 10*time.Millisecond)
+
+	// Act: start a tip rescan before opening Notifications(), assert the
+	// atomic activation flag immediately, then open Notifications().
+	require.NoError(t, client.Rescan(&tipHash, nil, nil))
+	require.True(t, client.legacyNotificationsActive.Load())
+
+	legacy := client.Notifications()
+
+	// Assert: after the 20-item startup prefix, RescanFinished arrives with
+	// the tip hash and height.
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+		require.True(t, ok, "expected prefix BlockConnected")
+		require.Equal(t, startHeight+i, blk.Height)
+	}
+
+	fin, ok := waitLegacyNotification(t, legacy).(*RescanFinished)
+	require.True(t, ok, "expected *RescanFinished")
+	require.Equal(t, &tipHash, fin.Hash)
+	require.Equal(t, wantTip, fin.Height)
 }

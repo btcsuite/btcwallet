@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -25,6 +26,25 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// blockStampSnapshot pairs the last-dequeued legacy BlockStamp with the
+// unactivated intake BlockStamp so BlockStamp() selects the active view
+// atomically even when the handler goroutine is already parked in select.
+type blockStampSnapshot struct {
+	dequeued     *waddrmgr.BlockStamp
+	intake       *waddrmgr.BlockStamp
+	legacyActive *atomic.Bool
+}
+
+// current returns the dequeued legacy stamp once legacy notifications are
+// active, or the intake stamp while the legacy queue remains unactivated.
+func (b blockStampSnapshot) current() *waddrmgr.BlockStamp {
+	if b.legacyActive.Load() {
+		return b.dequeued
+	}
+
+	return b.intake
+}
+
 // RPCClient represents a persistent client connection to a bitcoin RPC server
 // for information regarding the current best block chain.
 type RPCClient struct {
@@ -36,7 +56,11 @@ type RPCClient struct {
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
 	eventStream         *chainEventStream
-	currentBlock        chan *waddrmgr.BlockStamp
+	currentBlock        chan blockStampSnapshot
+
+	// legacyNotificationsActive enables unbounded legacy buffering once
+	// Notifications() or Rescan() is called.
+	legacyNotificationsActive atomic.Bool
 
 	quit    chan struct{}
 	wg      sync.WaitGroup
@@ -100,7 +124,7 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		reconnectAttempts:   reconnectAttempts,
 		enqueueNotification: make(chan interface{}),
 		dequeueNotification: make(chan interface{}),
-		currentBlock:        make(chan *waddrmgr.BlockStamp),
+		currentBlock:        make(chan blockStampSnapshot),
 		quit:                make(chan struct{}),
 	}
 	client.eventStream = newChainEventStream(chainParams, client)
@@ -207,7 +231,7 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 		reconnectAttempts:   cfg.ReconnectAttempts,
 		enqueueNotification: make(chan interface{}),
 		dequeueNotification: make(chan interface{}),
-		currentBlock:        make(chan *waddrmgr.BlockStamp),
+		currentBlock:        make(chan blockStampSnapshot),
 		quit:                make(chan struct{}),
 	}
 	client.eventStream = newChainEventStream(cfg.Chain, client)
@@ -334,9 +358,13 @@ func (c *RPCClient) IsCurrent() bool {
 // Rescan wraps the normal Rescan command with an additional parameter that
 // allows us to map an outpoint to the address in the chain that it pays to.
 // This is useful when using BIP 158 filters as they include the prev pkScript
-// rather than the full outpoint.
+// rather than the full outpoint. Calling Rescan activates unbounded legacy
+// Notifications() buffering; drain Notifications() per its contract.
 func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []address.Address,
 	outPoints map[wire.OutPoint]address.Address) error {
+
+	// Enable unbounded legacy buffering before async rescan callbacks fire.
+	c.legacyNotificationsActive.Store(true)
 
 	flatOutpoints := make([]*wire.OutPoint, 0, len(outPoints))
 	for ops := range outPoints {
@@ -440,10 +468,12 @@ func (c *RPCClient) WaitForShutdown() {
 }
 
 // Notifications returns a channel of parsed notifications sent by the remote
-// bitcoin RPC server.  This channel must be continually read or the process
-// may abort for running out memory, as unread notifications are queued for
-// later reads.
+// bitcoin RPC server and activates unbounded legacy buffering; see
+// Interface.Notifications for the pre-activation retention and drain contract.
 func (c *RPCClient) Notifications() <-chan interface{} {
+	// Enable unbounded legacy queuing now that a caller requested it.
+	c.legacyNotificationsActive.Store(true)
+
 	return c.dequeueNotification
 }
 
@@ -458,8 +488,8 @@ func (c *RPCClient) SubscribeChainEvents(
 // if the client has been shut down.
 func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
-	case bs := <-c.currentBlock:
-		return bs, nil
+	case snap := <-c.currentBlock:
+		return snap.current(), nil
 	case <-c.quit:
 		return nil, errors.New("disconnected")
 	}
@@ -711,7 +741,10 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 
 }
 
-// handler delivers native notifications and maintains the last notified block.
+// handler delivers native notifications, maintains the last notified block,
+// and buffers legacy notifications up to legacyPreActivationCap (reserving one
+// slot for the initial ClientConnected marker) until Notifications() or
+// Rescan() activates unbounded FIFO buffering that must be drained continually.
 func (c *RPCClient) handler() {
 	defer c.wg.Done()
 
@@ -726,6 +759,7 @@ func (c *RPCClient) handler() {
 	}
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
+	intakeBS := bs
 
 	// TODO: Rather than leaving this as an unbounded queue for all types of
 	// notifications, try dropping ones where a later enqueued notification
@@ -738,6 +772,8 @@ func (c *RPCClient) handler() {
 	enqueue := c.enqueueNotification
 	var dequeue chan interface{}
 	var next interface{}
+
+	hasClientConnected := false
 out:
 	for {
 		select {
@@ -753,6 +789,31 @@ out:
 				continue
 			}
 
+			// While no legacy consumer is active, advance intakeBS
+			// and bound unread legacy entries (reserving one slot
+			// for the initial async ClientConnected). Once
+			// activated, BlockStamp serves bs, which advances only
+			// on dequeue to preserve the legacy-delivery fence.
+			_, isConnected := n.(ClientConnected)
+			if !c.legacyNotificationsActive.Load() {
+				if blk, ok := n.(BlockConnected); ok {
+					intakeBS = &waddrmgr.BlockStamp{
+						Height: blk.Height,
+						Hash:   blk.Hash,
+					}
+				}
+
+				limit := legacyPreActivationCap
+				if !hasClientConnected && !isConnected {
+					limit--
+				}
+
+				if len(notifications) >= limit {
+					continue
+				}
+			}
+
+			hasClientConnected = hasClientConnected || isConnected
 			if len(notifications) == 0 {
 				next = n
 				dequeue = c.dequeueNotification
@@ -780,7 +841,11 @@ out:
 				dequeue = nil
 			}
 
-		case c.currentBlock <- bs:
+		case c.currentBlock <- blockStampSnapshot{
+			dequeued:     bs,
+			intake:       intakeBS,
+			legacyActive: &c.legacyNotificationsActive,
+		}:
 
 		case <-c.quit:
 			break out
