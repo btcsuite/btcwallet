@@ -41,6 +41,7 @@ type RPCClient struct {
 	quit    chan struct{}
 	wg      sync.WaitGroup
 	started bool
+	stopped bool
 	quitMtx sync.Mutex
 
 	batchClient *rpcclient.Client
@@ -266,6 +267,22 @@ func (c *RPCClient) SubmitPackage(_ []*wire.MsgTx,
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
 func (c *RPCClient) Start(_ context.Context) error {
+	c.quitMtx.Lock()
+
+	if c.stopped {
+		c.quitMtx.Unlock()
+
+		return rpcclient.ErrClientShutdown
+	}
+
+	if c.started {
+		c.quitMtx.Unlock()
+
+		return nil
+	}
+
+	c.quitMtx.Unlock()
+
 	err := c.Connect(c.reconnectAttempts)
 	if err != nil {
 		return err
@@ -275,16 +292,34 @@ func (c *RPCClient) Start(_ context.Context) error {
 	net, err := c.GetCurrentNet()
 	if err != nil {
 		c.Disconnect()
+
 		return err
 	}
 	if net != c.chainParams.Net {
 		c.Disconnect()
+
 		return errors.New("mismatched networks")
 	}
 
 	c.quitMtx.Lock()
+
+	if c.stopped {
+		c.quitMtx.Unlock()
+		c.Shutdown()
+		c.Client.WaitForShutdown()
+
+		return rpcclient.ErrClientShutdown
+	}
+
+	if c.started {
+		c.quitMtx.Unlock()
+
+		return nil
+	}
+
 	c.started = true
 	c.wg.Add(1)
+
 	go c.handler()
 
 	c.quitMtx.Unlock()
@@ -296,21 +331,27 @@ func (c *RPCClient) Start(_ context.Context) error {
 // started by Start.
 func (c *RPCClient) Stop() {
 	c.quitMtx.Lock()
-	select {
-	case <-c.quit:
-	default:
-		close(c.quit)
-		c.Client.Shutdown()
-		c.Client.WaitForShutdown()
-		c.batchClient.Shutdown()
-		c.batchClient.WaitForShutdown()
 
-		if !c.started {
-			c.eventStream.close()
-			close(c.dequeueNotification)
-		}
+	if c.stopped {
+		c.quitMtx.Unlock()
+
+		return
 	}
+
+	c.stopped = true
+	wasStarted := c.started
+	close(c.quit)
 	c.quitMtx.Unlock()
+
+	c.Shutdown()
+	c.Client.WaitForShutdown()
+	c.batchClient.Shutdown()
+	c.batchClient.WaitForShutdown()
+
+	if !wasStarted {
+		c.eventStream.close()
+		close(c.dequeueNotification)
+	}
 }
 
 // IsCurrent returns whether the chain backend considers its view of the network

@@ -668,3 +668,36 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 		}
 	}
 }
+
+// TestRPCClientStartAfterStopError verifies that calling Start after Stop
+// returns ErrClientShutdown, closes future subscriptions cleanly, and leaves
+// repeated Stop calls safe.
+func TestRPCClientStartAfterStopError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an unstarted RPCClient and stop it before Start is invoked.
+	client, err := NewRPCClient(
+		&chaincfg.RegressionNetParams, "127.0.0.1:1", "user", "pass",
+		nil, true, 0,
+	)
+	require.NoError(t, err)
+
+	client.Stop()
+
+	// Act: attempt to start the stopped client and call Stop again.
+	startErr := client.Start(t.Context())
+	client.Stop()
+	sub := client.SubscribeChainEvents(t.Context())
+
+	// Assert: Start fails with ErrClientShutdown and new subscriptions are
+	// already closed with a nil terminal error.
+	require.ErrorIs(t, startErr, rpcclient.ErrClientShutdown)
+
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "expected subscription Done to be closed")
+	}
+
+	require.NoError(t, sub.Err())
+}
