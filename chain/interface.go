@@ -54,6 +54,9 @@ type Interface interface {
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
+	// Rescan initiates a legacy historical rescan. Calling Rescan activates
+	// unbounded legacy Notifications() buffering for the current run; drain
+	// Notifications() continually per its contract.
 	Rescan(*chainhash.Hash, []address.Address,
 		map[wire.OutPoint]address.Address) error
 	NotifyReceived([]address.Address) error
@@ -71,10 +74,18 @@ type Interface interface {
 	WatchAddrsFromTip(context.Context, []address.Address) error
 	NotifyBlocks() error
 
-	// Notifications returns the client's shared, unbounded notification
-	// queue. Drain it continually to release queued events, including
-	// while subscriptions are active. On btcd and Neutrino, legacy
-	// dequeue also advances BlockStamp.
+	// Notifications returns the client's shared legacy notification queue.
+	// Before Notifications() or Rescan() is called for the current run,
+	// backends retain at most 20 startup notifications (preserving the
+	// initial ClientConnected marker), permanently drop later legacy
+	// notifications, and advance BlockStamp on BlockConnected intake (on
+	// btcd and Neutrino). Calling Notifications() or Rescan() activates
+	// unbounded FIFO buffering; drain continually once activated, and on
+	// btcd and Neutrino BlockStamp advances on legacy BlockConnected
+	// dequeue. Backends allocating a fresh stream in Start (e.g.
+	// NeutrinoClient, nil before Start and reset on restart) require
+	// calling Notifications() after each Start and before enabling
+	// notification producers for lossless delivery.
 	//
 	// Deprecated: Use [Interface.SubscribeChainEvents] for independent
 	// subscriptions.
