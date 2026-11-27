@@ -2380,13 +2380,12 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 		return nil, fmt.Errorf("%w: %w", ErrSigningKeyMismatch, err)
 	}
 
-	// A legacy signature here would sign the constant digest 1, which
-	// any transaction can reuse. Segwit v0 signs a defined digest.
-	if !scriptCtx.witness {
-		err = refuseSingleWithoutOutput(packet, idx)
-		if err != nil {
-			return nil, err
-		}
+	// Both legacy (constant digest 1) and segwit v0 (committing to no
+	// outputs, rejected by txscript/v2 v2.0.1+) are unsafe when
+	// SIGHASH_SINGLE has no matching output, so refuse before key lookup.
+	err = refuseSingleWithoutOutput(packet, idx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Construct SpendDetails for Legacy/SegWit input. An existing record
