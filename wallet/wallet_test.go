@@ -2,8 +2,11 @@ package wallet
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,8 +15,10 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -660,5 +665,190 @@ func TestEndRecovery(t *testing.T) {
 
 	if !strings.EqualFold(err.Error(), "recovery: forced shutdown") {
 		t.Fatal("wrong error")
+	}
+}
+
+// newMockBitcoindRPCServer creates an httptest.Server that responds to the
+// minimal set of bitcoind JSON-RPC methods needed by BitcoindConn and
+// GetBlockHeight.
+func newMockBitcoindRPCServer(t *testing.T,
+	blockHeights map[string]int32) *httptest.Server {
+
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				ID     any             `json:"id"`
+				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
+			}
+
+			err := json.NewDecoder(r.Body).Decode(&req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+
+			var result any
+			switch req.Method {
+			case "getblockhash":
+				result = chaincfg.TestNet3Params.GenesisHash.String()
+			case "getblockchaininfo":
+				result = map[string]any{"pruned": false}
+			case "getinfo", "getnetworkinfo":
+				result = map[string]any{"version": 240000}
+			case "getblockheader":
+				var params []any
+
+				_ = json.Unmarshal(req.Params, &params)
+				hashStr, _ := params[0].(string)
+
+				height, ok := blockHeights[hashStr]
+				if !ok {
+					http.Error(
+						w, "unknown block",
+						http.StatusNotFound,
+					)
+
+					return
+				}
+
+				result = map[string]any{"height": height}
+			default:
+				http.Error(
+					w, "unsupported method: "+req.Method,
+					http.StatusNotFound,
+				)
+
+				return
+			}
+
+			resp := map[string]any{
+				"jsonrpc": "1.0",
+				"id":      req.ID,
+				"result":  result,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		},
+	))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// TestGetTransactionsBitcoindEndBlockHash verifies that GetTransactions assigns
+// the resolved BitcoindClient endBlock height to end rather than start.
+func TestGetTransactionsBitcoindEndBlockHash(t *testing.T) {
+	t.Parallel()
+
+	block100Hash := chainhash.Hash{0x01}
+	block200Hash := chainhash.Hash{0x02}
+	block300Hash := chainhash.Hash{0x03}
+
+	blockHeights := map[string]int32{
+		block100Hash.String(): 100,
+		block200Hash.String(): 200,
+		block300Hash.String(): 300,
+	}
+
+	srv := newMockBitcoindRPCServer(t, blockHeights)
+
+	bitcoindConn, err := chain.NewBitcoindConn(&chain.BitcoindConfig{
+		ChainParams:   &chaincfg.TestNet3Params,
+		Host:          strings.TrimPrefix(srv.URL, "http://"),
+		User:          "user",
+		Pass:          "pass",
+		PollingConfig: &chain.PollingConfig{},
+	})
+	require.NoError(t, err)
+
+	w, cleanup := testWallet(t)
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+		_ = w.Database().Close()
+
+		cleanup()
+	})
+
+	w.chainClient = bitcoindConn.NewBitcoindClient()
+
+	blocks := []struct {
+		hash   chainhash.Hash
+		height int32
+	}{
+		{hash: block100Hash, height: 100},
+		{hash: block200Hash, height: 200},
+		{hash: block300Hash, height: 300},
+	}
+
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		for i, blk := range blocks {
+			msgTx := TstTx.MsgTx().Copy()
+			msgTx.LockTime = uint32(i + 1)
+
+			rec, err := wtxmgr.NewTxRecordFromMsgTx(
+				msgTx, time.Now(),
+			)
+			if err != nil {
+				return err
+			}
+
+			meta := &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{
+					Hash:   blk.hash,
+					Height: blk.height,
+				},
+				Time: time.Now(),
+			}
+
+			err = w.TxStore.InsertTx(ns, rec, meta)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name       string
+		startBlock *BlockIdentifier
+		endBlock   *BlockIdentifier
+	}{
+		{
+			name:       "height start and hash end",
+			startBlock: NewBlockIdentifierFromHeight(100),
+			endBlock:   NewBlockIdentifierFromHash(&block200Hash),
+		},
+		{
+			name:       "hash start and hash end",
+			startBlock: NewBlockIdentifierFromHash(&block100Hash),
+			endBlock:   NewBlockIdentifierFromHash(&block200Hash),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			res, err := w.GetTransactions(
+				tc.startBlock, tc.endBlock, "", nil,
+			)
+			require.NoError(t, err)
+			require.Len(t, res.MinedTransactions, 2)
+			require.Equal(
+				t, int32(100), res.MinedTransactions[0].Height,
+			)
+			require.Equal(
+				t, int32(200), res.MinedTransactions[1].Height,
+			)
+		})
 	}
 }
