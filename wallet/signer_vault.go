@@ -9,6 +9,8 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 )
@@ -24,6 +26,19 @@ func mapDerivedSignErr(err error) error {
 	}
 
 	return mapAccountSecretErr(err)
+}
+
+// mapImportedKeyErr maps vault signing errors for a raw imported key to the
+// errors the legacy Store path returns. A key-less import returns
+// keyvault.ErrNoPrivateKey (covering watch-only SQL/kvdb imports and missing
+// kvdb secrets), which becomes ErrNoAssocPrivateKey. Other errors are returned
+// unchanged.
+func mapImportedKeyErr(err error) error {
+	if errors.Is(err, keyvault.ErrNoPrivateKey) {
+		return ErrNoAssocPrivateKey
+	}
+
+	return err
 }
 
 // signingPubKey returns the public key at path. The vault derives it through
@@ -331,4 +346,198 @@ func (w *Wallet) computeRawSigInVault(ctx context.Context,
 	}
 
 	return signer.sign(ctx, params.Tweak, sigHash)
+}
+
+// outputSigner returns the vault signer for the single key that spends a
+// wallet output, as GetPrivKeyForAddress resolves it for export. It maps the
+// vault's errors to the signer errors for that kind of key and checks every
+// signature under the output's public key.
+func (w *Wallet) outputSigner(
+	scriptInfo *OutputScriptInfo) (*vaultInputSigner, error) {
+
+	// Single-key outputs always carry their public key; see
+	// buildScriptsForAddressInfo.
+	signer := &vaultInputSigner{
+		vault:  w.keyVault,
+		pubKey: scriptInfo.PubKey,
+	}
+
+	switch {
+	case canUseAddressInfoDerivation(scriptInfo.AddressInfo):
+		derivation := scriptInfo.Derivation
+		signer.key = signing.DerivedKey{
+			KeyScope: derivation.KeyScope,
+			DerivationPath: waddrmgr.DerivationPath{
+				InternalAccount: derivation.Account,
+				Branch:          derivation.Branch,
+				Index:           derivation.Index,
+			},
+		}
+		signer.mapErr = mapDerivedSignErr
+
+	// Raw imports and numberless imported-XPub children have no
+	// derivation. Only a raw import holds its own key.
+	case scriptInfo.Imported:
+		signer.key = signing.ImportedKey{
+			ScriptPubKey: scriptInfo.scriptPubKey(),
+		}
+		signer.mapErr = mapImportedKeyErr
+
+	default:
+		return nil, ErrNoAssocPrivateKey
+	}
+
+	return signer, nil
+}
+
+// unlockingScriptInVault signs a single-key output through the wallet's vault
+// and assembles its witness or sigScript from public data. Each signature must
+// verify under the output's public key, or for Taproot its BIP-86 output key.
+// An output the wallet cannot sign alone, such as an imported script, reports
+// its address type before any script decryption or key lookup.
+func (w *Wallet) unlockingScriptInVault(ctx context.Context,
+	params *UnlockingScriptParams,
+	addressInfo AddressInfo) (*UnlockingScript, error) {
+
+	// A script output reports the wallet's ErrUnsupportedAddressType too,
+	// as the unsupported-type branch below does.
+	signingMethod, err := addressInfo.AddrType.SigningMethod()
+	if errors.Is(err, waddrmgr.ErrUnsupportedAddressType) {
+		return nil, fmt.Errorf("%w: %w", ErrUnsupportedAddressType, err)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("determine signing method: %w", err)
+	}
+
+	// Only single-key outputs get here, so their scripts come from the
+	// public key alone and no stored script is decrypted.
+	witnessProgram, redeemScript, sigScript, err :=
+		buildScriptsForAddressInfo(
+			addressInfo, params.Output.PkScript, w.cfg.ChainParams,
+		)
+	if err != nil {
+		return nil, err
+	}
+
+	scriptInfo := &OutputScriptInfo{
+		AddressInfo:    addressInfo,
+		WitnessProgram: witnessProgram,
+		RedeemScript:   redeemScript,
+		SigScript:      sigScript,
+	}
+
+	signer, err := w.outputSigner(scriptInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	rawParams := &RawSigParams{
+		Tx:         params.Tx,
+		InputIndex: params.InputIndex,
+		Output:     params.Output,
+		SigHashes:  params.SigHashes,
+		HashType:   params.HashType,
+	}
+
+	switch signingMethod {
+	case waddrmgr.SigningMethodTaprootKeySpend:
+		return taprootUnlockingScript(ctx, rawParams, signer)
+
+	case waddrmgr.SigningMethodWitnessV0:
+		return witnessV0UnlockingScript(
+			ctx, rawParams, scriptInfo, signer,
+		)
+
+	case waddrmgr.SigningMethodLegacy:
+		return legacyUnlockingScript(ctx, rawParams, signer)
+
+	default:
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			scriptInfo.AddrType)
+	}
+}
+
+// taprootUnlockingScript signs a BIP-86 key-path spend. Its witness is the
+// signature alone.
+func taprootUnlockingScript(ctx context.Context, params *RawSigParams,
+	signer *vaultInputSigner) (*UnlockingScript, error) {
+
+	// A wallet Taproot key commits to no scripts, as BIP-86 does.
+	sigHash, err := TaprootSpendDetails{
+		SpendPath: KeyPathSpend,
+		Tweak:     []byte{},
+	}.inputSigHash(params)
+	if err != nil {
+		return nil, fmt.Errorf("taproot witness error: %w", err)
+	}
+
+	sig, err := signer.sign(ctx, KeyTweak{}, sigHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &UnlockingScript{Witness: wire.TxWitness{sig}}, nil
+}
+
+// legacyUnlockingScript signs a P2PKH spend and pushes the signature and the
+// compressed public key into its sigScript.
+func legacyUnlockingScript(ctx context.Context, params *RawSigParams,
+	signer *vaultInputSigner) (*UnlockingScript, error) {
+
+	sigHash, err := LegacySpendDetails{}.inputSigHash(params)
+	if err != nil {
+		return nil, fmt.Errorf("sig script error: %w", err)
+	}
+
+	sig, err := signer.sign(ctx, KeyTweak{}, sigHash)
+	if err != nil {
+		return nil, err
+	}
+
+	sigScript, err := txscript.NewScriptBuilder().
+		AddData(sig).
+		AddData(signer.pubKey.SerializeCompressed()).
+		Script()
+	if err != nil {
+		return nil, fmt.Errorf("sig script error: %w", err)
+	}
+
+	return &UnlockingScript{SigScript: sigScript}, nil
+}
+
+// witnessV0UnlockingScript signs a P2WKH or nested P2WKH output and assembles
+// its witness, plus the redeem script push for a nested output. The witness
+// signature carries its sighash byte.
+func witnessV0UnlockingScript(ctx context.Context, params *RawSigParams,
+	scriptInfo *OutputScriptInfo,
+	signer *vaultInputSigner) (*UnlockingScript, error) {
+
+	sigHash, err := SegwitV0SpendDetails{
+		WitnessScript: scriptInfo.WitnessProgram,
+	}.inputSigHash(params)
+	if err != nil {
+		return nil, fmt.Errorf("witness sig error: %w", err)
+	}
+
+	// A witness signature carries its sighash byte, unlike the raw
+	// signature ComputeRawSig returns.
+	sigHash.appendHashType = true
+
+	sig, err := signer.sign(ctx, KeyTweak{}, sigHash)
+	if err != nil {
+		return nil, err
+	}
+
+	sigScript, err := redeemSigScript(scriptInfo.RedeemScript)
+	if err != nil {
+		return nil, err
+	}
+
+	return &UnlockingScript{
+		Witness: wire.TxWitness{
+			sig, signer.pubKey.SerializeCompressed(),
+		},
+		SigScript: sigScript,
+	}, nil
 }

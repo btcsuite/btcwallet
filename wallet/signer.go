@@ -1041,44 +1041,26 @@ func (w *Wallet) computeUnlockingScript(ctx context.Context,
 	params *UnlockingScriptParams) (*UnlockingScript, error) {
 
 	// First, we'll fetch the managed address that corresponds to the
-	// output being spent. This will be used to look up the private key
-	// required for signing.
-	scriptInfo, err := w.scriptForOutput(ctx, *params.Output)
+	// output being spent. Its derivation or import selects the vault key
+	// that signs. Only its metadata is read here: a script output is
+	// refused before its stored script would be decrypted.
+	addr := extractAddrFromPKScript(
+		params.Output.PkScript, w.cfg.ChainParams,
+	)
+	if addr == nil {
+		return nil, fmt.Errorf("%w: from pkscript %x",
+			ErrUnableToExtractAddress, params.Output.PkScript)
+	}
+
+	addressInfo, err := w.getAddressInfo(ctx, addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to get address info for %s: %w",
+			addr.String(), err)
 	}
 
-	privKey, err := w.privKeyForOutput(ctx, scriptInfo)
-	if err != nil {
-		return nil, err
-	}
-	defer privKey.Zero()
-
-	// With the private key retrieved, we can now generate the unlocking
-	// script.
-	return signAndAssembleScript(params, privKey, &scriptInfo)
-}
-
-// privKeyForOutput returns the private key needed to sign for the given
-// wallet-controlled output.
-//
-// Derived addresses resolve through the account-level secret. A derived child
-// without wallet-seed derivation metadata, such as an imported-XPub child,
-// cannot sign. Only raw imported addresses resolve through their own encrypted
-// private key material in the store.
-func (w *Wallet) privKeyForOutput(ctx context.Context,
-	scriptInfo OutputScriptInfo) (
-	*btcec.PrivateKey, error) {
-
-	if canUseAddressInfoDerivation(scriptInfo.AddressInfo) {
-		return w.privKeyForAddressInfo(ctx, scriptInfo.AddressInfo)
-	}
-
-	if !scriptInfo.Imported {
-		return nil, ErrNoAssocPrivateKey
-	}
-
-	return w.resolveImportedAddrPrivKey(ctx, scriptInfo.scriptPubKey())
+	// The vault signs and the wallet assembles the witness from public
+	// data, so no private key reaches Wallet code.
+	return w.unlockingScriptInVault(ctx, params, addressInfo)
 }
 
 // scriptPubKey returns the output pkScript associated with the address
@@ -1407,8 +1389,8 @@ func mapAccountSecretErr(err error) error {
 // decrypted account key is zeroed before the call returns; the caller must
 // zero the returned key.
 //
-// ECDH no longer uses this UnsafeVault path on either backend. It remains for
-// signing until that moves behind vault operations.
+// ECDH and the non-PSBT signers no longer use this UnsafeVault path on either
+// backend. It remains for PSBT signing and private-key export.
 func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
 	encAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
@@ -1507,69 +1489,6 @@ func deriveStoredAccountChildPubKey(accountPubKey []byte,
 	}
 
 	return pubKey, nil
-}
-
-// signAndAssembleScript is a helper function that performs the final signing
-// and script assembly for a given set of parameters and a private key.
-func signAndAssembleScript(params *UnlockingScriptParams,
-	privKey *btcec.PrivateKey,
-	scriptInfo *OutputScriptInfo) (*UnlockingScript, error) {
-
-	// Dispatch to the correct signing logic based on the address type signing
-	// method.
-	signingMethod, err := scriptInfo.AddrType.SigningMethod()
-	if err != nil {
-		return nil, fmt.Errorf("determine signing method: %w", err)
-	}
-
-	switch signingMethod {
-	case waddrmgr.SigningMethodTaprootKeySpend:
-		witness, err := txscript.TaprootWitnessSignature(
-			params.Tx, params.SigHashes, params.InputIndex,
-			params.Output.Value, params.Output.PkScript,
-			params.HashType, privKey,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("taproot witness error: %w", err)
-		}
-
-		return &UnlockingScript{Witness: witness}, nil
-
-	case waddrmgr.SigningMethodWitnessV0:
-		witness, err := txscript.WitnessSignature(
-			params.Tx, params.SigHashes, params.InputIndex,
-			params.Output.Value, scriptInfo.WitnessProgram,
-			params.HashType, privKey, true,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("witness sig error: %w", err)
-		}
-
-		sigScript, err := redeemSigScript(scriptInfo.RedeemScript)
-		if err != nil {
-			return nil, err
-		}
-
-		return &UnlockingScript{
-			Witness:   witness,
-			SigScript: sigScript,
-		}, nil
-
-	case waddrmgr.SigningMethodLegacy:
-		sigScript, err := txscript.SignatureScript(
-			params.Tx, params.InputIndex, params.Output.PkScript,
-			params.HashType, privKey, true,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("sig script error: %w", err)
-		}
-
-		return &UnlockingScript{SigScript: sigScript}, nil
-
-	default:
-		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			scriptInfo.AddrType)
-	}
 }
 
 // redeemSigScript wraps a redeem script into the final scriptSig push required
