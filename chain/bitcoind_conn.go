@@ -429,7 +429,7 @@ func (c *BitcoindConn) NewBitcoindClient() (*BitcoindClient, error) {
 		watchedOutPoints: make(map[wire.OutPoint]struct{}),
 		watchedTxs:       make(map[chainhash.Hash]struct{}),
 
-		notificationQueue: NewConcurrentQueue(20),
+		notificationQueue: NewConcurrentQueue(legacyPreActivationCap),
 		txNtfns:           make(chan *wire.MsgTx, 1000),
 		blockNtfns:        make(chan *wire.MsgBlock, 100),
 

@@ -20,6 +20,10 @@ import (
 // the chain.
 const isCurrentDelta = 2 * time.Hour
 
+// legacyPreActivationCap bounds unread legacy Notifications() entries retained
+// before Notifications() or Rescan() activates unbounded legacy buffering.
+const legacyPreActivationCap = 20
+
 // BackEnds returns a list of the available back ends.
 // TODO: Refactor each into a driver and use dynamic registration.
 func BackEnds() []string {

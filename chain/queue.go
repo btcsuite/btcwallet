@@ -2,6 +2,7 @@ package chain
 
 import (
 	"container/list"
+	"sync/atomic"
 )
 
 // ConcurrentQueue is a concurrent-safe FIFO queue with unbounded capacity.
@@ -44,14 +45,14 @@ func (cq *ConcurrentQueue) ChanOut() <-chan interface{} {
 // minimize overhead, but if the out channel is full it pushes items to an
 // overflow queue. This must be called before using the queue.
 func (cq *ConcurrentQueue) Start() {
-	// A standalone queue only needs its original FIFO path.
-	go cq.run(nil, nil)
+	// A standalone queue only needs its original unbounded FIFO path.
+	go cq.run(nil, nil, nil)
 }
 
-// run owns FIFO buffering and offers events to the optional live stream.
-// Stop retires the queue. A backing source can also retire it.
+// run owns FIFO buffering and offers events to the optional live stream. When
+// overflowEnabled is non-nil and false, items past chanOut are discarded.
 func (cq *ConcurrentQueue) run(stream *chainEventStream,
-	sourceQuit <-chan struct{}) {
+	sourceQuit <-chan struct{}, overflowEnabled *atomic.Bool) {
 
 	for {
 		// Offer the legacy overflow head only while a backlog exists.
@@ -72,7 +73,10 @@ func (cq *ConcurrentQueue) run(stream *chainEventStream,
 				stream.publish(item)
 			}
 
-			cq.enqueue(item)
+			// Overflow only for standalone or activated queues.
+			allowOverflow := overflowEnabled == nil ||
+				overflowEnabled.Load()
+			cq.enqueue(item, allowOverflow)
 
 		case out <- next:
 			cq.overflow.Remove(head)
@@ -86,8 +90,9 @@ func (cq *ConcurrentQueue) run(stream *chainEventStream,
 	}
 }
 
-// enqueue preserves FIFO order when called before startup or by the owner.
-func (cq *ConcurrentQueue) enqueue(item any) {
+// enqueue preserves FIFO order when called before startup or by the owner,
+// discarding overflow items when allowOverflow is false.
+func (cq *ConcurrentQueue) enqueue(item any, allowOverflow bool) {
 	// Bypass the overflow list only when no older event is there.
 	if cq.overflow.Len() == 0 {
 		select {
@@ -95,6 +100,11 @@ func (cq *ConcurrentQueue) enqueue(item any) {
 			return
 		default:
 		}
+	}
+
+	// Discard excess items before legacy activation to stay bounded.
+	if !allowOverflow {
+		return
 	}
 
 	cq.overflow.PushBack(item)

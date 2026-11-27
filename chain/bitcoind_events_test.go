@@ -2235,3 +2235,157 @@ func TestBitcoindScopedWatch(t *testing.T) {
 	require.Equal(t, int32(10), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)
 }
+
+// waitLegacyNotification reads the next legacy notification or fails on
+// timeout.
+func waitLegacyNotification(t *testing.T, ch <-chan any) any {
+	t.Helper()
+
+	select {
+	case n, ok := <-ch:
+		require.True(t, ok, "unexpected closed legacy channel")
+		return n
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for legacy notification")
+		return nil
+	}
+}
+
+// TestBitcoindClientLegacyQueueBoundedUntilNotifications verifies that
+// BitcoindClient caps unread legacy notifications at legacyPreActivationCap
+// while delivering SubscribeChainEvents past the cap, and activates unbounded
+// FIFO overflow once Notifications() is called.
+func TestBitcoindClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start a BitcoindClient with block notifications enabled and
+	// enroll a scoped subscriber without calling Notifications().
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	burst := legacyPreActivationCap + 5
+
+	// Act: emit a burst exceeding legacyPreActivationCap while unactivated,
+	// send one distinct fence marker on unbuffered intake so the queue
+	// finishes the burst before activation, then open Notifications() and
+	// emit a sentinel plus a post-activation burst.
+	for i := int32(1); i <= int32(burst); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockDisconnected(&hash, i, time.Time{})
+
+		ev := waitChainEvent(t, sub.Events())
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, i, ev.Block.Height)
+	}
+
+	const fenceHeight int32 = -1
+
+	var fence BlockConnected
+
+	fence.Height = fenceHeight
+	client.enqueueNotification(fence)
+
+	legacy := client.Notifications()
+
+	const sentinelHeight int32 = 100
+
+	sentinelHash := chainhash.Hash{byte(sentinelHeight)}
+	client.onBlockDisconnected(&sentinelHash, sentinelHeight, time.Time{})
+	waitChainEvent(t, sub.Events())
+
+	for i := int32(1); i <= int32(burst); i++ {
+		h := sentinelHeight + i
+		hash := chainhash.Hash{byte(h)}
+		client.onBlockDisconnected(&hash, h, time.Time{})
+		waitChainEvent(t, sub.Events())
+	}
+
+	// Assert: ClientConnected and 19 prefix items precede the sentinel
+	// (ignoring the distinct fence marker if its own admission straddled
+	// activation), followed by every post-activation event in FIFO order.
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		disc, ok := waitLegacyNotification(t, legacy).(BlockDisconnected)
+		require.True(t, ok, "expected prefix BlockDisconnected")
+		require.Equal(t, i, disc.Height)
+	}
+
+	nextNtfn := waitLegacyNotification(t, legacy)
+	if blk, ok := nextNtfn.(BlockConnected); ok &&
+		blk.Height == fenceHeight {
+
+		nextNtfn = waitLegacyNotification(t, legacy)
+	}
+
+	sentinel, ok := nextNtfn.(BlockDisconnected)
+	require.True(t, ok, "expected sentinel BlockDisconnected")
+	require.Equal(t, sentinelHeight, sentinel.Height)
+
+	for i := int32(1); i <= int32(burst); i++ {
+		disc, ok := waitLegacyNotification(t, legacy).(BlockDisconnected)
+		require.True(t, ok, "expected post-activation BlockDisconnected")
+		require.Equal(t, sentinelHeight+i, disc.Height)
+	}
+}
+
+// TestBitcoindClientRescanActivatesLegacyQueue verifies that calling
+// BitcoindClient.Rescan before Notifications() activates lossless legacy
+// delivery so RescanFinished survives a full pre-activation startup prefix.
+func TestBitcoindClientRescanActivatesLegacyQueue(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start a BitcoindClient without opening Notifications(),
+	// fill the 20-item startup prefix, and hand off a distinct fence
+	// marker on unbuffered intake before activation.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockDisconnected(&hash, i, time.Time{})
+		waitChainEvent(t, sub.Events())
+	}
+
+	const fenceHeight int32 = -1
+
+	var fence BlockConnected
+
+	fence.Height = fenceHeight
+	client.enqueueNotification(fence)
+
+	tip, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	// Act: invoke Rescan at the tip before opening Notifications(), check
+	// the atomic activation flag immediately, then open Notifications().
+	require.NoError(t, client.Rescan(&tip.Hash, nil, nil))
+	require.True(t, client.legacyNotificationsActive.Load())
+
+	legacy := client.Notifications()
+
+	// Assert: the 20-item startup prefix (ignoring the distinct fence
+	// marker if it straddled activation) is followed by RescanFinished.
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		disc, ok := waitLegacyNotification(t, legacy).(BlockDisconnected)
+		require.True(t, ok, "expected prefix BlockDisconnected")
+		require.Equal(t, i, disc.Height)
+	}
+
+	nextNtfn := waitLegacyNotification(t, legacy)
+	if blk, ok := nextNtfn.(BlockConnected); ok &&
+		blk.Height == fenceHeight {
+
+		nextNtfn = waitLegacyNotification(t, legacy)
+	}
+
+	fin, ok := nextNtfn.(*RescanFinished)
+	require.True(t, ok, "expected *RescanFinished")
+	require.Equal(t, &tip.Hash, fin.Hash)
+}
