@@ -753,8 +753,8 @@ func authorizeEcdsaSigner(scriptCtx ecdsaScriptContext, key []byte) error {
 			ErrSigningKeyMismatch)
 	}
 
-	// The legacy digest parses the script, which fails only after the
-	// private key is looked up.
+	// The legacy digest parses the script, which would otherwise fail only
+	// when the input is signed, after other inputs.
 	if !scriptCtx.witness && parseScriptOps(scriptCtx.script) == nil {
 		return fmt.Errorf("%w: script does not parse",
 			ErrSigningKeyMismatch)

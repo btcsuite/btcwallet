@@ -321,11 +321,15 @@ func keyPathTweak(tweak KeyTweak, base *btcec.PublicKey,
 
 // computeRawSigInVault signs a raw input signature through the vault. The
 // signature hash is computed before any key lookup, so a malformed request
-// fails without touching a secret. Only a Taproot key path reads the key's
-// public key, which its output tweak needs; other raw signatures are returned
-// without a key check, as before.
+// fails without touching a secret. Only a Taproot key path or a recordKey
+// reads the key's public key.
+//
+// recordKey is the tweaked key a PSBT record names, serialized as the record
+// does; SignPsbt passes it and ComputeRawSig passes nil. When set, the vault's
+// key under params.Tweak must be recordKey before signing, and the signature
+// must verify under it, or ErrSigningKeyMismatch is returned.
 func (w *Wallet) computeRawSigInVault(ctx context.Context,
-	params *RawSigParams) (RawSignature, error) {
+	params *RawSigParams, recordKey []byte) (RawSignature, error) {
 
 	sigHash, err := params.Details.inputSigHash(params)
 	if err != nil {
@@ -338,10 +342,22 @@ func (w *Wallet) computeRawSigInVault(ctx context.Context,
 		mapErr: mapDerivedSignErr,
 	}
 
-	if sigHash.taprootKeyPath {
+	if sigHash.taprootKeyPath || recordKey != nil {
 		signer.pubKey, err = w.signingPubKey(ctx, params.Path)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	if recordKey != nil {
+		want, err := tweakedPubKey(&params.Tweak, signer.pubKey)
+		if err != nil {
+			return nil, err
+		}
+
+		if !recordKeyIs(recordKey, want) {
+			return nil, fmt.Errorf("%w: derived key differs",
+				ErrSigningKeyMismatch)
 		}
 	}
 
