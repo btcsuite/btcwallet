@@ -2244,3 +2244,79 @@ func TestBitcoindScopedWatch(t *testing.T) {
 	require.Equal(t, int32(10), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)
 }
+
+// TestChainEventStreamWatchSnapshot verifies that watchSnapshot captures
+// explicit address and outpoint watches alongside auto-indexed received
+// outpoints, and drops watches once the owning subscriber cancels.
+func TestChainEventStreamWatchSnapshot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange two subscribers with distinct watches and one received tx
+	// that auto-indexes a derived outpoint on sub1.
+	ctx1, cancel1 := context.WithCancel(t.Context())
+	stream, mc, sub1 := newMockWatchSub(ctx1)
+	sub2 := stream.subscribe(t.Context())
+
+	addr1, script1 := randTestP2PKHAddr(t)
+	addr2, _ := randTestP2PKHAddr(t)
+	op1 := &wire.OutPoint{Hash: chainhash.Hash{21}, Index: 0}
+	op2 := &wire.OutPoint{Hash: chainhash.Hash{22}, Index: 1}
+
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr1},
+	).Return(nil).Once()
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr2},
+	).Return(nil).Once()
+	mc.On("NotifySpent", []*wire.OutPoint{op1}).Return(nil).Once()
+	mc.On("NotifySpent", []*wire.OutPoint{op2}).Return(nil).Once()
+
+	require.NoError(t, sub1.WatchAddrs(t.Context(), []address.Address{addr1}))
+	require.NoError(t, sub1.WatchOutputs(t.Context(), []*wire.OutPoint{op1}))
+	require.NoError(t, sub2.WatchAddrs(t.Context(), []address.Address{addr2}))
+	require.NoError(t, sub2.WatchOutputs(t.Context(), []*wire.OutPoint{op2}))
+
+	recvTx := wire.NewMsgTx(wire.TxVersion)
+	recvTx.AddTxOut(wire.NewTxOut(5000, script1))
+	recvRec, err := wtxmgr.NewTxRecordFromMsgTx(recvTx, time.Now())
+	require.NoError(t, err)
+
+	autoOP := wire.OutPoint{Hash: recvRec.Hash, Index: 0}
+	stream.publish(RelevantTx{TxRecord: recvRec})
+
+	// Act: take a snapshot while both subscribers are live, then cancel
+	// sub1 and take a second snapshot.
+	addrsBefore, opsBefore := stream.watchSnapshot()
+
+	cancel1()
+	<-sub1.Done
+
+	addrsAfter, opsAfter := stream.watchSnapshot()
+
+	// Assert: the first snapshot includes both subscribers' watches plus
+	// the auto-indexed received outpoint; the second retains only sub2.
+	beforeAddrStrs := make([]string, len(addrsBefore))
+	for i, a := range addrsBefore {
+		beforeAddrStrs[i] = a.EncodeAddress()
+	}
+
+	require.ElementsMatch(
+		t, []string{addr1.EncodeAddress(), addr2.EncodeAddress()},
+		beforeAddrStrs,
+	)
+	require.ElementsMatch(t, []wire.OutPoint{*op1, *op2, autoOP}, opsBefore)
+
+	afterAddrStrs := make([]string, len(addrsAfter))
+	for i, a := range addrsAfter {
+		afterAddrStrs[i] = a.EncodeAddress()
+	}
+
+	require.Equal(t, []string{addr2.EncodeAddress()}, afterAddrStrs)
+	require.Equal(t, []wire.OutPoint{*op2}, opsAfter)
+
+	// Assert: closing the stream yields an empty snapshot.
+	stream.close()
+	closedAddrs, closedOps := stream.watchSnapshot()
+	require.Empty(t, closedAddrs)
+	require.Empty(t, closedOps)
+}
