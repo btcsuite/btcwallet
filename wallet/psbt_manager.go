@@ -1441,10 +1441,9 @@ func (w *Wallet) createTxIntent(packet *psbt.Packet,
 //     private key is looked up until every input is planned, so a problem on
 //     any input is reported first. An input whose output does not commit to
 //     the key the wallet would sign with, or to the script or leaf it would
-//     sign, fails with ErrSigningKeyMismatch, and a legacy or Taproot input
-//     requesting SIGHASH_SINGLE with no output at its index fails with
-//     ErrUnsafeSighash. How a script uses the key is left to the script
-//     engine.
+//     sign, fails with ErrSigningKeyMismatch, and any planned input requesting
+//     SIGHASH_SINGLE with no output at its index fails with ErrUnsafeSighash.
+//     How a script uses the key is left to the script engine.
 //  3. Signing: Looking up each planned key and generating the raw ECDSA or
 //     Schnorr signature using the underlying `Signer`.
 //
@@ -2379,13 +2378,12 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 		return nil, fmt.Errorf("%w: %w", ErrSigningKeyMismatch, err)
 	}
 
-	// A legacy signature here would sign the constant digest 1, which
-	// any transaction can reuse. Segwit v0 signs a defined digest.
-	if !scriptCtx.witness {
-		err = refuseSingleWithoutOutput(packet, idx)
-		if err != nil {
-			return nil, err
-		}
+	// Both legacy (constant digest 1) and segwit v0 (committing to no
+	// outputs, rejected by txscript/v2 v2.0.1+) are unsafe when
+	// SIGHASH_SINGLE has no matching output, so refuse before key lookup.
+	err = refuseSingleWithoutOutput(packet, idx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Construct SpendDetails for Legacy/SegWit input. An existing record
