@@ -1833,7 +1833,7 @@ func TestAdvanceChainSync(t *testing.T) {
 // liveMatches builds Manager-prepared event data for processor tests using
 // the real output parser without subscribing a chain source.
 func liveMatches(recs ...*wtxmgr.TxRecord) TxEntries {
-	return newChainSyncer(nil, &chainParams).prepareTxMatches(recs)
+	return prepareTxMatches(recs, &chainParams)
 }
 
 // TestHandleChainUpdate verifies notification handling.
@@ -4846,10 +4846,8 @@ func TestExtractAddrEntries(t *testing.T) {
 
 	txOut := &wire.TxOut{Value: 1000, PkScript: pkScript}
 
-	s := newChainSyncer(nil, &chainParams)
-
 	// Act: Extract address entries from the output.
-	entries := s.extractAddrEntries([]*wire.TxOut{txOut})
+	entries := extractAddrEntries([]*wire.TxOut{txOut}, &chainParams)
 
 	// Assert: Verify that the correct address was extracted.
 	require.Len(t, entries, 1)
@@ -7705,10 +7703,8 @@ func TestExtractAddrEntries_NonStd(t *testing.T) {
 		},
 	}
 
-	s := newChainSyncer(nil, &chainParams)
-
 	// Act: Extract address entries.
-	entries := s.extractAddrEntries(txOuts)
+	entries := extractAddrEntries(txOuts, &chainParams)
 
 	// Assert: Verify that only the standard P2PKH output was extracted.
 	require.Len(t, entries, 1)

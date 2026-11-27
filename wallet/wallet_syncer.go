@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -922,6 +923,53 @@ func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
 	}
 
 	return wtxmgr.DependencySort(txSet), nil
+}
+
+// prepareTxMatches decodes each transaction's output addresses and indices for
+// Wallet Store application.
+func prepareTxMatches(recs []*wtxmgr.TxRecord,
+	params *chaincfg.Params) TxEntries {
+
+	matches := make(TxEntries, 0, len(recs))
+	for _, rec := range recs {
+		matches = append(matches, TxEntry{
+			Rec:     rec,
+			Entries: extractAddrEntries(rec.MsgTx.TxOut, params),
+		})
+	}
+
+	return matches
+}
+
+// extractAddrEntries collects all addresses from transaction outputs and
+// creates initial AddrEntry objects with output indices.
+func extractAddrEntries(txOuts []*wire.TxOut,
+	params *chaincfg.Params) []AddrEntry {
+
+	var entries []AddrEntry
+	for i, output := range txOuts {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, params,
+		)
+		if err != nil {
+			log.Warnf("Cannot extract non-std pkScript=%x",
+				output.PkScript)
+
+			continue
+		}
+
+		for _, addr := range addrs {
+			entries = append(entries, AddrEntry{
+				Address: addr,
+				Credit: wtxmgr.CreditEntry{
+					// Output index fits in uint32.
+					Index: uint32(i),
+				},
+			})
+		}
+	}
+
+	return entries
 }
 
 // putTxNotifications records relevant transaction notifications through the

@@ -210,7 +210,7 @@ func (s *chainSyncer) routeChainEvent(n any,
 		return events
 	}
 
-	matches := s.prepareTxMatches(records)
+	matches := prepareTxMatches(records, s.params)
 
 	for _, match := range matches {
 		recipients := s.watches.matchRecipients(match, s.params)
@@ -241,50 +241,6 @@ func (s *chainSyncer) routeChainEvent(n any,
 	}
 
 	return events
-}
-
-// prepareTxMatches decodes each transaction once for shared routing while
-// retaining its record and output indices for Wallet Store application.
-func (s *chainSyncer) prepareTxMatches(recs []*wtxmgr.TxRecord) TxEntries {
-	matches := make(TxEntries, 0, len(recs))
-	for _, rec := range recs {
-		entries := s.extractAddrEntries(rec.MsgTx.TxOut)
-		matches = append(matches, TxEntry{
-			Rec:     rec,
-			Entries: entries,
-		})
-	}
-
-	return matches
-}
-
-// extractAddrEntries collects all addresses from transaction outputs and
-// creates initial AddrEntry objects with output indices.
-func (s *chainSyncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
-	var entries []AddrEntry
-	for i, output := range txOuts {
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, s.params,
-		)
-		if err != nil {
-			log.Warnf("Cannot extract non-std pkScript=%x",
-				output.PkScript)
-
-			continue
-		}
-
-		for _, addr := range addrs {
-			entries = append(entries, AddrEntry{
-				Address: addr,
-				Credit: wtxmgr.CreditEntry{
-					// Output index fits in uint32.
-					Index: uint32(i),
-				},
-			})
-		}
-	}
-
-	return entries
 }
 
 // recordOutpoint adds an association while the caller holds mu. Both native
