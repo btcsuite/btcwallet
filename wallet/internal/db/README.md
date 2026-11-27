@@ -59,7 +59,7 @@ conversions, and any helper code that only those backend methods need.
 
 Examples:
 
-- tx store: `CreateTx`, `UpdateTx`, `DeleteTx`, `RollbackToBlock`
+- tx store: `CreateTx`, `UpdateTx`, `DeleteTx`, `DisconnectBlock`
 - utxo store: `LeaseOutput`, `ReleaseOutput`
 
 Minimal example:

@@ -126,7 +126,7 @@ depends on which wallet event started the flow.
 | `InvalidateUnminedTx` | `failed` | `failed` | The wallet has evidence one local unmined branch is invalid. |
 | `DeleteUnminedTx` | removed | removed | A caller removes an unconfirmed branch, or publication cleanup follows a recognized malformed/mandatory-script rejection. |
 | `CreateTx` conflict handling | direct conflict roots become `replaced` | dependent descendants become `failed` | A newly confirmed transaction shares a retained input with an unmined branch. |
-| `RollbackToBlock` | disconnected coinbase roots become `orphaned` | dependent descendants become `failed` | A reorg disconnects the confirming block for the root branch. |
+| `DisconnectBlock` | disconnected coinbase roots become `orphaned` | dependent descendants become `failed` | A reorg disconnects the confirming block for the root branch. |
 
 Row-local metadata patching does not enter this branch workflow because it does
 not discover descendants or rewrite input facts.
