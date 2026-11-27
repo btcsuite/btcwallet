@@ -237,7 +237,9 @@ func (m *Chain) SubscribeChainEvents(
 	ctx context.Context) chain.EventSubscription {
 
 	args := m.Called(ctx)
-	return args.Get(0).(chain.EventSubscription)
+	sub, _ := args.Get(0).(chain.EventSubscription)
+
+	return sub
 }
 
 // BackEnd implements the chain.Interface interface.

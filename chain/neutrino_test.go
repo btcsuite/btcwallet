@@ -167,7 +167,7 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	select {
-	case ev := <-first.Events:
+	case ev := <-first.Events():
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, hash, ev.Block.Hash)
 		require.Equal(t, int32(1), ev.Block.Height)
@@ -191,13 +191,13 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	// Assert the first generation retired and the current generation
 	// delivers its own marker before canceling while the client runs.
 	select {
-	case <-first.Done:
+	case <-first.Done():
 	default:
 		require.FailNow(t, "first generation still subscribed")
 	}
 
 	select {
-	case ev := <-second.Events:
+	case ev := <-second.Events():
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, nextHash, ev.Block.Hash)
 		require.Equal(t, int32(2), ev.Block.Height)
@@ -211,7 +211,7 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	cancel()
 
 	select {
-	case <-second.Done:
+	case <-second.Done():
 	case <-time.After(defaultTestTimeout):
 		t.Fatal("the restarted handler did not retire a canceled reader")
 	}
@@ -498,13 +498,13 @@ func TestNeutrinoClientScopedWatch(t *testing.T) {
 
 	// Watched receives the tx inside EventBlockConnected; unwatched
 	// receives the block with zero relevant txns.
-	wBlk := waitChainEvent(t, watched.Events)
+	wBlk := waitChainEvent(t, watched.Events())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, int32(11), wBlk.Block.Height)
 	require.Len(t, wBlk.RelevantTxs, 1)
 	require.Equal(t, txHash, wBlk.RelevantTxs[0].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events)
+	uBlk := waitChainEvent(t, unwatched.Events())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, int32(11), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)

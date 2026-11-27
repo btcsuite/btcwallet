@@ -70,20 +70,43 @@ type Event struct {
 // EventSubscription delivers normalized chain events in source order until it
 // ends. Payloads may be shared across subscribers; copy before mutating.
 // Watches and auto-indexed outpoints grow unboundedly until retirement.
-type EventSubscription struct {
-	// Events carries buffered Events published after enrollment.
-	Events <-chan Event
+type EventSubscription interface {
+	// Events returns the channel carrying buffered Events published after
+	// enrollment. The channel closes on cancellation, source shutdown, or
+	// buffer overflow, leaving already-buffered events readable.
+	Events() <-chan Event
 
-	// Done closes after Events on cancellation, source shutdown, or buffer
-	// overflow. Buffered events remain readable after closure.
-	Done <-chan struct{}
+	// Done returns a channel that closes after Events on cancellation,
+	// source shutdown, or buffer overflow.
+	Done() <-chan struct{}
 
+	// Err returns the terminal result after Done closes. Cancellation and
+	// source shutdown return nil. Sending to a full buffer ends the
+	// subscription with [ErrEventSubscriptionBufferFull].
+	Err() error
+
+	// WatchAddrs registers addrs on this subscription and delegates to
+	// WatchAddrsFromTip. Received outputs are auto-indexed on delivery;
+	// NotifyBlocks is required for block events and block-confirmed spend
+	// tracking.
+	WatchAddrs(ctx context.Context, addrs []address.Address) error
+
+	// WatchOutputs registers points on this subscription and delegates to
+	// NotifySpent, keeping its no-complete-mempool-snapshot contract
+	// (Neutrino's NotifySpent is a no-op so it only scopes txns surfaced
+	// by its active scan).
+	WatchOutputs(ctx context.Context, points []*wire.OutPoint) error
+}
+
+// eventSubscription is the concrete EventSubscription backed by a
+// chainEventStream.
+type eventSubscription struct {
 	// stream is the owning event stream that manages watch indices and
 	// delegates watch registration to the backing chain client.
 	stream *chainEventStream
 
-	// listener gives Err and watch registration access to this
-	// subscription's state and terminal result.
+	// listener gives Events, Done, Err, and watch registration access to
+	// this subscription's state and terminal result.
 	listener *eventListener
 
 	// canceled mirrors the subscription context's Done channel so watch
@@ -91,15 +114,26 @@ type EventSubscription struct {
 	canceled <-chan struct{}
 }
 
+// A compile-time check to ensure eventSubscription implements
+// EventSubscription.
+var _ EventSubscription = eventSubscription{}
+
+// Events returns the channel carrying buffered Events published after
+// enrollment.
+func (s eventSubscription) Events() <-chan Event {
+	return s.listener.events
+}
+
+// Done returns a channel that closes after Events on cancellation, source
+// shutdown, or buffer overflow.
+func (s eventSubscription) Done() <-chan struct{} {
+	return s.listener.done
+}
+
 // Err returns the terminal result after Done closes. Cancellation and source
 // shutdown return nil. Sending to a full buffer ends the subscription with
 // [ErrEventSubscriptionBufferFull].
-func (s EventSubscription) Err() error {
-	// Handles supplied by test doubles may only contain public channels.
-	if s.listener == nil {
-		return nil
-	}
-
+func (s eventSubscription) Err() error {
 	// Observe the owner's close before reading the published result.
 	select {
 	case <-s.listener.done:
@@ -109,28 +143,13 @@ func (s EventSubscription) Err() error {
 	}
 }
 
-// checkWatchable validates ctx and ensures the handle is attached to a live
-// stream before indexing watches.
-func (s EventSubscription) checkWatchable(ctx context.Context) error {
-	err := ctx.Err()
-	if err != nil {
-		return err
-	}
-
-	if s.stream == nil {
-		return context.Canceled
-	}
-
-	return nil
-}
-
 // WatchAddrs registers addrs on this subscription and delegates to
 // WatchAddrsFromTip. Received outputs are auto-indexed on delivery;
 // NotifyBlocks is required for block events and block-confirmed spend tracking.
-func (s EventSubscription) WatchAddrs(ctx context.Context,
+func (s eventSubscription) WatchAddrs(ctx context.Context,
 	addrs []address.Address) error {
 
-	err := s.checkWatchable(ctx)
+	err := ctx.Err()
 	if err != nil {
 		return err
 	}
@@ -176,10 +195,10 @@ func (s EventSubscription) WatchAddrs(ctx context.Context,
 // WatchOutputs registers points on this subscription and delegates to
 // NotifySpent, keeping its no-complete-mempool-snapshot contract (Neutrino's
 // NotifySpent is a no-op so it only scopes txns surfaced by its active scan).
-func (s EventSubscription) WatchOutputs(ctx context.Context,
+func (s eventSubscription) WatchOutputs(ctx context.Context,
 	points []*wire.OutPoint) error {
 
-	err := s.checkWatchable(ctx)
+	err := ctx.Err()
 	if err != nil {
 		return err
 	}
@@ -580,14 +599,12 @@ func (s *chainEventStream) matchTx(
 }
 
 // subscribe registers the listener directly at the publication boundary.
-func (s *chainEventStream) subscribe(ctx context.Context) EventSubscription {
+func (s *chainEventStream) subscribe(ctx context.Context) *eventSubscription {
 	l := &eventListener{
 		events: make(chan Event, chainEventSubscriberBufferSize),
 		done:   make(chan struct{}),
 	}
-	sub := EventSubscription{
-		Events:   l.events,
-		Done:     l.done,
+	sub := &eventSubscription{
 		stream:   s,
 		listener: l,
 		canceled: ctx.Done(),

@@ -85,8 +85,8 @@ type Interface interface {
 	// resets (LoadTxFilter) or Neutrino Rescan replacements clear native
 	// coverage unless watches are re-registered. Buffer overflow ends the
 	// subscription with [ErrEventSubscriptionBufferFull]. Check
-	// [EventSubscription.Err] after Done closes, and cancel ctx when
-	// finished.
+	// [EventSubscription.Err] after [EventSubscription.Done] closes, and
+	// cancel ctx when finished.
 	SubscribeChainEvents(ctx context.Context) EventSubscription
 
 	BackEnd() string

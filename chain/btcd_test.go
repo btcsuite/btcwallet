@@ -267,7 +267,7 @@ func TestRPCClientSubscriptionLifecycle(t *testing.T) {
 	require.Len(t, hashes, 1)
 
 	select {
-	case ev := <-sub.Events:
+	case ev := <-sub.Events():
 		require.Equal(t, EventBlockConnected, ev.Type)
 		require.NotNil(t, ev.Block)
 		require.Equal(t, *hashes[0], ev.Block.Hash)
@@ -516,7 +516,7 @@ func TestRPCClientRelevantTxWitnessTxid(t *testing.T) {
 
 	// Confirm an unconfirmed EventMempoolTx with canonical txid was
 	// published on the subscription.
-	ev := waitChainEvent(t, sub.Events)
+	ev := waitChainEvent(t, sub.Events())
 	require.Equal(t, EventMempoolTx, ev.Type)
 	require.Nil(t, ev.Block)
 	require.Len(t, ev.RelevantTxs, 1)
@@ -574,7 +574,7 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	_, err := client.SendRawTransaction(parent, true)
 	require.NoError(t, err)
 
-	memEv := waitChainEvent(t, watched.Events)
+	memEv := waitChainEvent(t, watched.Events())
 	require.Equal(t, EventMempoolTx, memEv.Type)
 	require.Nil(t, memEv.Block)
 	require.Len(t, memEv.RelevantTxs, 1)
@@ -596,14 +596,14 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	// Verify watched receives parent then child inside one
 	// EventBlockConnected, unwatched receives an empty block event, and
 	// legacy Notifications receives parent.
-	wBlk := waitChainEvent(t, watched.Events)
+	wBlk := waitChainEvent(t, watched.Events())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, *minedBlk.Hash(), wBlk.Block.Hash)
 	require.Len(t, wBlk.RelevantTxs, 2)
 	require.Equal(t, parentHash, wBlk.RelevantTxs[0].Hash)
 	require.Equal(t, child.TxHash(), wBlk.RelevantTxs[1].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events)
+	uBlk := waitChainEvent(t, unwatched.Events())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, *minedBlk.Hash(), uBlk.Block.Hash)
 	require.Empty(t, uBlk.RelevantTxs)
@@ -644,7 +644,7 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 
 	// Verify sub receives the mempool tx and legacy Notifications() sees
 	// no unrequested BlockConnected before the matching RelevantTx.
-	memEv := waitChainEvent(t, sub.Events)
+	memEv := waitChainEvent(t, sub.Events())
 	require.Equal(t, EventMempoolTx, memEv.Type)
 	require.Equal(t, txHash, memEv.RelevantTxs[0].Hash)
 
