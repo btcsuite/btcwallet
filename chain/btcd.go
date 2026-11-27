@@ -38,10 +38,13 @@ type RPCClient struct {
 	eventStream         *chainEventStream
 	currentBlock        chan *waddrmgr.BlockStamp
 
-	quit    chan struct{}
-	wg      sync.WaitGroup
-	started bool
-	quitMtx sync.Mutex
+	quit        chan struct{}
+	wg          sync.WaitGroup
+	startDone   chan struct{}
+	connectDone chan struct{}
+	started     bool
+	stopped     bool
+	quitMtx     sync.Mutex
 
 	batchClient *rpcclient.Client
 }
@@ -270,7 +273,92 @@ func (c *RPCClient) SubmitPackage(_ []*wire.MsgTx,
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
 func (c *RPCClient) Start(_ context.Context) error {
-	err := c.Connect(c.reconnectAttempts)
+	c.quitMtx.Lock()
+
+	for {
+		if c.stopped {
+			c.quitMtx.Unlock()
+
+			return rpcclient.ErrClientShutdown
+		}
+
+		if c.startDone == nil {
+			break
+		}
+
+		done := c.startDone
+		c.quitMtx.Unlock()
+
+		select {
+		case <-done:
+		case <-c.quit:
+			return rpcclient.ErrClientShutdown
+		}
+
+		c.quitMtx.Lock()
+	}
+
+	if c.started {
+		c.quitMtx.Unlock()
+
+		return nil
+	}
+
+	startDone := make(chan struct{})
+	connectDone := make(chan struct{})
+	c.startDone = startDone
+	c.connectDone = connectDone
+	c.quitMtx.Unlock()
+
+	defer func() {
+		c.quitMtx.Lock()
+		c.startDone = nil
+		close(startDone)
+		c.quitMtx.Unlock()
+	}()
+
+	err := c.connectAndVerify(connectDone)
+	if err != nil {
+		return err
+	}
+
+	c.quitMtx.Lock()
+
+	if c.stopped {
+		c.quitMtx.Unlock()
+		c.Shutdown()
+		c.Client.WaitForShutdown()
+
+		return rpcclient.ErrClientShutdown
+	}
+
+	c.started = true
+	c.wg.Add(1)
+
+	go c.handler()
+
+	c.quitMtx.Unlock()
+
+	return nil
+}
+
+// connectAndVerify dials the btcd websocket while connectDone is active,
+// clears connectDone once Connect returns, and checks that the server matches
+// the configured network.
+func (c *RPCClient) connectAndVerify(connectDone chan struct{}) error {
+	var err error
+	select {
+	case <-c.quit:
+		err = rpcclient.ErrClientShutdown
+	default:
+		err = c.Connect(c.reconnectAttempts)
+	}
+
+	c.quitMtx.Lock()
+	c.connectDone = nil
+	close(connectDone)
+	c.quitMtx.Unlock()
+
 	if err != nil {
 		return err
 	}
@@ -279,19 +367,15 @@ func (c *RPCClient) Start(_ context.Context) error {
 	net, err := c.GetCurrentNet()
 	if err != nil {
 		c.Disconnect()
+
 		return err
 	}
+
 	if net != c.chainParams.Net {
 		c.Disconnect()
+
 		return errors.New("mismatched networks")
 	}
-
-	c.quitMtx.Lock()
-	c.started = true
-	c.wg.Add(1)
-	go c.handler()
-
-	c.quitMtx.Unlock()
 
 	return nil
 }
@@ -300,21 +384,32 @@ func (c *RPCClient) Start(_ context.Context) error {
 // started by Start.
 func (c *RPCClient) Stop() {
 	c.quitMtx.Lock()
-	select {
-	case <-c.quit:
-	default:
-		close(c.quit)
-		c.Client.Shutdown()
-		c.Client.WaitForShutdown()
-		c.batchClient.Shutdown()
-		c.batchClient.WaitForShutdown()
 
-		if !c.started {
-			c.eventStream.close()
-			close(c.dequeueNotification)
-		}
+	if c.stopped {
+		c.quitMtx.Unlock()
+
+		return
 	}
+
+	c.stopped = true
+	wasStarted := c.started
+	connectDone := c.connectDone
+	close(c.quit)
 	c.quitMtx.Unlock()
+
+	if connectDone != nil {
+		<-connectDone
+	}
+
+	c.Shutdown()
+	c.Client.WaitForShutdown()
+	c.batchClient.Shutdown()
+	c.batchClient.WaitForShutdown()
+
+	if !wasStarted {
+		c.eventStream.close()
+		close(c.dequeueNotification)
+	}
 }
 
 // IsCurrent returns whether the chain backend considers its view of the network
@@ -629,6 +724,7 @@ func (c *RPCClient) onFilteredBlockConnected(height int32,
 		)
 		if err != nil {
 			log.Errorf("Cannot create filtered block tx: %v", err)
+
 			continue
 		}
 
