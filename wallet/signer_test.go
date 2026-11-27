@@ -1632,6 +1632,201 @@ func TestComputeUnlockingScriptImportedAddress(t *testing.T) {
 	require.NoError(t, vm.Execute(), "script execution failed")
 }
 
+// TestComputeUnlockingScriptImportedNoKey verifies that ComputeUnlockingScript
+// reports ErrNoAssocPrivateKey for a watch-only raw import, which the vault
+// reports as keyvault.ErrNoPrivateKey. This keeps the sentinel the legacy
+// Store path returned before signing moved into the vault.
+func TestComputeUnlockingScriptImportedNoKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Resolve a raw imported P2WKH output whose key the vault
+	// does not hold.
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, pubKey := deterministicPrivKey(t)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+	sigHashes := txscript.NewTxSigHashes(
+		tx, txscript.NewCannedPrevOutputFetcher(
+			prevOut.PkScript, prevOut.Value,
+		),
+	)
+
+	expectStoreAddressInfo(t, w, mocks, addr, &db.AddressInfo{
+		ScriptPubKey: pkScript,
+		AddrType:     db.WitnessPubKey,
+		IsImported:   true,
+		PubKey:       pubKey.SerializeCompressed(),
+	})
+
+	signsImport := func(req signing.DigestRequest) bool {
+		imported, ok := req.Key.(signing.ImportedKey)
+
+		return ok && bytes.Equal(imported.ScriptPubKey, pkScript)
+	}
+	mocks.vault.On(
+		"SignDigest", mock.Anything, mock.MatchedBy(signsImport),
+	).Return(nil, keyvault.ErrNoPrivateKey).Once()
+
+	// Act: Build the unlocking script for the import.
+	_, err = w.ComputeUnlockingScript(t.Context(), &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: sigHashes,
+		HashType:  txscript.SigHashAll,
+	})
+
+	// Assert: The vault was asked for the imported key, and its error
+	// keeps the legacy sentinel.
+	require.ErrorIs(t, err, ErrNoAssocPrivateKey)
+	mocks.vault.AssertExpectations(t)
+}
+
+// TestComputeUnlockingScriptChecksVaultSignature verifies that
+// ComputeUnlockingScript refuses a vault signature for a P2WKH input that does
+// not prove the address key: an ECDSA signature by another key returns
+// ErrSigningKeyMismatch, and a Schnorr signature, the wrong kind for a SegWit
+// v0 input, returns ErrUnknownSignMethod.
+func TestComputeUnlockingScriptChecksVaultSignature(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A derived P2WKH output and its input signature hash, signed
+	// by another key with each signature kind.
+	_, pubKey := deterministicPrivKey(t)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+	sigHashes := txscript.NewTxSigHashes(
+		tx, txscript.NewCannedPrevOutputFetcher(
+			prevOut.PkScript, prevOut.Value,
+		),
+	)
+
+	sigHash, err := SegwitV0SpendDetails{WitnessScript: pkScript}.
+		inputSigHash(&RawSigParams{
+			Tx:        tx,
+			Output:    prevOut,
+			SigHashes: sigHashes,
+			HashType:  txscript.SigHashAll,
+		})
+	require.NoError(t, err)
+
+	otherKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	otherECDSA := ecdsa.Sign(otherKey, sigHash.digest[:])
+	otherSchnorr, err := schnorr.Sign(otherKey, sigHash.digest[:])
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		sig     Signature
+		wantErr error
+	}{
+		{
+			name:    "ecdsa by other key",
+			sig:     ECDSASignature{Signature: otherECDSA},
+			wantErr: ErrSigningKeyMismatch,
+		},
+		{
+			name:    "schnorr signature",
+			sig:     SchnorrSignature{Signature: otherSchnorr},
+			wantErr: ErrUnknownSignMethod,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: A wallet whose vault returns the test case's
+			// signature for the output.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			expectSignerAddressInfoWithKeyScope(
+				t, w, mocks, addr, db.WitnessPubKey, false,
+				false, pubKey, waddrmgr.KeyScopeBIP0084,
+			)
+			mocks.vault.On(
+				"SignDigest", mock.Anything, mock.Anything,
+			).Return(test.sig, nil).Once()
+
+			// Act: Build the unlocking script for the output.
+			script, err := w.ComputeUnlockingScript(
+				t.Context(), &UnlockingScriptParams{
+					Tx:        tx,
+					Output:    prevOut,
+					SigHashes: sigHashes,
+					HashType:  txscript.SigHashAll,
+				},
+			)
+
+			// Assert: Wallet refuses the vault's signature.
+			require.ErrorIs(t, err, test.wantErr)
+			require.Nil(t, script)
+			mocks.vault.AssertExpectations(t)
+		})
+	}
+}
+
+// TestComputeUnlockingScriptScriptAddress verifies that an imported script
+// output, which no single wallet key can spend, reports
+// ErrUnsupportedAddressType with the address manager's error in the chain,
+// before any secret use: its stored script is not decrypted and the vault is
+// not asked to sign. The legacy key path decrypted the script, then looked up
+// the import's private key and reported ErrNoAssocPrivateKey.
+func TestComputeUnlockingScriptScriptAddress(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A SQL wallet with an imported P2WSH output that holds an
+	// encrypted witness script.
+	vector := sqlScriptVectors(t)[1]
+	w, deps := createUnlockedSQLWalletWithMocks(t)
+
+	addr := extractAddrFromPKScript(vector.scriptPubKey, w.cfg.ChainParams)
+	expectStoreAddressInfo(t, w, deps, addr, &db.AddressInfo{
+		ScriptPubKey: vector.scriptPubKey,
+		AddrType:     vector.addrType,
+		IsImported:   true,
+		HasScript:    true,
+	})
+
+	prevOut, tx := createDummyTestTx(vector.scriptPubKey)
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+
+	// Act: Build the unlocking script for the output.
+	_, err := w.ComputeUnlockingScript(t.Context(), &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: txscript.NewTxSigHashes(tx, fetcher),
+		HashType:  txscript.SigHashAll,
+	})
+
+	// Assert: The output reports its address type with no script
+	// decryption and no signing request.
+	require.ErrorIs(t, err, ErrUnsupportedAddressType)
+	require.ErrorIs(t, err, waddrmgr.ErrUnsupportedAddressType)
+	deps.vault.AssertNotCalled(
+		t, "DecryptScript", mock.Anything, mock.Anything,
+	)
+	deps.vault.AssertNotCalled(t, "Decrypt", mock.Anything, mock.Anything)
+	deps.vault.AssertNotCalled(
+		t, "SignDigest", mock.Anything, mock.Anything,
+	)
+}
+
 // TestScriptForOutputScriptClasses verifies that ScriptForOutput resolves each
 // stored script class through the vault script operation and maps each vault
 // result to its public result: the redeem script verbatim for P2SH, the witness

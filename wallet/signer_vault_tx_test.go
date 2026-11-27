@@ -257,3 +257,130 @@ func TestSQLComputeRawSigTaprootKeyPath(t *testing.T) {
 		})
 	}
 }
+
+// sqlUnlockingAddress creates an account in scope and returns one of its
+// receive addresses with a previous output paying it.
+func sqlUnlockingAddress(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
+	name string) *wire.TxOut {
+
+	t.Helper()
+
+	_, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope, Name: name,
+	})
+	require.NoError(t, err)
+
+	info, err := w.NewAddress(
+		t.Context(), NewAccountSelectorByName(scope, name), false,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(info.Addr)
+	require.NoError(t, err)
+
+	return wire.NewTxOut(100_000, pkScript)
+}
+
+// sqlTaprootParityOutputs creates a BIP-86 account and returns previous
+// outputs paying one of its addresses whose internal key has an even Y
+// coordinate and one whose internal key has an odd one.
+func sqlTaprootParityOutputs(t *testing.T,
+	w *Wallet) (*wire.TxOut, *wire.TxOut) {
+
+	t.Helper()
+
+	_, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0086, Name: "taproot",
+	})
+	require.NoError(t, err)
+
+	infos, err := w.NewBulkAddresses(
+		t.Context(), NewAccountSelectorByName(
+			waddrmgr.KeyScopeBIP0086, "taproot",
+		), false, 16,
+	)
+	require.NoError(t, err)
+
+	var found [2]*wire.TxOut
+	for _, info := range infos {
+		parity := info.PubKey.SerializeCompressed()[0] - 0x02
+		if found[parity] != nil {
+			continue
+		}
+
+		pkScript, err := txscript.PayToAddrScript(info.Addr)
+		require.NoError(t, err)
+
+		found[parity] = wire.NewTxOut(100_000, pkScript)
+	}
+
+	require.NotNil(t, found[0])
+	require.NotNil(t, found[1])
+
+	return found[0], found[1]
+}
+
+// TestSQLComputeUnlockingScriptVerifies verifies that SQL
+// ComputeUnlockingScript signs in the vault, with no unsafe vault attached,
+// and that the script engine accepts its result for P2PKH, nested P2WKH, P2WKH
+// and BIP-86 P2TR outputs, the last for internal keys of both Y parities.
+func TestSQLComputeUnlockingScriptVerifies(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create an output for every single-key address family, then
+	// drop the unsafe vault, which account creation still needs.
+	w := createSQLiteWallet(t, createTestChain(t))
+	p2pkh := sqlUnlockingAddress(t, w, waddrmgr.KeyScopeBIP0044, "p2pkh")
+	np2wkh := sqlUnlockingAddress(
+		t, w, waddrmgr.KeyScopeBIP0049Plus, "np2wkh",
+	)
+	p2wkh := sqlUnlockingAddress(t, w, waddrmgr.KeyScopeBIP0084, "p2wkh")
+	evenP2TR, oddP2TR := sqlTaprootParityOutputs(t, w)
+
+	w.unsafeVault = nil
+
+	tests := []struct {
+		name    string
+		prevOut *wire.TxOut
+	}{
+		{name: "p2pkh", prevOut: p2pkh},
+		{name: "np2wkh", prevOut: np2wkh},
+		{name: "p2wkh", prevOut: p2wkh},
+		{name: "p2tr even key", prevOut: evenP2TR},
+		{name: "p2tr odd key", prevOut: oddP2TR},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			tx, sigHashes := rawSigTx(test.prevOut)
+
+			// Act: Compute and install the unlocking script.
+			script, err := w.ComputeUnlockingScript(
+				t.Context(), &UnlockingScriptParams{
+					Tx:        tx,
+					Output:    test.prevOut,
+					SigHashes: sigHashes,
+					HashType:  txscript.SigHashAll,
+				},
+			)
+			require.NoError(t, err)
+
+			tx.TxIn[0].SignatureScript = script.SigScript
+			tx.TxIn[0].Witness = script.Witness
+
+			// Assert: The script engine accepts the spend.
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				test.prevOut.PkScript, test.prevOut.Value,
+			)
+			engine, err := txscript.NewEngine(
+				test.prevOut.PkScript, tx, 0,
+				txscript.StandardVerifyFlags, nil, sigHashes,
+				test.prevOut.Value, fetcher,
+			)
+			require.NoError(t, err)
+			require.NoError(t, engine.Execute())
+		})
+	}
+}
