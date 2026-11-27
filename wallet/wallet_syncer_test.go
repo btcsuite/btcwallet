@@ -9578,3 +9578,734 @@ func TestWalletRemainsSyncedAfterStaleDisconnect(t *testing.T) {
 		require.Equal(t, tip, info.SyncedTo.Hash)
 	}
 }
+
+// seedStartupRewardHistory seeds a height-2 checkpoint with an orphaned
+// height-1 payment and a canonical reward confirmed at rewardHeight, wiring the
+// mock chain expectations for startup rollback.
+func seedStartupRewardHistory(t *testing.T, s *syncer,
+	rewardHeight uint32) (db.Block, db.Block, chainhash.Hash,
+	chainhash.Hash) {
+
+	t.Helper()
+
+	ctx := t.Context()
+	fork := db.Block{
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: chainParams.GenesisBlock.Header.Timestamp,
+	}
+	old := db.Block{
+		Height: 1, Hash: chainhash.Hash{21},
+		Timestamp: time.Unix(1, 0),
+	}
+	tip := db.Block{
+		Height: 2, Hash: chainhash.Hash{22},
+		Timestamp: time.Unix(2, 0),
+	}
+	payment := reorgRecord(t, 21)
+	err := s.store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID: s.walletID, SyncedBlocks: []db.Block{fork, old, tip},
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: s.walletID, Tx: &payment.MsgTx, Block: &old,
+				Status: db.TxStatusPublished, Received: payment.Received,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	hashes, headers := linkedDisconnectHeaders(fork.Hash, 3, 7)
+	valid := db.Block{
+		Height: rewardHeight, Hash: hashes[rewardHeight-1],
+		Timestamp: headers[rewardHeight-1].Timestamp,
+	}
+	reward := reorgCoinbase(t, 23)
+	err = s.store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID: s.walletID, Transactions: []db.CreateTxParams{
+			{
+				WalletID: s.walletID, Tx: &reward.MsgTx, Block: &valid,
+				Status: db.TxStatusPublished, Received: reward.Received,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	source := &bwmock.Chain{}
+	t.Cleanup(func() { source.AssertExpectations(t) })
+
+	s.cfg.Chain = source
+	source.On("GetBestBlock").Return(&hashes[2], int32(3), nil).Twice()
+	source.On("GetBlockHashes", int64(0), int64(2)).
+		Return(append([]chainhash.Hash{fork.Hash}, hashes[:2]...), nil).Once()
+	source.On("GetBlockHeader", &fork.Hash).
+		Return(&chainParams.GenesisBlock.Header, nil).Once()
+	source.On("GetBlockHashes", int64(1), int64(3)).Return(hashes, nil).Once()
+	source.On("GetBlockHeaders", hashes).Return(headers, nil).Once()
+
+	return fork, valid, payment.Hash, reward.Hash
+}
+
+// TestSyncerRestartPreservesReplacementReward verifies SQL startup fork
+// recovery preserves a confirmed reward on the winning branch.
+func TestSyncerRestartPreservesReplacementReward(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed a SQLite syncer at an orphaned height-2 checkpoint with
+	// a height-3 reward already recorded on the winning branch.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	s := newTestSyncer(
+		Config{Name: "sql-watch-only-scripts"},
+		nil, nil, nil, store, id,
+	)
+	fork, valid, paymentHash, rewardHash := seedStartupRewardHistory(t, s, 3)
+
+	// Act: Run the saved-checkpoint comparison used on restart.
+	err := s.checkRollback(ctx)
+
+	// Assert: Recovery rewinds the SQL checkpoint to genesis, detaches the
+	// orphaned payment, and preserves the confirmed height-3 reward.
+	require.NoError(t, err)
+	progress, err := s.syncedTo(ctx)
+	require.NoError(t, err)
+	require.Equal(t, fork.Hash, progress.Hash)
+
+	paymentTx, err := s.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: s.walletID, Txid: paymentHash,
+	})
+	require.NoError(t, err)
+	require.Nil(t, paymentTx.Block)
+
+	rewardTx, err := s.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: s.walletID, Txid: rewardHash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, rewardTx.Status)
+	require.NotNil(t, rewardTx.Block)
+	require.Equal(t, valid.Hash, rewardTx.Block.Hash)
+}
+
+// newDisconnectProofWallet commits a reward and its spend, then arranges the
+// fork lookup and upper header batch shared by interrupted proof rejections.
+func newDisconnectProofWallet(t *testing.T, source *bwmock.Chain,
+	hashes []chainhash.Hash, headers []*wire.BlockHeader) (*syncer,
+	wtxmgr.BlockMeta, chainhash.Hash, chainhash.Hash) {
+
+	t.Helper()
+
+	const height = recoveryBatchSize + 3
+
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+
+	fork := db.Block{
+		Height: 1, Hash: hashes[1], Timestamp: headers[1].Timestamp,
+	}
+	old := db.Block{
+		Height: 2, Hash: hashes[2], Timestamp: headers[2].Timestamp,
+	}
+	reward := reorgCoinbase(t, 7)
+	spend := reorgSpend(t, reward, 800)
+	err := store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID: id, SyncedBlocks: []db.Block{fork, old},
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: id, Tx: &reward.MsgTx, Block: &old,
+				Status: db.TxStatusPublished, Received: reward.Received,
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.CreateTx(ctx, db.CreateTxParams{
+		WalletID: id, Tx: &spend.MsgTx, Status: db.TxStatusPublished,
+		Received: spend.Received,
+	}))
+
+	t.Cleanup(func() { source.AssertExpectations(t) })
+	source.On("IsCurrent").Return(true).Once()
+	source.On("GetBestBlock").
+		Return(&hashes[height], int32(height), nil).Once()
+	source.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+	source.On("GetBlockHeader", &fork.Hash).Return(headers[1], nil).Once()
+	source.On("GetBlockHashes", int64(4), int64(height)).
+		Return(hashes[4:], nil).Once()
+	source.On("GetBlockHeaders", hashes[4:]).Return(headers[4:], nil).Once()
+
+	s := newTestSyncer(
+		Config{
+			Name: "sql-watch-only-scripts", Chain: source,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, id,
+	)
+	event := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 2, Hash: old.Hash},
+	}
+
+	return s, event, reward.Hash, spend.Hash
+}
+
+// checkRetainedProofHistory compares the checkpoint, reward, and pending spend
+// after a disconnect proof rejection on the real-store fixture.
+func checkRetainedProofHistory(t *testing.T, s *syncer, block, reward,
+	spend chainhash.Hash) {
+
+	t.Helper()
+	ctx := t.Context()
+	tip, err := s.syncedTo(ctx)
+	require.NoError(t, err)
+	require.Equal(t, block, tip.Hash)
+
+	for _, hash := range []chainhash.Hash{reward, spend} {
+		tx, err := s.store.GetTx(ctx, db.GetTxQuery{
+			WalletID: s.walletID, Txid: hash,
+		})
+		require.NoError(t, err)
+		require.Equal(t, db.TxStatusPublished, tx.Status)
+
+		if hash == reward {
+			require.NotNil(t, tx.Block)
+			require.Equal(t, block, tx.Block.Hash)
+		}
+	}
+}
+
+// TestSyncerRejectsChangedDisconnectProof checks a changed final tip after
+// both header windows agreed. The Wallet must leave stored history intact.
+func TestSyncerRejectsChangedDisconnectProof(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two linked header windows followed by a changed final tip.
+	const height = recoveryBatchSize + 3
+
+	hashes, headers := linkedDisconnectHeaders(chainhash.Hash{}, height+1, 1)
+	source := &bwmock.Chain{}
+	s, event, reward, spend := newDisconnectProofWallet(
+		t, source, hashes, headers,
+	)
+	source.On("GetBlockHashes", int64(2), int64(3)).
+		Return(hashes[2:4], nil).Once()
+	source.On("GetBlockHeaders", hashes[2:4]).Return(headers[2:4], nil).Once()
+	source.On("GetBestBlock").
+		Return(&chainhash.Hash{33}, int32(height), nil).Once()
+
+	// Act: Run the worker disconnect handler against the changed tip.
+	err := s.disconnectBlock(t.Context(), event)
+
+	// Assert: The tip change rejects the proof and leaves history intact.
+	require.ErrorContains(t, err, "disconnect source tip changed")
+	require.Equal(t, &event, s.pendingDisconnect)
+	checkRetainedProofHistory(t, s, event.Hash, reward, spend)
+}
+
+// TestSyncerRejectsBrokenDisconnectAncestry checks a conflicting parent
+// between windows even when the original best block remains available.
+func TestSyncerRejectsBrokenDisconnectAncestry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A lower header window sharing the fork that fails to link to
+	// the upper window's parent.
+	hashes, headers := linkedDisconnectHeaders(
+		chainhash.Hash{}, recoveryBatchSize+4, 1,
+	)
+	other, low := linkedDisconnectHeaders(hashes[1], 2, 2)
+	source := &bwmock.Chain{}
+	s, event, reward, spend := newDisconnectProofWallet(
+		t, source, hashes, headers,
+	)
+	source.On("GetBlockHashes", int64(2), int64(3)).Return(other, nil).Once()
+	source.On("GetBlockHeaders", other).Return(low, nil).Once()
+
+	// Act: Run the disconnect handler across the broken header seam.
+	err := s.disconnectBlock(t.Context(), event)
+
+	// Assert: The broken link rejects the proof before any write.
+	require.ErrorContains(t, err, "disconnect ancestry changed")
+	require.Equal(t, &event, s.pendingDisconnect)
+	checkRetainedProofHistory(t, s, event.Hash, reward, spend)
+}
+
+// TestSyncerRetriesFailedDisconnect verifies that a live disconnect failing
+// with a transient backend error is retained in pendingDisconnect, replayed at
+// the start of initChainSync before checkRollback, and clears orphaned tx
+// confirmations recorded above the saved checkpoint.
+func TestSyncerRetriesFailedDisconnect(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed a SQLite Wallet at genesis, record a live payment in
+	// orphaned block A1 at height 1 above the checkpoint, and inject a
+	// transient GetBestBlock error on the first disconnect attempt.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	src := &bwmock.Chain{}
+	t.Cleanup(func() { src.AssertExpectations(t) })
+
+	genesis := db.Block{
+		Height:    0,
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	a1 := db.Block{
+		Height:    1,
+		Hash:      chainhash.Hash{11},
+		Timestamp: time.Unix(2, 0).UTC(),
+	}
+	b1 := db.Block{
+		Height:    1,
+		Hash:      chainhash.Hash{22},
+		Timestamp: time.Unix(3, 0).UTC(),
+	}
+
+	require.NoError(t, store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{genesis},
+	}))
+
+	s := newTestSyncer(
+		Config{
+			Name:        "sql-watch-only-scripts",
+			Chain:       src,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, id,
+	)
+
+	payment := reorgRecord(t, 21)
+	a1Meta := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 1, Hash: a1.Hash},
+		Time:  a1.Timestamp,
+	}
+	require.NoError(t, s.processChainEventBeforeSync(ctx, chainEvent{
+		notification: chain.FilteredBlockConnected{
+			Block:       &a1Meta,
+			RelevantTxs: []*wtxmgr.TxRecord{payment},
+		},
+		matches: liveMatches(payment),
+	}))
+
+	b1Header := &wire.BlockHeader{
+		PrevBlock: genesis.Hash,
+		Timestamp: b1.Timestamp,
+	}
+
+	// First disconnect attempt fails with a transient GetBestBlock error.
+	src.On("IsCurrent").Return(true).Once()
+	src.On("GetBestBlock").
+		Return((*chainhash.Hash)(nil), int32(0), errors.New("transient")).
+		Once()
+
+	// Retry inside initChainSync succeeds and verifies B1 links to genesis.
+	src.On("IsCurrent").Return(true).Times(2)
+	src.On("GetBestBlock").Return(&b1.Hash, int32(1), nil).Times(2)
+	src.On("GetBlockHashes", int64(1), int64(1)).
+		Return([]chainhash.Hash{b1.Hash}, nil).Once()
+	src.On("GetBlockHeaders", []chainhash.Hash{b1.Hash}).
+		Return([]*wire.BlockHeader{b1Header}, nil).Once()
+	src.On("GetBlockHash", int64(0)).Return(&genesis.Hash, nil).Once()
+	src.On("WatchAddrsFromTip", mock.Anything, []address.Address(nil)).
+		Return(nil).Once()
+	src.On("NotifyBlocks").Return(nil).Once()
+
+	// Act: Deliver the disconnect during transient failure, then run
+	// initChainSync to replay it and scan replacement block B1.
+	firstErr := s.processChainEvent(ctx, chainEvent{
+		notification: chain.BlockDisconnected(a1Meta),
+	})
+	retryErr := s.initChainSync(ctx)
+	batchErr := store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{b1},
+	})
+	txInfo, getTxErr := store.GetTx(ctx, db.GetTxQuery{
+		WalletID: id,
+		Txid:     payment.Hash,
+	})
+
+	// Assert: The transient failure retained pendingDisconnect, retry
+	// detached the orphaned confirmation and cleared pendingDisconnect, and
+	// scanning replacement block B1 succeeds cleanly.
+	require.ErrorContains(t, firstErr, "transient")
+	require.NoError(t, retryErr)
+	require.Nil(t, s.pendingDisconnect)
+	require.NoError(t, batchErr)
+	require.NoError(t, getTxErr)
+	require.Nil(t, txInfo.Block)
+}
+
+// TestSyncerWaitForRetryServicesEvent verifies that waitForRetry processes a
+// queued mailbox event before the retry timer expires and pauses mailbox reads
+// once a failed disconnect is retained in pendingDisconnect.
+func TestSyncerWaitForRetryServicesEvent(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Queue a failing BlockDisconnected followed by a
+		// second disconnect event so waitForRetry must pause mailbox
+		// reads after retaining the first failure.
+		retry := make(chan time.Time)
+		src := &bwmock.Chain{}
+		src.On("IsCurrent").Return(false).Once()
+		t.Cleanup(func() { src.AssertExpectations(t) })
+
+		events := make(chan chainEvent, 2)
+		s := newTestSyncer(Config{Chain: src}, nil, nil, nil, nil, 1)
+		s.chainEventChan = events
+
+		meta1 := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 5}}
+		meta2 := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 4}}
+
+		events <- chainEvent{notification: chain.BlockDisconnected(meta1)}
+
+		events <- chainEvent{notification: chain.BlockDisconnected(meta2)}
+
+		// Act: Start waitForRetry, wait until the worker processes the
+		// first event and blocks on the retry channel without draining
+		// the second event, then release retry.
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- s.waitForRetry(t.Context(), retry)
+		}()
+
+		synctest.Wait()
+		close(retry)
+
+		err := <-errCh
+
+		// Assert: waitForRetry returns nil, retains only the first
+		// failed disconnect, and leaves the second event unread.
+		require.NoError(t, err)
+		require.Equal(t, &meta1, s.pendingDisconnect)
+		require.Len(t, events, 1)
+	})
+}
+
+// TestSyncerWaitUntilBackendSyncedPausesPendingDisconnect verifies that
+// waitUntilBackendSynced does not consume queued mailbox events while a
+// previously failed disconnect awaits retry in pendingDisconnect.
+func TestSyncerWaitUntilBackendSyncedPausesPendingDisconnect(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		// Arrange: Configure a syncer with a retained pendingDisconnect
+		// and one queued event in chainEventChan while the backend
+		// becomes current on its next poll tick.
+		src := &bwmock.Chain{}
+		src.On("IsCurrent").Return(false).Once()
+		src.On("IsCurrent").Return(true).Once()
+		t.Cleanup(func() { src.AssertExpectations(t) })
+
+		events := make(chan chainEvent, 1)
+		s := newTestSyncer(Config{Chain: src}, nil, nil, nil, nil, 1)
+		s.chainEventChan = events
+
+		pending := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 5}}
+		s.pendingDisconnect = &pending
+
+		events <- chainEvent{
+			notification: chain.BlockDisconnected(wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 4},
+			}),
+		}
+
+		// Act: Wait for backend sync to advance past the 1-second poll
+		// tick inside synctest fake time.
+		err := s.waitUntilBackendSynced(t.Context())
+
+		// Assert: waitUntilBackendSynced succeeds once the backend is
+		// current while leaving the queued mailbox event unread.
+		require.NoError(t, err)
+		require.Len(t, events, 1)
+	})
+}
+
+// TestSyncerDisconnectBlockRevokesSyncedState verifies that disconnecting a
+// Synced Wallet's losing tip block on a real SQLite Store rewinds to the fork
+// and transitions readiness back to Syncing.
+func TestSyncerDisconnectBlockRevokesSyncedState(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed a real SQLite Wallet synced to losing block 2 while the
+	// chain source has already replaced height 2 with a competing block.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	src := &bwmock.Chain{}
+	t.Cleanup(func() { src.AssertExpectations(t) })
+
+	genesis := db.Block{
+		Height:    0,
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	fork := db.Block{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(2, 0).UTC(),
+	}
+	orphan := db.Block{
+		Height:    2,
+		Hash:      chainhash.Hash{2},
+		Timestamp: time.Unix(3, 0).UTC(),
+	}
+	replacement := db.Block{
+		Height:    2,
+		Hash:      chainhash.Hash{3},
+		Timestamp: time.Unix(4, 0).UTC(),
+	}
+	require.NoError(t, store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{genesis, fork, orphan},
+	}))
+
+	s := newTestSyncer(
+		Config{
+			Name:        "sql-watch-only-scripts",
+			Chain:       src,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, id,
+	)
+	s.state.Store(uint32(syncStateSynced))
+
+	forkHeader := &wire.BlockHeader{
+		PrevBlock: genesis.Hash,
+		Timestamp: fork.Timestamp,
+	}
+	replacementHeader := &wire.BlockHeader{
+		PrevBlock: fork.Hash,
+		Timestamp: replacement.Timestamp,
+	}
+
+	src.On("IsCurrent").Return(true).Once()
+	src.On("GetBestBlock").Return(&replacement.Hash, int32(2), nil).Times(2)
+	src.On("GetBlockHash", int64(1)).Return(&fork.Hash, nil).Once()
+	src.On("GetBlockHeader", &fork.Hash).Return(forkHeader, nil).Once()
+	src.On("GetBlockHashes", int64(2), int64(2)).
+		Return([]chainhash.Hash{replacement.Hash}, nil).Once()
+	src.On("GetBlockHeaders", []chainhash.Hash{replacement.Hash}).
+		Return([]*wire.BlockHeader{replacementHeader}, nil).Once()
+
+	// Act: Reconcile the live disconnect of the losing block on the Synced
+	// Wallet.
+	err := s.disconnectBlock(ctx, wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 2, Hash: orphan.Hash},
+		Time:  orphan.Timestamp,
+	})
+	tip, tipErr := s.syncedTo(ctx)
+
+	// Assert: The real Store rewinds to fork height 1 and readiness is
+	// revoked back to Syncing.
+	require.NoError(t, err)
+	require.NoError(t, tipErr)
+	require.Equal(t, int32(1), tip.Height)
+	require.Equal(t, fork.Hash, tip.Hash)
+	require.Equal(t, syncStateSyncing, s.syncState())
+}
+
+// TestSyncerReconcileDisconnectRejectsNonCurrentChain verifies that
+// disconnectBlock rejects disconnects while the chain source is not current
+// without issuing any Store calls.
+func TestSyncerReconcileDisconnectRejectsNonCurrentChain(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Configure a strict mock Store with zero expectations and a
+	// chain source reporting IsCurrent == false.
+	store := &walletmock.Store{}
+	src := &bwmock.Chain{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		src.AssertExpectations(t)
+	})
+	src.On("IsCurrent").Return(false).Once()
+
+	s := newTestSyncer(Config{Chain: src}, nil, nil, nil, store, 3)
+	meta := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 1}}
+
+	// Act: Attempt to disconnect while the backend is not current.
+	err := s.disconnectBlock(t.Context(), meta)
+
+	// Assert: The disconnect fails with a non-current error, retains
+	// pendingDisconnect, and performs zero Store reads.
+	require.ErrorContains(t, err, "disconnect source is not current")
+	require.Equal(t, &meta, s.pendingDisconnect)
+}
+
+// TestSyncerApplyDisconnectSkipsCanonicalBlock verifies that applyDisconnect
+// returns nil without calling Store.DisconnectBlock when the observed block
+// hash is still canonical on the verified source branch.
+func TestSyncerApplyDisconnectSkipsCanonicalBlock(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Verify a single-block branch where block 2's observed hash
+	// still matches the canonical chain header anchored to fork 1.
+	store := &walletmock.Store{}
+	src := &bwmock.Chain{}
+	t.Cleanup(func() {
+		store.AssertExpectations(t)
+		src.AssertExpectations(t)
+	})
+
+	s := newTestSyncer(Config{Chain: src}, nil, nil, nil, store, 6)
+
+	fork := waddrmgr.BlockStamp{Height: 1, Hash: chainhash.Hash{1}}
+	block := db.Block{Height: 2, Hash: chainhash.Hash{2}}
+	source := waddrmgr.BlockStamp{Height: 2, Hash: block.Hash}
+	header := &wire.BlockHeader{PrevBlock: fork.Hash}
+
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID: 6, StartHeight: 2, EndHeight: math.MaxInt32,
+	}).Return([]db.TxInfo(nil), nil).Once()
+
+	src.On("GetBlockHashes", int64(2), int64(2)).
+		Return([]chainhash.Hash{block.Hash}, nil).Once()
+	src.On("GetBlockHeaders", []chainhash.Hash{block.Hash}).
+		Return([]*wire.BlockHeader{header}, nil).Once()
+	src.On("GetBestBlock").Return(&source.Hash, source.Height, nil).Once()
+
+	// Act: Apply disconnect for the still-canonical block.
+	err := s.applyDisconnect(t.Context(), block, 2, fork, source)
+
+	// Assert: applyDisconnect succeeds without calling Store.DisconnectBlock.
+	require.NoError(t, err)
+}
+
+// TestSyncerDisconnectDoesNotRetryIndeterminateCommit verifies that an
+// indeterminate Store.DisconnectBlock commit error neither schedules a new
+// pendingDisconnect nor leaves an already pending retry armed for replay in
+// initChainSync.
+func TestSyncerDisconnectDoesNotRetryIndeterminateCommit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("live disconnect", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Configure a strict mock Store whose DisconnectBlock
+		// returns db.ErrIndeterminateCommit once.
+		ctx := t.Context()
+		store := &walletmock.Store{}
+		src := &bwmock.Chain{}
+		t.Cleanup(func() {
+			store.AssertExpectations(t)
+			src.AssertExpectations(t)
+		})
+
+		s := newTestSyncer(
+			Config{
+				Name:        "indeterminate-live-disconnect",
+				Chain:       src,
+				ChainParams: &chainParams,
+			}, nil, nil, nil, store, 8,
+		)
+
+		genesis := db.Block{Height: 0, Hash: *chainParams.GenesisHash}
+		orphan := db.Block{Height: 1, Hash: chainhash.Hash{11}}
+		replacement := db.Block{Height: 1, Hash: chainhash.Hash{22}}
+		header := &wire.BlockHeader{PrevBlock: genesis.Hash}
+
+		store.On("GetWallet", mock.Anything, s.cfg.Name).
+			Return(&db.WalletInfo{SyncedTo: &genesis}, nil).Once()
+		store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+			WalletID:    8,
+			StartHeight: 0,
+			EndHeight:   0,
+		}).Return([]db.Block{genesis}, nil).Once()
+		store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID: 8, StartHeight: 1, EndHeight: math.MaxInt32,
+		}).Return([]db.TxInfo(nil), nil).Once()
+		store.On(
+			"DisconnectBlock", mock.Anything, uint32(8), orphan,
+			&genesis,
+			map[uint32]*chainhash.Hash{1: &replacement.Hash},
+		).Return(db.ErrIndeterminateCommit).Once()
+
+		src.On("IsCurrent").Return(true).Once()
+		src.On("GetBestBlock").
+			Return(&replacement.Hash, int32(1), nil).Times(2)
+		src.On("GetBlockHash", int64(0)).
+			Return(&genesis.Hash, nil).Once()
+		src.On("GetBlockHashes", int64(1), int64(1)).
+			Return([]chainhash.Hash{replacement.Hash}, nil).Once()
+		src.On("GetBlockHeaders", []chainhash.Hash{replacement.Hash}).
+			Return([]*wire.BlockHeader{header}, nil).Once()
+
+		// Act: Process the live disconnect that returns an
+		// indeterminate commit error.
+		err := s.disconnectBlock(ctx, wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 1, Hash: orphan.Hash},
+		})
+
+		// Assert: ErrIndeterminateCommit is returned without scheduling
+		// pendingDisconnect for replay.
+		require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+		require.Nil(t, s.pendingDisconnect)
+	})
+
+	t.Run("pending retry", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Arm pendingDisconnect from an earlier transient
+		// failure, then return db.ErrIndeterminateCommit on replay.
+		ctx := t.Context()
+		store := &walletmock.Store{}
+		src := &bwmock.Chain{}
+		t.Cleanup(func() {
+			store.AssertExpectations(t)
+			src.AssertExpectations(t)
+		})
+
+		s := newTestSyncer(
+			Config{
+				Name:        "indeterminate-pending-retry",
+				Chain:       src,
+				ChainParams: &chainParams,
+			}, nil, nil, nil, store, 9,
+		)
+
+		genesis := db.Block{Height: 0, Hash: *chainParams.GenesisHash}
+		orphan := db.Block{Height: 1, Hash: chainhash.Hash{33}}
+		replacement := db.Block{Height: 1, Hash: chainhash.Hash{44}}
+		header := &wire.BlockHeader{PrevBlock: genesis.Hash}
+
+		pending := wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 1, Hash: orphan.Hash},
+		}
+		s.pendingDisconnect = &pending
+
+		store.On("GetWallet", mock.Anything, s.cfg.Name).
+			Return(&db.WalletInfo{SyncedTo: &genesis}, nil).Once()
+		store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+			WalletID:    9,
+			StartHeight: 0,
+			EndHeight:   0,
+		}).Return([]db.Block{genesis}, nil).Once()
+		store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+			WalletID: 9, StartHeight: 1, EndHeight: math.MaxInt32,
+		}).Return([]db.TxInfo(nil), nil).Once()
+		store.On(
+			"DisconnectBlock", mock.Anything, uint32(9), orphan,
+			&genesis,
+			map[uint32]*chainhash.Hash{1: &replacement.Hash},
+		).Return(db.ErrIndeterminateCommit).Once()
+
+		// initChainSync checks IsCurrent once in waitUntilBackendSynced
+		// and once inside reconcileDisconnect.
+		src.On("IsCurrent").Return(true).Times(2)
+		src.On("GetBestBlock").
+			Return(&replacement.Hash, int32(1), nil).Times(2)
+		src.On("GetBlockHash", int64(0)).
+			Return(&genesis.Hash, nil).Once()
+		src.On("GetBlockHashes", int64(1), int64(1)).
+			Return([]chainhash.Hash{replacement.Hash}, nil).Once()
+		src.On("GetBlockHeaders", []chainhash.Hash{replacement.Hash}).
+			Return([]*wire.BlockHeader{header}, nil).Once()
+
+		// Act: Replay the armed pendingDisconnect through
+		// initChainSync.
+		err := s.initChainSync(ctx)
+
+		// Assert: ErrIndeterminateCommit is propagated and
+		// pendingDisconnect is cleared so DisconnectBlock cannot run a
+		// second time.
+		require.ErrorIs(t, err, db.ErrIndeterminateCommit)
+		require.Nil(t, s.pendingDisconnect)
+	})
+}
