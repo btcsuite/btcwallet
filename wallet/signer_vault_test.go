@@ -47,6 +47,28 @@ func parityIndices(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	return *found[0], *found[1]
 }
 
+// sqlSignerPrivKeys reads the private keys at paths through the unsafe vault,
+// then drops it, so the signing that follows uses only vault primitives. The
+// keys compute the expected signatures and are zeroed when the test ends.
+func sqlSignerPrivKeys(t *testing.T, w *Wallet,
+	paths ...BIP32Path) []*btcec.PrivateKey {
+
+	t.Helper()
+
+	keys := make([]*btcec.PrivateKey, len(paths))
+	for i, path := range paths {
+		key, err := w.DerivePrivKey(t.Context(), path)
+		require.NoError(t, err)
+		t.Cleanup(key.Zero)
+
+		keys[i] = key
+	}
+
+	w.unsafeVault = nil
+
+	return keys
+}
+
 // sqlSignerPubKeys reads the public keys at paths through the unsafe vault,
 // then drops it, so the signing that follows uses only vault primitives.
 func sqlSignerPubKeys(t *testing.T, w *Wallet,
@@ -54,16 +76,12 @@ func sqlSignerPubKeys(t *testing.T, w *Wallet,
 
 	t.Helper()
 
-	pubs := make([]*btcec.PublicKey, len(paths))
-	for i, path := range paths {
-		key, err := w.DerivePrivKey(t.Context(), path)
-		require.NoError(t, err)
+	keys := sqlSignerPrivKeys(t, w, paths...)
 
+	pubs := make([]*btcec.PublicKey, len(keys))
+	for i, key := range keys {
 		pubs[i] = key.PubKey()
-		key.Zero()
 	}
-
-	w.unsafeVault = nil
 
 	return pubs
 }

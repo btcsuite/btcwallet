@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/big"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2747,6 +2748,38 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidSignParam)
 	})
 
+	// This subtest verifies that Wallet refuses a vault signature of the
+	// wrong kind for the input: an ECDSA signature for a tapscript input,
+	// whose raw signature has no key to check it against.
+	t.Run("Wrong Signature Kind", func(t *testing.T) {
+		t.Parallel()
+		w, mocks := createUnlockedWalletWithMocks(t)
+
+		privKey, _ := deterministicPrivKey(t)
+		digest := sha256.Sum256([]byte("wrong signature kind"))
+		mocks.vault.On(
+			"SignDigest", mock.Anything, mock.Anything,
+		).Return(ECDSASignature{
+			Signature: ecdsa.Sign(privKey, digest[:]),
+		}, nil).Once()
+
+		tapscriptOut := wire.NewTxOut(100_000, []byte{txscript.OP_TRUE})
+		tapscriptTx, tapscriptSigHashes := rawSigTx(tapscriptOut)
+
+		_, err := w.ComputeRawSig(t.Context(), &RawSigParams{
+			Tx:        tapscriptTx,
+			Output:    tapscriptOut,
+			SigHashes: tapscriptSigHashes,
+			Path:      path,
+			Details: TaprootSpendDetails{
+				SpendPath:     ScriptPathSpend,
+				WitnessScript: []byte{txscript.OP_TRUE},
+			},
+		})
+
+		require.ErrorIs(t, err, ErrUnknownSignMethod)
+	})
+
 	// This subtest verifies that an error is returned when an unsupported
 	// Taproot spend path is provided, ensuring robust error handling for
 	// invalid configurations.
@@ -2771,7 +2804,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// propagated.
 	t.Run("Segwit SigHash Fail", func(t *testing.T) {
 		t.Parallel()
-		w, _ := createUnlockedWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2786,6 +2819,11 @@ func TestComputeRawSigFail(t *testing.T) {
 
 		_, err := w.ComputeRawSig(t.Context(), params)
 		require.Error(t, err)
+
+		// A malformed request fails before any vault request.
+		mocks.vault.AssertNotCalled(
+			t, "SignDigest", mock.Anything, mock.Anything,
+		)
 	})
 
 	// This subtest verifies that if the Taproot KeyPath signature hash
@@ -2829,6 +2867,79 @@ func TestComputeRawSigFail(t *testing.T) {
 
 		_, err := w.ComputeRawSig(t.Context(), params)
 		require.Error(t, err)
+	})
+}
+
+// TestComputeRawSigKeyPathFail tests the failures of a Taproot key-path raw
+// signature that Wallet reports before the vault signs: the tweaked internal
+// key and the key's public key are needed for the BIP-341 output tweak.
+func TestComputeRawSigKeyPathFail(t *testing.T) {
+	t.Parallel()
+
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	prevOut := wire.NewTxOut(100_000, []byte{txscript.OP_TRUE})
+	tx, sigHashes := rawSigTx(prevOut)
+
+	// This subtest verifies that a tweak cancelling the derived key on a
+	// Taproot key path fails in Wallet, which needs the tweaked internal
+	// key for the output tweak, before any vault signing request. The
+	// error carries ErrInvalidSignParam once.
+	t.Run("Tweak Fail", func(t *testing.T) {
+		t.Parallel()
+		w, mocks := createUnlockedWalletWithMocks(t)
+		leafPriv, _ := expectVaultSigner(
+			t, mocks, path.KeyScope, path.DerivationPath,
+		)
+
+		var negated [32]byte
+
+		negKey := leafPriv.Key
+		negKey.Negate().PutBytes(&negated)
+
+		tweak, err := NewAddTweak(negated)
+		require.NoError(t, err)
+
+		_, err = w.ComputeRawSig(t.Context(), &RawSigParams{
+			Tx:        tx,
+			Output:    prevOut,
+			SigHashes: sigHashes,
+			Path:      path,
+			Details:   TaprootSpendDetails{SpendPath: KeyPathSpend},
+			Tweak:     tweak,
+		})
+
+		require.ErrorIs(t, err, ErrInvalidSignParam)
+		require.ErrorIs(t, err, signing.ErrInvalidKeyTweak)
+
+		prefix := ErrInvalidSignParam.Error()
+		require.Equal(t, 1, strings.Count(err.Error(), prefix))
+		mocks.vault.AssertNotCalled(
+			t, "SignDigest", mock.Anything, mock.Anything,
+		)
+	})
+
+	// This subtest verifies that a Taproot key path whose public key the
+	// vault cannot read reports the legacy sentinel before any vault
+	// signing request.
+	t.Run("PubKey Fail", func(t *testing.T) {
+		t.Parallel()
+		w, mocks := createUnlockedWalletWithMocks(t)
+		mocks.vault.On("PubKey", mock.Anything, mock.Anything).Return(
+			(*btcec.PublicKey)(nil), keyvault.ErrNoPrivateKey,
+		).Once()
+
+		_, err := w.ComputeRawSig(t.Context(), &RawSigParams{
+			Tx:        tx,
+			Output:    prevOut,
+			SigHashes: sigHashes,
+			Path:      path,
+			Details:   TaprootSpendDetails{SpendPath: KeyPathSpend},
+		})
+
+		require.ErrorIs(t, err, ErrWatchOnlyAccount)
+		mocks.vault.AssertNotCalled(
+			t, "SignDigest", mock.Anything, mock.Anything,
+		)
 	})
 }
 
