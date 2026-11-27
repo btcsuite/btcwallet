@@ -140,6 +140,7 @@ func TestControllerChangePassphraseOwnsAcceptedBuffers(t *testing.T) {
 
 	// Each selection carries only its chosen halves to the Vault; ignored
 	// fields and empty public values must retain their existing semantics.
+	//nolint:staticcheck // Tests legacy kvdb public passphrase.
 	tests := []struct {
 		name string
 		req  ChangePassphraseRequest
@@ -632,6 +633,8 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 				PrivateNew:    []byte("new"),
 			}
 			req := newChangePassphraseReq(caller)
+
+			//nolint:staticcheck // Legacy kvdb public passphrase.
 			deps.vault.On(
 				"ChangePassphrase", mock.Anything,
 				keyvault.ChangePassphraseParams{

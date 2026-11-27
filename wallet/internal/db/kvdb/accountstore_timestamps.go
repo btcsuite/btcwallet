@@ -80,7 +80,7 @@ func putAccountCreatedAt(ns walletdb.ReadWriteBucket,
 	}
 
 	value := make([]byte, length)
-	//nolint:gosec // UnixNano() always fits in uint64 for times after 1970.
+	// UnixNano() always fits in uint64 for times after 1970.
 	binary.BigEndian.PutUint64(value, uint64(t.UTC().UnixNano()))
 
 	if knownNumber != nil {
@@ -121,8 +121,8 @@ func readAccountCreatedAt(ns walletdb.ReadBucket,
 		)
 	}
 
-	//nolint:gosec // Stored values are written via UnixNano() of
-	// time.Now() in putAccountCreatedAt; round-tripping fits int64.
+	// Stored values are written via UnixNano() of time.Now() in
+	// putAccountCreatedAt; round-tripping fits int64.
 	nanos := int64(binary.BigEndian.Uint64(raw))
 
 	// Only the explicit tail establishes a known number for an imported key.

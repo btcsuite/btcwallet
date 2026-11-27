@@ -691,7 +691,7 @@ func parseScriptOps(script []byte) []scriptOp {
 			data:   tokenizer.Data(),
 			end:    int(tokenizer.ByteIndex()),
 
-			//nolint:gosec // Not negative once Next returns an op.
+			// Not negative once Next returns an op.
 			pos: uint32(tokenizer.OpcodePosition()),
 		})
 	}

@@ -277,7 +277,7 @@ func (s *chainSyncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 			entries = append(entries, AddrEntry{
 				Address: addr,
 				Credit: wtxmgr.CreditEntry{
-					//nolint:gosec // bounded.
+					// Output index fits in uint32.
 					Index: uint32(i),
 				},
 			})

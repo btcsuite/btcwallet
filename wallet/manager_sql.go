@@ -119,7 +119,6 @@ func sqlCreateWalletParams(params CreateWalletParams,
 		IsImported: params.Mode == ModeImportSeed ||
 			params.Mode == ModeImportExtKey,
 		// LatestMgrVersion is a small constant that fits int32.
-		//nolint:gosec
 		ManagerVersion: int32(waddrmgr.LatestMgrVersion),
 		IsWatchOnly:    params.WatchOnly,
 		Birthday:       birthday,

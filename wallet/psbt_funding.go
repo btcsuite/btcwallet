@@ -426,8 +426,6 @@ func changeIndexAfterSort(packet *psbt.Packet,
 		}
 
 		// The bound above makes this conversion safe.
-		//
-		//nolint:gosec
 		return int32(i), nil
 	}
 

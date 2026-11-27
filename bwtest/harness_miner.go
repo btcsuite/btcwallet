@@ -521,18 +521,21 @@ func (h *HarnessTest) blockHasNoTxns(block *wire.MsgBlock) error {
 		return nil
 	}
 
+	// Format the block and non-coinbase transaction hashes directly into
+	// the in-memory diagnostic. strings.Builder.Write always returns a nil
+	// error, so both fmt.Fprintf calls discard their results.
 	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf(
-		"block %v has %d txns:\n",
+	fmt.Fprintf(
+		&desc, "block %v has %d txns:\n",
 		block.BlockHash(), len(block.Transactions)-1,
-	))
+	)
 
 	for _, tx := range block.Transactions[1:] {
 		if tx == nil {
 			continue
 		}
 
-		desc.WriteString(fmt.Sprintf("%v\n", tx.TxHash()))
+		fmt.Fprintf(&desc, "%v\n", tx.TxHash())
 	}
 
 	desc.WriteString(

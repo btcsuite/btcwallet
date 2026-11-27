@@ -118,6 +118,7 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 			b.walletName)
 	}
 
+	//nolint:staticcheck // Legacy kvdb uses a public passphrase.
 	adapterCfg := kvdb.Config{
 		DB:            b.db,
 		ChainParams:   b.chainParams,
@@ -141,6 +142,7 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 func (b *kvdbManagerBackend) listWallets(
 	ctx context.Context) ([]*walletData, error) {
 
+	//nolint:staticcheck // Legacy kvdb uses a public passphrase.
 	data, err := b.open(ctx, "", kvdb.Config{
 		DB:            b.db,
 		ChainParams:   b.chainParams,

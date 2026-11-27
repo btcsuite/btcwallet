@@ -568,7 +568,7 @@ func (s *syncer) checkRollbackBatch(ctx context.Context,
 
 	// Resolve the matching ancestor before entering persistence or the
 	// Store rollback, so backend I/O never holds a storage transaction.
-	//nolint:gosec // matchIndex < batchSize (10).
+	// matchIndex < batchSize (10).
 	forkHeight := startHeight + int32(matchIndex)
 	forkHash := localHashes[matchIndex]
 	log.Infof("Rollback detected! Rewinding to height %d (%v)",
@@ -1339,8 +1339,8 @@ func (s *syncer) scanBatchHeadersOnly(_ context.Context,
 		hash := hashes[i]
 		header := headers[i]
 
-		//nolint:gosec // i is bounded by batch size (2000), so
-		// addition to startHeight won't overflow int32.
+		// i is bounded by batch size (2000), so addition to startHeight
+		// won't overflow int32.
 		height := startHeight + int32(i)
 
 		meta := &wtxmgr.BlockMeta{
@@ -1440,8 +1440,8 @@ func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
 		hash := hashes[i]
 		block := blocks[i]
 
-		//nolint:gosec // i is bounded by batch size (2000), so
-		// addition to startHeight won't overflow int32.
+		// i is bounded by batch size (2000), so addition to startHeight
+		// won't overflow int32.
 		height := startHeight + int32(i)
 
 		meta := &wtxmgr.BlockMeta{
@@ -1490,9 +1490,9 @@ func (s *syncer) initResultsForCFilterScan(_ context.Context,
 				Block: wtxmgr.Block{
 					Hash: hashes[i],
 
-					//nolint:gosec // i is bounded by batch
-					// size (2000), so addition to
-					// startHeight won't overflow int32.
+					// i is bounded by batch size (2000),
+					// so addition to startHeight won't
+					// overflow int32.
 					Height: startHeight + int32(i),
 				},
 				Time: headers[i].Timestamp,
@@ -2241,8 +2241,7 @@ func (s *syncer) scanWithTargets(ctx context.Context,
 
 		s.state.Store(uint32(syncStateRescanning))
 
-		// Advance startHeight.
-		//nolint:gosec // batch size is bounded.
+		// Advance startHeight; batch size is bounded.
 		startHeight += int32(len(results))
 	}
 
