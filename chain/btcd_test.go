@@ -980,3 +980,104 @@ func TestRPCClientRescanActivatesLegacyQueue(t *testing.T) {
 	require.Equal(t, &tipHash, fin.Hash)
 	require.Equal(t, wantTip, fin.Height)
 }
+
+// TestRPCClientBlockStampAdvancesAtIntake verifies that RPCClient.BlockStamp
+// advances at handler intake while the legacy queue is unactivated (including
+// past the 20-item prefix) and hands off to dequeue-driven updates once
+// Notifications() is activated.
+func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start btcd with NotifyBlocks enabled and fill the 20-item
+	// unactivated legacy prefix without calling Notifications().
+	miner, client := setupBtcd(t)
+
+	// Wait for handler() to finish its startup GetBestBlock RPC before
+	// enabling block notifications so a BlockConnected callback cannot
+	// block wsInHandler before the startup response is read.
+	initialBS, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	require.NoError(t, client.NotifyBlocks())
+
+	startHeight := initialBS.Height
+	_, err = miner.Client.Generate(uint32(legacyPreActivationCap))
+	require.NoError(t, err)
+
+	for range legacyPreActivationCap {
+		ev := waitChainEvent(t, sub.Events())
+		require.Equal(t, EventBlockConnected, ev.Type)
+	}
+
+	prefixTip := startHeight + int32(legacyPreActivationCap)
+	require.Eventually(t, func() bool {
+		bs, bsErr := client.BlockStamp()
+
+		return bsErr == nil && bs.Height == prefixTip
+	}, defaultTestTimeout, 10*time.Millisecond)
+
+	// Act: mine one distinct block beyond the unactivated legacy cap while
+	// Notifications() remains unopened.
+	hashes, err := miner.Client.Generate(1)
+	require.NoError(t, err)
+	require.Len(t, hashes, 1)
+
+	ev := waitChainEvent(t, sub.Events())
+	require.Equal(t, EventBlockConnected, ev.Type)
+
+	wantHeight := prefixTip + 1
+	wantHash := *hashes[0]
+
+	// Assert: BlockStamp() advances to the post-cap block's height and hash
+	// without ever opening or draining Notifications().
+	require.Eventually(t, func() bool {
+		bs, bsErr := client.BlockStamp()
+
+		return bsErr == nil && bs.Height == wantHeight &&
+			bs.Hash == wantHash
+	}, defaultTestTimeout, 10*time.Millisecond)
+
+	// Act: activate Notifications(), verify BlockStamp() immediately hands
+	// off to the dequeued legacy stamp even before another event arrives,
+	// then mine a newer block while leaving legacy unread and wait for its
+	// scoped EventBlockConnected so handler() has ingested BlockConnected.
+	legacy := client.Notifications()
+
+	bs, err := client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, initialBS.Height, bs.Height)
+	require.Equal(t, initialBS.Hash, bs.Hash)
+
+	nextHashes, err := miner.Client.Generate(1)
+	require.NoError(t, err)
+	require.Len(t, nextHashes, 1)
+
+	nextEv := waitChainEvent(t, sub.Events())
+	require.Equal(t, EventBlockConnected, nextEv.Type)
+
+	nextHeight := wantHeight + 1
+	nextHash := *nextHashes[0]
+
+	// Assert: BlockStamp() still reports the last-dequeued legacy stamp
+	// (initialBS) after post-activation intake until nextHeight is dequeued
+	// from Notifications().
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, initialBS.Height, bs.Height)
+	require.Equal(t, initialBS.Hash, bs.Hash)
+
+	for {
+		n := waitLegacyNotification(t, legacy)
+		if blk, ok := n.(BlockConnected); ok &&
+			blk.Height == nextHeight {
+
+			break
+		}
+	}
+
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, nextHeight, bs.Height)
+	require.Equal(t, nextHash, bs.Hash)
+}
