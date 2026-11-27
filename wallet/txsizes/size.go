@@ -246,8 +246,8 @@ func EstimateVirtualSize(numP2PKHIns, numP2TRIns, numP2WPKHIns, numNestedP2WPKHI
 
 // GetMinInputVirtualSize returns the minimum number of vbytes that this input
 // adds to a transaction.
-func GetMinInputVirtualSize(pkScript []byte) int {
-	var baseSize, witnessWeight int
+func GetMinInputVirtualSize(pkScript []byte) uint64 {
+	var baseSize, witnessWeight uint64
 	switch {
 	// If this is a p2sh output, we assume this is a
 	// nested P2WKH.
@@ -267,7 +267,6 @@ func GetMinInputVirtualSize(pkScript []byte) int {
 		baseSize = RedeemP2PKHInputSize
 	}
 
-	return baseSize +
-		(witnessWeight+blockchain.WitnessScaleFactor-1)/
-			blockchain.WitnessScaleFactor
+	return baseSize + (witnessWeight+blockchain.WitnessScaleFactor-1)/
+		blockchain.WitnessScaleFactor
 }

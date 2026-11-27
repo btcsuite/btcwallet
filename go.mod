@@ -118,3 +118,7 @@ go 1.27.3
 // The SQL migration code pulled in through neutrino requires the lightninglabs
 // fork of golang-migrate.
 replace github.com/golang-migrate/migrate/v4 => github.com/lightninglabs/migrate/v4 v4.18.2-9023d66a-fork-pr-2.0.20251211093704-71c1eef09789
+
+replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
+
+replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes

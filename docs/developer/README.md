@@ -41,3 +41,11 @@ A deep dive into the core design philosophy, architectural patterns, and Go impl
 Formal documentation of significant architectural decisions, their context, and consequences.
 
 **[➡️ View Architecture Decision Records](./adr/README.md)**
+
+---
+
+## 📜 PSBT Workflows Guide
+
+A detailed guide to creating Bitcoin transactions using the `PsbtManager` interface, covering various scenarios and best practices.
+
+**[➡️ Read the PSBT Workflows Guide](./psbt_workflows.md)**
