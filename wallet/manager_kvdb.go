@@ -252,7 +252,7 @@ func (b *kvdbManagerBackend) rollbackToBlock(ctx context.Context,
 	}
 
 	return b.store.DisconnectBlock(
-		ctx, block, db.OptionalBlockFromBlockStamp(fork), canonical,
+		ctx, 0, block, db.OptionalBlockFromBlockStamp(fork), canonical,
 	)
 }
 

@@ -2399,7 +2399,7 @@ func nonNegativeInt32ToUint32(value int32) uint32 {
 // before the write: present nil means above the source tip, while an absent
 // affected height is unknown and aborts before mutation. Stale mined identities
 // are preserved independently of an exact manager-only rewind.
-func (s *Store) DisconnectBlock(_ context.Context, block db.Block,
+func (s *Store) DisconnectBlock(_ context.Context, _ uint32, block db.Block,
 	previous *db.Block, canonical map[uint32]*chainhash.Hash) error {
 
 	height, err := db.Uint32ToInt32(block.Height)

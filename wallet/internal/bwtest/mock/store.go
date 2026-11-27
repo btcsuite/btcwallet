@@ -9,6 +9,7 @@ import (
 	"context"
 	"iter"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
@@ -582,6 +583,18 @@ func (m *Store) InvalidateUnminedTx(ctx context.Context,
 // RollbackToBlock implements the db.TxStore interface.
 func (m *Store) RollbackToBlock(ctx context.Context, height uint32) error {
 	args := m.Called(ctx, height)
+
+	return args.Error(0)
+}
+
+// DisconnectBlock records the target wallet ID, observed block, fork anchor,
+// and canonical hashes together so tests can assert which wallet is rewound
+// and what proof was supplied, returning the arranged storage error.
+func (m *Store) DisconnectBlock(ctx context.Context, walletID uint32,
+	block db.Block, previous *db.Block,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	args := m.Called(ctx, walletID, block, previous, canonical)
 
 	return args.Error(0)
 }

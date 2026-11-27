@@ -5,6 +5,7 @@ import (
 	"errors"
 	"iter"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 )
@@ -562,6 +563,30 @@ type TxStore interface {
 	// ErrTxNotFound.
 	DeleteUnminedTx(ctx context.Context,
 		params DeleteUnminedTxParams) error
+
+	// DisconnectBlock atomically reconciles one Wallet's persisted block
+	// history for a disconnected block identity against caller-resolved
+	// canonical hashes and rewinds the Wallet checkpoint to previous when
+	// needed.
+	//
+	// Callers must pass a verified canonical previous block strictly below
+	// block.Height, or nil when no retained fork exists below the
+	// disconnect (clearing the SQL sync tip or resetting KVDB to its start
+	// block). Callers must also populate canonical from one verified source
+	// tip for block.Height, every committed height from the fork up to the
+	// saved checkpoint, and every confirmed height above the fork, using a
+	// non-nil hash for canonical blocks and an explicit nil entry for
+	// heights above the source tip. Other empty retained rows above the
+	// saved checkpoint are left untouched.
+	//
+	// SQL stores validate these preconditions before mutating an owned
+	// orphaned block (returning ErrInvalidParam for a missing canonical key
+	// or a previous at or above block.Height, ErrBlockNotFound for an
+	// unretained previous, and ErrBlockMismatch for a retained previous
+	// with a different hash). Legacy KVDB validates canonical entries for
+	// affected mined history and trusts the caller-verified previous fork.
+	DisconnectBlock(ctx context.Context, walletID uint32, block Block,
+		previous *Block, canonical map[uint32]*chainhash.Hash) error
 
 	// RollbackToBlock removes all blocks at and after a given height,
 	// moving any transactions within those blocks back to the unconfirmed

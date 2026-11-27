@@ -4867,7 +4867,7 @@ func TestDisconnectBlockIdentities(t *testing.T) {
 
 			// Act through the public Store capability, without consulting
 			// buckets or using the manager tip as the mined identity.
-			err = store.DisconnectBlock(t.Context(), db.Block{
+			err = store.DisconnectBlock(t.Context(), 0, db.Block{
 				Height: 2,
 				Hash:   chainhash.Hash{31, 2},
 			}, retained, canonical)
@@ -4939,7 +4939,7 @@ func TestDisconnectBlockIdentityError(t *testing.T) {
 
 	// Act on an independently matching mined identity with unreadable manager
 	// history; recovery must preserve the causal error instead of guessing.
-	err := store.DisconnectBlock(t.Context(), db.Block{
+	err := store.DisconnectBlock(t.Context(), 0, db.Block{
 		Height: 2,
 		Hash:   chainhash.Hash{31, 2},
 	}, nil, nil)
