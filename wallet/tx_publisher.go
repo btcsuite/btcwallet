@@ -761,10 +761,8 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]address.Address {
 			continue
 		}
 
-		// It's not possible for a transaction to have this many
-		// outputs, so we can ignore the gosec error.
-		//
-		//nolint:gosec
+		// Transaction output indices fit in uint32 under consensus
+		// block size limits.
 		txOutAddrs[uint32(i)] = addrs
 	}
 

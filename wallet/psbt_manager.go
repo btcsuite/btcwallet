@@ -1595,7 +1595,6 @@ func (w *Wallet) signPacket(ctx context.Context, packet *psbt.Packet,
 			// We convert the index (int) to uint32. This is safe
 			// because a Bitcoin transaction is strictly bounded by
 			// the block size limit.
-			//nolint:gosec
 			signedInputs = append(signedInputs, uint32(plan.idx))
 		}
 	}
