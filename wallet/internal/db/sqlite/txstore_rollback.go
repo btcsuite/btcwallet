@@ -100,6 +100,23 @@ func rewindWalletTransactions(ctx context.Context, qtx *sqlc.Queries,
 	)
 }
 
+// DisconnectBlock atomically reconciles one wallet's persisted block history
+// for a disconnected block identity against caller-resolved canonical hashes.
+func (s *Store) DisconnectBlock(ctx context.Context, walletID uint32,
+	block db.Block, previous *db.Block,
+	canonical map[uint32]*chainhash.Hash) error {
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		return db.DisconnectBlockWithOps(
+			ctx, walletID, block, previous, canonical,
+			rollbackToBlockOps{
+				qtx:      qtx,
+				walletID: walletID,
+			},
+		)
+	})
+}
+
 // RollbackToBlock atomically removes every block at or above the provided
 // height and rewrites wallet sync-state references so the block delete can
 // succeed.
