@@ -298,7 +298,7 @@ type SignPsbtParams struct {
 	//
 	// A Taproot derivation record names only an x-only key. The tweak
 	// applies to the derived key with the parity it has, as lnd applies it,
-	// so the wallet reads that key from the account's extended public key
+	// so the wallet reads that key through the vault's public key lookup
 	// before it plans the input.
 	//
 	// NOTE: The ideal implementation would be to add a new field to
@@ -2211,13 +2211,15 @@ func createBip32SpendDetails(pInput *psbt.PInput,
 }
 
 // planTaprootPsbtInput plans the signature for a single Taproot input of a
-// PSBT, without looking up a private key.
+// PSBT, without signing it.
 //
 // It performs the following steps:
 //  1. Parses the BIP32 derivation path to ensure it is valid.
 //  2. Applies the tweak to the key the wallet derives at the path, read
-//     from the account's extended public key, after checking that the
-//     derivation record names it.
+//     through the vault's public key lookup, after checking that the
+//     derivation record names it. The vault serves hardened children and
+//     reports a missing or watch-only account first, so such an input is
+//     skipped as another signer's.
 //  3. Determines the specific spending path (Key Path vs Script Path) using
 //     createTaprootSpendDetails.
 //  4. Checks that the output commits to the tweaked key or the leaf spent.
@@ -2261,10 +2263,11 @@ func (w *Wallet) planTaprootPsbtInput(ctx context.Context,
 	// parity of the key the wallet derives.
 	signer := tapDerivation.XOnlyPubKey
 	if tweak != (KeyTweak{}) {
-		base, err := w.derivePathPubKey(ctx, path)
+		// The vault reports a missing or watch-only account, which
+		// signing would refuse too, so such an input is skipped here
+		// as another signer's.
+		base, err := w.signingPubKey(ctx, path)
 		if err != nil {
-			// Key lookup would fail the same way, so an account
-			// the wallet lacks is skipped as another signer's.
 			return nil, fmt.Errorf("%w: %w", errComputeRawSig, err)
 		}
 

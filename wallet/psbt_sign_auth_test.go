@@ -2386,7 +2386,8 @@ func TestSignPsbtTaprootEffectiveKey(t *testing.T) {
 					TaprootBip32Derivation
 
 				// Only the first pass may look up the private
-				// key. Each pass reads a tweaked key's base.
+				// key. Each pass reads a tweaked key's base
+				// through the vault.
 				w, mocks := createUnlockedWalletWithMocks(t)
 				scope := waddrmgr.KeyScope{Purpose: 86, Coin: 1}
 				path := waddrmgr.DerivationPath{Index: index}
@@ -2394,10 +2395,7 @@ func TestSignPsbtTaprootEffectiveKey(t *testing.T) {
 				_, _ = expectStoreSignerPrivKey(
 					t, mocks, w.id, scope, path,
 				)
-				if tw.tweak != (KeyTweak{}) {
-					expectStorePubKey(t, mocks, w.id, scope, path)
-					expectStorePubKey(t, mocks, w.id, scope, path)
-				}
+				_, _ = expectVaultSigner(t, mocks, scope, path)
 
 				params := &SignPsbtParams{
 					Packet:      packet,
@@ -2547,7 +2545,7 @@ func TestSignPsbtTaprootFilesRecordUnderDerivedParity(t *testing.T) {
 			scope := waddrmgr.KeyScope{Purpose: 86, Coin: 1}
 			path := waddrmgr.DerivationPath{Index: odd}
 			_, _ = expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
-			expectStorePubKey(t, mocks, w.id, scope, path)
+			_, _ = expectVaultSigner(t, mocks, scope, path)
 
 			// Act: sign the packet.
 			result, err := w.SignPsbt(t.Context(), &SignPsbtParams{
@@ -2811,16 +2809,13 @@ func TestSignPsbtRejectsTaprootSignerBeforeKeyLookup(t *testing.T) {
 
 			before := clonePacket(packet)
 
-			// A tweaked key's base is read from the account's
-			// public key.
+			// A tweaked key's base is read through the vault's
+			// public key lookup while the input is planned; an
+			// untweaked input reads no key.
 			w, mocks := createUnlockedWalletWithMocks(t)
-			if tc.tweaks != nil {
-				expectStorePubKey(
-					t, mocks, w.id,
-					waddrmgr.KeyScope{Purpose: 86, Coin: 1},
-					waddrmgr.DerivationPath{},
-				)
-			}
+			mocks.vault.On(
+				"PubKey", mock.Anything, mock.Anything,
+			).Return(walletPub, nil).Maybe()
 
 			// Act: sign the packet.
 			_, err := w.SignPsbt(t.Context(), &SignPsbtParams{

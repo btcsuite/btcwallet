@@ -3728,8 +3728,8 @@ func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 
 // TestSignPsbtClassifiesSignError tests that SignPsbt skips explicit ownership
 // failures while returning cancellation and operational Store errors, from
-// both the private key lookup and the base key read a tweaked Taproot input
-// makes before it.
+// both the private key lookup and the vault base key read a tweaked Taproot
+// input makes before it.
 func TestSignPsbtClassifiesSignError(t *testing.T) {
 	t.Parallel()
 
@@ -3796,18 +3796,15 @@ func TestSignPsbtClassifiesSignError(t *testing.T) {
 					)
 					tweaks = map[int]KeyTweak{0: tweak}
 
-					var account uint32
-					mocks.store.On("GetAccount", mock.Anything,
-						db.GetAccountQuery{
-							WalletID: w.id,
-							Scope: db.KeyScope{
-								Purpose: 86, Coin: 1,
-							},
-							AccountNumber: &account,
-							SkipBalance:   true,
-						},
+					// The vault resolves the base key
+					// through the Store while planning.
+					mocks.vault.On(
+						"PubKey", mock.Anything,
+						mock.Anything,
 					).Return(
-						(*db.AccountInfo)(nil), tc.storeErr,
+						nil, fmt.Errorf("get account "+
+							"secret: %w",
+							tc.storeErr),
 					).Once()
 				} else {
 					mocks.store.On(
