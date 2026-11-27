@@ -51,7 +51,11 @@ type RPCClient struct {
 var _ Interface = (*RPCClient)(nil)
 
 // notificationHandlers builds the default btcd websocket callbacks shared by
-// NewRPCClient and NewRPCClientWithConfig.
+// NewRPCClient and NewRPCClientWithConfig. The deprecated btcd handlers remain
+// required for legacy chain.Interface notifications and active
+// EventSubscription block-disconnect delivery.
+//
+//nolint:staticcheck // Keep deprecated btcd callbacks for chain notifications.
 func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
 	return &rpcclient.NotificationHandlers{
 		OnClientConnected:        c.onClientConnect,
