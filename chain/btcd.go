@@ -62,6 +62,7 @@ var _ Interface = (*RPCClient)(nil)
 func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
 	return &rpcclient.NotificationHandlers{
 		OnClientConnected:        c.onClientConnect,
+		OnClientDisconnected:     c.onClientDisconnect,
 		OnBlockConnected:         c.onBlockConnected,
 		OnBlockDisconnected:      c.onBlockDisconnected,
 		OnFilteredBlockConnected: c.onFilteredBlockConnected,
@@ -668,6 +669,15 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 		Time: time.Unix(block.Time, 0),
 	}
 	return blk, nil
+}
+
+// onClientDisconnect refreshes btcd/rpcclient's transient reconnect tx filter
+// with all active EventSubscription watches (including auto-indexed received
+// outpoints) before automatic reconnect dials a replacement socket so
+// reregisterNtfns replays them via LoadTxFilter ahead of reregistered
+// NotifyBlocks state and same-connection resendRequests resends.
+func (c *RPCClient) onClientDisconnect() {
+	c.SetReconnectTxFilter(c.eventStream.watchSnapshot())
 }
 
 func (c *RPCClient) onClientConnect() {

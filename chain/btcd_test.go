@@ -836,3 +836,91 @@ func TestRPCClientStartRejectsWhileStopAwaitsConnect(t *testing.T) {
 	}
 }
 
+// TestRPCClientReconnectReplaysFilterAndAutoOutpoint verifies that a btcd
+// websocket reconnect keeps EventSubscription alive, seeds auto-indexed
+// outpoints in OnClientDisconnected before dialing socket 2, and replays
+// LoadTxFilter ahead of NotifyBlocks so post-reconnect spends are delivered.
+func TestRPCClientReconnectReplaysFilterAndAutoOutpoint(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a regtest btcd client with NotifyBlocks enabled, an observer
+	// client to synchronize mined blocks, and an auto-indexed received
+	// outpoint on sub.
+	miner, client := setupBtcd(t)
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+	require.NoError(t, client.NotifyBlocks())
+
+	obs := setupBtcdClient(t, miner)
+	require.NoError(t, obs.NotifyBlocks())
+	waitForClientConnected(t, obs.Notifications())
+
+	keyA := newTestWPKHKey(t)
+	keyOther := newTestWPKHKey(t)
+	sub := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, sub.WatchAddrs(t.Context(), []address.Address{keyA.addr}),
+	)
+
+	fundOP := fundConfirmedWPKH(t, miner, keyA)
+	fundEv := waitChainEvent(t, sub.Events)
+	require.Equal(t, EventBlockConnected, fundEv.Type)
+	require.Len(t, fundEv.RelevantTxs, 1)
+	require.Equal(t, fundOP.Hash, fundEv.RelevantTxs[0].Hash)
+	waitForBlockNtfn(t, legacy, fundEv.Block.Height, true)
+
+	// Block watchSnapshot inside onClientDisconnect so btcd/rpcclient must
+	// wait for SetReconnectTxFilter before dialing socket 2 and
+	// re-enabling notifyblocks.
+	locked := true
+
+	client.eventStream.mu.Lock()
+	defer func() {
+		if locked {
+			client.eventStream.mu.Unlock()
+		}
+	}()
+
+	// Act: disconnect socket 1 and mine a probe block while
+	// onClientDisconnect is still paused; socket 2 must not connect yet.
+	client.Disconnect()
+
+	probeBlk, err := miner.GenerateAndSubmitBlock(nil, -1, time.Time{})
+	require.NoError(t, err)
+	waitForBlockNtfn(t, obs.Notifications(), probeBlk.Height(), true)
+	require.True(t, client.Disconnected())
+
+	// Release onClientDisconnect so SetReconnectTxFilter seeds fundOP,
+	// socket 2 reconnects with LoadTxFilter ahead of NotifyBlocks, then
+	// mine a spend of fundOP to an unwatched key.
+	client.eventStream.mu.Unlock()
+
+	locked = false
+
+	waitForClientConnected(t, legacy)
+
+	spendTx := signWPKHSpend(
+		t, fundOP, keyA, 10000, keyOther.pkScript, 9000,
+	)
+	spendBlk, err := miner.GenerateAndSubmitBlock(
+		[]*btcutil.Tx{btcutil.NewTx(spendTx)}, -1, time.Time{},
+	)
+	require.NoError(t, err)
+
+	// Assert: sub stays open and delivers the spend matched purely through
+	// the replayed auto-indexed outpoint.
+	spendEv := waitChainEvent(t, sub.Events)
+	select {
+	case <-sub.Done:
+		require.FailNowf(
+			t, "subscription closed unexpectedly", "err=%v",
+			sub.Err(),
+		)
+	default:
+	}
+
+	require.Equal(t, EventBlockConnected, spendEv.Type)
+	require.Equal(t, *spendBlk.Hash(), spendEv.Block.Hash)
+	require.Len(t, spendEv.RelevantTxs, 1)
+	require.Equal(t, spendTx.TxHash(), spendEv.RelevantTxs[0].Hash)
+}
