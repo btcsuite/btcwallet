@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
@@ -23,8 +25,228 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
 )
+
+// BenchmarkStartToSynced compares native startup using the shared lnd-inspired
+// inventory. Each sample restores metadata at the base and discovers history
+// from the same fixed daemon target, without the old stress suite's lookahead.
+func BenchmarkStartToSynced(b *testing.B) {
+	benchmarkStartToSynced(b, SyncMethodFullBlocks)
+}
+
+// BenchmarkStartToSyncedCFilters measures the same restored native Wallet with
+// forced compact filters; unavailable filters fail instead of selecting Auto.
+func BenchmarkStartToSyncedCFilters(b *testing.B) {
+	benchmarkStartToSynced(b, SyncMethodCFilters)
+}
+
+// benchmarkStartToSynced shares fixtures and timer boundaries between the two
+// maintained strategies, retaining legacy rescan only as the baseline leaf.
+func benchmarkStartToSynced(b *testing.B, method SyncMethod) {
+	b.Helper()
+
+	for _, scenario := range bwtest.SyncBenchmarkCases() {
+		b.Run(scenario.ID, func(b *testing.B) {
+			fixture, target := prepareSyncBenchmarkKVDB(b, scenario)
+			_, node, rpc, _ := bwtest.RestoreSyncBenchmarkNode(
+				b.Context(), b, target,
+			)
+			hash, err := rpc.GetBestBlockHash()
+			require.NoError(b, err)
+			header, err := rpc.GetBlockHeaderVerbose(hash)
+			require.NoError(b, err)
+
+			height := header.Height
+
+			tip := waddrmgr.BlockStamp{Hash: *hash, Height: height}
+
+			// Separate leaves keep native API ownership and exclude fixture
+			// preparation from each reported startup lifecycle.
+			if method == SyncMethodFullBlocks {
+				b.Run("Legacy", func(b *testing.B) {
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.StopTimer()
+
+					for range b.N {
+						runLegacyStartToSynced(b, fixture, node, tip)
+					}
+				})
+			}
+
+			b.Run("KVDB", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.StopTimer()
+
+				for range b.N {
+					runMaintainedStartToSynced(b, fixture, node, tip, method)
+				}
+			})
+		})
+	}
+}
+
+// runLegacyStartToSynced includes durable Wallet loading, matching the work
+// performed inside Manager.Start. Defers drain this sample before the next.
+func runLegacyStartToSynced(b *testing.B, fixture string,
+	node *testcontainers.DockerContainer, tip waddrmgr.BlockStamp) {
+
+	b.Helper()
+	// Go reports leaf logs; retain the actual endpoint with each sample.
+	b.Logf("startup target: %d:%s", tip.Height, tip.Hash)
+
+	ctx, cancel := context.WithTimeout(b.Context(), 30*time.Minute)
+	defer cancel()
+
+	path := syncBenchmarkKVDBPath(b, fixture)
+	// Persist freelists like Manager's default; otherwise the native leaves
+	// perform different bbolt writes during the measured synchronization.
+	dbConn, err := walletdb.Open("bdb", path, false, time.Minute, false)
+
+	require.NoError(b, err)
+	defer func() { require.NoError(b, dbConn.Close()) }()
+
+	source, stopSource := bwtest.NewSyncBenchmarkClient(ctx, b, node)
+	defer stopSource()
+
+	if os.Getenv("BTCWALLET_BENCH_PROFILE") != "" {
+		require.Equal(b, 1, b.N, "startup profiles require benchtime=1x")
+	}
+
+	finishProfile := bwtest.StartBenchmarkProfile(b)
+	defer finishProfile()
+
+	b.StartTimer()
+
+	w := openSyncBenchmarkLegacy(b, dbConn)
+	defer func() {
+		finishProfile()
+		w.StopDeprecated()
+		w.WaitForShutdown()
+	}()
+
+	w.StartDeprecated()
+	w.SynchronizeRPC(source)
+
+	// Match Info's live-tip RPC so netpoll can run on one processor. A
+	// memory-only runnable observer delays the scanner's network replies.
+	for {
+		hash, height, err := source.GetBestBlock()
+		require.NoError(b, err)
+
+		stamp := w.addrStore.SyncedTo()
+		if height == tip.Height && hash.IsEqual(&tip.Hash) &&
+			w.ChainSynced() && stamp.Height == tip.Height &&
+			stamp.Hash == tip.Hash {
+
+			break
+		}
+
+		require.NoError(b, ctx.Err())
+		runtime.Gosched()
+	}
+
+	b.StopTimer()
+	finishProfile()
+
+	// Preserve a public result census after measurement so external receipts
+	// can reject a completed scan that omitted or changed wallet funds.
+	utxos, err := w.ListUnspentDeprecated(0, 999999, "")
+	require.NoError(b, err)
+	b.Logf("startup outputs: %d", len(utxos))
+
+	outputs := make([]string, 0, len(utxos))
+	for _, utxo := range utxos {
+		amount, err := btcutil.NewAmount(utxo.Amount)
+		require.NoError(b, err)
+
+		outputs = append(outputs, fmt.Sprintf(
+			"%s:%d=%d", utxo.TxID, utxo.Vout, amount,
+		))
+	}
+	// One log line preserves the full census under Go's benchmark log limit.
+	b.Logf("startup output set: %s", strings.Join(outputs, ","))
+}
+
+// runMaintainedStartToSynced times Start through exact public Info readiness;
+// physical storage opening and all teardown remain outside the sample.
+func runMaintainedStartToSynced(b *testing.B, fixture string,
+	node *testcontainers.DockerContainer, tip waddrmgr.BlockStamp,
+	method SyncMethod) {
+
+	b.Helper()
+	// Go reports leaf logs; retain the actual endpoint with each sample.
+	b.Logf("startup target: %d:%s", tip.Height, tip.Hash)
+
+	ctx, cancel := context.WithTimeout(b.Context(), 30*time.Minute)
+	defer cancel()
+
+	source, stopSource := bwtest.NewSyncBenchmarkClient(ctx, b, node)
+	defer stopSource()
+
+	manager, err := NewManager(ctx, ManagerConfig{
+		Backend: DBBackendKVDB, DataSource: syncBenchmarkKVDBPath(b, fixture),
+		ChainParams: chaincfg.RegressionNetParams, ChainSource: source,
+		SyncMethod:              method,
+		WalletSyncRetryInterval: 10 * time.Millisecond,
+		KVDBPubPassphrase:       []byte(InsecurePubPassphrase),
+	})
+
+	require.NoError(b, err)
+	defer func() { require.NoError(b, manager.Stop()) }()
+
+	if os.Getenv("BTCWALLET_BENCH_PROFILE") != "" {
+		require.Equal(b, 1, b.N, "startup profiles require benchtime=1x")
+	}
+
+	finishProfile := bwtest.StartBenchmarkProfile(b)
+	defer finishProfile()
+
+	b.StartTimer()
+
+	wallets, err := manager.Start(ctx)
+	require.NoError(b, err)
+
+	for {
+		info, err := wallets[0].Info(ctx)
+		require.NoError(b, err)
+
+		if info.Synced && info.SyncedTo.Height == tip.Height &&
+			info.SyncedTo.Hash == tip.Hash {
+
+			break
+		}
+
+		require.NoError(b, ctx.Err())
+		runtime.Gosched()
+	}
+
+	b.StopTimer()
+	finishProfile()
+
+	// Read only after timer/profile capture; the same canonical outpoints and
+	// satoshi values must be discovered by both forced strategies.
+	utxos, err := wallets[0].ListUnspent(ctx, UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: 999999,
+	})
+	require.NoError(b, err)
+	b.Logf("startup outputs: %d", len(utxos))
+
+	outputs := make([]string, 0, len(utxos))
+	for _, utxo := range utxos {
+		outputs = append(outputs, fmt.Sprintf(
+			"%s=%d", utxo.OutPoint.String(), utxo.Amount,
+		))
+	}
+	// One log line preserves the full census under Go's benchmark log limit.
+	b.Logf("startup output set: %s", strings.Join(outputs, ","))
+}
 
 const (
 	// benchBlocksToSync is the number of blocks to generate and sync during
