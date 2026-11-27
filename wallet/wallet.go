@@ -2640,6 +2640,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 				end = endHeader.Height
 			case *chain.BitcoindClient:
 				var err error
+
 				end, err = client.GetBlockHeight(endBlock.hash)
 				if err != nil {
 					return nil, err
