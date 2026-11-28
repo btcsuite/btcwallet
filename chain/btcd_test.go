@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -268,7 +269,7 @@ func TestRPCClientSubscriptionLifecycle(t *testing.T) {
 	require.Len(t, hashes, 1)
 
 	select {
-	case ev := <-sub.Events():
+	case ev := <-sub.BlockEvents():
 		require.Equal(t, EventBlockConnected, ev.Type)
 		require.NotNil(t, ev.Block)
 		require.Equal(t, *hashes[0], ev.Block.Hash)
@@ -515,13 +516,10 @@ func TestRPCClientRelevantTxWitnessTxid(t *testing.T) {
 	// Feed the serialized witness tx into onRelevantTxAccepted.
 	client.onRelevantTxAccepted(raw.Bytes())
 
-	// Confirm an unconfirmed EventMempoolTx with canonical txid was
-	// published on the subscription.
-	ev := waitChainEvent(t, sub.Events())
-	require.Equal(t, EventMempoolTx, ev.Type)
-	require.Nil(t, ev.Block)
-	require.Len(t, ev.RelevantTxs, 1)
-	require.Equal(t, tx.TxHash(), ev.RelevantTxs[0].Hash)
+	// Confirm an unconfirmed mempool tx with canonical txid was published
+	// on the subscription's MempoolTxns channel.
+	rec := waitMempoolTx(t, sub.MempoolTxns())
+	require.Equal(t, tx.TxHash(), rec.Hash)
 }
 
 // waitChainEvent reads the next Event from ch or fails on timeout.
@@ -535,6 +533,21 @@ func waitChainEvent(t *testing.T, ch <-chan Event) Event {
 	case <-time.After(defaultTestTimeout):
 		require.FailNow(t, "timed out waiting for Event")
 		return Event{}
+	}
+}
+
+// waitMempoolTx reads the next mempool *wtxmgr.TxRecord from ch or fails on
+// timeout.
+func waitMempoolTx(t *testing.T, ch <-chan *wtxmgr.TxRecord) *wtxmgr.TxRecord {
+	t.Helper()
+
+	select {
+	case rec, ok := <-ch:
+		require.True(t, ok, "unexpected closed MempoolTxns channel")
+		return rec
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for mempool tx")
+		return nil
 	}
 }
 
@@ -567,7 +580,7 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	)
 
 	// Broadcast the spend parent in mempool first so watched sees it via
-	// EventMempoolTx before confirmation.
+	// MempoolTxns before confirmation.
 	parent := signWPKHSpend(
 		t, fundOP, keyA, 10000, keyA.pkScript, 9000,
 	)
@@ -575,11 +588,8 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	_, err := client.SendRawTransaction(parent, true)
 	require.NoError(t, err)
 
-	memEv := waitChainEvent(t, watched.Events())
-	require.Equal(t, EventMempoolTx, memEv.Type)
-	require.Nil(t, memEv.Block)
-	require.Len(t, memEv.RelevantTxs, 1)
-	require.Equal(t, parentHash, memEv.RelevantTxs[0].Hash)
+	memRec := waitMempoolTx(t, watched.MempoolTxns())
+	require.Equal(t, parentHash, memRec.Hash)
 
 	// Build a same-block child spending parent's self-funded output and
 	// mine both directly in one block.
@@ -595,26 +605,35 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify watched receives parent then child inside one
-	// EventBlockConnected, unwatched receives an empty block event, and
-	// legacy Notifications receives parent.
-	wBlk := waitChainEvent(t, watched.Events())
+	// EventBlockConnected, unwatched receives an empty block event (and no
+	// mempool txns), and legacy Notifications receives parent.
+	wBlk := waitChainEvent(t, watched.BlockEvents())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, *minedBlk.Hash(), wBlk.Block.Hash)
 	require.Len(t, wBlk.RelevantTxs, 2)
 	require.Equal(t, parentHash, wBlk.RelevantTxs[0].Hash)
 	require.Equal(t, child.TxHash(), wBlk.RelevantTxs[1].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events())
+	uBlk := waitChainEvent(t, unwatched.BlockEvents())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, *minedBlk.Hash(), uBlk.Block.Hash)
 	require.Empty(t, uBlk.RelevantTxs)
+
+	select {
+	case extra := <-unwatched.MempoolTxns():
+		require.FailNowf(
+			t, "unexpected mempool tx",
+			"unwatched received %v", extra.Hash,
+		)
+	default:
+	}
 
 	waitForRelevantTx(t, legacy, &parentHash)
 }
 
 // TestRPCClientWatchWithoutNotifyBlocks verifies calling WatchAddrs without
 // NotifyBlocks does not stealth-enable legacy BlockConnected notifications on
-// Notifications() while still delivering watched EventMempoolTx events.
+// Notifications() while still delivering watched MempoolTxns notifications.
 func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 	t.Parallel()
 
@@ -645,9 +664,8 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 
 	// Verify sub receives the mempool tx and legacy Notifications() sees
 	// no unrequested BlockConnected before the matching RelevantTx.
-	memEv := waitChainEvent(t, sub.Events())
-	require.Equal(t, EventMempoolTx, memEv.Type)
-	require.Equal(t, txHash, memEv.RelevantTxs[0].Hash)
+	memRec := waitMempoolTx(t, sub.MempoolTxns())
+	require.Equal(t, txHash, memRec.Hash)
 
 	deadline := time.After(defaultTestTimeout)
 	for {
@@ -768,12 +786,12 @@ func TestRPCClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
 	// Act: mine more than legacyPreActivationCap blocks while unactivated,
 	// fencing handler() intake via BlockStamp(), then open Notifications(),
 	// mine a sentinel block, and mine a post-activation burst without
-	// draining legacy until sub.Events() observes the entire burst.
+	// draining legacy until sub.BlockEvents() observes the entire burst.
 	_, err = miner.Client.Generate(uint32(burst))
 	require.NoError(t, err)
 
 	for range burst {
-		ev := waitChainEvent(t, sub.Events())
+		ev := waitChainEvent(t, sub.BlockEvents())
 		require.Equal(t, EventBlockConnected, ev.Type)
 	}
 
@@ -790,7 +808,7 @@ func TestRPCClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
 	require.NoError(t, err)
 
 	for range burst + 1 {
-		ev := waitChainEvent(t, sub.Events())
+		ev := waitChainEvent(t, sub.BlockEvents())
 		require.Equal(t, EventBlockConnected, ev.Type)
 	}
 
@@ -1006,7 +1024,7 @@ func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
 	require.NoError(t, err)
 
 	for range legacyPreActivationCap {
-		ev := waitChainEvent(t, sub.Events())
+		ev := waitChainEvent(t, sub.BlockEvents())
 		require.Equal(t, EventBlockConnected, ev.Type)
 	}
 
@@ -1023,7 +1041,7 @@ func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, hashes, 1)
 
-	ev := waitChainEvent(t, sub.Events())
+	ev := waitChainEvent(t, sub.BlockEvents())
 	require.Equal(t, EventBlockConnected, ev.Type)
 
 	wantHeight := prefixTip + 1
@@ -1053,7 +1071,7 @@ func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, nextHashes, 1)
 
-	nextEv := waitChainEvent(t, sub.Events())
+	nextEv := waitChainEvent(t, sub.BlockEvents())
 	require.Equal(t, EventBlockConnected, nextEv.Type)
 
 	nextHeight := wantHeight + 1

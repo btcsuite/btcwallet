@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // mempoolAcceptResultReject is the reject reason recorded for a transaction
@@ -216,8 +217,13 @@ type noopEventSubscription struct{}
 // chain.EventSubscription.
 var _ chain.EventSubscription = noopEventSubscription{}
 
-// Events returns nil because MempoolChain never emits live chain events.
-func (noopEventSubscription) Events() <-chan chain.Event { return nil }
+// BlockEvents returns nil because MempoolChain never emits live block events.
+func (noopEventSubscription) BlockEvents() <-chan chain.Event { return nil }
+
+// MempoolTxns returns nil because MempoolChain never emits live mempool txns.
+func (noopEventSubscription) MempoolTxns() <-chan *wtxmgr.TxRecord {
+	return nil
+}
 
 // Done returns nil because MempoolChain never closes a live event stream.
 func (noopEventSubscription) Done() <-chan struct{} { return nil }

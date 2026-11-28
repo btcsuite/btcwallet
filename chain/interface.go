@@ -92,16 +92,19 @@ type Interface interface {
 	Notifications() <-chan interface{}
 
 	// SubscribeChainEvents enrolls an independent reader on a started
-	// client, delivering normalized [Event] values in source order.
-	// Call NotifyBlocks for block events and block-confirmed output spend
-	// tracking. Use [EventSubscription.WatchAddrs] and
-	// [EventSubscription.WatchOutputs] for scoped tx watches; local watch
-	// routing is retained until retirement, while backend-wide filter
-	// resets (LoadTxFilter) or Neutrino Rescan replacements clear native
-	// coverage unless watches are re-registered. Buffer overflow ends the
-	// subscription with [ErrEventSubscriptionBufferFull]. Check
-	// [EventSubscription.Err] after [EventSubscription.Done] closes, and
-	// cancel ctx when finished.
+	// client, delivering strictly ordered block [Event] values on
+	// [EventSubscription.BlockEvents] and best-effort unconfirmed matching
+	// txns on [EventSubscription.MempoolTxns]. Call NotifyBlocks for block
+	// events and block-confirmed output spend tracking. Use
+	// [EventSubscription.WatchAddrs] and [EventSubscription.WatchOutputs]
+	// for scoped tx watches; local watch routing is retained until
+	// retirement, while backend-wide filter resets (LoadTxFilter) or
+	// Neutrino Rescan replacements clear native coverage unless watches are
+	// re-registered. Overflowing BlockEvents closes both delivery channels
+	// and ends the subscription with [ErrEventSubscriptionBufferFull],
+	// whereas a full MempoolTxns buffer drops incoming mempool txns without
+	// retiring the subscription. Check [EventSubscription.Err] after
+	// [EventSubscription.Done] closes, and cancel ctx when finished.
 	SubscribeChainEvents(ctx context.Context) EventSubscription
 
 	BackEnd() string

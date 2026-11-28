@@ -171,7 +171,7 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 
 	// Act by filling the slow reader's buffer while draining the fast
 	// reader to keep its subscription active.
-	capacity := cap(slow.Events())
+	capacity := cap(slow.BlockEvents())
 	require.Equal(t, 100, capacity)
 
 	height := int32(2)
@@ -179,7 +179,7 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	for range capacity {
 		client.onBlockDisconnected(&hash, height, time.Time{})
 
-		ev := receiveEvent(fast.Events())
+		ev := receiveEvent(fast.BlockEvents())
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, hash, ev.Block.Hash)
 		require.Equal(t, height, ev.Block.Height)
@@ -209,7 +209,7 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	// the fast reader and exposes the slow reader's terminal result.
 	client.onBlockDisconnected(&hash, height, time.Time{})
 
-	ev := receiveEvent(fast.Events())
+	ev := receiveEvent(fast.BlockEvents())
 	require.Equal(t, EventBlockDisconnected, ev.Type)
 	require.Equal(t, height, ev.Block.Height)
 	height++
@@ -217,20 +217,20 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	waitSubDone(t, slow)
 	require.ErrorIs(t, slow.Err(), ErrEventSubscriptionBufferFull)
 
-	late := client.SubscribeChainEvents(t.Context()).Events()
+	late := client.SubscribeChainEvents(t.Context()).BlockEvents()
 
 	// The closed slow reader retains exactly the accepted prefix.
 	retained := int32(2)
 
 	for range capacity {
-		ev := receiveEvent(slow.Events())
+		ev := receiveEvent(slow.BlockEvents())
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, hash, ev.Block.Hash)
 		require.Equal(t, retained, ev.Block.Height)
 		retained++
 	}
 
-	_, open := <-slow.Events()
+	_, open := <-slow.BlockEvents()
 	require.False(t, open)
 
 	// Check late enrollment and continued fast delivery after overflow.
@@ -242,7 +242,7 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 		},
 	}
 	require.Equal(t, want, receiveEvent(late))
-	require.Equal(t, want, receiveEvent(fast.Events()))
+	require.Equal(t, want, receiveEvent(fast.BlockEvents()))
 }
 
 // TestBitcoindSubscriptionPreCanceled checks that an already-canceled
@@ -260,21 +260,28 @@ func TestBitcoindSubscriptionPreCanceled(t *testing.T) {
 	// Act by subscribing with the context that already finished.
 	sub := client.SubscribeChainEvents(ctx)
 
-	// Assert both channels are closed when the rejected call returns,
+	// Assert all channels are closed when the rejected call returns,
 	// with the source still running.
 	select {
 	case <-sub.Done():
 	default:
-		t.Fatal("refused subscription stayed active")
+		require.FailNow(t, "refused subscription stayed active")
 	}
 
 	require.NoError(t, sub.Err())
 
 	select {
-	case _, ok := <-sub.Events():
+	case _, ok := <-sub.BlockEvents():
 		require.False(t, ok)
 	default:
-		t.Fatal("refused subscription left Events open")
+		require.FailNow(t, "refused subscription left BlockEvents open")
+	}
+
+	select {
+	case _, ok := <-sub.MempoolTxns():
+		require.False(t, ok)
+	default:
+		require.FailNow(t, "refused subscription left MempoolTxns open")
 	}
 }
 
@@ -296,7 +303,7 @@ func TestBitcoindSubscriptionCancellation(t *testing.T) {
 	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	// Act by retiring the only subscriber, then publish while there is
-	// no reader. Leave the old reader's Events channel unread.
+	// no reader. Leave the old reader's BlockEvents channel unread.
 	cancel()
 	waitSubDone(t, first)
 	require.NoError(t, first.Err())
@@ -317,7 +324,7 @@ func TestBitcoindSubscriptionCancellation(t *testing.T) {
 
 	for {
 		select {
-		case event := <-next.Events():
+		case event := <-next.BlockEvents():
 			require.Equal(
 				t, EventBlockDisconnected, event.Type,
 			)
@@ -360,12 +367,12 @@ func TestBitcoindSubscriptionClientShutdown(t *testing.T) {
 	waitSubDone(t, sub)
 	require.NoError(t, sub.Err())
 
-	ev := <-sub.Events()
+	ev := <-sub.BlockEvents()
 	require.Equal(t, EventBlockDisconnected, ev.Type)
 	require.Equal(t, hash, ev.Block.Hash)
 	require.Equal(t, int32(1), ev.Block.Height)
 
-	_, ok := <-sub.Events()
+	_, ok := <-sub.BlockEvents()
 	require.False(t, ok)
 
 	// A call after retirement must return already-closed channels.
@@ -373,14 +380,21 @@ func TestBitcoindSubscriptionClientShutdown(t *testing.T) {
 	select {
 	case <-late.Done():
 	default:
-		t.Fatal("a stopped client accepted a new subscriber")
+		require.FailNow(t, "a stopped client accepted a new subscriber")
 	}
 
 	select {
-	case _, open := <-late.Events():
+	case _, open := <-late.BlockEvents():
 		require.False(t, open)
 	default:
-		t.Fatal("a stopped client left Events open")
+		require.FailNow(t, "a stopped client left BlockEvents open")
+	}
+
+	select {
+	case _, open := <-late.MempoolTxns():
+		require.False(t, open)
+	default:
+		require.FailNow(t, "a stopped client left MempoolTxns open")
 	}
 }
 
@@ -418,7 +432,7 @@ func TestBitcoindSubscriptionAfterStartRetry(t *testing.T) {
 	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	select {
-	case event := <-sub.Events():
+	case event := <-sub.BlockEvents():
 		require.Equal(t, EventBlockDisconnected, event.Type)
 		require.Equal(t, hash, event.Block.Hash)
 		require.Equal(t, int32(1), event.Block.Height)
@@ -1487,21 +1501,22 @@ func TestChainEventSubscriptionOverflowUnindexesWatches(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Overflow slow's buffer while draining fast, then publish once more.
+	// Overflow slow's block buffer while draining fast, then publish once
+	// more.
 	for i := range chainEventSubscriberBufferSize + 1 {
 		blk := BlockDisconnected{
 			Block: wtxmgr.Block{Height: int32(i)},
 		}
 		stream.publish(blk)
 
-		ev := <-fast.Events()
+		ev := <-fast.BlockEvents()
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, int32(i), ev.Block.Height)
 	}
 
 	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 999}})
 
-	ev := <-fast.Events()
+	ev := <-fast.BlockEvents()
 	require.Equal(t, int32(999), ev.Block.Height)
 
 	// Assert slow retired with ErrEventSubscriptionBufferFull and released
@@ -1707,10 +1722,20 @@ func TestChainEventSubscriptionWatchRegistration(t *testing.T) {
 	// WatchOutputs delivers the synchronous spend only to watched.
 	require.NoError(t, liveOutErr)
 
-	ev := <-watched.Events()
-	require.Equal(t, EventMempoolTx, ev.Type)
-	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, ev.RelevantTxs)
-	require.Equal(t, EventBlockDisconnected, (<-unwatched.Events()).Type)
+	rec := <-watched.MempoolTxns()
+	require.Equal(t, spendRec, rec)
+	require.Equal(
+		t, EventBlockDisconnected, (<-unwatched.BlockEvents()).Type,
+	)
+
+	select {
+	case extra := <-unwatched.MempoolTxns():
+		require.FailNowf(
+			t, "unexpected mempool tx",
+			"unwatched received %v", extra.Hash,
+		)
+	default:
+	}
 
 	cancel()
 	waitSubDone(t, watched)
@@ -1877,30 +1902,18 @@ func TestChainEventSubscriptionWatchRollbackError(t *testing.T) {
 	require.ErrorIs(t, addrErr, regErr)
 	require.ErrorIs(t, outErr, regErr)
 
-	okAddrEv := waitChainEvent(t, subOK.Events())
-	require.Equal(t, EventMempoolTx, okAddrEv.Type)
-	require.Equal(t, []*wtxmgr.TxRecord{failAddrRec}, okAddrEv.RelevantTxs)
+	require.Equal(t, failAddrRec, waitMempoolTx(t, subOK.MempoolTxns()))
+	require.Equal(t, failOPRec, waitMempoolTx(t, subOK.MempoolTxns()))
+	require.Empty(t, subOK.MempoolTxns())
 
-	okOPEv := waitChainEvent(t, subOK.Events())
-	require.Equal(t, EventMempoolTx, okOPEv.Type)
-	require.Equal(t, []*wtxmgr.TxRecord{failOPRec}, okOPEv.RelevantTxs)
-
-	okBarrier := waitChainEvent(t, subOK.Events())
+	okBarrier := waitChainEvent(t, subOK.BlockEvents())
 	require.Equal(t, EventBlockDisconnected, okBarrier.Type)
 
-	failKeepAddrEv := waitChainEvent(t, subFail.Events())
-	require.Equal(t, EventMempoolTx, failKeepAddrEv.Type)
-	require.Equal(
-		t, []*wtxmgr.TxRecord{keepAddrRec}, failKeepAddrEv.RelevantTxs,
-	)
+	require.Equal(t, keepAddrRec, waitMempoolTx(t, subFail.MempoolTxns()))
+	require.Equal(t, keepOPRec, waitMempoolTx(t, subFail.MempoolTxns()))
+	require.Empty(t, subFail.MempoolTxns())
 
-	failKeepOPEv := waitChainEvent(t, subFail.Events())
-	require.Equal(t, EventMempoolTx, failKeepOPEv.Type)
-	require.Equal(
-		t, []*wtxmgr.TxRecord{keepOPRec}, failKeepOPEv.RelevantTxs,
-	)
-
-	failBarrier := waitChainEvent(t, subFail.Events())
+	failBarrier := waitChainEvent(t, subFail.BlockEvents())
 	require.Equal(t, EventBlockDisconnected, failBarrier.Type)
 	mc.AssertExpectations(t)
 }
@@ -1965,15 +1978,10 @@ func TestChainEventSubscriptionAutoWatchRollbackError(t *testing.T) {
 	// outpoint survived rollback and delivered the subsequent spend.
 	require.ErrorIs(t, watchErr, regErr)
 
-	fundEv := waitChainEvent(t, watched.Events())
-	require.Equal(t, EventMempoolTx, fundEv.Type)
-	require.Equal(t, []*wtxmgr.TxRecord{fundRec}, fundEv.RelevantTxs)
+	require.Equal(t, fundRec, waitMempoolTx(t, watched.MempoolTxns()))
+	require.Equal(t, spendRec, waitMempoolTx(t, watched.MempoolTxns()))
 
-	spendEv := waitChainEvent(t, watched.Events())
-	require.Equal(t, EventMempoolTx, spendEv.Type)
-	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, spendEv.RelevantTxs)
-
-	barrierEv := waitChainEvent(t, watched.Events())
+	barrierEv := waitChainEvent(t, watched.BlockEvents())
 	require.Equal(t, EventBlockDisconnected, barrierEv.Type)
 	mc.AssertExpectations(t)
 }
@@ -2030,8 +2038,8 @@ func TestChainEventSubscriptionWatchConcurrentClose(t *testing.T) {
 	}
 }
 
-// TestChainEventSubscriptionMempoolTx verifies unconfirmed RelevantTx emits
-// EventMempoolTx only to matched listeners while confirmed RelevantTx is
+// TestChainEventSubscriptionMempoolTx verifies unconfirmed RelevantTx delivers
+// on MempoolTxns only to matched listeners while confirmed RelevantTx is
 // ignored on EventSubscription.
 func TestChainEventSubscriptionMempoolTx(t *testing.T) {
 	t.Parallel()
@@ -2071,18 +2079,19 @@ func TestChainEventSubscriptionMempoolTx(t *testing.T) {
 	stream.publish(RelevantTx{TxRecord: mempoolRec, Block: nil})
 	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 2}})
 
-	// Confirm watched receives only the unconfirmed mempool tx immediately
-	// followed by the disconnect barrier, while unwatched skips straight
-	// to the disconnect barrier.
-	ev := <-watched.Events()
-	require.Equal(t, EventMempoolTx, ev.Type)
-	require.Nil(t, ev.Block)
-	require.Equal(t, []*wtxmgr.TxRecord{mempoolRec}, ev.RelevantTxs)
+	// Confirm watched receives only the unconfirmed mempool tx on
+	// MempoolTxns and the disconnect barrier on BlockEvents, while
+	// unwatched receives nothing on MempoolTxns.
+	require.Equal(t, mempoolRec, <-watched.MempoolTxns())
+	require.Empty(t, watched.MempoolTxns())
+	require.Empty(t, unwatched.MempoolTxns())
 
-	barrier := <-watched.Events()
+	barrier := <-watched.BlockEvents()
 	require.Equal(t, EventBlockDisconnected, barrier.Type)
 	require.Equal(t, int32(2), barrier.Block.Height)
-	require.Equal(t, EventBlockDisconnected, (<-unwatched.Events()).Type)
+	require.Equal(
+		t, EventBlockDisconnected, (<-unwatched.BlockEvents()).Type,
+	)
 	mc.AssertExpectations(t)
 }
 
@@ -2144,9 +2153,9 @@ func TestChainEventSubscriptionBlockEvents(t *testing.T) {
 	stream.publish(BlockDisconnected(*blk))
 
 	// Confirm watched receives only parent and child in block order without
-	// mutating origSlice, unwatched receives an empty block, and the
-	// disconnect follows.
-	wBlk := <-watched.Events()
+	// mutating origSlice, unwatched receives an empty block, the
+	// disconnect follows, and MempoolTxns stays empty.
+	wBlk := <-watched.BlockEvents()
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, blk, wBlk.Block)
 	require.Equal(
@@ -2157,13 +2166,15 @@ func TestChainEventSubscriptionBlockEvents(t *testing.T) {
 		origSlice,
 	)
 
-	uBlk := <-unwatched.Events()
+	uBlk := <-unwatched.BlockEvents()
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Nil(t, uBlk.RelevantTxs)
 
-	wDisc := <-watched.Events()
+	wDisc := <-watched.BlockEvents()
 	require.Equal(t, EventBlockDisconnected, wDisc.Type)
 	require.Equal(t, blk.Hash, wDisc.Block.Hash)
+	require.Empty(t, watched.MempoolTxns())
+	require.Empty(t, unwatched.MempoolTxns())
 	require.Equal(t, EventUnknown, Event{}.Type)
 	mc.AssertExpectations(t)
 }
@@ -2215,25 +2226,24 @@ func TestBitcoindScopedWatch(t *testing.T) {
 	}
 	client.filterBlock(block, 10, true)
 
-	// Watched receives EventMempoolTx then the connected block with
-	// blockTx and spendTx; unwatched receives only the empty connected block.
-	memEv := waitChainEvent(t, watched.Events())
-	require.Equal(t, EventMempoolTx, memEv.Type)
-	require.Nil(t, memEv.Block)
-	require.Len(t, memEv.RelevantTxs, 1)
-	require.Equal(t, rec.Hash, memEv.RelevantTxs[0].Hash)
+	// Watched receives the mempool tx on MempoolTxns and the connected
+	// block with blockTx and spendTx on BlockEvents; unwatched receives
+	// only the empty connected block and no mempool txns.
+	memRec := waitMempoolTx(t, watched.MempoolTxns())
+	require.Equal(t, rec.Hash, memRec.Hash)
 
-	wBlk := waitChainEvent(t, watched.Events())
+	wBlk := waitChainEvent(t, watched.BlockEvents())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, int32(10), wBlk.Block.Height)
 	require.Len(t, wBlk.RelevantTxs, 2)
 	require.Equal(t, blockTx.TxHash(), wBlk.RelevantTxs[0].Hash)
 	require.Equal(t, spendTx.TxHash(), wBlk.RelevantTxs[1].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events())
+	uBlk := waitChainEvent(t, unwatched.BlockEvents())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, int32(10), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)
+	require.Empty(t, unwatched.MempoolTxns())
 }
 
 // waitLegacyNotification reads the next legacy notification or fails on
@@ -2275,7 +2285,7 @@ func TestBitcoindClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
 		hash := chainhash.Hash{byte(i)}
 		client.onBlockDisconnected(&hash, i, time.Time{})
 
-		ev := waitChainEvent(t, sub.Events())
+		ev := waitChainEvent(t, sub.BlockEvents())
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, i, ev.Block.Height)
 	}
@@ -2293,13 +2303,13 @@ func TestBitcoindClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
 
 	sentinelHash := chainhash.Hash{byte(sentinelHeight)}
 	client.onBlockDisconnected(&sentinelHash, sentinelHeight, time.Time{})
-	waitChainEvent(t, sub.Events())
+	waitChainEvent(t, sub.BlockEvents())
 
 	for i := int32(1); i <= int32(burst); i++ {
 		h := sentinelHeight + i
 		hash := chainhash.Hash{byte(h)}
 		client.onBlockDisconnected(&hash, h, time.Time{})
-		waitChainEvent(t, sub.Events())
+		waitChainEvent(t, sub.BlockEvents())
 	}
 
 	// Assert: ClientConnected and 19 prefix items precede the sentinel
@@ -2348,7 +2358,7 @@ func TestBitcoindClientRescanActivatesLegacyQueue(t *testing.T) {
 	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
 		hash := chainhash.Hash{byte(i)}
 		client.onBlockDisconnected(&hash, i, time.Time{})
-		waitChainEvent(t, sub.Events())
+		waitChainEvent(t, sub.BlockEvents())
 	}
 
 	const fenceHeight int32 = -1

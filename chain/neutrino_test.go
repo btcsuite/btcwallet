@@ -167,7 +167,7 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	select {
-	case ev := <-first.Events():
+	case ev := <-first.BlockEvents():
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, hash, ev.Block.Hash)
 		require.Equal(t, int32(1), ev.Block.Height)
@@ -197,7 +197,7 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	}
 
 	select {
-	case ev := <-second.Events():
+	case ev := <-second.BlockEvents():
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, nextHash, ev.Block.Hash)
 		require.Equal(t, int32(2), ev.Block.Height)
@@ -498,13 +498,13 @@ func TestNeutrinoClientScopedWatch(t *testing.T) {
 
 	// Watched receives the tx inside EventBlockConnected; unwatched
 	// receives the block with zero relevant txns.
-	wBlk := waitChainEvent(t, watched.Events())
+	wBlk := waitChainEvent(t, watched.BlockEvents())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, int32(11), wBlk.Block.Height)
 	require.Len(t, wBlk.RelevantTxs, 1)
 	require.Equal(t, txHash, wBlk.RelevantTxs[0].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events())
+	uBlk := waitChainEvent(t, unwatched.BlockEvents())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, int32(11), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)
@@ -543,7 +543,7 @@ func TestNeutrinoClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
 		hash := chainhash.Hash{byte(i)}
 		client.onBlockDisconnected(&hash, i, time.Time{})
 
-		ev := waitChainEvent(t, sub.Events())
+		ev := waitChainEvent(t, sub.BlockEvents())
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, i, ev.Block.Height)
 	}
@@ -557,13 +557,13 @@ func TestNeutrinoClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
 
 	sentinelHash := chainhash.Hash{byte(sentinelHeight)}
 	client.onBlockDisconnected(&sentinelHash, sentinelHeight, time.Time{})
-	waitChainEvent(t, sub.Events())
+	waitChainEvent(t, sub.BlockEvents())
 
 	for i := int32(1); i <= int32(burst); i++ {
 		h := sentinelHeight + i
 		hash := chainhash.Hash{byte(h)}
 		client.onBlockDisconnected(&hash, h, time.Time{})
-		waitChainEvent(t, sub.Events())
+		waitChainEvent(t, sub.BlockEvents())
 	}
 
 	// Assert: ClientConnected and 19 prefix items precede the sentinel,
@@ -623,7 +623,7 @@ func TestNeutrinoClientRestartResetsLegacyQueueBound(t *testing.T) {
 	for i := int32(1); i <= int32(burst); i++ {
 		hash := chainhash.Hash{byte(i)}
 		client.onBlockDisconnected(&hash, i, time.Time{})
-		waitChainEvent(t, sub.Events())
+		waitChainEvent(t, sub.BlockEvents())
 	}
 
 	_, err := client.BlockStamp()
@@ -635,7 +635,7 @@ func TestNeutrinoClientRestartResetsLegacyQueueBound(t *testing.T) {
 
 	sentinelHash := chainhash.Hash{byte(sentinelHeight)}
 	client.onBlockDisconnected(&sentinelHash, sentinelHeight, time.Time{})
-	waitChainEvent(t, sub.Events())
+	waitChainEvent(t, sub.BlockEvents())
 
 	// Assert: generation 2 retained only ClientConnected plus 19 prefix
 	// items before the sentinel, proving restart reset activation.
@@ -689,7 +689,7 @@ func TestNeutrinoClientRescanActivatesLegacyQueue(t *testing.T) {
 	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
 		hash := chainhash.Hash{byte(i)}
 		client.onBlockDisconnected(&hash, i, time.Time{})
-		waitChainEvent(t, sub.Events())
+		waitChainEvent(t, sub.BlockEvents())
 	}
 
 	_, err := client.BlockStamp()
@@ -747,7 +747,7 @@ func TestNeutrinoClientBlockStampAdvancesAtIntake(t *testing.T) {
 	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
 		hash := chainhash.Hash{byte(i)}
 		client.onBlockDisconnected(&hash, i, time.Time{})
-		waitChainEvent(t, sub.Events())
+		waitChainEvent(t, sub.BlockEvents())
 	}
 
 	_, err := client.BlockStamp()
@@ -772,7 +772,7 @@ func TestNeutrinoClientBlockStampAdvancesAtIntake(t *testing.T) {
 	// Act: activate Notifications(), verify BlockStamp() immediately hands
 	// off to the dequeued legacy stamp even before another event arrives,
 	// then deliver a newer BlockConnected while leaving legacy unread and
-	// fence intake via a trailing disconnect on sub.Events().
+	// fence intake via a trailing disconnect on sub.BlockEvents().
 	legacy := client.Notifications()
 
 	bs, err := client.BlockStamp()
@@ -787,7 +787,7 @@ func TestNeutrinoClientBlockStampAdvancesAtIntake(t *testing.T) {
 
 	client.onBlockConnected(&nextHash, nextHeight, time.Unix(2, 0))
 	client.onBlockDisconnected(&fenceHash, 27, time.Time{})
-	waitChainEvent(t, sub.Events())
+	waitChainEvent(t, sub.BlockEvents())
 
 	// Assert: BlockStamp() still reports the initial/last-dequeued legacy
 	// stamp (height 0) after post-activation intake, then advances to
