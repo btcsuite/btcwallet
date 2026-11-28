@@ -20,6 +20,10 @@ import (
 // the chain.
 const isCurrentDelta = 2 * time.Hour
 
+// legacyPreActivationCap bounds unread legacy Notifications() entries retained
+// before Notifications() or Rescan() activates unbounded legacy buffering.
+const legacyPreActivationCap = 20
+
 // BackEnds returns a list of the available back ends.
 // TODO: Refactor each into a driver and use dynamic registration.
 func BackEnds() []string {
@@ -50,6 +54,9 @@ type Interface interface {
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
+	// Rescan initiates a legacy historical rescan. Calling Rescan activates
+	// unbounded legacy Notifications() buffering for the current run; drain
+	// Notifications() continually per its contract.
 	Rescan(*chainhash.Hash, []address.Address,
 		map[wire.OutPoint]address.Address) error
 	NotifyReceived([]address.Address) error
@@ -67,26 +74,39 @@ type Interface interface {
 	WatchAddrsFromTip(context.Context, []address.Address) error
 	NotifyBlocks() error
 
-	// Notifications returns the client's shared, unbounded notification
-	// queue. Drain it continually to release queued events, including
-	// while subscriptions are active. On btcd and Neutrino, legacy
-	// dequeue also advances BlockStamp.
+	// Notifications returns the client's shared legacy notification queue.
+	// Before Notifications() or Rescan() is called for the current run,
+	// backends retain at most 20 startup notifications (preserving the
+	// initial ClientConnected marker), permanently drop later legacy
+	// notifications, and advance BlockStamp on BlockConnected intake (on
+	// btcd and Neutrino). Calling Notifications() or Rescan() activates
+	// unbounded FIFO buffering; drain continually once activated, and on
+	// btcd and Neutrino BlockStamp advances on legacy BlockConnected
+	// dequeue. Backends allocating a fresh stream in Start (e.g.
+	// NeutrinoClient, nil before Start and reset on restart) require
+	// calling Notifications() after each Start and before enabling
+	// notification producers for lossless delivery.
 	//
 	// Deprecated: Use [Interface.SubscribeChainEvents] for independent
 	// subscriptions.
 	Notifications() <-chan interface{}
 
 	// SubscribeChainEvents enrolls an independent reader on a started
-	// client, delivering normalized [Event] values in source order.
-	// Call NotifyBlocks for block events and block-confirmed output spend
-	// tracking. Use [EventSubscription.WatchAddrs] and
-	// [EventSubscription.WatchOutputs] for scoped tx watches; local watch
-	// routing is retained until retirement, while backend-wide filter
-	// resets (LoadTxFilter) or Neutrino Rescan replacements clear native
-	// coverage unless watches are re-registered. Buffer overflow ends the
-	// subscription with [ErrEventSubscriptionBufferFull]. Check
-	// [EventSubscription.Err] after Done closes, and cancel ctx when
-	// finished.
+	// client, delivering strictly ordered block [Event] values on
+	// [EventSubscription.BlockEvents] and best-effort unconfirmed matching
+	// txns on [EventSubscription.MempoolTxns]. Call NotifyBlocks for block
+	// events and block-confirmed output spend tracking. Use
+	// [EventSubscription.WatchAddrs] and [EventSubscription.WatchOutputs]
+	// for scoped tx watches; local watch routing is retained until
+	// retirement, while backend-wide filter resets (LoadTxFilter) or
+	// Neutrino Rescan replacements clear native coverage unless watches are
+	// re-registered. Overflowing BlockEvents closes both delivery channels
+	// and ends the subscription with [ErrEventSubscriptionBufferFull],
+	// whereas a full MempoolTxns buffer drops incoming mempool txns without
+	// retiring the subscription. Check [EventSubscription.Err] after
+	// [EventSubscription.Done] closes (Cancel and ctx cancellation report
+	// the context error; source shutdown reports nil), and call
+	// [EventSubscription.Cancel] or cancel ctx when finished.
 	SubscribeChainEvents(ctx context.Context) EventSubscription
 
 	BackEnd() string

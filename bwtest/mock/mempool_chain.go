@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // mempoolAcceptResultReject is the reject reason recorded for a transaction
@@ -208,11 +209,61 @@ func (c *MempoolChain) NotifyBlocks() error { return nil }
 // Notifications implements the chain.Interface interface.
 func (c *MempoolChain) Notifications() <-chan any { return nil }
 
+// noopEventSubscription disables live chain events for MempoolChain while
+// matching zero-value subscription semantics.
+type noopEventSubscription struct{}
+
+// A compile-time assertion to ensure noopEventSubscription implements
+// chain.EventSubscription.
+var _ chain.EventSubscription = noopEventSubscription{}
+
+// BlockEvents returns nil because MempoolChain never emits live block events.
+func (noopEventSubscription) BlockEvents() <-chan chain.Event { return nil }
+
+// MempoolTxns returns nil because MempoolChain never emits live mempool txns.
+func (noopEventSubscription) MempoolTxns() <-chan *wtxmgr.TxRecord {
+	return nil
+}
+
+// Done returns nil because MempoolChain never closes a live event stream.
+func (noopEventSubscription) Done() <-chan struct{} { return nil }
+
+// Err returns nil because MempoolChain never terminates a live event stream.
+func (noopEventSubscription) Err() error { return nil }
+
+// Cancel is a no-op because MempoolChain never opens a live event stream.
+func (noopEventSubscription) Cancel() {}
+
+// rejectWatch rejects watch registration because no live stream is attached,
+// preserving any caller context error such as DeadlineExceeded.
+func (noopEventSubscription) rejectWatch(ctx context.Context) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	return context.Canceled
+}
+
+// WatchAddrs rejects watch registration because no live stream is attached.
+func (s noopEventSubscription) WatchAddrs(ctx context.Context,
+	_ []address.Address) error {
+
+	return s.rejectWatch(ctx)
+}
+
+// WatchOutputs rejects watch registration because no live stream is attached.
+func (s noopEventSubscription) WatchOutputs(ctx context.Context,
+	_ []*wire.OutPoint) error {
+
+	return s.rejectWatch(ctx)
+}
+
 // SubscribeChainEvents disables live input for the broadcast benchmark.
 func (c *MempoolChain) SubscribeChainEvents(
 	_ context.Context) chain.EventSubscription {
 
-	return chain.EventSubscription{}
+	return noopEventSubscription{}
 }
 
 // BackEnd implements the chain.Interface interface.

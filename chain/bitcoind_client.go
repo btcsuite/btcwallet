@@ -99,16 +99,17 @@ type BitcoindClient struct {
 	// NOTE: This requires the watchMtx to be held.
 	expiredMempool map[int32]map[chainhash.Hash]struct{}
 
-	// notificationQueue is a concurrent unbounded queue that handles
-	// dispatching notifications to the subscriber of this client.
-	//
-	// TODO: Rather than leaving this as an unbounded queue for all types of
-	// notifications, try dropping ones where a later enqueued notification
-	// can fully invalidate one waiting to be processed. For example,
-	// BlockConnected notifications for greater block heights can remove the
-	// need to process earlier notifications still waiting to be processed.
+	// notificationQueue dispatches legacy notifications to callers of
+	// Notifications(). Before Notifications() or Rescan() is called, it
+	// retains at most legacyPreActivationCap entries in its output channel
+	// and drops later notifications; once activated, it overflows into an
+	// unbounded FIFO list that must be drained continually.
 	notificationQueue *ConcurrentQueue
 	eventStream       *chainEventStream
+
+	// legacyNotificationsActive enables unbounded overflow once
+	// Notifications() or Rescan() is called.
+	legacyNotificationsActive atomic.Bool
 
 	// txNtfns is a channel through which transaction events will be
 	// retrieved from the backing bitcoind connection, either via ZMQ or
@@ -349,10 +350,14 @@ func (c *BitcoindClient) SubmitPackage(txns []*wire.MsgTx,
 	return result, nil
 }
 
-// Notifications returns a channel to retrieve notifications from.
+// Notifications returns a channel to retrieve notifications from and activates
+// unbounded overflow buffering; see Interface.Notifications for the contract.
 //
 // NOTE: This is part of the chain.Interface interface.
 func (c *BitcoindClient) Notifications() <-chan interface{} {
+	// Enable unbounded overflow now that a legacy consumer is reading.
+	c.legacyNotificationsActive.Store(true)
+
 	return c.notificationQueue.ChanOut()
 }
 
@@ -585,6 +590,8 @@ func (c *BitcoindClient) RescanBlocks(
 
 // Rescan rescans from the block with the given hash until the current block,
 // after adding the passed addresses and outpoints to the client's watch list.
+// Calling Rescan activates unbounded legacy Notifications() buffering; drain
+// Notifications() per its contract.
 func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 	addresses []address.Address,
 	outPoints map[wire.OutPoint]address.Address) error {
@@ -593,6 +600,9 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 	if blockHash == nil {
 		return errors.New("rescan requires a starting block hash")
 	}
+
+	// Enable unbounded legacy buffering before rescan emits completion.
+	c.legacyNotificationsActive.Store(true)
 
 	// We'll then update our filters with the given outpoints and addresses.
 	c.updateWatchedFilters(addresses)
@@ -662,11 +672,13 @@ func (c *BitcoindClient) Start(_ context.Context) error {
 
 	// The startup marker predates enrollment. Seed it in the FIFO so
 	// only future intake can publish to subscribers.
-	c.notificationQueue.enqueue(ClientConnected{})
+	c.notificationQueue.enqueue(ClientConnected{}, true)
 	c.wg.Go(func() {
 		defer stream.close()
 
-		c.notificationQueue.run(stream, c.chainConn.quit)
+		c.notificationQueue.run(
+			stream, c.chainConn.quit, &c.legacyNotificationsActive,
+		)
 	})
 	c.eventStream = stream
 

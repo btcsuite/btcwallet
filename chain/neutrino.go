@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -43,13 +44,18 @@ type NeutrinoClient struct {
 	newRescan newRescanFunc
 	rescanMtx sync.Mutex
 
-	enqueueNotification     chan interface{}
-	dequeueNotification     chan interface{}
-	eventStream             *chainEventStream
+	enqueueNotification chan any
+	dequeueNotification chan any
+	eventStream         *chainEventStream
+
+	// legacyNotificationsActive tracks whether this Start() run activated
+	// unbounded legacy buffering via Notifications() or Rescan().
+	legacyNotificationsActive *atomic.Bool
+
 	startTime               time.Time
 	lastProgressSent        bool
 	lastFilteredBlockHeader *wire.BlockHeader
-	currentBlock            chan *waddrmgr.BlockStamp
+	currentBlock            chan blockStampSnapshot
 
 	quit       chan struct{}
 	rescanQuit chan struct{}
@@ -116,12 +122,15 @@ func (s *NeutrinoClient) Start(ctx context.Context) error {
 		// Reset the client state.
 		s.enqueueNotification = make(chan interface{})
 		s.dequeueNotification = make(chan interface{})
-		s.currentBlock = make(chan *waddrmgr.BlockStamp)
+		s.currentBlock = make(chan blockStampSnapshot)
 		s.quit = make(chan struct{})
 		s.started = true
 
 		// Each client run owns a fresh enrollment and cancellation scope.
 		s.eventStream = newChainEventStream(s.chainParams, s)
+
+		// Start each run bounded until Notifications() or Rescan().
+		s.legacyNotificationsActive = &atomic.Bool{}
 
 		// Go launch the notification handler.
 		s.wg.Add(1)
@@ -184,8 +193,8 @@ func (s *NeutrinoClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 // if the client has been shut down.
 func (s *NeutrinoClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
-	case bs := <-s.currentBlock:
-		return bs, nil
+	case snap := <-s.currentBlock:
+		return snap.current(), nil
 	case <-s.quit:
 		return nil, errors.New("disconnected")
 	}
@@ -423,7 +432,9 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 	return nil, err
 }
 
-// Rescan replicates the RPC client's Rescan command.
+// Rescan replicates the RPC client's Rescan command. Calling Rescan activates
+// unbounded legacy Notifications() buffering for this run; drain
+// Notifications() per its contract.
 //
 //nolint:cyclop
 func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash,
@@ -440,6 +451,9 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash,
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
+
+	// Enable unbounded legacy buffering before rescan emits notifications.
+	s.legacyNotificationsActive.Store(true)
 	if s.scanning {
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
@@ -601,9 +615,22 @@ func (s *NeutrinoClient) WatchAddrsFromTip(ctx context.Context,
 	return s.NotifyReceived(addrs)
 }
 
-// Notifications replicates the RPC client's Notifications method.
+// Notifications replicates the RPC client's Notifications method and activates
+// unbounded legacy buffering for the current run. Call Notifications after
+// each successful Start and before enabling notification producers; it returns
+// nil before Start and resets on restart.
 func (s *NeutrinoClient) Notifications() <-chan interface{} {
-	return s.dequeueNotification
+	// Snapshot the current run's channel and activation flag under lock.
+	s.clientMtx.Lock()
+	ch := s.dequeueNotification
+	active := s.legacyNotificationsActive
+	s.clientMtx.Unlock()
+
+	if active != nil {
+		active.Store(true)
+	}
+
+	return ch
 }
 
 // SubscribeChainEvents enrolls a reader on the started NeutrinoClient.
@@ -881,13 +908,21 @@ func (s *NeutrinoClient) dispatchRescanFinished() {
 	}
 }
 
-// notificationHandler queues and dequeues notifications. There are currently
-// no bounds on the queue, so the dequeue channel should be read continually to
-// avoid running out of memory.
+// notificationHandler queues and dequeues notifications for one Start() run.
+// Before Notifications() or Rescan() activates legacy buffering for the run,
+// it retains at most legacyPreActivationCap unread legacy entries and drops
+// later legacy notifications; once activated, the queue is unbounded and the
+// dequeue channel must be read continually to avoid running out of memory.
 func (s *NeutrinoClient) notificationHandler() {
 	defer s.wg.Done()
 
+	// Capture this run's stream and legacy activation flag under clientMtx
+	// so restarts cannot race with the active handler generation.
+	s.clientMtx.Lock()
 	stream := s.eventStream
+	legacyActive := s.legacyNotificationsActive
+	s.clientMtx.Unlock()
+
 	defer stream.close()
 
 	hash, height, err := s.GetBestBlock()
@@ -899,6 +934,7 @@ func (s *NeutrinoClient) notificationHandler() {
 	}
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
+	intakeBS := bs
 
 	// TODO: Rather than leaving this as an unbounded queue for all types of
 	// notifications, try dropping ones where a later enqueued notification
@@ -919,6 +955,7 @@ out:
 		s.clientMtx.Lock()
 		rescanErr := s.rescanErr
 		s.clientMtx.Unlock()
+
 		select {
 		case n, ok := <-enqueue:
 			if !ok {
@@ -938,6 +975,25 @@ out:
 				stream.publish(n)
 			}
 
+			// While no legacy consumer is active, advance intakeBS
+			// (after scoped publication) and drop excess legacy
+			// entries past legacyPreActivationCap so scoped-only
+			// callers observe live tip progress without draining
+			// Notifications(). Once activated, BlockStamp serves bs,
+			// which advances only on dequeue to preserve the
+			// legacy-delivery fence.
+			if !legacyActive.Load() {
+				if blk, ok := n.(BlockConnected); ok {
+					intakeBS = &waddrmgr.BlockStamp{
+						Height: blk.Height,
+						Hash:   blk.Hash,
+					}
+				}
+
+				if len(notifications) >= legacyPreActivationCap {
+					continue
+				}
+			}
 			if len(notifications) == 0 {
 				next = n
 				dequeue = s.dequeueNotification
@@ -970,7 +1026,11 @@ out:
 				log.Errorf("Neutrino rescan ended with error: %s", err)
 			}
 
-		case s.currentBlock <- bs:
+		case s.currentBlock <- blockStampSnapshot{
+			dequeued:     bs,
+			intake:       intakeBS,
+			legacyActive: legacyActive,
+		}:
 
 		case <-s.quit:
 			break out

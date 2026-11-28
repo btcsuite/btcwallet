@@ -3,12 +3,19 @@ package chain
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -16,6 +23,9 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/btcsuite/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -267,7 +277,7 @@ func TestRPCClientSubscriptionLifecycle(t *testing.T) {
 	require.Len(t, hashes, 1)
 
 	select {
-	case ev := <-sub.Events:
+	case ev := <-sub.BlockEvents():
 		require.Equal(t, EventBlockConnected, ev.Type)
 		require.NotNil(t, ev.Block)
 		require.Equal(t, *hashes[0], ev.Block.Hash)
@@ -282,10 +292,11 @@ func TestRPCClientSubscriptionLifecycle(t *testing.T) {
 	require.Equal(t, *hashes[0], legacyHash)
 	cancel()
 
-	// Assert cancellation retires this reader while the owner is still
-	// running. A different live context then exercises handler shutdown.
+	// Assert cancellation retires this reader with context.Canceled while
+	// the owner is still running. A different live context then exercises
+	// handler shutdown (nil Err).
 	waitSubDone(t, sub)
-	require.NoError(t, sub.Err())
+	require.ErrorIs(t, sub.Err(), context.Canceled)
 
 	live := client.SubscribeChainEvents(t.Context())
 	client.Stop()
@@ -514,13 +525,10 @@ func TestRPCClientRelevantTxWitnessTxid(t *testing.T) {
 	// Feed the serialized witness tx into onRelevantTxAccepted.
 	client.onRelevantTxAccepted(raw.Bytes())
 
-	// Confirm an unconfirmed EventMempoolTx with canonical txid was
-	// published on the subscription.
-	ev := waitChainEvent(t, sub.Events)
-	require.Equal(t, EventMempoolTx, ev.Type)
-	require.Nil(t, ev.Block)
-	require.Len(t, ev.RelevantTxs, 1)
-	require.Equal(t, tx.TxHash(), ev.RelevantTxs[0].Hash)
+	// Confirm an unconfirmed mempool tx with canonical txid was published
+	// on the subscription's MempoolTxns channel.
+	rec := waitMempoolTx(t, sub.MempoolTxns())
+	require.Equal(t, tx.TxHash(), rec.Hash)
 }
 
 // waitChainEvent reads the next Event from ch or fails on timeout.
@@ -534,6 +542,21 @@ func waitChainEvent(t *testing.T, ch <-chan Event) Event {
 	case <-time.After(defaultTestTimeout):
 		require.FailNow(t, "timed out waiting for Event")
 		return Event{}
+	}
+}
+
+// waitMempoolTx reads the next mempool *wtxmgr.TxRecord from ch or fails on
+// timeout.
+func waitMempoolTx(t *testing.T, ch <-chan *wtxmgr.TxRecord) *wtxmgr.TxRecord {
+	t.Helper()
+
+	select {
+	case rec, ok := <-ch:
+		require.True(t, ok, "unexpected closed MempoolTxns channel")
+		return rec
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for mempool tx")
+		return nil
 	}
 }
 
@@ -566,7 +589,7 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	)
 
 	// Broadcast the spend parent in mempool first so watched sees it via
-	// EventMempoolTx before confirmation.
+	// MempoolTxns before confirmation.
 	parent := signWPKHSpend(
 		t, fundOP, keyA, 10000, keyA.pkScript, 9000,
 	)
@@ -574,11 +597,8 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	_, err := client.SendRawTransaction(parent, true)
 	require.NoError(t, err)
 
-	memEv := waitChainEvent(t, watched.Events)
-	require.Equal(t, EventMempoolTx, memEv.Type)
-	require.Nil(t, memEv.Block)
-	require.Len(t, memEv.RelevantTxs, 1)
-	require.Equal(t, parentHash, memEv.RelevantTxs[0].Hash)
+	memRec := waitMempoolTx(t, watched.MempoolTxns())
+	require.Equal(t, parentHash, memRec.Hash)
 
 	// Build a same-block child spending parent's self-funded output and
 	// mine both directly in one block.
@@ -594,26 +614,35 @@ func TestRPCClientScopedWatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify watched receives parent then child inside one
-	// EventBlockConnected, unwatched receives an empty block event, and
-	// legacy Notifications receives parent.
-	wBlk := waitChainEvent(t, watched.Events)
+	// EventBlockConnected, unwatched receives an empty block event (and no
+	// mempool txns), and legacy Notifications receives parent.
+	wBlk := waitChainEvent(t, watched.BlockEvents())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, *minedBlk.Hash(), wBlk.Block.Hash)
 	require.Len(t, wBlk.RelevantTxs, 2)
 	require.Equal(t, parentHash, wBlk.RelevantTxs[0].Hash)
 	require.Equal(t, child.TxHash(), wBlk.RelevantTxs[1].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events)
+	uBlk := waitChainEvent(t, unwatched.BlockEvents())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, *minedBlk.Hash(), uBlk.Block.Hash)
 	require.Empty(t, uBlk.RelevantTxs)
+
+	select {
+	case extra := <-unwatched.MempoolTxns():
+		require.FailNowf(
+			t, "unexpected mempool tx",
+			"unwatched received %v", extra.Hash,
+		)
+	default:
+	}
 
 	waitForRelevantTx(t, legacy, &parentHash)
 }
 
 // TestRPCClientWatchWithoutNotifyBlocks verifies calling WatchAddrs without
 // NotifyBlocks does not stealth-enable legacy BlockConnected notifications on
-// Notifications() while still delivering watched EventMempoolTx events.
+// Notifications() while still delivering watched MempoolTxns notifications.
 func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 	t.Parallel()
 
@@ -644,9 +673,8 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 
 	// Verify sub receives the mempool tx and legacy Notifications() sees
 	// no unrequested BlockConnected before the matching RelevantTx.
-	memEv := waitChainEvent(t, sub.Events)
-	require.Equal(t, EventMempoolTx, memEv.Type)
-	require.Equal(t, txHash, memEv.RelevantTxs[0].Hash)
+	memRec := waitMempoolTx(t, sub.MempoolTxns())
+	require.Equal(t, txHash, memRec.Hash)
 
 	deadline := time.After(defaultTestTimeout)
 	for {
@@ -667,4 +695,437 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 			require.FailNow(t, "legacy Notifications missed tx")
 		}
 	}
+}
+
+// startTestRPCClientHandler starts an in-process RPCClient.handler goroutine
+// rooted at height 0 without spawning a btcd subprocess.
+func startTestRPCClientHandler(t *testing.T) *RPCClient {
+	t.Helper()
+
+	client := &RPCClient{
+		chainParams:         &chaincfg.RegressionNetParams,
+		enqueueNotification: make(chan any),
+		dequeueNotification: make(chan any),
+		currentBlock:        make(chan blockStampSnapshot),
+		quit:                make(chan struct{}),
+	}
+	client.eventStream = newChainEventStream(client.chainParams, client)
+	client.wg.Add(1)
+
+	go client.handler(&waddrmgr.BlockStamp{})
+
+	t.Cleanup(func() {
+		close(client.quit)
+		client.wg.Wait()
+	})
+
+	return client
+}
+
+// TestRPCClientLegacyQueueBoundedUntilNotifications verifies that RPCClient
+// caps unread legacy notifications at legacyPreActivationCap while reserving
+// one slot for the initial async ClientConnected marker, and delivers
+// unbounded FIFO once Notifications() is called.
+func TestRPCClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start an in-process RPCClient handler without opening
+	// Notifications().
+	client := startTestRPCClientHandler(t)
+	burst := legacyPreActivationCap + 5
+
+	// Act: enqueue 20 BlockConnected entries before ClientConnected so the
+	// slot-reservation rule must hold back entry 20, then enqueue
+	// ClientConnected and 5 more excess blocks before opening
+	// Notifications() and enqueueing a post-activation burst.
+	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockConnected(&hash, i, time.Unix(int64(i), 0))
+	}
+
+	client.onClientConnect()
+
+	for i := int32(legacyPreActivationCap) + 1; i <= int32(burst); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockConnected(&hash, i, time.Unix(int64(i), 0))
+	}
+
+	// Fence handler admission of the unactivated burst via BlockStamp().
+	_, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	legacy := client.Notifications()
+
+	const sentinelHeight int32 = 100
+
+	for i := int32(0); i <= int32(burst); i++ {
+		h := sentinelHeight + i
+		hash := chainhash.Hash{byte(h)}
+		client.onBlockConnected(&hash, h, time.Unix(int64(h), 0))
+	}
+
+	// Assert: the first 19 prefix blocks and the preserved initial
+	// ClientConnected marker precede the sentinel and every post-activation
+	// block in FIFO order.
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+		require.True(t, ok, "expected prefix BlockConnected")
+		require.Equal(t, i, blk.Height)
+	}
+
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+
+	for i := int32(0); i <= int32(burst); i++ {
+		blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+		require.True(t, ok, "expected post-activation BlockConnected")
+		require.Equal(t, sentinelHeight+i, blk.Height)
+	}
+}
+
+// TestRPCClientBlockStampAdvancesAtIntake verifies that RPCClient.BlockStamp
+// advances at handler intake while the legacy queue is unactivated (including
+// past the 20-item prefix) and hands off to dequeue-driven updates once
+// Notifications() is activated.
+func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start an in-process RPCClient handler and fill the 20-item
+	// unactivated legacy prefix without calling Notifications().
+	client := startTestRPCClientHandler(t)
+	client.onClientConnect()
+
+	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockConnected(&hash, i, time.Unix(int64(i), 0))
+	}
+
+	// Act: deliver one distinct post-cap BlockConnected while
+	// Notifications() remains unopened.
+	const wantHeight int32 = 25
+
+	wantHash := chainhash.Hash{byte(wantHeight)}
+	client.onBlockConnected(&wantHash, wantHeight, time.Unix(25, 0))
+
+	// Assert: BlockStamp() advances to the post-cap block without opening
+	// or draining Notifications().
+	bs, err := client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, wantHeight, bs.Height)
+	require.Equal(t, wantHash, bs.Hash)
+
+	// Act: activate Notifications() and deliver a newer block while leaving
+	// the legacy channel unread.
+	legacy := client.Notifications()
+
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, int32(0), bs.Height)
+	require.Equal(t, chainhash.Hash{}, bs.Hash)
+
+	const nextHeight int32 = 26
+
+	nextHash := chainhash.Hash{byte(nextHeight)}
+	client.onBlockConnected(&nextHash, nextHeight, time.Unix(26, 0))
+
+	// Assert: BlockStamp() stays at the last-dequeued legacy stamp until
+	// nextHeight is dequeued from Notifications().
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, int32(0), bs.Height)
+	require.Equal(t, chainhash.Hash{}, bs.Hash)
+
+	for {
+		n := waitLegacyNotification(t, legacy)
+		if blk, ok := n.(BlockConnected); ok &&
+			blk.Height == nextHeight {
+
+			break
+		}
+	}
+
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, nextHeight, bs.Height)
+	require.Equal(t, nextHash, bs.Hash)
+}
+
+// serveStartTestConn answers getcurrentnet with regtest and delegates
+// getbestblock to onBestBlock until the websocket connection closes.
+func serveStartTestConn(conn *websocket.Conn,
+	onBestBlock func(id any) btcjson.Response) {
+
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+
+		var req btcjson.Request
+		if json.Unmarshal(raw, &req) != nil {
+			return
+		}
+
+		var resp btcjson.Response
+		switch req.Method {
+		case "getcurrentnet":
+			netVal := uint64(chaincfg.RegressionNetParams.Net)
+			resp = btcjson.Response{
+				Result: json.RawMessage(
+					strconv.FormatUint(netVal, 10),
+				),
+				ID: &req.ID,
+			}
+		case "getbestblock":
+			resp = onBestBlock(req.ID)
+		case "rescan":
+			resp = btcjson.Response{
+				Result: json.RawMessage("null"),
+				ID:     &req.ID,
+			}
+		default:
+			return
+		}
+
+		out, err := json.Marshal(resp)
+		if err != nil {
+			return
+		}
+
+		err = conn.WriteMessage(websocket.TextMessage, out)
+		if err != nil {
+			return
+		}
+	}
+}
+
+// newStartTestRPCClient creates an RPCClient wired to a local websocket server
+// that answers getcurrentnet with regtest and delegates getbestblock to
+// onBestBlock, closing reconnected if a second websocket connection arrives.
+func newStartTestRPCClient(t *testing.T,
+	onBestBlock func(id any) btcjson.Response) (*RPCClient,
+	<-chan struct{}) {
+
+	t.Helper()
+
+	var (
+		conns       atomic.Int32
+		reconnected = make(chan struct{})
+		upgrader    websocket.Upgrader
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if conns.Add(1) == 2 {
+				close(reconnected)
+			}
+
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+
+			serveStartTestConn(conn, onBestBlock)
+		},
+	))
+	t.Cleanup(srv.Close)
+
+	client, err := NewRPCClientWithConfig(&RPCClientConfig{
+		ReconnectAttempts: 1,
+		Chain:             &chaincfg.RegressionNetParams,
+		Conn: &rpcclient.ConnConfig{
+			Host:       strings.TrimPrefix(srv.URL, "http://"),
+			User:       "user",
+			Pass:       "pass",
+			Endpoint:   "ws",
+			DisableTLS: true,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	return client, reconnected
+}
+
+// TestRPCClientStartBestBlockError verifies that a failing startup
+// getbestblock RPC stops the RPCClient cleanly without auto-reconnecting.
+func TestRPCClientStartBestBlockError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: serve a failing getbestblock RPC after getcurrentnet.
+	client, reconnected := newStartTestRPCClient(
+		t, func(id any) btcjson.Response {
+			return btcjson.Response{
+				Error: btcjson.NewRPCError(
+					btcjson.ErrRPCInternal.Code,
+					"rejected startup probe",
+				),
+				ID: &id,
+			}
+		},
+	)
+
+	// Act: call Start and expect the wrapped RPC error.
+	err := client.Start(t.Context())
+
+	// Assert: Start returned the RPC error, closed quit, and never opened
+	// a reconnect websocket.
+	require.ErrorContains(t, err, "rejected startup probe")
+
+	select {
+	case <-client.quit:
+	case <-reconnected:
+		require.FailNow(t, "failed Start opened a second websocket")
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "failed Start left client running")
+	}
+}
+
+// TestRPCClientStartBestBlockCanceled verifies that canceling the Start
+// context while startup getbestblock is in flight unblocks Start with
+// context.Canceled and shuts down the client.
+func TestRPCClientStartBestBlockCanceled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: withhold the getbestblock reply until release closes so
+	// Start stays blocked on that RPC until ctx is canceled.
+	inBestBlock := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+	})
+
+	client, _ := newStartTestRPCClient(
+		t, func(id any) btcjson.Response {
+			close(inBestBlock)
+			<-release
+
+			return btcjson.Response{ID: &id}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	started := make(chan error, 1)
+
+	// Act: launch Start, wait until getbestblock is in flight, then cancel
+	// the caller context.
+	go func() {
+		started <- client.Start(ctx)
+	}()
+
+	select {
+	case <-inBestBlock:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "Start did not issue getbestblock")
+	}
+
+	cancel()
+
+	// Assert: Start returns context.Canceled promptly before release
+	// closes and leaves the client stopped.
+	select {
+	case err := <-started:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "Start stayed blocked after cancel")
+	}
+
+	select {
+	case <-client.quit:
+	default:
+		require.FailNow(t, "canceled Start left client running")
+	}
+}
+
+// TestRPCClientRescanActivatesLegacyQueue verifies that calling
+// RPCClient.Rescan before Notifications() activates lossless legacy delivery
+// so RescanFinished survives a full pre-activation startup prefix.
+func TestRPCClientRescanActivatesLegacyQueue(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start an RPCClient against the local websocket server and
+	// fill the 20-item pre-activation startup prefix without calling
+	// Notifications().
+	tipHash := chainhash.Hash{0x42}
+
+	const wantTip int32 = 20
+
+	client, _ := newStartTestRPCClient(
+		t, func(id any) btcjson.Response {
+			resBytes, err := json.Marshal(&btcjson.GetBestBlockResult{
+				Hash:   tipHash.String(),
+				Height: wantTip,
+			})
+			if err != nil {
+				return btcjson.Response{ID: &id}
+			}
+
+			return btcjson.Response{
+				Result: resBytes,
+				ID:     &id,
+			}
+		},
+	)
+	require.NoError(t, client.Start(t.Context()))
+
+	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockConnected(&hash, i, time.Unix(int64(i), 0))
+	}
+
+	// Fence handler admission of the full prefix before invoking Rescan.
+	_, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	// Act: invoke Rescan before opening Notifications(), assert activation
+	// immediately, deliver RescanFinished, and fence its admission before
+	// Notifications() can mask a missing activation store.
+	require.NoError(t, client.Rescan(&tipHash, nil, nil))
+	require.True(t, client.legacyNotificationsActive.Load())
+
+	client.onRescanFinished(&tipHash, wantTip, time.Unix(int64(wantTip), 0))
+
+	_, err = client.BlockStamp()
+	require.NoError(t, err)
+
+	legacy := client.Notifications()
+
+	// Assert: the 19 retained prefix blocks, the initial ClientConnected
+	// marker (regardless of async arrival relative to Rescan), and
+	// RescanFinished all arrive intact.
+	var (
+		gotBlocks    int32
+		gotConnected bool
+		gotFinished  *RescanFinished
+	)
+
+	for range legacyPreActivationCap + 1 {
+		switch n := waitLegacyNotification(t, legacy).(type) {
+		case BlockConnected:
+			gotBlocks++
+			require.Equal(t, gotBlocks, n.Height)
+		case ClientConnected:
+			gotConnected = true
+		case *RescanFinished:
+			gotFinished = n
+		default:
+			require.FailNowf(
+				t, "unexpected notification", "%T", n,
+			)
+		}
+	}
+
+	require.Equal(t, int32(legacyPreActivationCap-1), gotBlocks)
+	require.True(t, gotConnected)
+	require.NotNil(t, gotFinished)
+	require.Equal(t, &tipHash, gotFinished.Hash)
+	require.Equal(t, wantTip, gotFinished.Height)
 }

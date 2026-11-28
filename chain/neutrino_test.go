@@ -167,7 +167,7 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	client.onBlockDisconnected(&hash, 1, time.Time{})
 
 	select {
-	case ev := <-first.Events:
+	case ev := <-first.BlockEvents():
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, hash, ev.Block.Hash)
 		require.Equal(t, int32(1), ev.Block.Height)
@@ -191,13 +191,13 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	// Assert the first generation retired and the current generation
 	// delivers its own marker before canceling while the client runs.
 	select {
-	case <-first.Done:
+	case <-first.Done():
 	default:
 		require.FailNow(t, "first generation still subscribed")
 	}
 
 	select {
-	case ev := <-second.Events:
+	case ev := <-second.BlockEvents():
 		require.Equal(t, EventBlockDisconnected, ev.Type)
 		require.Equal(t, nextHash, ev.Block.Hash)
 		require.Equal(t, int32(2), ev.Block.Height)
@@ -211,7 +211,7 @@ func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
 	cancel()
 
 	select {
-	case <-second.Done:
+	case <-second.Done():
 	case <-time.After(defaultTestTimeout):
 		t.Fatal("the restarted handler did not retire a canceled reader")
 	}
@@ -498,16 +498,277 @@ func TestNeutrinoClientScopedWatch(t *testing.T) {
 
 	// Watched receives the tx inside EventBlockConnected; unwatched
 	// receives the block with zero relevant txns.
-	wBlk := waitChainEvent(t, watched.Events)
+	wBlk := waitChainEvent(t, watched.BlockEvents())
 	require.Equal(t, EventBlockConnected, wBlk.Type)
 	require.Equal(t, int32(11), wBlk.Block.Height)
 	require.Len(t, wBlk.RelevantTxs, 1)
 	require.Equal(t, txHash, wBlk.RelevantTxs[0].Hash)
 
-	uBlk := waitChainEvent(t, unwatched.Events)
+	uBlk := waitChainEvent(t, unwatched.BlockEvents())
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, int32(11), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)
+	require.Empty(t, watched.MempoolTxns())
+	require.Empty(t, unwatched.MempoolTxns())
+
+	service.AssertExpectations(t)
+}
+
+// drainLegacyDisconnectPrefix verifies ClientConnected followed by 19
+// BlockDisconnected prefix entries with heights 1..legacyPreActivationCap-1.
+func drainLegacyDisconnectPrefix(t *testing.T, legacy <-chan any) {
+	t.Helper()
+
+	require.IsType(t, ClientConnected{}, waitLegacyNotification(t, legacy))
+
+	for i := int32(1); i < int32(legacyPreActivationCap); i++ {
+		disc, ok := waitLegacyNotification(t, legacy).(BlockDisconnected)
+		require.True(t, ok, "expected prefix BlockDisconnected")
+		require.Equal(t, i, disc.Height)
+	}
+}
+
+// TestNeutrinoClientLegacyQueueBoundedUntilNotifications verifies that
+// NeutrinoClient caps unread legacy notifications at legacyPreActivationCap
+// while delivering SubscribeChainEvents past the cap, activates unbounded FIFO
+// delivery once Notifications() is called, and resets the bound on restart.
+func TestNeutrinoClientLegacyQueueBoundedUntilNotifications(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start a mock NeutrinoClient without calling Notifications().
+	client := newMockNeutrinoClient()
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+	service.On("Start").Return(nil).Twice()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{}, nil).Twice()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	sub := client.SubscribeChainEvents(t.Context())
+	burst := legacyPreActivationCap + 5
+
+	// Act: emit a burst exceeding legacyPreActivationCap while unactivated,
+	// fence handler intake via BlockStamp(), then open Notifications() and
+	// emit a sentinel plus a post-activation burst.
+	for i := int32(1); i <= int32(burst); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockDisconnected(&hash, i, time.Time{})
+		waitChainEvent(t, sub.BlockEvents())
+	}
+
+	_, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	legacy := client.Notifications()
+
+	const sentinelHeight int32 = 100
+
+	sentinelHash := chainhash.Hash{byte(sentinelHeight)}
+	client.onBlockDisconnected(&sentinelHash, sentinelHeight, time.Time{})
+	waitChainEvent(t, sub.BlockEvents())
+
+	for i := int32(1); i <= int32(burst); i++ {
+		h := sentinelHeight + i
+		hash := chainhash.Hash{byte(h)}
+		client.onBlockDisconnected(&hash, h, time.Time{})
+		waitChainEvent(t, sub.BlockEvents())
+	}
+
+	// Assert: ClientConnected and 19 prefix items precede the sentinel,
+	// followed by all post-activation entries in FIFO order.
+	drainLegacyDisconnectPrefix(t, legacy)
+
+	sentinel, ok := waitLegacyNotification(t, legacy).(BlockDisconnected)
+	require.True(t, ok, "expected sentinel BlockDisconnected")
+	require.Equal(t, sentinelHeight, sentinel.Height)
+
+	for i := int32(1); i <= int32(burst); i++ {
+		disc, ok := waitLegacyNotification(t, legacy).(BlockDisconnected)
+		require.True(t, ok, "expected post-activation BlockDisconnected")
+		require.Equal(t, sentinelHeight+i, disc.Height)
+	}
+
+	// Act: restart into generation 2 without calling Notifications(), burst
+	// past the cap again, then activate and send a sentinel.
+	client.Stop()
+	client.WaitForShutdown()
+	require.NoError(t, client.Start(t.Context()))
+
+	sub = client.SubscribeChainEvents(t.Context())
+	for i := int32(1); i <= int32(burst); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockDisconnected(&hash, i, time.Time{})
+		waitChainEvent(t, sub.BlockEvents())
+	}
+
+	_, err = client.BlockStamp()
+	require.NoError(t, err)
+
+	legacy = client.Notifications()
+	client.onBlockDisconnected(&sentinelHash, sentinelHeight, time.Time{})
+	waitChainEvent(t, sub.BlockEvents())
+
+	// Assert: generation 2 reset activation and bounded its startup prefix.
+	drainLegacyDisconnectPrefix(t, legacy)
+
+	sentinel, ok = waitLegacyNotification(t, legacy).(BlockDisconnected)
+	require.True(t, ok, "expected sentinel BlockDisconnected")
+	require.Equal(t, sentinelHeight, sentinel.Height)
+
+	service.AssertExpectations(t)
+}
+
+// TestNeutrinoClientRescanActivatesLegacyQueue verifies that calling
+// NeutrinoClient.Rescan before Notifications() activates lossless legacy
+// delivery so RescanFinished survives a full pre-activation startup prefix.
+func TestNeutrinoClientRescanActivatesLegacyQueue(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start a mock NeutrinoClient at a known tip and fill the
+	// 20-item startup prefix without opening Notifications().
+	client := newMockNeutrinoClient()
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+
+	header := &wire.BlockHeader{
+		Version:   1,
+		Timestamp: time.Unix(1700000000, 0),
+	}
+	tip := header.BlockHash()
+
+	service.On("Start").Return(nil).Once()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{
+		Hash:   tip,
+		Height: 20,
+	}, nil).Twice()
+	service.On("GetBlockHeader", &tip).Return(header, nil).Once()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	sub := client.SubscribeChainEvents(t.Context())
+	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockDisconnected(&hash, i, time.Time{})
+		waitChainEvent(t, sub.BlockEvents())
+	}
+
+	_, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	// Act: invoke Rescan at the tip before calling Notifications(), assert
+	// the per-run activation flag immediately, then open Notifications().
+	require.NoError(t, client.Rescan(&tip, nil, nil))
+	require.True(t, client.legacyNotificationsActive.Load())
+
+	legacy := client.Notifications()
+
+	// Assert: after the 20-item startup prefix, RescanFinished arrives with
+	// the tip hash and height.
+	drainLegacyDisconnectPrefix(t, legacy)
+
+	fin, ok := waitLegacyNotification(t, legacy).(*RescanFinished)
+	require.True(t, ok, "expected *RescanFinished")
+	require.Equal(t, &tip, fin.Hash)
+	require.Equal(t, int32(20), fin.Height)
+
+	service.AssertExpectations(t)
+}
+
+// TestNeutrinoClientBlockStampAdvancesAtIntake verifies that
+// NeutrinoClient.BlockStamp advances on BlockConnected intake while the legacy
+// queue is unactivated (including past the 20-item prefix) and switches back
+// to advancing only on Notifications() dequeue once activated.
+func TestNeutrinoClientBlockStampAdvancesAtIntake(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: start a mock NeutrinoClient without calling Notifications()
+	// and fill the 20-item unactivated legacy prefix, fencing intake via
+	// BlockStamp().
+	client := newMockNeutrinoClient()
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+
+	service.On("Start").Return(nil).Once()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{}, nil).Times(3)
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	sub := client.SubscribeChainEvents(t.Context())
+	for i := int32(1); i <= int32(legacyPreActivationCap); i++ {
+		hash := chainhash.Hash{byte(i)}
+		client.onBlockDisconnected(&hash, i, time.Time{})
+		waitChainEvent(t, sub.BlockEvents())
+	}
+
+	_, err := client.BlockStamp()
+	require.NoError(t, err)
+
+	// Act: deliver one distinct post-cap BlockConnected callback while
+	// Notifications() remains unopened.
+	const wantHeight int32 = 25
+
+	wantHash := chainhash.Hash{byte(wantHeight)}
+	client.onBlockConnected(&wantHash, wantHeight, time.Unix(1, 0))
+
+	// Assert: BlockStamp() observes the new height and hash without opening
+	// or draining Notifications().
+	require.Eventually(t, func() bool {
+		bs, bsErr := client.BlockStamp()
+
+		return bsErr == nil && bs.Height == wantHeight &&
+			bs.Hash == wantHash
+	}, defaultTestTimeout, 10*time.Millisecond)
+
+	// Act: activate Notifications(), verify BlockStamp() immediately hands
+	// off to the dequeued legacy stamp even before another event arrives,
+	// then deliver a newer BlockConnected while leaving legacy unread and
+	// fence intake via a trailing disconnect on sub.BlockEvents().
+	legacy := client.Notifications()
+
+	bs, err := client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, int32(0), bs.Height)
+	require.Equal(t, chainhash.Hash{}, bs.Hash)
+
+	const nextHeight int32 = 26
+
+	nextHash := chainhash.Hash{byte(nextHeight)}
+	fenceHash := chainhash.Hash{27}
+
+	client.onBlockConnected(&nextHash, nextHeight, time.Unix(2, 0))
+	client.onBlockDisconnected(&fenceHash, 27, time.Time{})
+	waitChainEvent(t, sub.BlockEvents())
+
+	// Assert: BlockStamp() still reports the initial/last-dequeued legacy
+	// stamp (height 0) after post-activation intake, then advances to
+	// nextHeight only once nextHeight is dequeued from Notifications().
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, int32(0), bs.Height)
+	require.Equal(t, chainhash.Hash{}, bs.Hash)
+
+	drainLegacyDisconnectPrefix(t, legacy)
+
+	blk, ok := waitLegacyNotification(t, legacy).(BlockConnected)
+	require.True(t, ok, "expected activated BlockConnected")
+	require.Equal(t, nextHeight, blk.Height)
+
+	bs, err = client.BlockStamp()
+	require.NoError(t, err)
+	require.Equal(t, nextHeight, bs.Height)
+	require.Equal(t, nextHash, bs.Hash)
 
 	service.AssertExpectations(t)
 }
