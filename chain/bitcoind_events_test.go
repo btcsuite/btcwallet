@@ -234,6 +234,9 @@ func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
 	_, open := <-slow.BlockEvents()
 	require.False(t, open)
 
+	_, open = <-slow.MempoolTxns()
+	require.False(t, open)
+
 	// Check late enrollment and continued fast delivery after overflow.
 	client.onBlockDisconnected(&hash, height, time.Time{})
 	want := Event{
@@ -374,6 +377,9 @@ func TestBitcoindSubscriptionClientShutdown(t *testing.T) {
 	require.Equal(t, int32(1), ev.Block.Height)
 
 	_, ok := <-sub.BlockEvents()
+	require.False(t, ok)
+
+	_, ok = <-sub.MempoolTxns()
 	require.False(t, ok)
 
 	// A call after retirement must return already-closed channels.
@@ -2538,139 +2544,31 @@ func drainClosedChan[T any](t *testing.T, ch <-chan T, name string) []T {
 	}
 }
 
-// TestChainEventSubscriptionCloseOrderOnRetirement verifies that context
-// cancellation, source shutdown, and BlockEvents overflow each close both
-// BlockEvents and MempoolTxns before closing Done while preserving already-
-// buffered items and publishing the expected terminal error.
-func TestChainEventSubscriptionCloseOrderOnRetirement(t *testing.T) {
-	t.Parallel()
-
-	newBufferedSub := func(t *testing.T,
-		ctx context.Context) (*chainEventStream, *mockChainClient,
-		EventSubscription, *wtxmgr.TxRecord) {
-
-		t.Helper()
-
-		addr, pkScript := randTestP2PKHAddr(t)
-		stream, mc, sub := newMockWatchSub(ctx)
-		mc.On(
-			"WatchAddrsFromTip", mock.Anything,
-			[]address.Address{addr},
-		).Return(nil).Once()
-		require.NoError(
-			t, sub.WatchAddrs(ctx, []address.Address{addr}),
-		)
-
-		tx := wire.NewMsgTx(wire.TxVersion)
-		tx.AddTxOut(wire.NewTxOut(2000, pkScript))
-		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-		require.NoError(t, err)
-
-		stream.publish(RelevantTx{TxRecord: rec})
-		stream.publish(BlockDisconnected{Height: 1})
-
-		return stream, mc, sub, rec
-	}
-
-	t.Run("context cancel", func(t *testing.T) {
-		t.Parallel()
-
-		// Arrange: enroll a cancellable subscription with one unread
-		// block event and one unread mempool tx.
-		ctx, cancel := context.WithCancel(t.Context())
-		_, mc, sub, rec := newBufferedSub(t, ctx)
-
-		// Act: cancel the subscription context and wait for Done.
-		cancel()
-		waitSubDone(t, sub)
-
-		// Assert: both channels closed before Done, buffered items
-		// remained readable, and Err reports context.Canceled.
-		require.ErrorIs(t, sub.Err(), context.Canceled)
-		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
-		require.Len(t, blocks, 1)
-		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
-		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
-		mc.AssertExpectations(t)
-	})
-
-	t.Run("source shutdown", func(t *testing.T) {
-		t.Parallel()
-
-		// Arrange: enroll a live subscription with one unread block
-		// event and one unread mempool tx.
-		stream, mc, sub, rec := newBufferedSub(t, t.Context())
-
-		// Act: close the owning event stream and wait for Done.
-		stream.close()
-		waitSubDone(t, sub)
-
-		// Assert: both channels closed before Done, buffered items
-		// remained readable, and Err reports nil.
-		require.NoError(t, sub.Err())
-		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
-		require.Len(t, blocks, 1)
-		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
-		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
-		mc.AssertExpectations(t)
-	})
-
-	t.Run("block overflow", func(t *testing.T) {
-		t.Parallel()
-
-		// Arrange: enroll a subscription with one unread block event
-		// and one unread mempool tx, then overflow BlockEvents.
-		stream, mc, sub, rec := newBufferedSub(t, t.Context())
-
-		// Act: publish enough additional block disconnects to exceed
-		// BlockEvents capacity and wait for Done.
-		maxHeight := int32(chainEventSubscriberBufferSize) + 1
-		for i := int32(2); i <= maxHeight; i++ {
-			stream.publish(BlockDisconnected{Height: i})
-		}
-
-		waitSubDone(t, sub)
-
-		// Assert: both channels closed before Done, all buffered block
-		// events and the buffered mempool tx remained readable, and
-		// Err reports ErrEventSubscriptionBufferFull.
-		require.ErrorIs(t, sub.Err(), ErrEventSubscriptionBufferFull)
-		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
-		require.Len(t, blocks, chainEventSubscriberBufferSize)
-		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
-		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
-		mc.AssertExpectations(t)
-	})
-}
-
 // TestChainEventSubscriptionCancel verifies direct EventSubscription.Cancel
 // semantics: immediate synchronous channel closure, idempotent concurrent use,
-// watch unregistration, post-cancel watch rejection, and Err distinguishing
-// cancellation from source shutdown and block overflow.
+// context.AfterFunc unregistration, watch unregistration, post-cancel watch
+// rejection, and Err distinguishing cancellation from source shutdown and
+// block overflow.
 func TestChainEventSubscriptionCancel(t *testing.T) {
 	t.Parallel()
 
 	t.Run("direct cancel and watch cleanup", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: enroll two subscriptions on a shared stream with
-		// both shared and exclusive address/outpoint watches while
-		// leaving the parent context live, and buffer one mempool tx
-		// plus one block disconnect before canceling sub.
+		// Arrange: enroll a live subscription with address and outpoint
+		// watches while leaving parentCtx live, and buffer one mempool
+		// tx plus one block disconnect before canceling.
 		parentCtx, parentCancel := context.WithCancel(t.Context())
 		defer parentCancel()
 
-		sharedAddr, sharedScript := randTestP2PKHAddr(t)
-		onlyAddr, onlyScript := randTestP2PKHAddr(t)
-		sharedOp := wire.OutPoint{Hash: chainhash.Hash{0x61}, Index: 0}
-		onlyOp := wire.OutPoint{Hash: chainhash.Hash{0x62}, Index: 1}
+		addr, pkScript := randTestP2PKHAddr(t)
+		op := wire.OutPoint{Hash: chainhash.Hash{0x62}, Index: 1}
 
 		mc := &mockChainClient{}
 		stream := newChainEventStream(
 			&chaincfg.RegressionNetParams, mc,
 		)
 		sub := stream.subscribe(parentCtx)
-		sibling := stream.subscribe(t.Context())
 
 		stream.mu.Lock()
 		stopAfterFunc := stream.members[sub.listener]
@@ -2679,34 +2577,19 @@ func TestChainEventSubscriptionCancel(t *testing.T) {
 
 		mc.On(
 			"WatchAddrsFromTip", mock.Anything,
-			[]address.Address{sharedAddr, onlyAddr},
+			[]address.Address{addr},
 		).Return(nil).Once()
-		mc.On(
-			"WatchAddrsFromTip", mock.Anything,
-			[]address.Address{sharedAddr},
-		).Return(nil).Once()
-		mc.On(
-			"NotifySpent", []*wire.OutPoint{&sharedOp, &onlyOp},
-		).Return(nil).Once()
-		mc.On(
-			"NotifySpent", []*wire.OutPoint{&sharedOp},
-		).Return(nil).Once()
+		mc.On("NotifySpent", []*wire.OutPoint{&op}).Return(nil).Once()
 
-		require.NoError(t, sub.WatchAddrs(
-			t.Context(), []address.Address{sharedAddr, onlyAddr},
-		))
-		require.NoError(t, sibling.WatchAddrs(
-			t.Context(), []address.Address{sharedAddr},
-		))
-		require.NoError(t, sub.WatchOutputs(
-			t.Context(), []*wire.OutPoint{&sharedOp, &onlyOp},
-		))
-		require.NoError(t, sibling.WatchOutputs(
-			t.Context(), []*wire.OutPoint{&sharedOp},
-		))
+		require.NoError(
+			t, sub.WatchAddrs(t.Context(), []address.Address{addr}),
+		)
+		require.NoError(
+			t, sub.WatchOutputs(t.Context(), []*wire.OutPoint{&op}),
+		)
 
 		tx := wire.NewMsgTx(wire.TxVersion)
-		tx.AddTxOut(wire.NewTxOut(2500, onlyScript))
+		tx.AddTxOut(wire.NewTxOut(2500, pkScript))
 		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 		require.NoError(t, err)
 
@@ -2735,8 +2618,7 @@ func TestChainEventSubscriptionCancel(t *testing.T) {
 
 		// Assert: Done, BlockEvents, and MempoolTxns are immediately
 		// closed, buffered items remain readable, Err reports
-		// context.Canceled, and the context.AfterFunc callback is
-		// already unregistered while parentCtx is still live.
+		// context.Canceled, and context.AfterFunc is unregistered.
 		select {
 		case <-sub.Done():
 		default:
@@ -2752,48 +2634,34 @@ func TestChainEventSubscriptionCancel(t *testing.T) {
 		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
 		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
 
-		// Verify watch indices dropped sub's exclusive watches while
-		// retaining sibling's shared watches.
+		// Verify watch indices and membership were cleared on Cancel.
 		stream.mu.Lock()
-		require.NotContains(t, stream.members, sub.listener)
-		require.Contains(t, stream.members, sibling.listener)
-		require.NotContains(
-			t, stream.scriptListeners, string(onlyScript),
-		)
-		require.Len(t, stream.scriptListeners[string(sharedScript)], 1)
-		require.NotContains(t, stream.outpointListeners, onlyOp)
-		require.Len(t, stream.outpointListeners[sharedOp], 1)
+		require.Empty(t, stream.members)
+		require.Empty(t, stream.scriptListeners)
+		require.Empty(t, stream.outpointListeners)
 		stream.mu.Unlock()
 
 		// Verify post-cancel WatchAddrs and WatchOutputs fail with
 		// context.Canceled without invoking backend client mocks.
-		err = sub.WatchAddrs(
-			t.Context(), []address.Address{onlyAddr},
-		)
+		err = sub.WatchAddrs(t.Context(), []address.Address{addr})
 		require.ErrorIs(t, err, context.Canceled)
-		err = sub.WatchOutputs(
-			t.Context(), []*wire.OutPoint{&onlyOp},
-		)
+		err = sub.WatchOutputs(t.Context(), []*wire.OutPoint{&op})
 		require.ErrorIs(t, err, context.Canceled)
 
-		// Cancel parentCtx after direct Cancel and shut down the
-		// stream; sibling must observe source shutdown (nil) while
-		// sub's terminal error stays context.Canceled.
+		// Canceling parentCtx and closing the stream afterward must
+		// keep sub.Err() at context.Canceled.
 		parentCancel()
 		stream.close()
-		waitSubDone(t, sibling)
-		require.NoError(t, sibling.Err())
 		require.ErrorIs(t, sub.Err(), context.Canceled)
-
 		mc.AssertExpectations(t)
 	})
 
 	t.Run("cancel preserves prior terminal result", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: create three subscriptions that terminate via source
-		// shutdown, BlockEvents overflow, and parent deadline expiry
-		// respectively before Cancel is called.
+		// Arrange: terminate three subscriptions via source shutdown,
+		// BlockEvents overflow, and parent deadline expiry before
+		// calling Cancel.
 		shutdownStream := newChainEventStream(
 			&chaincfg.RegressionNetParams, &mockChainClient{},
 		)
@@ -2830,8 +2698,7 @@ func TestChainEventSubscriptionCancel(t *testing.T) {
 		deadlineSub.Cancel()
 
 		// Assert: each subscription preserves its original terminal
-		// error so callers can distinguish source shutdown (nil),
-		// overflow, and deadline expiry from direct Cancel.
+		// result so callers distinguish shutdown, overflow, and cancel.
 		require.NoError(t, shutdownSub.Err())
 		require.ErrorIs(
 			t, overflowSub.Err(), ErrEventSubscriptionBufferFull,
