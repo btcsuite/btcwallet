@@ -293,7 +293,7 @@ func (c *RPCClient) SubmitPackage(_ []*wire.MsgTx,
 // sent by the server.  After a limited number of connection attempts, this
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
-func (c *RPCClient) Start(_ context.Context) error {
+func (c *RPCClient) Start(ctx context.Context) error {
 	err := c.Connect(c.reconnectAttempts)
 	if err != nil {
 		return err
@@ -310,10 +310,33 @@ func (c *RPCClient) Start(_ context.Context) error {
 		return errors.New("mismatched networks")
 	}
 
+	// Query the initial best block before spawning handler(bs) so
+	// notifications enabled immediately after Start() cannot deadlock
+	// rpcclient's websocket reader against an in-flight GetBestBlock RPC.
+	// Bind ctx cancellation to Stop so canceling Start unblocks the RPC.
+	stopCancel := context.AfterFunc(ctx, c.Stop)
+
+	hash, height, err := c.GetBestBlock()
+	if !stopCancel() {
+		c.Stop()
+
+		return ctx.Err()
+	}
+
+	if err != nil {
+		c.Stop()
+
+		return fmt.Errorf("failed to receive best block from chain "+
+			"server: %w", err)
+	}
+
+	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
+
 	c.quitMtx.Lock()
 	c.started = true
 	c.wg.Add(1)
-	go c.handler()
+
+	go c.handler(bs)
 
 	c.quitMtx.Unlock()
 
@@ -741,24 +764,72 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 
 }
 
+// blockStampFromConnected returns a BlockStamp when n is BlockConnected, or
+// fallback otherwise.
+func blockStampFromConnected(n any,
+	fallback *waddrmgr.BlockStamp) *waddrmgr.BlockStamp {
+
+	if blk, ok := n.(BlockConnected); ok {
+		return &waddrmgr.BlockStamp{
+			Height: blk.Height,
+			Hash:   blk.Hash,
+		}
+	}
+
+	return fallback
+}
+
+// enqueueLegacyNotification updates intakeBS while unactivated and appends n
+// to notifications unless the pre-activation cap (reserving one slot for the
+// initial async ClientConnected marker) drops it.
+func (c *RPCClient) enqueueLegacyNotification(notifications []any, n any,
+	hasClientConnected *bool, intakeBS **waddrmgr.BlockStamp) []any {
+
+	_, isConnected := n.(ClientConnected)
+	if !c.legacyNotificationsActive.Load() {
+		*intakeBS = blockStampFromConnected(n, *intakeBS)
+
+		limit := legacyPreActivationCap
+		if !*hasClientConnected && !isConnected {
+			limit--
+		}
+
+		if len(notifications) >= limit {
+			return notifications
+		}
+	}
+
+	*hasClientConnected = *hasClientConnected || isConnected
+
+	return append(notifications, n)
+}
+
+// dequeueLegacyNotification removes the delivered head from notifications and
+// returns the remaining slice, next head, updated dequeue channel, and whether
+// the handler loop can exit because enqueue is already closed.
+func dequeueLegacyNotification(notifications []any, dequeue chan any,
+	enqueueClosed bool) ([]any, any, chan any, bool) {
+
+	notifications[0] = nil
+
+	notifications = notifications[1:]
+	if len(notifications) != 0 {
+		return notifications, notifications[0], dequeue, false
+	}
+
+	return notifications, nil, nil, enqueueClosed
+}
+
 // handler delivers native notifications, maintains the last notified block,
 // and buffers legacy notifications up to legacyPreActivationCap (reserving one
 // slot for the initial ClientConnected marker) until Notifications() or
 // Rescan() activates unbounded FIFO buffering that must be drained continually.
-func (c *RPCClient) handler() {
+func (c *RPCClient) handler(bs *waddrmgr.BlockStamp) {
 	defer c.wg.Done()
 
 	stream := c.eventStream
 	defer stream.close()
 
-	hash, height, err := c.GetBestBlock()
-	if err != nil {
-		log.Errorf("Failed to receive best block from chain server: %v", err)
-		c.Stop()
-		return
-	}
-
-	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
 	intakeBS := bs
 
 	// TODO: Rather than leaving this as an unbounded queue for all types of
@@ -768,10 +839,13 @@ func (c *RPCClient) handler() {
 	// need to process earlier blockconnected notifications still waiting
 	// here.
 
-	var notifications []interface{}
+	var notifications []any
+
 	enqueue := c.enqueueNotification
-	var dequeue chan interface{}
-	var next interface{}
+
+	var dequeue chan any
+
+	var next any
 
 	hasClientConnected := false
 out:
@@ -790,55 +864,29 @@ out:
 			}
 
 			// While no legacy consumer is active, advance intakeBS
-			// and bound unread legacy entries (reserving one slot
-			// for the initial async ClientConnected). Once
-			// activated, BlockStamp serves bs, which advances only
-			// on dequeue to preserve the legacy-delivery fence.
-			_, isConnected := n.(ClientConnected)
-			if !c.legacyNotificationsActive.Load() {
-				if blk, ok := n.(BlockConnected); ok {
-					intakeBS = &waddrmgr.BlockStamp{
-						Height: blk.Height,
-						Hash:   blk.Hash,
-					}
-				}
-
-				limit := legacyPreActivationCap
-				if !hasClientConnected && !isConnected {
-					limit--
-				}
-
-				if len(notifications) >= limit {
-					continue
-				}
-			}
-
-			hasClientConnected = hasClientConnected || isConnected
-			if len(notifications) == 0 {
-				next = n
+			// and bound unread legacy entries. Once activated,
+			// BlockStamp serves bs, which advances only on dequeue
+			// to preserve the legacy-delivery fence.
+			notifications = c.enqueueLegacyNotification(
+				notifications, n, &hasClientConnected,
+				&intakeBS,
+			)
+			if len(notifications) == 1 {
+				next = notifications[0]
 				dequeue = c.dequeueNotification
 			}
-			notifications = append(notifications, n)
 
 		case dequeue <- next:
-			if n, ok := next.(BlockConnected); ok {
-				bs = &waddrmgr.BlockStamp{
-					Height: n.Height,
-					Hash:   n.Hash,
-				}
-			}
+			bs = blockStampFromConnected(next, bs)
 
-			notifications[0] = nil
-			notifications = notifications[1:]
-			if len(notifications) != 0 {
-				next = notifications[0]
-			} else {
-				// If no more notifications can be enqueued, the
-				// queue is finished.
-				if enqueue == nil {
-					break out
-				}
-				dequeue = nil
+			var done bool
+
+			notifications, next, dequeue, done =
+				dequeueLegacyNotification(
+					notifications, dequeue, enqueue == nil,
+				)
+			if done {
+				break out
 			}
 
 		case c.currentBlock <- blockStampSnapshot{

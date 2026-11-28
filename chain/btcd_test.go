@@ -3,13 +3,19 @@ package chain
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -18,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/btcsuite/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -890,13 +897,6 @@ func TestRPCClientPreActivationRetainsClientConnected(t *testing.T) {
 	})
 
 	require.NoError(t, client.Start(t.Context()))
-
-	// Wait for handler() to finish its startup GetBestBlock RPC before
-	// enabling block notifications so a BlockConnected callback cannot
-	// block wsInHandler before the startup response is read.
-	_, err = client.BlockStamp()
-	require.NoError(t, err)
-
 	require.NoError(t, client.NotifyBlocks())
 
 	_, startHeight, err := miner.Client.GetBestBlock()
@@ -1010,9 +1010,9 @@ func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
 	// unactivated legacy prefix without calling Notifications().
 	miner, client := setupBtcd(t)
 
-	// Wait for handler() to finish its startup GetBestBlock RPC before
-	// enabling block notifications so a BlockConnected callback cannot
-	// block wsInHandler before the startup response is read.
+	// Record the initial startup BlockStamp before enabling block
+	// notifications so we can assert the post-activation handoff back to
+	// the last-dequeued legacy stamp.
 	initialBS, err := client.BlockStamp()
 	require.NoError(t, err)
 
@@ -1098,4 +1098,199 @@ func TestRPCClientBlockStampAdvancesAtIntake(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, nextHeight, bs.Height)
 	require.Equal(t, nextHash, bs.Hash)
+}
+
+// serveStartTestConn answers getcurrentnet with regtest and delegates
+// getbestblock to onBestBlock until the websocket connection closes.
+func serveStartTestConn(conn *websocket.Conn,
+	onBestBlock func(id any) btcjson.Response) {
+
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+
+		var req btcjson.Request
+		if json.Unmarshal(raw, &req) != nil {
+			return
+		}
+
+		var resp btcjson.Response
+		switch req.Method {
+		case "getcurrentnet":
+			resBytes, err := json.Marshal(
+				uint32(chaincfg.RegressionNetParams.Net),
+			)
+			if err != nil {
+				return
+			}
+
+			resp = btcjson.Response{
+				Result: resBytes,
+				ID:     &req.ID,
+			}
+		case "getbestblock":
+			resp = onBestBlock(req.ID)
+		default:
+			return
+		}
+
+		out, err := json.Marshal(resp)
+		if err != nil {
+			return
+		}
+
+		err = conn.WriteMessage(websocket.TextMessage, out)
+		if err != nil {
+			return
+		}
+	}
+}
+
+// newStartTestRPCClient creates an RPCClient wired to a local websocket server
+// that answers getcurrentnet with regtest and delegates getbestblock to
+// onBestBlock, closing reconnected if a second websocket connection arrives.
+func newStartTestRPCClient(t *testing.T,
+	onBestBlock func(id any) btcjson.Response) (*RPCClient,
+	<-chan struct{}) {
+
+	t.Helper()
+
+	var (
+		conns       atomic.Int32
+		reconnected = make(chan struct{})
+		upgrader    websocket.Upgrader
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if conns.Add(1) == 2 {
+				close(reconnected)
+			}
+
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+
+			serveStartTestConn(conn, onBestBlock)
+		},
+	))
+	t.Cleanup(srv.Close)
+
+	client, err := NewRPCClientWithConfig(&RPCClientConfig{
+		ReconnectAttempts: 1,
+		Chain:             &chaincfg.RegressionNetParams,
+		Conn: &rpcclient.ConnConfig{
+			Host:       strings.TrimPrefix(srv.URL, "http://"),
+			User:       "user",
+			Pass:       "pass",
+			Endpoint:   "ws",
+			DisableTLS: true,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	return client, reconnected
+}
+
+// TestRPCClientStartBestBlockError verifies that a failing startup
+// getbestblock RPC stops the RPCClient cleanly without auto-reconnecting.
+func TestRPCClientStartBestBlockError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: serve a failing getbestblock RPC after getcurrentnet.
+	client, reconnected := newStartTestRPCClient(
+		t, func(id any) btcjson.Response {
+			return btcjson.Response{
+				Error: btcjson.NewRPCError(
+					btcjson.ErrRPCInternal.Code,
+					"rejected startup probe",
+				),
+				ID: &id,
+			}
+		},
+	)
+
+	// Act: call Start and expect the wrapped RPC error.
+	err := client.Start(t.Context())
+
+	// Assert: Start returned the RPC error, closed quit, and never opened
+	// a reconnect websocket.
+	require.ErrorContains(t, err, "rejected startup probe")
+
+	select {
+	case <-client.quit:
+	case <-reconnected:
+		require.FailNow(t, "failed Start opened a second websocket")
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "failed Start left client running")
+	}
+}
+
+// TestRPCClientStartBestBlockCanceled verifies that canceling the Start
+// context while startup getbestblock is in flight unblocks Start with
+// context.Canceled and shuts down the client.
+func TestRPCClientStartBestBlockCanceled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: withhold the getbestblock reply until release closes so
+	// Start stays blocked on that RPC until ctx is canceled.
+	inBestBlock := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+	})
+
+	client, _ := newStartTestRPCClient(
+		t, func(id any) btcjson.Response {
+			close(inBestBlock)
+			<-release
+
+			return btcjson.Response{ID: &id}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	started := make(chan error, 1)
+
+	// Act: launch Start, wait until getbestblock is in flight, then cancel
+	// the caller context.
+	go func() {
+		started <- client.Start(ctx)
+	}()
+
+	select {
+	case <-inBestBlock:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "Start did not issue getbestblock")
+	}
+
+	cancel()
+
+	// Assert: Start returns context.Canceled promptly before release
+	// closes and leaves the client stopped.
+	select {
+	case err := <-started:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "Start stayed blocked after cancel")
+	}
+
+	select {
+	case <-client.quit:
+	default:
+		require.FailNow(t, "canceled Start left client running")
+	}
 }
