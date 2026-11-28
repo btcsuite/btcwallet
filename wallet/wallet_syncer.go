@@ -1016,8 +1016,19 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 	}
 
 	if blockMeta.Height == current.Height+1 {
-		return s.applyStoreTxBatch(ctx, matches, block, block)
+		return s.putNextBlockNotification(
+			ctx, matches, *blockMeta, block, current,
+		)
 	}
+
+	return s.putSupplementalBlockMatches(ctx, matches, block, current)
+}
+
+// putSupplementalBlockMatches records matched transactions for an already
+// synced height on the committed branch without advancing SyncedTo.
+func (s *syncer) putSupplementalBlockMatches(ctx context.Context,
+	matches TxEntries, block *db.Block,
+	current waddrmgr.BlockStamp) error {
 
 	// Empty supplemental payloads cannot add effects, so they need no
 	// historical lookup after the checkpoint has already passed them.
@@ -1032,6 +1043,48 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 	}
 
 	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// putNextBlockNotification verifies parent continuity for a live next-height
+// block and commits its transactions and new checkpoint when connected.
+func (s *syncer) putNextBlockNotification(ctx context.Context,
+	matches TxEntries, blockMeta wtxmgr.BlockMeta, block *db.Block,
+	current waddrmgr.BlockStamp) error {
+
+	extends, err := s.verifyBlockParent(ctx, blockMeta, current)
+	if err != nil || !extends {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, block)
+}
+
+// verifyBlockParent checks that a live next-height block connects directly to
+// the wallet's current synced tip. When the parent hash differs (for example,
+// a fork whose disconnect has not yet arrived), it returns false without error
+// so the caller does not advance SyncedTo onto a forked branch.
+func (s *syncer) verifyBlockParent(ctx context.Context,
+	blockMeta wtxmgr.BlockMeta, current waddrmgr.BlockStamp) (bool, error) {
+
+	// Genesis has no parent block to compare against.
+	if blockMeta.Height == 0 {
+		return true, nil
+	}
+
+	// Check cancellation before calling GetBlockHeader, which accepts no
+	// context.
+	err := ctx.Err()
+	if err != nil {
+		return false, err
+	}
+
+	header, err := s.cfg.Chain.GetBlockHeader(&blockMeta.Hash)
+	if err != nil {
+		return false, fmt.Errorf("get block header %v: %w",
+			blockMeta.Hash, err)
+	}
+
+	return header.PrevBlock == current.Hash, nil
 }
 
 // blockMatchesCheckpoint checks a queued live block against this Wallet's
@@ -1135,32 +1188,39 @@ func (s *syncer) applyStoreTxBatch(ctx context.Context,
 // putSyncBatch records recovery scan results and synced blocks through the
 // store.
 func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
-	results []scanResult) (resultErr error) {
+	results []scanResult) error {
 
-	// Rollback invalidates fetched facts before persistence. Ordinary work
-	// stays behind this attempt, including conversion or Store failures.
+	// Check for rollback before committing. If a disconnect is queued,
+	// process it and abort the batch. Any non-disconnect event stays out of
+	// the sync batch so historical recovery does not advance past it.
 	pending, err := s.checkForRollbackBeforeCommit(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Retained observations must not checkpoint an unfetched next block:
-	// live matches can omit recovery addresses until historical scanning.
-	// An empty mailbox returns a zero event and needs no deferred handler.
+	err = s.commitSyncBatch(ctx, scanState, results)
 	if pending.notification != nil {
-		defer func() {
-			resultErr = errors.Join(
-				resultErr, s.processChainEventBeforeSync(ctx, pending),
-			)
-		}()
+		err = errors.Join(
+			err, s.processChainEventBeforeSync(ctx, pending),
+		)
 	}
+
+	return err
+}
+
+// commitSyncBatch persists one recovery scan batch, announces committed
+// transactions, and refreshes live watches when horizons or transactions
+// changed.
+func (s *syncer) commitSyncBatch(ctx context.Context,
+	scanState *RecoveryState, results []scanResult) error {
 
 	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
 		return err
 	}
 
-	refreshWatches := len(params.Horizons) > 0 || len(params.Transactions) > 0
+	refreshWatches := len(params.Horizons) > 0 ||
+		len(params.Transactions) > 0
 	if refreshWatches {
 		// Clear readiness before publishing the tip. Normal catch-up
 		// restores it only after watch registration succeeds.
@@ -1183,13 +1243,11 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 		s.txManager.notifyTx(ctx, tx.Tx.TxHash())
 	}
 
-	// A committed horizon or credit can introduce watches after startup;
-	// finish registration before catch-up reports this batch complete.
-	if refreshWatches {
-		return s.refreshLiveWatches(ctx)
+	if !refreshWatches {
+		return nil
 	}
 
-	return nil
+	return s.refreshLiveWatches(ctx)
 }
 
 // putTargetedBatch records targeted recovery scan results through the store.
@@ -1905,7 +1963,7 @@ func (s *syncer) dispatchScanStrategy(ctx context.Context,
 // caller should continue polling.
 func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	// Check the chain tip.
-	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	bestHash, bestHeight, err := s.cfg.Chain.GetBestBlock()
 	if err != nil {
 		// An error getting best block height means we couldn't
 		// determine sync status. We are NOT finished, and an error
@@ -1926,11 +1984,7 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	// If the wallet is caught up to the best known tip, log this and
 	// return.
 	if syncedTo.Height >= bestHeight {
-		s.state.Store(uint32(syncStateSynced))
-		log.Infof("Wallet is synced to chain tip: height=%d",
-			syncedTo.Height)
-
-		return true, nil
+		return s.ensureSyncedAtTip(ctx, syncedTo, bestHash, bestHeight)
 	}
 
 	// Calculate the gap.
@@ -1960,6 +2014,26 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	// is NOT finished. Caller should continue looping to process the next
 	// batch.
 	return false, nil
+}
+
+// ensureSyncedAtTip verifies exact tip equality and transitions the syncer to
+// Synced when caught up to the best known block.
+func (s *syncer) ensureSyncedAtTip(_ context.Context,
+	syncedTo waddrmgr.BlockStamp, bestHash *chainhash.Hash,
+	bestHeight int32) (bool, error) {
+
+	if syncedTo.Height != bestHeight ||
+		bestHash == nil || syncedTo.Hash != *bestHash {
+
+		return false, fmt.Errorf("wallet tip %d (%v) diverges from "+
+			"chain tip %d (%v): %w", syncedTo.Height,
+			syncedTo.Hash, bestHeight, bestHash, ErrStateChanged)
+	}
+
+	s.state.Store(uint32(syncStateSynced))
+	log.Infof("Wallet is synced to chain tip: height=%d", syncedTo.Height)
+
+	return true, nil
 }
 
 // scanBatch fetches and processes a batch of blocks from the chain backend. It
@@ -2221,28 +2295,33 @@ func (s *syncer) loadTargetedScanTip(ctx context.Context,
 
 // scanWithTargets performs a targeted rescan for specific accounts without
 // rewinding the global sync state.
-func (s *syncer) scanWithTargets(ctx context.Context,
-	req *scanReq) (resultErr error) {
+func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
+	err, eventErr := s.runTargetedScan(ctx, req)
+	if eventErr != nil {
+		s.state.Store(uint32(syncStateSyncing))
+		err = errors.Join(err, eventErr)
+	}
 
-	// A retained live-event failure must reach the ordinary worker retry
-	// policy, but only after this accepted account range has finished.
-	var eventErr error
-	defer func() {
-		if eventErr != nil {
-			s.state.Store(uint32(syncStateSyncing))
-
-			resultErr = errors.Join(resultErr, eventErr)
-		}
-	}()
-
-	// Failed registration keeps readiness revoked until initialization retries.
-	defer s.state.CompareAndSwap(
+	// Failed registration or retained live-event errors keep readiness
+	// revoked until initialization retries.
+	s.state.CompareAndSwap(
 		uint32(syncStateRescanning), uint32(syncStateSynced),
 	)
 
+	return err
+}
+
+// runTargetedScan executes the targeted batch scan loop, separating scan range
+// errors from retained live-event errors so a failed live observation does not
+// abort the remaining account scan.
+func (s *syncer) runTargetedScan(ctx context.Context,
+	req *scanReq) (error, error) {
+
+	var eventErr error
+
 	scanState, bestHeight, err := s.loadTargetedScanTip(ctx, req.targets)
 	if err != nil {
-		return err
+		return err, nil
 	}
 
 	startHeight := req.startBlock.Height
@@ -2266,33 +2345,27 @@ func (s *syncer) scanWithTargets(ctx context.Context,
 			ctx, scanState, startHeight, endHeight,
 		)
 		if err != nil {
-			return err
+			return err, eventErr
 		}
 
 		if len(results) == 0 {
 			return fmt.Errorf("%w: fetchAndFilterBlocks returned "+
-				"0 results", ErrScanBatchEmpty)
+				"0 results", ErrScanBatchEmpty), eventErr
 		}
 
-		// Keep the range's own result separate from retained live work:
-		// a failed observation must not discard the remaining account scan.
-		pending, err := s.checkForRollbackBeforeCommit(ctx)
-		if err == nil {
-			err = s.putTargetedBatch(ctx, scanState, results)
-		}
-
-		// The selected accounts cannot prove full-wallet historical coverage.
-		// Replay known matches without a checkpoint; preserve any error until
-		// this accepted range finishes. An empty event remains a no-op.
-		pendingErr := s.processChainEventBeforeSync(ctx, pending)
+		batchErr, pendingErr := s.applyTargetedBatch(
+			ctx, scanState, results,
+		)
 		eventErr = errors.Join(eventErr, pendingErr)
 
-		if errors.Is(err, ErrStateChanged) {
+		if errors.Is(batchErr, ErrStateChanged) {
 			// A rollback discards this attempt, not the accepted request.
 			// Reload horizons and refetch its original range on the new tip.
-			scanState, bestHeight, err = s.loadTargetedScanTip(ctx, req.targets)
+			scanState, bestHeight, err = s.loadTargetedScanTip(
+				ctx, req.targets,
+			)
 			if err != nil {
-				return err
+				return err, eventErr
 			}
 
 			startHeight = req.startBlock.Height
@@ -2300,8 +2373,8 @@ func (s *syncer) scanWithTargets(ctx context.Context,
 			continue
 		}
 
-		if err != nil {
-			return err
+		if batchErr != nil {
+			return batchErr, eventErr
 		}
 
 		s.state.Store(uint32(syncStateRescanning))
@@ -2312,7 +2385,28 @@ func (s *syncer) scanWithTargets(ctx context.Context,
 
 	log.Infof("Targeted rescan complete")
 
-	return nil
+	return nil, eventErr
+}
+
+// applyTargetedBatch checks for a queued disconnect before committing one
+// targeted batch, then replays any retained non-disconnect live event without
+// advancing SyncedTo.
+func (s *syncer) applyTargetedBatch(ctx context.Context,
+	scanState *RecoveryState, results []scanResult) (error, error) {
+
+	// Keep the range's own result separate from retained live work: a
+	// failed observation must not discard the remaining account scan.
+	pending, err := s.checkForRollbackBeforeCommit(ctx)
+	if err == nil {
+		err = s.putTargetedBatch(ctx, scanState, results)
+	}
+
+	// The selected accounts cannot prove full-wallet historical coverage.
+	// Replay known matches without a checkpoint; preserve any error until
+	// this accepted range finishes. An empty event remains a no-op.
+	pendingErr := s.processChainEventBeforeSync(ctx, pending)
+
+	return err, pendingErr
 }
 
 // storeScanHorizons loads account horizon data through the store. Targets are
