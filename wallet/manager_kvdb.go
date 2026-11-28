@@ -14,7 +14,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Register bdb.
 )
 
 // kvdbManagerBackend owns the legacy walletdb database and the one legacy

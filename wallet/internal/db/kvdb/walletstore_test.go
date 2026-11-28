@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
@@ -108,6 +111,122 @@ func TestLoadWatchSetScopeSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, watches.AddressScripts)
 	require.Empty(t, watches.OutPoints)
+}
+
+// TestResolveOwnedAddressesScopeSnapshot excludes cached imports committed
+// after a read view opens, whether their scope already existed or is new.
+func TestResolveOwnedAddressesScopeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reserve pages before opening the view, so publishing a scope
+	// inside its callback needs no mmap growth while Bolt retains the reader.
+	baseStore, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	conn := baseStore.db
+	keys := make([]*btcec.PublicKey, 2)
+	scripts := make([][]byte, 0, len(keys))
+
+	// Both imports populate live caches after the old view opens. Separate
+	// keys distinguish a missing address row from an entirely missing scope.
+	for i := range keys {
+		key, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+
+		keys[i] = key.PubKey()
+		addr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(keys[i].SerializeCompressed()),
+			mgr.ChainParams(),
+		)
+		require.NoError(t, err)
+
+		pkScript, err := txscript.PayToAddrScript(addr)
+		require.NoError(t, err)
+
+		scripts = append(scripts, pkScript)
+	}
+
+	err := walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		pad, err := tx.CreateTopLevelBucket([]byte("ownership-view-reserve"))
+		if err != nil {
+			return err
+		}
+
+		return pad.Put([]byte("reserve"), make([]byte, 512<<10))
+	})
+	require.NoError(t, err)
+
+	// The first scope exists in the old snapshot without its imported row;
+	// the second scope and its imported row are both absent from that view.
+	writeScope := func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		existing, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+		if err != nil {
+			return err
+		}
+
+		schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+
+		created, err := mgr.NewScopedKeyManager(
+			ns, waddrmgr.KeyScope{Purpose: 1017}, schema,
+		)
+		if err != nil {
+			return err
+		}
+
+		for i, scoped := range []waddrmgr.AccountStore{existing, created} {
+			_, err := scoped.ImportPublicKey(ns, keys[i], nil)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+	view := func(read func(walletdb.ReadTx) error, reset func()) error {
+		return conn.View(func(snapshot walletdb.ReadTx) error {
+			err := walletdb.Update(conn, writeScope)
+			if err != nil {
+				return err
+			}
+
+			return read(snapshot)
+		}, reset)
+	}
+	viewDB := &watchViewDB{
+		DB: conn,
+	}
+	viewDB.On("View", mock.Anything, mock.Anything).Return(view).Once()
+	t.Cleanup(func() {
+		viewDB.AssertExpectations(t)
+	})
+
+	store := NewStore(viewDB, nil, mgr)
+
+	// Act: Resolve both cached imports through the view that predates
+	// their rows and the new scope's publication.
+	owned, err := store.ResolveOwnedAddresses(
+		t.Context(), db.ResolveOwnedAddressesQuery{
+			ScriptPubKeys: scripts,
+		},
+	)
+
+	// Assert: Neither cached import is owned in the earlier view. A fresh
+	// view sees both, proving that old-view absence is snapshot isolation.
+	require.NoError(t, err)
+	require.Empty(t, owned)
+	current, err := NewStore(conn, nil, mgr).ResolveOwnedAddresses(
+		t.Context(), db.ResolveOwnedAddressesQuery{
+			ScriptPubKeys: scripts,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, current, 2)
+
+	for _, script := range scripts {
+		require.Contains(t, current, string(script))
+	}
 }
 
 // newSpendableAddrMgr creates a fresh waddrmgr-backed wallet on top of a new
