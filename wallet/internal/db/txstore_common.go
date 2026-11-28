@@ -1,0 +1,2190 @@
+package db
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"math"
+	"slices"
+	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+)
+
+var (
+	// ErrInvalidParam is returned when a TxStore method receives invalid input.
+	ErrInvalidParam = errors.New("invalid param")
+
+	// ErrInvalidStatus is returned when a transaction status is unknown or not
+	// allowed for the requested operation.
+	ErrInvalidStatus = errors.New("invalid tx status")
+
+	// ErrIndexOutOfRange is returned when a referenced transaction input or
+	// output index does not exist.
+	ErrIndexOutOfRange = errors.New("index out of range")
+
+	// ErrDuplicateInputOutPoint is returned when CreateTx receives the same
+	// previous outpoint more than once.
+	ErrDuplicateInputOutPoint = errors.New("duplicate input outpoint")
+
+	// ErrDeleteRequiresUnmined indicates that DeleteTx only accepts unmined
+	// transactions.
+	ErrDeleteRequiresUnmined = errors.New(
+		"delete requires an unmined transaction",
+	)
+
+	// ErrDeleteRequiresLeaf indicates that DeleteTx only accepts unmined
+	// transactions with no child spenders.
+	ErrDeleteRequiresLeaf = errors.New("delete requires a leaf tx")
+)
+
+// serializeMsgTx serializes a wire.MsgTx so it can be stored in the
+// transactions table.
+func serializeMsgTx(tx *wire.MsgTx) ([]byte, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("%w: tx is required", ErrInvalidParam)
+	}
+
+	var buf bytes.Buffer
+
+	err := tx.Serialize(&buf)
+	if err != nil {
+		return nil, fmt.Errorf("serialize tx: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// deserializeMsgTx deserializes a stored transaction payload back into a
+// wire.MsgTx.
+func deserializeMsgTx(rawTx []byte) (*wire.MsgTx, error) {
+	var tx wire.MsgTx
+
+	err := tx.Deserialize(bytes.NewReader(rawTx))
+	if err != nil {
+		return nil, fmt.Errorf("deserialize tx: %w", err)
+	}
+
+	return &tx, nil
+}
+
+// ParseTxStatus converts a stored numeric status code into the strongly typed
+// TxStatus enum used by the public db API.
+func ParseTxStatus(status int64) (TxStatus, error) {
+	txStatus, err := int64ToUint8(status)
+	if err != nil {
+		return TxStatus(0), fmt.Errorf("status %d: %w", status,
+			ErrInvalidStatus)
+	}
+
+	switch TxStatus(txStatus) {
+	case TxStatusPending,
+		TxStatusPublished,
+		TxStatusReplaced,
+		TxStatusFailed,
+		TxStatusOrphaned:
+
+		return TxStatus(txStatus), nil
+
+	default:
+		return TxStatus(0), fmt.Errorf("status %d: %w", status,
+			ErrInvalidStatus)
+	}
+}
+
+// BuildTxInfo converts normalized transaction fields into the public TxInfo
+// shape returned by the db interfaces.
+func BuildTxInfo(hash []byte, rawTx []byte, received time.Time, block *Block,
+	status int64, label string) (*TxInfo, error) {
+
+	txHash, err := chainhash.NewHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf("tx hash: %w", err)
+	}
+
+	txStatus, err := ParseTxStatus(status)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TxInfo{
+		Hash:         *txHash,
+		SerializedTx: rawTx,
+		Received:     received.UTC(),
+		Block:        block,
+		Status:       txStatus,
+		Label:        label,
+	}, nil
+}
+
+// TxDetailBase is the normalized transaction-row metadata the shared detail
+// read workflows need from one SQL backend.
+type TxDetailBase struct {
+	// ID is the backend row identifier for the transaction.
+	ID int64
+
+	// Hash is the serialized transaction hash bytes.
+	Hash []byte
+
+	// RawTx is the serialized wire transaction payload.
+	RawTx []byte
+
+	// Received is when the wallet observed the transaction.
+	Received time.Time
+
+	// Block is the normalized confirming block metadata, or nil when
+	// the row has no confirming block.
+	Block *Block
+
+	// Status is the stored wallet-relative transaction status code.
+	Status int64
+
+	// Label is the optional user-supplied transaction label.
+	Label string
+}
+
+// TxInputOutpoint identifies one transaction input and the previous outpoint it
+// spends.
+type TxInputOutpoint struct {
+	// TxID is the backend row ID of the spending transaction.
+	TxID int64
+
+	// InputIndex is the input position within the spending transaction.
+	InputIndex uint32
+
+	// PrevTxHash is the hash of the transaction that created the previous
+	// output.
+	PrevTxHash chainhash.Hash
+
+	// PrevOutputIndex is the output index in the previous transaction.
+	PrevOutputIndex uint32
+}
+
+// GetTxDetailOps is the small semantic adapter GetTxDetail needs from one SQL
+// backend.
+//
+// The shared GetTxDetail algorithm is intentionally ordered:
+//   - load the wallet-scoped base transaction row first
+//   - load wallet-owned outputs for that exact row ID next
+//   - derive previous outpoints from the raw transaction and load the
+//     wallet-owned inputs referenced by those outpoints after that
+//   - build the final TxDetailInfo from the normalized row plus those edge sets
+//
+// Each backend implements those steps with its own sqlc-generated query types,
+// nullable field shapes, and row conversion helpers while GetTxDetailWithOps
+// keeps the visible sequencing in one place.
+type GetTxDetailOps interface {
+	// LoadBase loads the normalized base transaction row for one wallet-scoped
+	// hash lookup.
+	LoadBase(ctx context.Context, query GetTxDetailQuery) (TxDetailBase, error)
+
+	// LoadOwnedOutputs loads every wallet-owned output created by
+	// the provided tx row IDs and groups them by creating tx ID.
+	LoadOwnedOutputs(ctx context.Context, walletID uint32,
+		txIDs []int64) (map[int64][]TxOwnedOutput, error)
+
+	// LoadOwnedInputs loads every wallet-owned input referenced by the provided
+	// transaction input outpoints and groups them by spender tx ID.
+	LoadOwnedInputs(ctx context.Context, walletID uint32,
+		inputOutpoints []TxInputOutpoint) (map[int64][]TxOwnedInput, error)
+}
+
+// GetTxDetailWithOps runs the shared GetTxDetail read workflow.
+//
+// The helper owns the ordering between the base-row load and the owned-edge
+// loads so both SQL backends expose the same detailed transaction shape and the
+// same wallet-scoped not-found behavior.
+func GetTxDetailWithOps(ctx context.Context, query GetTxDetailQuery,
+	ops GetTxDetailOps) (*TxDetailInfo, error) {
+
+	base, err := ops.LoadBase(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail base: %w", err)
+	}
+
+	txIDs := []int64{base.ID}
+
+	ownedOutputs, err := ops.LoadOwnedOutputs(ctx, query.WalletID, txIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail outputs: %w", err)
+	}
+
+	inputOutpoints, err := txInputOutpointsFromBases([]TxDetailBase{base})
+	if err != nil {
+		return nil, fmt.Errorf("build tx detail input outpoints: %w", err)
+	}
+
+	ownedInputs, err := ops.LoadOwnedInputs(
+		ctx, query.WalletID, inputOutpoints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail inputs: %w", err)
+	}
+
+	return buildTxDetailInfo(
+		base, ownedInputs[base.ID], ownedOutputs[base.ID],
+	)
+}
+
+// normalizedListTxDetailsQuery captures wallet tx-reader range semantics in one
+// simpler shape that the shared ListTxDetails workflow can execute directly.
+type normalizedListTxDetailsQuery struct {
+	confirmedStart int32
+	confirmedEnd   int32
+	reverse        bool
+	includeUnmined bool
+	unminedFirst   bool
+	hasConfirmed   bool
+}
+
+// ListTxDetailsOps is the small semantic adapter ListTxDetails needs from one
+// SQL backend.
+//
+// The shared ListTxDetails algorithm is intentionally ordered:
+//   - normalize the wallet tx-reader range semantics first
+//   - load the rows visible to the unmined leg before or after confirmed rows
+//     as required by that normalized view
+//   - collect the selected tx row IDs in the final output order next
+//   - load wallet-owned outputs for that exact ID set
+//   - derive previous outpoints from those raw transactions and load any
+//     wallet-owned inputs referenced by those outpoints
+//   - rebuild the final TxDetailInfo values in the original base-row order
+//
+// Each backend implements those stages with its own sqlc-generated query types,
+// nullable field shapes, and binding helpers while ListTxDetailsWithOps keeps
+// the shared sequencing and tx-reader semantics in one place.
+type ListTxDetailsOps interface {
+	// ListUnmined loads the rows visible to the tx-reader unmined leg. This
+	// includes current unmined rows together with any retained history
+	// rows that no longer have a confirming block.
+	ListUnmined(ctx context.Context, walletID uint32) ([]TxDetailBase, error)
+
+	// ListConfirmed loads the confirmed height-range rows for the normalized
+	// query.
+	ListConfirmed(ctx context.Context, walletID uint32, startHeight,
+		endHeight int32, reverse bool) ([]TxDetailBase, error)
+
+	// LoadOwnedOutputs loads every wallet-owned output created by
+	// the provided tx row IDs and groups them by creating tx ID.
+	LoadOwnedOutputs(ctx context.Context, walletID uint32,
+		txIDs []int64) (map[int64][]TxOwnedOutput, error)
+
+	// LoadOwnedInputs loads every wallet-owned input referenced by the provided
+	// transaction input outpoints and groups them by spender tx ID.
+	LoadOwnedInputs(ctx context.Context, walletID uint32,
+		inputOutpoints []TxInputOutpoint) (map[int64][]TxOwnedInput, error)
+}
+
+// ListTxDetailsWithOps runs the shared ListTxDetails read workflow.
+//
+// The helper owns the range normalization, row-order preservation, and owned-
+// edge loading order so both SQL backends expose identical tx-reader behavior.
+func ListTxDetailsWithOps(ctx context.Context, query ListTxDetailsQuery,
+	ops ListTxDetailsOps) ([]TxDetailInfo, error) {
+
+	normalized := normalizeListTxDetailsQuery(query)
+
+	bases, err := listTxDetailBases(ctx, query.WalletID, normalized, ops)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(bases) == 0 {
+		return []TxDetailInfo{}, nil
+	}
+
+	txIDs := make([]int64, 0, len(bases))
+	for _, base := range bases {
+		txIDs = append(txIDs, base.ID)
+	}
+
+	ownedOutputs, err := ops.LoadOwnedOutputs(ctx, query.WalletID, txIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail outputs: %w", err)
+	}
+
+	inputOutpoints, err := txInputOutpointsFromBases(bases)
+	if err != nil {
+		return nil, fmt.Errorf("build tx detail input outpoints: %w", err)
+	}
+
+	ownedInputs, err := ops.LoadOwnedInputs(
+		ctx, query.WalletID, inputOutpoints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail inputs: %w", err)
+	}
+
+	return buildTxDetailsFromBases(bases, ownedInputs, ownedOutputs)
+}
+
+// txInputOutpointsFromBases extracts every previous outpoint referenced by the
+// selected transaction rows.
+func txInputOutpointsFromBases(bases []TxDetailBase) (
+	[]TxInputOutpoint, error) {
+
+	var inputOutpoints []TxInputOutpoint
+
+	for _, base := range bases {
+		msgTx, err := deserializeMsgTx(base.RawTx)
+		if err != nil {
+			return nil, err
+		}
+
+		if blockchain.IsCoinBaseTx(msgTx) {
+			continue
+		}
+
+		for inputIndex, txIn := range msgTx.TxIn {
+			index, err := Int64ToUint32(int64(inputIndex))
+			if err != nil {
+				return nil, fmt.Errorf("input index %d: %w",
+					inputIndex, err)
+			}
+
+			inputOutpoints = append(inputOutpoints, TxInputOutpoint{
+				TxID:            base.ID,
+				InputIndex:      index,
+				PrevTxHash:      txIn.PreviousOutPoint.Hash,
+				PrevOutputIndex: txIn.PreviousOutPoint.Index,
+			})
+		}
+	}
+
+	return inputOutpoints, nil
+}
+
+// buildTxDetailInfo rebuilds one TxDetailInfo from one normalized base row and
+// its owned input and output edge sets.
+func buildTxDetailInfo(base TxDetailBase, ownedInputs []TxOwnedInput,
+	ownedOutputs []TxOwnedOutput) (*TxDetailInfo, error) {
+
+	msgTx, err := deserializeMsgTx(base.RawTx)
+	if err != nil {
+		return nil, err
+	}
+
+	txInfo, err := BuildTxInfo(
+		base.Hash, base.RawTx, base.Received, base.Block, base.Status,
+		base.Label,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TxDetailInfo{
+		Hash:         txInfo.Hash,
+		MsgTx:        msgTx,
+		SerializedTx: txInfo.SerializedTx,
+		Received:     txInfo.Received,
+		Block:        txInfo.Block,
+		Status:       txInfo.Status,
+		Label:        txInfo.Label,
+		OwnedInputs:  ownedInputs,
+		OwnedOutputs: ownedOutputs,
+	}, nil
+}
+
+// ReverseTxInfosByBlock reverses confirmed block order while preserving the
+// transaction order within each block.
+func ReverseTxInfosByBlock(infos []TxInfo) {
+	reverseByBlock(infos, func(info TxInfo) uint32 {
+		if info.Block == nil {
+			return 0
+		}
+
+		return info.Block.Height
+	})
+}
+
+// ReverseTxDetailBasesByBlock reverses confirmed block order while preserving
+// the transaction order within each block.
+func ReverseTxDetailBasesByBlock(bases []TxDetailBase) {
+	reverseByBlock(bases, func(base TxDetailBase) uint32 {
+		if base.Block == nil {
+			return 0
+		}
+
+		return base.Block.Height
+	})
+}
+
+// reverseByBlock reverses contiguous block groups while preserving the original
+// order inside each group.
+func reverseByBlock[T any](items []T, blockHeight func(T) uint32) {
+	slices.Reverse(items)
+
+	for start := 0; start < len(items); {
+		end := start + 1
+
+		height := blockHeight(items[start])
+		for end < len(items) && blockHeight(items[end]) == height {
+			end++
+		}
+
+		slices.Reverse(items[start:end])
+		start = end
+	}
+}
+
+// normalizeListTxDetailsQuery converts wallet tx-reader range semantics into
+// the internal form used by the shared ListTxDetails workflow.
+func normalizeListTxDetailsQuery(
+	query ListTxDetailsQuery,
+) normalizedListTxDetailsQuery {
+
+	switch {
+	case query.StartHeight < 0 && query.EndHeight < 0:
+		return normalizedListTxDetailsQuery{
+			includeUnmined: true,
+			unminedFirst:   true,
+		}
+
+	case query.StartHeight < 0:
+		return normalizedListTxDetailsQuery{
+			confirmedStart: query.EndHeight,
+			confirmedEnd:   math.MaxInt32,
+			reverse:        true,
+			includeUnmined: true,
+			unminedFirst:   true,
+			hasConfirmed:   true,
+		}
+
+	case query.EndHeight < 0:
+		return normalizedListTxDetailsQuery{
+			confirmedStart: query.StartHeight,
+			confirmedEnd:   math.MaxInt32,
+			includeUnmined: true,
+			hasConfirmed:   true,
+		}
+
+	default:
+		start := query.StartHeight
+		end := query.EndHeight
+
+		reverse := start > end
+		if reverse {
+			start, end = end, start
+		}
+
+		return normalizedListTxDetailsQuery{
+			confirmedStart: start,
+			confirmedEnd:   end,
+			reverse:        reverse,
+			hasConfirmed:   true,
+		}
+	}
+}
+
+// listTxDetailBases loads the normalized base rows for one ListTxDetails call
+// in the final output order required by the wallet tx reader.
+func listTxDetailBases(ctx context.Context, walletID uint32,
+	normalized normalizedListTxDetailsQuery,
+	ops ListTxDetailsOps) ([]TxDetailBase, error) {
+
+	var bases []TxDetailBase
+
+	if normalized.includeUnmined && normalized.unminedFirst {
+		unmined, err := ops.ListUnmined(ctx, walletID)
+		if err != nil {
+			return nil, fmt.Errorf("list unmined tx details: %w", err)
+		}
+
+		bases = append(bases, unmined...)
+	}
+
+	if normalized.hasConfirmed {
+		confirmed, err := ops.ListConfirmed(
+			ctx, walletID, normalized.confirmedStart, normalized.confirmedEnd,
+			normalized.reverse,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("list confirmed tx details: %w", err)
+		}
+
+		bases = append(bases, confirmed...)
+	}
+
+	if normalized.includeUnmined && !normalized.unminedFirst {
+		unmined, err := ops.ListUnmined(ctx, walletID)
+		if err != nil {
+			return nil, fmt.Errorf("list unmined tx details: %w", err)
+		}
+
+		bases = append(bases, unmined...)
+	}
+
+	return bases, nil
+}
+
+// buildTxDetailsFromBases rebuilds the final detail rows in base-row order
+// after the owned input and output edges have been grouped by tx id.
+func buildTxDetailsFromBases(bases []TxDetailBase,
+	ownedInputs map[int64][]TxOwnedInput,
+	ownedOutputs map[int64][]TxOwnedOutput) ([]TxDetailInfo, error) {
+
+	details := make([]TxDetailInfo, 0, len(bases))
+	for _, base := range bases {
+		detail, err := buildTxDetailInfo(
+			base, ownedInputs[base.ID], ownedOutputs[base.ID],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		details = append(details, *detail)
+	}
+
+	return details, nil
+}
+
+// validateCreateTxParams enforces the CreateTx invariants shared by both SQL
+// backends after serializeMsgTx has already verified that params.Tx is non-nil.
+func validateCreateTxParams(params CreateTxParams) error {
+	isCoinbase := blockchain.IsCoinBaseTx(params.Tx)
+
+	err := validateCreateTxStatus(
+		params.Status, params.Block != nil, isCoinbase,
+	)
+	if err != nil {
+		return err
+	}
+
+	maxIndex := uint64(len(params.Tx.TxOut))
+
+	for index := range params.Credits {
+		if uint64(index) >= maxIndex {
+			return fmt.Errorf("%w: credit index %d is out of range: %w",
+				ErrInvalidParam, index, ErrIndexOutOfRange)
+		}
+	}
+
+	if len(params.CreditCandidates) > 0 {
+		return fmt.Errorf("%w: unresolved credit candidates",
+			ErrInvalidParam)
+	}
+
+	// Coinbase transactions only enter wallet history once a block already
+	// anchors them, so CreateTx requires the caller to provide that block up
+	// front instead of storing a fake unmined intermediate row first.
+	if isCoinbase {
+		return nil
+	}
+
+	seenInputs := make(map[wire.OutPoint]struct{}, len(params.Tx.TxIn))
+	for inputIndex, txIn := range params.Tx.TxIn {
+		// One transaction cannot spend the same previous outpoint twice.
+		// Rejecting duplicate inputs here keeps the later wallet-spend walk
+		// simple and avoids writing contradictory spend metadata.
+		if _, ok := seenInputs[txIn.PreviousOutPoint]; ok {
+			return fmt.Errorf("%w: input %d duplicates a previous outpoint: %w",
+				ErrInvalidParam, inputIndex, ErrDuplicateInputOutPoint)
+		}
+
+		seenInputs[txIn.PreviousOutPoint] = struct{}{}
+	}
+
+	return nil
+}
+
+// ValidateCreditAddrMembership verifies that a caller-supplied credit address
+// is actually paid by the output script it claims to credit. A bad caller
+// could otherwise label output N with any wallet address even when TxOut[N]
+// pays elsewhere, and the SQL backends would record the output as owned by
+// that unrelated address, corrupting UTXO ownership. The kvdb backend already
+// enforces the same rule via its own validateCreditAddr, so this keeps the
+// backends consistent.
+//
+// Membership, not strict equality, is required so bare-multisig outputs the
+// wallet partly owns still validate: such an output is credited to one of its
+// member pubkey addresses, whose own script never equals the full multisig
+// output script.
+//
+// The check is intentionally script-based and chain-parameter free. For a
+// single-address output the member's standard script equals the output script
+// outright. For a bare-multisig output the member's pubkey is one of the
+// script's member operands, and ScriptAddress() exposes that pubkey directly
+// without re-deriving a network-encoded address, so no chaincfg.Params is
+// needed (the SQL stores do not carry one).
+//
+// The bare-multisig fallback is gated on the output script actually being a
+// standard bare-multisig script (txscript.MultiSigTy). Without that gate any
+// script that merely pushes the same bytes - for example a non-paying
+// OP_RETURN <pubkey> - would pass, after which InsertUtxo would record that
+// unrelated script as wallet-owned. The gate is what distinguishes "a pubkey
+// appears somewhere in the script" from "the script pays through bare multisig
+// and this pubkey is a member": in a MultiSigTy script the only non-empty data
+// pushes are the member pubkey operands (the threshold and key-count small
+// integers and OP_CHECKMULTISIG carry no push data), so a data-push match
+// against a MultiSigTy script can only be a genuine member.
+func ValidateCreditAddrMembership(creditAddr address.Address,
+	outputScript []byte) error {
+
+	creditScript, err := txscript.PayToAddrScript(creditAddr)
+	if err != nil {
+		return fmt.Errorf("%w: build credit address script: %w",
+			ErrInvalidParam, err)
+	}
+
+	// A single-address output is credited to the very address its script
+	// pays, so the member's standard script equals the output script.
+	if bytes.Equal(creditScript, outputScript) {
+		return nil
+	}
+
+	// Otherwise the only supported shape is a standard bare-multisig output
+	// the wallet partly owns, credited to one of its member pubkeys. Require
+	// the output script to classify as bare multisig before trusting any
+	// pushed-member match, so a non-multisig script that happens to push the
+	// pubkey bytes (such as OP_RETURN <pubkey>) is rejected rather than
+	// recorded as wallet-owned.
+	if txscript.GetScriptClass(outputScript) != txscript.MultiSigTy {
+		return fmt.Errorf("%w: credit address %s is not paid by the "+
+			"output script", ErrInvalidParam, creditAddr.EncodeAddress())
+	}
+
+	// The output is a bare-multisig script, whose only data pushes are its
+	// member pubkey operands, so the credited pubkey must appear as one of
+	// those pushes to be a member.
+	memberPubKey := creditAddr.ScriptAddress()
+	if len(memberPubKey) != 0 && scriptPushesData(outputScript, memberPubKey) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: credit address %s is not a member of the "+
+		"bare-multisig output script", ErrInvalidParam,
+		creditAddr.EncodeAddress())
+}
+
+// scriptPushesData reports whether script contains a data push equal to want.
+// It is used to detect a bare-multisig member pubkey inside a multisig output
+// script without depending on chain parameters.
+func scriptPushesData(script, want []byte) bool {
+	const scriptVersion = 0
+
+	tokenizer := txscript.MakeScriptTokenizer(scriptVersion, script)
+	for tokenizer.Next() {
+		if bytes.Equal(tokenizer.Data(), want) {
+			return true
+		}
+	}
+
+	// A malformed or non-matching script yields no match; the caller then
+	// rejects the credit as a non-member rather than trusting it.
+	return false
+}
+
+// validateCreateTxStatus checks the status/block combinations that CreateTx may
+// store directly.
+func validateCreateTxStatus(status TxStatus, hasBlock bool,
+	isCoinbase bool) error {
+
+	_, err := ParseTxStatus(int64(status))
+	if err != nil {
+		return fmt.Errorf("%w: status %d is not supported: %w",
+			ErrInvalidParam, status, ErrInvalidStatus)
+	}
+
+	// Orphaned rows only arise later when rollback disconnects a confirmed
+	// coinbase transaction. CreateTx records the initial observed facts, so it
+	// never inserts orphaned history directly.
+	if status == TxStatusOrphaned {
+		return fmt.Errorf("%w: CreateTx cannot Insert orphaned txns: %w",
+			ErrInvalidParam, ErrInvalidStatus)
+	}
+
+	if !hasBlock {
+		// Coinbase transactions cannot exist without a confirming block from
+		// the store's point of view, so callers must supply that block up
+		// front.
+		if isCoinbase {
+			return fmt.Errorf("%w: coinbase txns require a block: %w",
+				ErrInvalidParam, ErrInvalidStatus)
+		}
+
+		// Unmined non-coinbase inserts still represent current unmined wallet
+		// history, so CreateTx only accepts the two active unmined statuses
+		// there.
+		if status != TxStatusPending && status != TxStatusPublished {
+			return fmt.Errorf("%w: CreateTx requires pending or published: %w",
+				ErrInvalidParam, ErrInvalidStatus)
+		}
+
+		return nil
+	}
+
+	// A non-nil block means the caller already knows the transaction is mined.
+	// Mined rows must be published immediately to satisfy the transaction-state
+	// invariants enforced by the schema.
+	if status != TxStatusPublished {
+		return fmt.Errorf("%w: confirmed txns must be published: %w",
+			ErrInvalidParam, ErrInvalidStatus)
+	}
+
+	return nil
+}
+
+// CreateTxRequest captures the backend-independent CreateTx inputs after the
+// shared validation and normalization step has already succeeded.
+type CreateTxRequest struct {
+	// Params keeps the original public request available for backend helpers
+	// that still need the caller-supplied CreateTx metadata.
+	Params CreateTxParams
+
+	// RawTx stores the serialized transaction bytes once so both backends reuse
+	// the same payload throughout the write.
+	RawTx []byte
+
+	// TxHash avoids recomputing the transaction hash across the shared flow and
+	// backend adapters.
+	TxHash chainhash.Hash
+
+	// Received is normalized to UTC before any backend insert logic runs.
+	Received time.Time
+
+	// IsCoinbase caches the consensus coinbase check for backend insert params.
+	IsCoinbase bool
+}
+
+// NewCreateTxRequest performs the backend-independent CreateTx preparation
+// shared by both SQL stores before they open a write transaction.
+func NewCreateTxRequest(params CreateTxParams) (CreateTxRequest, error) {
+	rawTx, err := serializeMsgTx(params.Tx)
+	if err != nil {
+		return CreateTxRequest{}, err
+	}
+
+	err = validateCreateTxParams(params)
+	if err != nil {
+		return CreateTxRequest{}, err
+	}
+
+	return CreateTxRequest{
+		Params:     params,
+		RawTx:      rawTx,
+		TxHash:     params.Tx.TxHash(),
+		Received:   params.Received.UTC(),
+		IsCoinbase: blockchain.IsCoinBaseTx(params.Tx),
+	}, nil
+}
+
+// CreateTxExistingTarget is the normalized metadata the shared CreateTx flow
+// needs when the wallet already stores the requested tx hash.
+type CreateTxExistingTarget struct {
+	// ID is the backend row ID.
+	ID int64
+
+	// Status is the wallet-relative transaction status.
+	Status TxStatus
+
+	// HasBlock reports whether the row already has confirming block metadata.
+	HasBlock bool
+
+	// BlockHeight is the confirmed block height when HasBlock is true.
+	BlockHeight *uint32
+
+	// BlockHash is the confirmed block hash when HasBlock is true.
+	BlockHash *chainhash.Hash
+
+	// IsCoinbase reports whether the row records coinbase history.
+	IsCoinbase bool
+
+	// Label is the stored user-visible transaction label.
+	Label string
+}
+
+// ErrCreateTxExistingNotFound reports that CreateTx found no existing row.
+var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
+	"found")
+
+// CreateTxOps is the small semantic adapter CreateTx needs from one SQL
+// backend.
+//
+// The shared CreateTx algorithm is intentionally linear:
+//   - load any existing wallet-scoped row for the same tx hash first
+//   - if the same tx is being reconfirmed, update that existing row instead of
+//     inserting a duplicate
+//   - validate and cache any confirming block metadata before later writes use
+//     it
+//   - Insert the base transaction row exactly once when no existing row can be
+//     reused
+//   - index immutable inputs even when their parent credits are not known
+//   - validate known parent ancestry and reject a second confirmed claimant
+//   - only for a confirming block, mark direct peers Replaced and descendants
+//     Failed while retaining input facts and recording replacement history
+//   - insert wallet-owned credited outputs independently of spending claims
+//   - delete the leases on those inputs if the transaction is confirmed
+//
+// Each backend implements those steps with its own sqlc-generated query types
+// while CreateTxWithOps keeps the high-level sequencing in one place.
+// That sequencing matters because confirmation, conflict invalidation, credit
+// creation, and spent-input claims must either all observe the same tx row or
+// all roll back together.
+//
+//nolint:interfacebloat // Each step of the shared CreateTx flow is one method.
+type CreateTxOps interface {
+	InvalidateUnminedTxOps
+	SpentLeaseOps
+
+	// LoadExisting loads any existing wallet-scoped transaction row for the
+	// same hash.
+	LoadExisting(ctx context.Context, req CreateTxRequest) (
+		*CreateTxExistingTarget, error)
+
+	// ConfirmExisting reuses one existing row when CreateTx learns about the
+	// same transaction with confirming block context later.
+	ConfirmExisting(ctx context.Context, req CreateTxRequest,
+		existing CreateTxExistingTarget) error
+
+	// PrepareBlock validates and caches any optional confirming block metadata
+	// the later Insert step needs.
+	PrepareBlock(ctx context.Context, req CreateTxRequest) error
+
+	// ListConflictTxns returns direct unmined peers sharing retained inputs,
+	// including unknown parents, and their hashes for descendant discovery.
+	ListConflictTxns(ctx context.Context, req CreateTxRequest) ([]int64,
+		[]chainhash.Hash, error)
+
+	// MarkTxnsReplaced batch-marks the provided direct conflict roots
+	// as replaced.
+	MarkTxnsReplaced(ctx context.Context, walletID int64, txIDs []int64) error
+
+	// InsertReplacementEdges records replacement-history edges from each direct
+	// conflict root to the newly inserted confirmed transaction row.
+	InsertReplacementEdges(ctx context.Context, walletID int64,
+		replacedTxIDs []int64, replacementTxID int64) error
+
+	// Insert writes the base transaction row and returns its new primary key.
+	Insert(ctx context.Context, req CreateTxRequest) (int64, error)
+
+	// InsertInputs retains prevout facts independently of credit discovery.
+	// Replaying the same input position preserves its immutable identity.
+	// The shared workflow calls it only for non-coinbase transactions.
+	InsertInputs(ctx context.Context, req CreateTxRequest, txID int64) error
+
+	// GetInputValidity reports whether a known parent is invalid and whether
+	// a different confirmed transaction spends any input, in that order.
+	// It returns facts only; the shared workflow decides admission.
+	GetInputValidity(ctx context.Context,
+		req CreateTxRequest) (bool, bool, error)
+
+	// InsertCredits records every wallet-owned output that the caller
+	// marked as a credit for this transaction.
+	InsertCredits(ctx context.Context, req CreateTxRequest, txID int64) error
+}
+
+// SpentLeaseOps deletes the leases that a confirmed spend ends.
+type SpentLeaseOps interface {
+	// DeleteSpentLeases deletes the leases on outputs spent by txHash if
+	// that transaction is confirmed, under either expiration policy.
+	DeleteSpentLeases(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) error
+}
+
+// checkReuseCreateTx reports whether CreateTx should reuse an existing wallet-
+// scoped row instead of inserting a new one.
+func checkReuseCreateTx(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	// Only a newly confirmed observation can reuse an existing row.
+	// Plain unmined inserts still create fresh unmined history
+	// instead of rewriting one existing record in place.
+	if req.Params.Block == nil {
+		return false
+	}
+
+	// Reuse is only for the mined published state that records
+	// the wallet's final view of the tx once a block anchors it.
+	if req.Params.Status != TxStatusPublished {
+		return false
+	}
+
+	// A row that already has a confirming block is already in its final mined
+	// form, so CreateTx must reject the duplicate instead of mutating it again.
+	if existing.HasBlock {
+		return false
+	}
+
+	// Coinbase rows only reuse the orphaned state. That path restores the same
+	// coinbase hash after rollback disconnected its previous confirming block.
+	if existing.IsCoinbase {
+		// Both sides must still be coinbase history, and the existing
+		// row must be the rollback-created orphan that is waiting for a
+		// confirming block again.
+		return req.IsCoinbase && existing.Status == TxStatusOrphaned
+	}
+
+	// LoadExisting parses the status, and both schemas reserve Orphaned for
+	// coinbase. Every remaining status permits current-chain confirmation,
+	// including retained Replaced/Failed history.
+	return true
+}
+
+// createTxBlockMatches reports whether a stored row carries the same block
+// assignment as the incoming CreateTx observation.
+func createTxBlockMatches(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	if req.Params.Block == nil {
+		return !existing.HasBlock
+	}
+
+	if !existing.HasBlock || existing.BlockHeight == nil ||
+		existing.BlockHash == nil {
+
+		return false
+	}
+
+	return *existing.BlockHeight == req.Params.Block.Height &&
+		*existing.BlockHash == req.Params.Block.Hash
+}
+
+// checkIdempotentCreateTx reports whether the incoming CreateTx observation is
+// already fully reflected by the stored row.
+func checkIdempotentCreateTx(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	if req.Params.Status != existing.Status {
+		return false
+	}
+
+	if req.IsCoinbase != existing.IsCoinbase {
+		return false
+	}
+
+	if req.Params.Label != existing.Label {
+		return false
+	}
+
+	return createTxBlockMatches(req, existing)
+}
+
+// validateCreateTxCreditRequests validates every caller-supplied credit before
+// an existing tx row is treated as an idempotent duplicate.
+func validateCreateTxCreditRequests(req CreateTxRequest) error {
+	for index, addr := range req.Params.Credits {
+		if addr == nil {
+			continue
+		}
+
+		err := ValidateCreditAddrMembership(
+			addr, req.Params.Tx.TxOut[index].PkScript,
+		)
+		if err != nil {
+			return fmt.Errorf("credit output %d: %w", index, err)
+		}
+	}
+
+	return nil
+}
+
+// CanPromoteUnminedCreateTxDuplicate reports whether an unmined duplicate
+// observation may promote an existing pending row to published. The caller must
+// preserve the existing row label while applying this transition.
+func CanPromoteUnminedCreateTxDuplicate(req CreateTxRequest, status TxStatus,
+	isCoinbase bool, block *Block) bool {
+
+	if req.Params.Block != nil || block != nil {
+		return false
+	}
+
+	if req.Params.Status != TxStatusPublished {
+		return false
+	}
+
+	if status != TxStatusPending {
+		return false
+	}
+
+	return req.IsCoinbase == isCoinbase
+}
+
+// loadCreateTxExisting resolves any wallet-scoped row already stored for the
+// requested tx hash. A nil target means no stored row exists.
+func loadCreateTxExisting(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) (*CreateTxExistingTarget, error) {
+
+	existing, err := ops.LoadExisting(ctx, req)
+	// Normalize the not-found sentinel into an absent target so callers can
+	// select insertion using the same optional-row result as a nil lookup.
+	if errors.Is(err, ErrCreateTxExistingNotFound) {
+		return existing, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("load create tx target: %w", err)
+	}
+
+	return existing, nil
+}
+
+// collectConflictDescendants loads the live unmined graph snapshot and returns
+// the descendant tx IDs for the provided direct conflict roots.
+//
+// NOTE: rootHashes is expected to be a set with unique tx hashes.
+func collectConflictDescendants(ctx context.Context, walletID int64,
+	rootHashes []chainhash.Hash, rootIDs []int64,
+	ops CreateTxOps) ([]int64, error) {
+
+	candidates, err := ops.ListUnminedTxRecords(ctx, walletID)
+	if err != nil {
+		return nil, fmt.Errorf("list create tx conflict candidates: %w", err)
+	}
+
+	descendantIDs := CollectDescendantTxIDs(rootHashes, rootIDs, candidates)
+
+	return descendantIDs, nil
+}
+
+// handleRootTxns marks direct roots replaced and retains their input facts.
+// Replacement edges record the authority of the current confirmed winner.
+func handleRootTxns(ctx context.Context, walletID int64, rootIDs []int64,
+	replacementTxID int64, ops CreateTxOps) error {
+
+	err := ops.MarkTxnsReplaced(ctx, walletID, rootIDs)
+	if err != nil {
+		return fmt.Errorf("mark direct conflicts replaced: %w", err)
+	}
+
+	err = ops.InsertReplacementEdges(ctx, walletID, rootIDs, replacementTxID)
+	if err != nil {
+		return fmt.Errorf("record conflict replacement edges: %w", err)
+	}
+
+	return nil
+}
+
+// handleTxDescendants invalidates dependent branches without deleting inputs.
+// Eligibility changes with status while immutable history remains available.
+func handleTxDescendants(ctx context.Context, walletID int64,
+	descendantIDs []int64, ops CreateTxOps) error {
+
+	if len(descendantIDs) == 0 {
+		return nil
+	}
+
+	err := ops.MarkTxnsFailed(ctx, walletID, descendantIDs)
+	if err != nil {
+		return fmt.Errorf("mark conflict descendants failed: %w", err)
+	}
+
+	return nil
+}
+
+// handleTxConflicts grants replacement authority only to a current block.
+// Both fresh recording and replay reach this gate after indexing their inputs.
+func handleTxConflicts(ctx context.Context, req CreateTxRequest,
+	replacementTxID int64, ops CreateTxOps) error {
+
+	if req.Params.Block == nil {
+		return nil
+	}
+
+	rootIDs, rootHashes, err := ops.ListConflictTxns(ctx, req)
+	if err != nil {
+		return fmt.Errorf("list conflict txns: %w", err)
+	}
+
+	if len(rootIDs) == 0 {
+		return nil
+	}
+
+	// Capture descendants before root mutation changes their eligibility.
+	// Indexed lookup produces each root ID and hash together in this snapshot.
+	walletID := int64(req.Params.WalletID)
+
+	descendantIDs, err := collectConflictDescendants(
+		ctx, walletID, rootHashes, rootIDs, ops,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = handleRootTxns(ctx, walletID, rootIDs, replacementTxID, ops)
+	if err != nil {
+		return err
+	}
+
+	return handleTxDescendants(ctx, walletID, descendantIDs, ops)
+}
+
+// insertCreateTx inserts the transaction before recording its inputs and
+// credits, so those records share the same ID as a later replay.
+func insertCreateTx(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) error {
+
+	txID, err := ops.Insert(ctx, req)
+	if err != nil {
+		return fmt.Errorf("insert tx: %w", err)
+	}
+
+	return recordCreateTxEdges(ctx, req, txID, ops)
+}
+
+// validateCreateTxInputs rejects unconfirmed children of invalid parents and
+// any competitor of a confirmed spender. Query errors take precedence.
+func validateCreateTxInputs(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) error {
+
+	invalidParent, confirmedConflict, err := ops.GetInputValidity(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	// A confirming block is authoritative even when a known parent's status
+	// has not yet been restored from a previous conflict or failure.
+	if req.Params.Block == nil && invalidParent {
+		return ErrTxInputInvalidParent
+	}
+
+	// Block context cannot authorize a second spend of a confirmed input.
+	if confirmedConflict {
+		return ErrTxInputConflict
+	}
+
+	return nil
+}
+
+// recordCreateTxEdges records inputs, confirmed conflicts and owned outputs.
+// Index inputs before validation, then handle confirmed competitors before
+// inserting credits; creation and replay use the same transaction ID.
+func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
+	ops CreateTxOps) error {
+
+	// Facts belong to the spending transaction even when its parent outputs
+	// are external or not yet known. A coinbase's null prevout is not a spend
+	// or an input reservation, so exclude it before calling either adapter.
+	if !req.IsCoinbase {
+		err := ops.InsertInputs(ctx, req, txID)
+		if err != nil {
+			return fmt.Errorf("create tx inputs: %w", err)
+		}
+	}
+
+	// Reject invalid known parents or a second confirmed spender before
+	// creating credits or changing competing transactions in this write.
+	err := validateCreateTxInputs(ctx, req, ops)
+	if err != nil {
+		return fmt.Errorf("validate tx inputs: %w", err)
+	}
+
+	// Only a current confirming block can invalidate competing branches.
+	// Unconfirmed recording leaves every eligible claimant's history intact.
+	err = handleTxConflicts(ctx, req, txID, ops)
+	if err != nil {
+		return err
+	}
+
+	// Keep credit identity independent of whether its outputs are already
+	// claimed; indexed child inputs make late discovery immediately accurate.
+	err = ops.InsertCredits(ctx, req, txID)
+	if err != nil {
+		return fmt.Errorf("create tx credits: %w", err)
+	}
+
+	// A confirmed spend ends the leases on its inputs.
+	err = ops.DeleteSpentLeases(ctx, req.Params.WalletID, req.TxHash)
+	if err != nil {
+		return fmt.Errorf("create tx spent leases: %w", err)
+	}
+
+	return nil
+}
+
+// handleExistingCreateTx handles a CreateTx request for a transaction hash that
+// already has a wallet-scoped row.
+func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
+	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	// Delayed unmined echoes cannot undo chain facts or revive terminal
+	// history, including by adding newly discovered credits to those rows.
+	if req.Params.Block == nil &&
+		(existing.HasBlock || !IsUnminedStatus(existing.Status)) {
+
+		return nil
+	}
+
+	if checkIdempotentCreateTx(req, existing) {
+		return replayIdempotentCreateTx(ctx, req, existing, ops)
+	}
+
+	if !checkReuseCreateTx(req, existing) {
+		return fmt.Errorf("tx %s: %w", req.TxHash, ErrTxAlreadyExists)
+	}
+
+	err := ops.ConfirmExisting(ctx, req, existing)
+	if err != nil {
+		return fmt.Errorf("confirm existing tx: %w", err)
+	}
+
+	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
+	if err != nil {
+		return fmt.Errorf("replay confirmed tx edges: %w", err)
+	}
+
+	return nil
+}
+
+// replayIdempotentCreateTx validates and records any edge writes that an
+// idempotent duplicate transaction notification may still need.
+func replayIdempotentCreateTx(ctx context.Context, req CreateTxRequest,
+	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	err := validateCreateTxCreditRequests(req)
+	if err != nil {
+		return err
+	}
+
+	if req.Params.Block != nil {
+		err = ops.PrepareBlock(ctx, req)
+		if err != nil {
+			return fmt.Errorf("prepare duplicate block assignment: %w", err)
+		}
+	}
+
+	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
+	if err != nil {
+		return fmt.Errorf("replay duplicate tx edges: %w", err)
+	}
+
+	return nil
+}
+
+// createTxWithExisting reuses loaded metadata to continue creation or replay.
+// The entry points can resolve label policy without a second database read.
+func createTxWithExisting(ctx context.Context, req CreateTxRequest,
+	existing *CreateTxExistingTarget, ops CreateTxOps) error {
+
+	if existing != nil {
+		return handleExistingCreateTx(ctx, req, *existing, ops)
+	}
+
+	err := ops.PrepareBlock(ctx, req)
+	if err != nil {
+		return fmt.Errorf("prepare create block assignment: %w", err)
+	}
+
+	return insertCreateTx(ctx, req, ops)
+}
+
+// CreateTxWithOps runs the backend-independent CreateTx orchestration once the
+// caller has opened a backend-specific SQL transaction.
+//
+// The helper can either confirm an existing unmined row or Insert a new row.
+// For confirmed inserts it also reconciles any current direct conflict branch
+// before the new row claims wallet-owned inputs. The helper owns that ordering
+// so the backends only need to supply query wiring and type conversion.
+// Direct creation keeps strict label comparison; scan batches instead use
+// ApplyBatchTxWithOps to preserve labels omitted by chain observations.
+func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) error {
+
+	existing, err := loadCreateTxExisting(ctx, req, ops)
+	if err != nil {
+		return err
+	}
+
+	return createTxWithExisting(ctx, req, existing, ops)
+}
+
+// ApplyBatchTxWithOps ingests a transaction using the caller's batch SQL
+// transaction. An absent observation label preserves existing user metadata;
+// explicit labels retain the same strict comparison as direct creation.
+func ApplyBatchTxWithOps(ctx context.Context, req CreateTxRequest,
+	ops CreateTxOps) error {
+
+	existing, err := loadCreateTxExisting(ctx, req, ops)
+	if err != nil {
+		return err
+	}
+
+	// Resolve the label from the same metadata replay will validate. Existing
+	// rows never write this label back, so concurrent user edits survive.
+	if existing != nil && req.Params.Label == "" {
+		req.Params.Label = existing.Label
+	}
+
+	return createTxWithExisting(ctx, req, existing, ops)
+}
+
+// validateUpdateTxParams loads the transaction before validating the label,
+// status and block, so coinbase checks use its stored metadata.
+func validateUpdateTxParams(ctx context.Context, params UpdateTxParams,
+	ops UpdateTxOps) error {
+
+	// Check the stored transaction and requested fields before preparing
+	// or writing either its status/block association or its label.
+	isCoinbase, err := ops.LoadIsCoinbase(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return fmt.Errorf("load update tx target: %w", err)
+	}
+
+	if params.Label == nil && params.State == nil {
+		return fmt.Errorf("%w: UpdateTx requires at least one field",
+			ErrInvalidParam)
+	}
+
+	if params.State != nil {
+		return validateUpdateTxState(*params.State, isCoinbase)
+	}
+
+	return nil
+}
+
+// validateUpdateTxState checks the block/status combinations UpdateTx may store
+// on an existing row.
+func validateUpdateTxState(state UpdateTxState, isCoinbase bool) error {
+	_, err := ParseTxStatus(int64(state.Status))
+	if err != nil {
+		return fmt.Errorf("%w: status %d is not supported: %w",
+			ErrInvalidParam, state.Status, ErrInvalidStatus)
+	}
+
+	// UpdateTx is row-local only. Any invalidating or orphaning transition must
+	// flow through the event-shaped APIs that also reconcile dependent branch
+	// state.
+	if state.Status == TxStatusFailed ||
+		state.Status == TxStatusReplaced ||
+		state.Status == TxStatusOrphaned {
+
+		return fmt.Errorf("%w: UpdateTx cannot invalidate txns: %w",
+			ErrInvalidParam, ErrInvalidStatus)
+	}
+
+	// Any row with a confirming block represents mined history, and mined
+	// wallet history is always published from the wallet's point of view.
+	if state.Block != nil && state.Status != TxStatusPublished {
+		return fmt.Errorf("%w: confirmed txns must be published: %w",
+			ErrInvalidParam, ErrInvalidStatus)
+	}
+
+	// Coinbase state transitions are event-shaped only. CreateTx records the
+	// mined fact, while RollbackToBlock clears the block reference and rewrites
+	// the row orphaned. UpdateTx therefore never patches coinbase state.
+	if isCoinbase {
+		return fmt.Errorf("%w: UpdateTx cannot patch coinbase tx state: %w",
+			ErrInvalidParam, ErrInvalidStatus)
+	}
+
+	return nil
+}
+
+// UpdateTxOps is the minimal backend adapter the shared UpdateTx workflow
+// needs.
+//
+// The shared UpdateTx algorithm is intentionally ordered:
+//   - load the target row metadata first
+//   - validate the requested label/state patch against that metadata
+//   - prepare any backend-specific block/status params next
+//   - apply the label patch if requested
+//   - apply the state patch last
+//   - delete the leases on its inputs if the patch confirmed the tx
+//
+// Keeping that sequence documented here matters because UpdateTx is
+// deliberately row-local. The backend adapters only supply query wiring. The
+// shared helper owns the mutation ordering and the invariants that keep
+// block/status patches from accidentally turning into graph-level
+// reconciliation.
+type UpdateTxOps interface {
+	SpentLeaseOps
+
+	// LoadIsCoinbase returns whether the existing row is coinbase history
+	// so the shared validation can enforce orphaning rules correctly.
+	LoadIsCoinbase(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) (bool, error)
+
+	// PrepareState validates and caches any backend-specific block/status
+	// params needed for the later row update.
+	PrepareState(ctx context.Context, walletID uint32,
+		state UpdateTxState) error
+
+	// CheckGraphState rejects terminal recovery or confirmation changes
+	// involving competing transactions; CreateTx and rollback own those flows.
+	CheckGraphState(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) error
+
+	// UpdateLabel applies one user-visible label patch.
+	UpdateLabel(ctx context.Context, walletID uint32, txHash chainhash.Hash,
+		label string) error
+
+	// UpdateState applies one block/status patch after PrepareState succeeds.
+	UpdateState(ctx context.Context, walletID uint32, txHash chainhash.Hash,
+		state UpdateTxState) error
+}
+
+// UpdateTxWithOps runs the shared UpdateTx patch workflow inside one backend-
+// specific SQL transaction.
+//
+// The helper validates the existing row first, prepares any requested state
+// patch next, and then applies the label patch and state patch in that order.
+// That keeps block validation and row mutation inside one transaction while
+// still allowing callers to update either field independently.
+func UpdateTxWithOps(ctx context.Context, params UpdateTxParams,
+	ops UpdateTxOps) error {
+
+	err := validateUpdateTxParams(ctx, params, ops)
+	if err != nil {
+		return err
+	}
+
+	if params.State != nil {
+		err = ops.PrepareState(ctx, params.WalletID, *params.State)
+		if err != nil {
+			return fmt.Errorf("prepare tx state update: %w", err)
+		}
+
+		// Reject changes involving competing transactions before changing the
+		// label; the backend transaction keeps the check and writes atomic.
+		err = ops.CheckGraphState(ctx, params.WalletID, params.Txid)
+		if err != nil {
+			return fmt.Errorf("check tx graph state: %w", err)
+		}
+	}
+
+	if params.Label != nil {
+		err = ops.UpdateLabel(ctx, params.WalletID, params.Txid, *params.Label)
+		if err != nil {
+			return fmt.Errorf("update tx label: %w", err)
+		}
+	}
+
+	if params.State != nil {
+		err = ops.UpdateState(ctx, params.WalletID, params.Txid, *params.State)
+		if err != nil {
+			return fmt.Errorf("update tx state: %w", err)
+		}
+
+		// A state patch that confirms the tx ends the leases on its
+		// inputs.
+		err = ops.DeleteSpentLeases(ctx, params.WalletID, params.Txid)
+		if err != nil {
+			return fmt.Errorf("update tx spent leases: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// DeleteTxOps is the minimal backend adapter the shared DeleteTx workflow
+// needs.
+//
+// The shared delete sequence is:
+//   - load and validate the target unmined row
+//   - reject deletes that would orphan direct child spenders
+//   - delete wallet-owned outputs created by the tx itself
+//   - delete the transaction row last
+//
+// DeleteTx is the ordinary leaf-cleanup path, not the invalidation path. The
+// shared helper therefore proves the leaf invariant first and only then unwinds
+// the wallet-owned state that points at the target row.
+type DeleteTxOps interface {
+	// LoadDeleteTarget returns the row ID of the unmined transaction
+	// DeleteTx is allowed to remove.
+	LoadDeleteTarget(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) (int64, error)
+
+	// EnsureLeaf rejects DeleteTx when the target still has direct
+	// unmined child spenders.
+	EnsureLeaf(ctx context.Context, walletID uint32, txHash chainhash.Hash,
+		txID int64) error
+
+	// DeleteCreatedUtxos removes any wallet-owned outputs created by the
+	// transaction being deleted.
+	DeleteCreatedUtxos(ctx context.Context, walletID uint32, txID int64) error
+
+	// DeleteUnminedTransaction removes the target row after its dependent
+	// wallet state has been cleaned up.
+	DeleteUnminedTransaction(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) (int64, error)
+}
+
+// DeleteTxWithOps runs the shared DeleteTx sequence inside a backend-specific
+// SQL transaction.
+//
+// The helper checks that the transaction is a leaf, deletes its created wallet
+// outputs, then removes the transaction row and input claims. Other eligible
+// claims keep the wallet outputs they spend reserved.
+func DeleteTxWithOps(ctx context.Context, params DeleteTxParams,
+	ops DeleteTxOps) error {
+
+	txID, err := ops.LoadDeleteTarget(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return fmt.Errorf("load delete tx target: %w", err)
+	}
+
+	err = ops.EnsureLeaf(ctx, params.WalletID, params.Txid, txID)
+	if err != nil {
+		return fmt.Errorf("check delete tx leaf: %w", err)
+	}
+
+	err = ops.DeleteCreatedUtxos(ctx, params.WalletID, txID)
+	if err != nil {
+		return fmt.Errorf("delete created utxos: %w", err)
+	}
+
+	rows, err := ops.DeleteUnminedTransaction(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return fmt.Errorf("delete unmined tx: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("tx %s: %w", params.Txid, ErrTxNotFound)
+	}
+
+	return nil
+}
+
+// UnminedTxRecord is the decoded view of one unmined transaction row used by
+// shared descendant checks.
+type UnminedTxRecord struct {
+	// ID is the backend row ID.
+	ID int64
+
+	// Hash is the transaction hash used for graph traversal.
+	Hash chainhash.Hash
+
+	// Tx is the decoded transaction payload.
+	Tx *wire.MsgTx
+}
+
+// ExtractUnminedTxFn projects one backend-specific unmined transaction row into
+// the shared `(id, tx_hash, raw_tx)` shape used by the invalidation walk.
+type ExtractUnminedTxFn[Row any] func(Row) (int64, []byte, []byte)
+
+// disconnectDescendantOps is the shared graph-write boundary for explicit
+// rollback and observed disconnections, independent of their block selection.
+type disconnectDescendantOps interface {
+	// ListUnminedTxRecords loads the wallet's current unmined transaction
+	// rows in the normalized shape the descendant walk expects.
+	ListUnminedTxRecords(ctx context.Context,
+		walletID int64) ([]UnminedTxRecord, error)
+
+	// MarkDescendantsFailed batch-marks the discovered descendants as
+	// failed while retaining their input facts for history.
+	MarkDescendantsFailed(ctx context.Context, walletID int64,
+		descendantIDs []int64) error
+}
+
+// newUnminedTxRecord decodes one normalized unmined transaction row into the
+// shared dependency-walk shape.
+func newUnminedTxRecord(id int64, hash []byte,
+	rawTx []byte) (UnminedTxRecord, error) {
+
+	txHash, err := chainhash.NewHash(hash)
+	if err != nil {
+		return UnminedTxRecord{}, fmt.Errorf("tx hash: %w", err)
+	}
+
+	tx, err := deserializeMsgTx(rawTx)
+	if err != nil {
+		return UnminedTxRecord{}, err
+	}
+
+	return UnminedTxRecord{ID: id, Hash: *txHash, Tx: tx}, nil
+}
+
+// BuildUnminedTxRecords decodes backend-specific unmined transaction rows into
+// the shared dependency-walk shape.
+func BuildUnminedTxRecords[T any](rows []T,
+	extract ExtractUnminedTxFn[T]) ([]UnminedTxRecord, error) {
+
+	records := make([]UnminedTxRecord, 0, len(rows))
+	for _, row := range rows {
+		id, hash, rawTx := extract(row)
+
+		record, err := newUnminedTxRecord(id, hash, rawTx)
+		if err != nil {
+			return nil, fmt.Errorf("decode unmined tx %d: %w", id, err)
+		}
+
+		records = append(records, record)
+	}
+
+	return records, nil
+}
+
+// ValidateInputBranchCompatibility checks whether one selected set of outputs
+// requires distinct transactions that spend the same previous output. It
+// returns ErrTxInputConflict if the selected dependencies cannot coexist.
+// Competing unconfirmed alternatives may remain in wallet history; this check
+// rejects only a selection that requires both alternatives together.
+//
+// The caller supplies decoded Pending or Published unconfirmed candidates.
+// Confirmed and unknown parents are absent and end that part of the walk.
+// This checks wallet-known input relationships, not mempool acceptance.
+//
+// The check:
+//   - Starts at the creator of each selected output.
+//   - Visits each known parent once and records the transaction that spends
+//     each previous output.
+//   - Allows shared ancestors, but rejects different required transactions
+//     spending the same previous output.
+//
+// For example, A and B spend F:0; C and D spend different outputs of A:
+//   - Selecting C and D is valid because both depend on the same ancestor A.
+//   - Selecting C and B, or A and B, needs both competitors and fails.
+func ValidateInputBranchCompatibility(inputs []wire.OutPoint,
+	candidates []UnminedTxRecord) error {
+
+	parents := make(map[chainhash.Hash]*wire.MsgTx, len(candidates))
+	for _, candidate := range candidates {
+		parents[candidate.Hash] = candidate.Tx
+	}
+
+	// Start at the selected creators so an unrelated competing transaction
+	// elsewhere in wallet history cannot reject an explicit choice.
+	pending := make([]chainhash.Hash, 0, len(inputs))
+	for _, input := range inputs {
+		pending = append(pending, input.Hash)
+	}
+
+	visited := make(map[chainhash.Hash]struct{})
+
+	spenders := make(map[wire.OutPoint]chainhash.Hash)
+	for len(pending) != 0 {
+		hash := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+
+		if _, ok := visited[hash]; ok {
+			continue
+		}
+
+		visited[hash] = struct{}{}
+
+		tx, ok := parents[hash]
+		if !ok {
+			continue
+		}
+
+		// Shared ancestry is valid, but two distinct ancestors consuming one
+		// output cannot coexist in the transaction being constructed.
+		for _, input := range tx.TxIn {
+			prevout := input.PreviousOutPoint
+			if other, ok := spenders[prevout]; ok && other != hash {
+				return fmt.Errorf("incompatible input ancestry: %w",
+					ErrTxInputConflict)
+			}
+
+			spenders[prevout] = hash
+			pending = append(pending, prevout.Hash)
+		}
+	}
+
+	return nil
+}
+
+// CollectDirectChildTxIDs returns the IDs of unmined transactions that directly
+// spend any output created by the provided parent hash.
+func CollectDirectChildTxIDs(parentHash chainhash.Hash,
+	candidates []UnminedTxRecord) []int64 {
+
+	parentHashes := map[chainhash.Hash]struct{}{
+		parentHash: {},
+	}
+
+	childIDs := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		if txSpendsAnyParent(candidate.Tx, parentHashes) {
+			childIDs = append(childIDs, candidate.ID)
+		}
+	}
+
+	return childIDs
+}
+
+// CollectDescendantTxIDs returns every discovered descendant in the original
+// candidate order. Any ID also listed in rootIDs is excluded so direct roots
+// can keep their own state transition instead of being treated as descendants.
+func CollectDescendantTxIDs(rootHashes []chainhash.Hash,
+	rootIDs []int64, candidates []UnminedTxRecord) []int64 {
+
+	invalidHashes := make(map[chainhash.Hash]struct{}, len(rootHashes))
+	for _, hash := range rootHashes {
+		invalidHashes[hash] = struct{}{}
+	}
+
+	invalidIDs := make(map[int64]struct{}, len(candidates))
+
+	// Walk the candidate set to a fixed point. Each time we discover one
+	// new descendant we add its hash to invalidHashes, which may cause
+	// later passes to discover txns that depend on that child.
+	for changed := true; changed; {
+		changed = false
+
+		for _, candidate := range candidates {
+			if _, ok := invalidIDs[candidate.ID]; ok {
+				continue
+			}
+
+			if !txSpendsAnyParent(candidate.Tx, invalidHashes) {
+				continue
+			}
+
+			invalidIDs[candidate.ID] = struct{}{}
+			invalidHashes[candidate.Hash] = struct{}{}
+			changed = true
+		}
+	}
+
+	// Direct roots are handled separately by the caller, so remove them here
+	// before the ordered descendant slice is materialized.
+	for _, rootID := range rootIDs {
+		delete(invalidIDs, rootID)
+	}
+
+	orderedIDs := make([]int64, 0, len(invalidIDs))
+	for _, candidate := range candidates {
+		if _, ok := invalidIDs[candidate.ID]; ok {
+			orderedIDs = append(orderedIDs, candidate.ID)
+		}
+	}
+
+	return orderedIDs
+}
+
+// invalidateRollbackDescendants fails unmined descendants of rollback roots.
+// Their retained inputs stop reserving credits once their status is invalid.
+func invalidateRollbackDescendants(ctx context.Context,
+	rootHashesByWallet map[uint32][]chainhash.Hash,
+	ops disconnectDescendantOps) error {
+
+	for walletID, rootHashes := range rootHashesByWallet {
+		walletID64 := int64(walletID)
+
+		candidates, err := ops.ListUnminedTxRecords(ctx, walletID64)
+		if err != nil {
+			return fmt.Errorf("list unmined rollback descendants for "+
+				"wallet %d: %w", walletID, err)
+		}
+
+		descendantIDs := CollectDescendantTxIDs(rootHashes, nil, candidates)
+		if len(descendantIDs) == 0 {
+			continue
+		}
+
+		err = ops.MarkDescendantsFailed(ctx, walletID64, descendantIDs)
+		if err != nil {
+			return fmt.Errorf("mark rollback descendants failed for "+
+				"wallet %d: %w", walletID, err)
+		}
+	}
+
+	return nil
+}
+
+// InvalidateRollbackDescendants fails unmined descendants rooted in
+// disconnected coinbase transactions, retaining their input facts.
+// Wallet-scoped
+// rewind paths use this without deleting shared block rows.
+func InvalidateRollbackDescendants(ctx context.Context,
+	rootHashesByWallet map[uint32][]chainhash.Hash,
+	ops disconnectDescendantOps) error {
+
+	return invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
+}
+
+// DisconnectTx carries only the persisted facts used by disconnect policy.
+// IsCoinbase matches the classification used by confirmation-delete triggers.
+type DisconnectTx struct {
+	BlockHeight uint32
+	BlockHash   chainhash.Hash
+	Hash        chainhash.Hash
+	IsCoinbase  bool
+}
+
+// DisconnectBlockOps supplies owned history queries inside one SQL write.
+// The descendant walk is shared with explicit height rollback.
+type DisconnectBlockOps interface {
+	disconnectDescendantOps
+
+	// GetDisconnectBlock reads the observed height or ErrBlockNotFound.
+	GetDisconnectBlock(ctx context.Context, height uint32) (*Block, error)
+
+	// GetDisconnectCheckpoint reads nullable progress within the current write.
+	GetDisconnectCheckpoint(ctx context.Context) (*uint32, error)
+
+	// ListDisconnectBlocks reads the caller-selected committed interval,
+	// including empty rows and gaps without changing the requested bounds.
+	ListDisconnectBlocks(ctx context.Context,
+		start, end uint32) ([]Block, error)
+
+	// ListDisconnectTransactions reads mined facts before deletion.
+	ListDisconnectTransactions(ctx context.Context,
+		height uint32) ([]DisconnectTx, error)
+
+	// RewindDisconnectReferences rewinds progress across selected orphan rows
+	// and moves birthday only when its own block is removed.
+	RewindDisconnectReferences(ctx context.Context, heights []uint32,
+		previous *Block) error
+
+	// DeleteDisconnectBlocks removes exact rows after reference rewind.
+	DeleteDisconnectBlocks(ctx context.Context, heights []uint32) error
+}
+
+// DisconnectBlockWithOps validates native evidence and removes only proven
+// orphan history; explicit height rollback retains its separate range policy.
+func DisconnectBlockWithOps(ctx context.Context, walletID uint32, block Block,
+	previous *Block, canonical map[uint32]*chainhash.Hash,
+	ops DisconnectBlockOps) error {
+
+	current, known := canonical[block.Height]
+	if !known {
+		return fmt.Errorf("unknown canonical block at %d: %w",
+			block.Height, ErrInvalidParam)
+	}
+
+	// An observation the Wallet never retained or already removed
+	// has no owned history to rewind.
+	stored, err := ops.GetDisconnectBlock(ctx, block.Height)
+	if errors.Is(err, ErrBlockNotFound) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// A delayed event cannot rewind a replacement or a still-current block.
+	if stored.Hash != block.Hash || block.Hash.IsEqual(current) {
+		return nil
+	}
+
+	// A height is enough to update the reference only after this transaction
+	// verifies that the Wallet still owns the fork used to collect the proof.
+	if previous != nil {
+		// A successor can exist in retained history. Accepting it as
+		// the fork would advance progress during a rewind.
+		if previous.Height >= block.Height {
+			return fmt.Errorf("disconnect fork %d must precede %d: %w",
+				previous.Height, block.Height, ErrInvalidParam)
+		}
+
+		fork, err := ops.GetDisconnectBlock(ctx, previous.Height)
+		if err != nil {
+			return err
+		}
+
+		if fork.Hash != previous.Hash {
+			return fmt.Errorf("disconnect fork at height %d: %w",
+				previous.Height, ErrBlockMismatch)
+		}
+	}
+
+	return disconnectStoredHistory(
+		ctx, walletID, block, previous, canonical, ops,
+	)
+}
+
+// selectDisconnectHistory classifies each owned block identity once, so exact
+// deletion and coinbase descendant invalidation use the same orphan decision.
+func selectDisconnectHistory(walletID uint32, observed Block, blocks []Block,
+	history []DisconnectTx, canonical map[uint32]*chainhash.Hash) (
+	[]uint32, map[uint32][]chainhash.Hash, error) {
+
+	// Mined observations can lie outside committed progress. Their owned
+	// block join guarantees the same identity as any committed row here.
+	orphaned := map[uint32]chainhash.Hash{observed.Height: observed.Hash}
+	for _, block := range blocks {
+		orphaned[block.Height] = block.Hash
+	}
+
+	for _, info := range history {
+		orphaned[info.BlockHeight] = info.BlockHash
+	}
+
+	// Validate the union before any mutation. Matching rows leave the selected
+	// set, while an explicit nil proves absence above the source's tip.
+	for height, stored := range orphaned {
+		hash, known := canonical[height]
+		if !known {
+			return nil, nil, fmt.Errorf("unknown canonical block at %d: %w",
+				height, ErrInvalidParam)
+		}
+
+		if hash != nil && *hash == stored {
+			delete(orphaned, height)
+		}
+	}
+
+	roots := make(map[uint32][]chainhash.Hash)
+	for _, info := range history {
+		if _, removed := orphaned[info.BlockHeight]; removed &&
+			info.IsCoinbase {
+
+			roots[walletID] = append(roots[walletID], info.Hash)
+		}
+	}
+
+	return slices.Collect(maps.Keys(orphaned)), roots, nil
+}
+
+// disconnectStoredHistory validates all required evidence before writes. Its
+// saved-checkpoint bound includes orphaned progress above a lower notification.
+func disconnectStoredHistory(ctx context.Context, walletID uint32,
+	observed Block, previous *Block, canonical map[uint32]*chainhash.Hash,
+	ops DisconnectBlockOps) error {
+
+	// The proven fork precedes the observation; nil means before genesis.
+	start := uint32(0)
+	if previous != nil {
+		start = previous.Height + 1
+	}
+
+	checkpoint, err := ops.GetDisconnectCheckpoint(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Only committed empty rows require proof. Empty retained observations
+	// above progress remain outside this received-event recovery contract.
+	var blocks []Block
+	if checkpoint != nil && start <= *checkpoint {
+		blocks, err = ops.ListDisconnectBlocks(ctx, start, *checkpoint)
+		if err != nil {
+			return fmt.Errorf("list committed disconnect blocks: %w", err)
+		}
+	}
+
+	history, err := ops.ListDisconnectTransactions(ctx, start)
+	if err != nil {
+		return err
+	}
+
+	heights, roots, err := selectDisconnectHistory(
+		walletID, observed, blocks, history, canonical,
+	)
+	if err != nil {
+		return err
+	}
+
+	// References must move before any delete can fire confirmation triggers.
+	// All selected rows and their descendant effects share this same write.
+	err = ops.RewindDisconnectReferences(ctx, heights, previous)
+	if err != nil {
+		return err
+	}
+
+	err = ops.DeleteDisconnectBlocks(ctx, heights)
+	if err != nil {
+		return err
+	}
+
+	return invalidateRollbackDescendants(ctx, roots, ops)
+}
+
+// txSpendsAnyParent reports whether the transaction spends any hash in the
+// provided parent set.
+func txSpendsAnyParent(tx *wire.MsgTx,
+	parentHashes map[chainhash.Hash]struct{}) bool {
+
+	for _, txIn := range tx.TxIn {
+		if _, ok := parentHashes[txIn.PreviousOutPoint.Hash]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsUnminedStatus reports whether a status still represents an unmined
+// transaction that DeleteTx may erase.
+func IsUnminedStatus(status TxStatus) bool {
+	switch status {
+	case TxStatusPending, TxStatusPublished:
+		return true
+
+	case TxStatusReplaced, TxStatusFailed, TxStatusOrphaned:
+		return false
+
+	default:
+		return false
+	}
+}
+
+// ValidateBatchTransactionsWalletID rejects a batch whose transactions are not
+// all owned by batchWalletID. A batch applies sync state (sync tip or scan
+// horizons) to batchWalletID but records each transaction under that
+// transaction's own WalletID, so a mismatched member would let one wallet's
+// sync state advance atomically with another wallet's transaction write. The
+// check runs before any backend write so the batch invariant is enforced
+// up front, before horizon derivation or synced-block work is wasted.
+func ValidateBatchTransactionsWalletID(batchWalletID uint32,
+	txs []CreateTxParams) error {
+
+	for i := range txs {
+		if txs[i].WalletID == batchWalletID {
+			continue
+		}
+
+		return fmt.Errorf("%w: transaction %d wallet id %d does not "+
+			"match batch wallet id %d", ErrInvalidParam, i,
+			txs[i].WalletID, batchWalletID)
+	}
+
+	return nil
+}
+
+// ValidateBatchTransactionsTx rejects a batch in which any transaction has a
+// nil Tx. A batch is reordered parents-first by SortTxBatchParentsFirst before
+// it is applied, and that sort dereferences each transaction's Tx to read its
+// hash and inputs. Per-transaction NewCreateTxRequest validation would catch a
+// nil Tx, but only inside the apply loop that runs after the sort, so a nil Tx
+// would panic during reordering. Running this check up front, before the sort,
+// turns that into the same ErrInvalidParam every backend returns uniformly.
+func ValidateBatchTransactionsTx(txs []CreateTxParams) error {
+	for i := range txs {
+		if txs[i].Tx != nil {
+			continue
+		}
+
+		return fmt.Errorf("%w: transaction %d tx is required",
+			ErrInvalidParam, i)
+	}
+
+	return nil
+}
+
+// SortTxBatchParentsFirst puts each in-batch parent before its spenders, so
+// recording and input validation see parents from the same batch regardless
+// of the caller's order. It preserves relative order between unrelated rows.
+// Parents outside the batch impose no ordering constraint.
+//
+// The stable topological walk reuses the same CreateTxParams values without
+// changing the input slice. An already ordered batch can be returned unchanged.
+func SortTxBatchParentsFirst(txs []CreateTxParams) []CreateTxParams {
+	// Nothing to reorder: a single transaction (or none) cannot list a
+	// child ahead of an in-batch parent.
+	if len(txs) <= 1 {
+		return txs
+	}
+
+	children, inDegree := buildTxBatchDependencyGraph(txs)
+	order := topoSortTxBatchOrder(children, inDegree)
+
+	ordered := make([]CreateTxParams, 0, len(txs))
+	for _, idx := range order {
+		ordered = append(ordered, txs[idx])
+	}
+
+	return ordered
+}
+
+// buildTxBatchDependencyGraph builds the parent->child dependency edges of a
+// transaction batch. children[p] lists the positions of the batch transactions
+// spending an output of txs[p], and inDegree[c] counts the distinct in-batch
+// parents of txs[c]. Outpoints created outside the batch contribute no edge.
+func buildTxBatchDependencyGraph(txs []CreateTxParams) ([][]int, []int) {
+	// Map every in-batch transaction hash to its position so input lookups
+	// can tell an in-batch parent from an external outpoint. A hash that
+	// repeats in the batch keeps its first position; a later duplicate is
+	// rejected by CreateTxWithOps regardless of order, so the dependency
+	// edge only needs to point at one occurrence.
+	indexByHash := make(map[chainhash.Hash]int, len(txs))
+	for i := range txs {
+		hash := txs[i].Tx.TxHash()
+		if _, ok := indexByHash[hash]; !ok {
+			indexByHash[hash] = i
+		}
+	}
+
+	children := make([][]int, len(txs))
+
+	inDegree := make([]int, len(txs))
+	for child := range txs {
+		// Deduplicate parents within one child so a child spending two
+		// outputs of the same in-batch parent only adds one edge, which
+		// keeps the in-degree bookkeeping exact.
+		seen := make(map[int]struct{})
+		for _, txIn := range txs[child].Tx.TxIn {
+			parent, ok := indexByHash[txIn.PreviousOutPoint.Hash]
+			if !ok || parent == child {
+				continue
+			}
+
+			if _, dup := seen[parent]; dup {
+				continue
+			}
+
+			seen[parent] = struct{}{}
+			children[parent] = append(children[parent], child)
+			inDegree[child]++
+		}
+	}
+
+	return children, inDegree
+}
+
+// topoSortTxBatchOrder returns batch transaction positions in a stable
+// parents-first topological order using Kahn's algorithm with an
+// ascending-index ready set: among transactions whose in-batch parents are all
+// already emitted, the one with the lowest original position goes next. That
+// keeps the caller's relative order for independent transactions and leaves an
+// already parents-first batch unchanged.
+//
+// A dependency cycle is impossible for real transactions, since an output
+// cannot be spent before the transaction creating it exists. If a malformed
+// batch still encodes one, the cyclic members never reach the ready set; they
+// are appended in their original order so no transaction is dropped and
+// CreateTxWithOps can reject the bad input downstream.
+func topoSortTxBatchOrder(children [][]int, inDegree []int) []int {
+	total := len(inDegree)
+
+	ready := make([]int, 0, total)
+	for i := range inDegree {
+		if inDegree[i] == 0 {
+			ready = append(ready, i)
+		}
+	}
+
+	order := make([]int, 0, total)
+
+	emitted := make([]bool, total)
+	for len(ready) > 0 {
+		node := popLowestIndex(&ready)
+		order = append(order, node)
+		emitted[node] = true
+
+		for _, child := range children[node] {
+			inDegree[child]--
+			if inDegree[child] == 0 {
+				ready = append(ready, child)
+			}
+		}
+	}
+
+	// Append any cyclic leftover in original order.
+	if len(order) != total {
+		for i := range total {
+			if !emitted[i] {
+				order = append(order, i)
+			}
+		}
+	}
+
+	return order
+}
+
+// popLowestIndex removes and returns the smallest value from ready, preserving
+// the order of the remaining elements.
+func popLowestIndex(ready *[]int) int {
+	r := *ready
+
+	lowest := 0
+	for i := 1; i < len(r); i++ {
+		if r[i] < r[lowest] {
+			lowest = i
+		}
+	}
+
+	node := r[lowest]
+	r = append(r[:lowest], r[lowest+1:]...)
+	*ready = r
+
+	return node
+}

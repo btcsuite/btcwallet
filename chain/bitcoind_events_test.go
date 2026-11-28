@@ -1,13 +1,22 @@
 package chain
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -17,6 +26,8 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain/port"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,6 +36,456 @@ const (
 	// file. It is set to 30 seconds to allow for slow test environments.
 	defaultTestTimeout = 30 * time.Second
 )
+
+// newBitcoindStartupTestClient gives the real client a local RPC endpoint
+// whose tip request can fail before the notification queue is published.
+func newBitcoindStartupTestClient(t *testing.T,
+	tipError func() *btcjson.RPCError) *BitcoindClient {
+
+	t.Helper()
+
+	// Serve startup RPCs without a node or its notification transport.
+	serve := func(w http.ResponseWriter, r *http.Request) {
+		var req btcjson.Request
+
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+
+		response := btcjson.Response{Jsonrpc: req.Jsonrpc, ID: &req.ID}
+		switch req.Method {
+		case "getblockchaininfo":
+			// Inject a warmup error only in tests that need it.
+			if tipError != nil {
+				response.Error = tipError()
+			}
+
+			if response.Error == nil {
+				response.Result = json.RawMessage(
+					`{"bestblockhash":"01"}`,
+				)
+			}
+
+		case "getinfo":
+			// Bitcoind exposes its version via getnetworkinfo.
+			response.Error = btcjson.ErrRPCMethodNotFound
+
+		case "getnetworkinfo":
+			version := `{"subversion":"/Satoshi:32.0.0/"}`
+			response.Result = json.RawMessage(version)
+
+		case "getblockheader":
+			response.Result = json.RawMessage(`{"time":1}`)
+
+		default:
+			t.Errorf("unexpected startup RPC %q", req.Method)
+			return
+		}
+
+		err = json.NewEncoder(w).Encode(response)
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(serve))
+	t.Cleanup(server.Close)
+
+	// Supply explicit credentials so rpcclient targets this test server
+	// without looking for a local bitcoind cookie.
+	cfg := rpcclient.ConnConfig{
+		Host:         strings.TrimPrefix(server.URL, "http://"),
+		User:         "test",
+		Pass:         "test",
+		HTTPPostMode: true,
+		DisableTLS:   true,
+	}
+	rpc, err := rpcclient.New(&cfg, nil)
+	require.NoError(t, err)
+
+	t.Cleanup(rpc.WaitForShutdown)
+	t.Cleanup(rpc.Shutdown)
+
+	conn := &BitcoindConn{
+		cfg: BitcoindConfig{
+			Host: cfg.Host,
+			User: cfg.User,
+			Pass: cfg.Pass,
+		},
+		client: rpc,
+	}
+	client, err := conn.NewBitcoindClient()
+	require.NoError(t, err)
+
+	t.Cleanup(client.WaitForShutdown)
+	t.Cleanup(client.Stop)
+
+	return client
+}
+
+// TestBitcoindSubscriptionLiveDelivery checks that native history is excluded
+// and that overflow at a slow reader leaves the fast reader unaffected.
+func TestBitcoindSubscriptionLiveDelivery(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a started client and drain the legacy startup marker so
+	// the next legacy read can check the same marker as a live reader.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	hash := chainhash.Hash{1}
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+
+	fast := client.SubscribeChainEvents(t.Context())
+	slow := client.SubscribeChainEvents(t.Context())
+
+	// Bound each read and return the first event so a later matching
+	// marker cannot hide replay or a gap.
+	receiveEvent := func(events <-chan Event) Event {
+		t.Helper()
+
+		select {
+		case event := <-events:
+			return event
+		case <-time.After(defaultTestTimeout):
+			require.FailNow(t, "reader missed an Event")
+		}
+
+		return Event{}
+	}
+	receiveLegacy := func(events <-chan any) any {
+		t.Helper()
+
+		select {
+		case event := <-events:
+			return event
+		case <-time.After(defaultTestTimeout):
+			require.FailNow(t, "legacy reader missed event")
+		}
+
+		return nil
+	}
+
+	// Act by filling the slow reader's buffer while draining the fast
+	// reader to keep its subscription active.
+	capacity := cap(slow.Events)
+	require.Equal(t, 100, capacity)
+
+	height := int32(2)
+
+	for range capacity {
+		client.onBlockDisconnected(&hash, height, time.Time{})
+
+		ev := receiveEvent(fast.Events)
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, hash, ev.Block.Hash)
+		require.Equal(t, height, ev.Block.Height)
+		height++
+	}
+
+	// Assert coexistence on the first legacy marker. Drain through the
+	// last marker because legacy enqueue follows all live offers.
+	require.Equal(
+		t, BlockDisconnected{
+			Block: wtxmgr.Block{Hash: hash, Height: 2},
+		}, receiveLegacy(legacy),
+	)
+
+	for range capacity - 1 {
+		receiveLegacy(legacy)
+	}
+
+	// All slots are occupied. Closure requires a failed offer.
+	select {
+	case <-slow.Done:
+		require.FailNow(t, "filling the buffer retired subscription")
+	default:
+	}
+
+	// The next marker cannot fit for the slow reader. It still fits for
+	// the fast reader and exposes the slow reader's terminal result.
+	client.onBlockDisconnected(&hash, height, time.Time{})
+
+	ev := receiveEvent(fast.Events)
+	require.Equal(t, EventBlockDisconnected, ev.Type)
+	require.Equal(t, height, ev.Block.Height)
+	height++
+
+	waitSubDone(t, slow)
+	require.ErrorIs(t, slow.Err(), ErrEventSubscriptionBufferFull)
+
+	late := client.SubscribeChainEvents(t.Context()).Events
+
+	// The closed slow reader retains exactly the accepted prefix.
+	retained := int32(2)
+
+	for range capacity {
+		ev := receiveEvent(slow.Events)
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, hash, ev.Block.Hash)
+		require.Equal(t, retained, ev.Block.Height)
+		retained++
+	}
+
+	_, open := <-slow.Events
+	require.False(t, open)
+
+	// Check late enrollment and continued fast delivery after overflow.
+	client.onBlockDisconnected(&hash, height, time.Time{})
+	want := Event{
+		Type: EventBlockDisconnected,
+		Block: &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Hash: hash, Height: height},
+		},
+	}
+	require.Equal(t, want, receiveEvent(late))
+	require.Equal(t, want, receiveEvent(fast.Events))
+}
+
+// TestBitcoindSubscriptionPreCanceled checks that an already-canceled
+// context returns a retired subscription.
+func TestBitcoindSubscriptionPreCanceled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a running source with a context canceled before enrollment.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act by subscribing with the context that already finished.
+	sub := client.SubscribeChainEvents(ctx)
+
+	// Assert both channels are closed when the rejected call returns,
+	// with the source still running.
+	select {
+	case <-sub.Done:
+	default:
+		t.Fatal("refused subscription stayed active")
+	}
+
+	require.NoError(t, sub.Err())
+
+	select {
+	case _, ok := <-sub.Events:
+		require.False(t, ok)
+	default:
+		t.Fatal("refused subscription left Events open")
+	}
+}
+
+// TestBitcoindSubscriptionCancellation checks that an unread subscriber can
+// retire and events published during the resulting gap are ineligible.
+func TestBitcoindSubscriptionCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange one live subscriber with a pending event and no drain.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	first := client.SubscribeChainEvents(ctx)
+	hash := chainhash.Hash{3}
+	client.onBlockDisconnected(&hash, 1, time.Time{})
+
+	// Act by retiring the only subscriber, then publish while there is
+	// no reader. Leave the old reader's Events channel unread.
+	cancel()
+	waitSubDone(t, first)
+	require.NoError(t, first.Err())
+
+	client.onBlockDisconnected(&hash, 2, time.Time{})
+
+	// The owner must finish publishing height 2 before it can accept
+	// height 3. Publication of height 3 itself may race registration.
+	client.onBlockDisconnected(&hash, 3, time.Time{})
+
+	next := client.SubscribeChainEvents(t.Context())
+	client.onBlockDisconnected(&hash, 4, time.Time{})
+
+	// Assert the reader can receive the racing height 3 and must receive
+	// height 4. Height 2 was published before enrollment and fails either
+	// expectation.
+	deadline := time.After(defaultTestTimeout)
+
+	for {
+		select {
+		case event := <-next.Events:
+			require.Equal(
+				t, EventBlockDisconnected, event.Type,
+			)
+
+			if event.Block.Height == 3 {
+				require.Equal(t, hash, event.Block.Hash)
+				continue
+			}
+
+			require.Equal(t, hash, event.Block.Hash)
+			require.Equal(t, int32(4), event.Block.Height)
+
+			return
+
+		case <-deadline:
+			require.FailNow(t, "new reader missed live delivery")
+		}
+	}
+}
+
+// TestBitcoindSubscriptionClientShutdown checks client Stop independently of
+// connection shutdown, including a live reader with an unread event.
+func TestBitcoindSubscriptionClientShutdown(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a started client and leave an eligible event unread.
+	client := newBitcoindStartupTestClient(t, nil)
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	sub := client.SubscribeChainEvents(t.Context())
+	hash := chainhash.Hash{4}
+	client.onBlockDisconnected(&hash, 1, time.Time{})
+
+	// Act by stopping the client while its subscription context is live.
+	client.Stop()
+
+	// Assert retirement does not require first draining the event. The
+	// existing buffered event remains readable on the closed channel.
+	waitSubDone(t, sub)
+	require.NoError(t, sub.Err())
+
+	ev := <-sub.Events
+	require.Equal(t, EventBlockDisconnected, ev.Type)
+	require.Equal(t, hash, ev.Block.Hash)
+	require.Equal(t, int32(1), ev.Block.Height)
+
+	_, ok := <-sub.Events
+	require.False(t, ok)
+
+	// A call after retirement must return already-closed channels.
+	late := client.SubscribeChainEvents(t.Context())
+	select {
+	case <-late.Done:
+	default:
+		t.Fatal("a stopped client accepted a new subscriber")
+	}
+
+	select {
+	case _, open := <-late.Events:
+		require.False(t, open)
+	default:
+		t.Fatal("a stopped client left Events open")
+	}
+}
+
+// TestBitcoindSubscriptionAfterStartRetry verifies a failed Start leaves the
+// client retryable and a successful retry makes live subscriptions usable.
+func TestBitcoindSubscriptionAfterStartRetry(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a node in warmup. The same RPC fixture can return its tip
+	// when the test clears the error.
+	var tipError atomic.Pointer[btcjson.RPCError]
+	tipError.Store(btcjson.NewRPCError(
+		btcjson.ErrRPCInWarmup, "Loading block index",
+	))
+	client := newBitcoindStartupTestClient(t, tipError.Load)
+
+	// Act by starting once while the node is in warmup, then retry on
+	// the same client after its tip RPC becomes available.
+	firstErr := client.Start(t.Context())
+
+	tipError.Store(nil)
+
+	retryErr := client.Start(t.Context())
+
+	// Assert the first call returns the actual RPC error. Verify the
+	// retry initialized the stream by receiving a live native marker.
+	var rpcErr *btcjson.RPCError
+	require.ErrorAs(t, firstErr, &rpcErr)
+	require.Equal(t, btcjson.ErrRPCInWarmup, rpcErr.Code)
+	require.NoError(t, retryErr)
+
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+	sub := client.SubscribeChainEvents(t.Context())
+	hash := chainhash.Hash{1}
+	client.onBlockDisconnected(&hash, 1, time.Time{})
+
+	select {
+	case event := <-sub.Events:
+		require.Equal(t, EventBlockDisconnected, event.Type)
+		require.Equal(t, hash, event.Block.Hash)
+		require.Equal(t, int32(1), event.Block.Height)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "retry did not enable live delivery")
+	}
+}
+
+// TestBitcoindConcurrentStart verifies overlapping Start calls produce one
+// startup notification for the client.
+func TestBitcoindConcurrentStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a real client with a healthy tip endpoint. A shared release
+	// lets two callers enter Start while the first tip lookup is in flight.
+	client := newBitcoindStartupTestClient(t, nil)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+
+	// Act by releasing both callers and collecting their results before
+	// reading any startup notifications.
+	for range cap(results) {
+		go func() {
+			<-start
+
+			results <- client.Start(t.Context())
+		}()
+	}
+
+	close(start)
+
+	firstErr, secondErr := <-results, <-results
+
+	// Assert both callers succeeded and together seeded exactly one
+	// startup marker in the public notification channel.
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+
+	notifications := client.Notifications()
+	require.Len(t, notifications, 1)
+	require.Equal(t, ClientConnected{}, <-notifications)
+}
+
+// TestBitcoindStartRetryAfterStop verifies a failed start cannot be retried
+// once Stop has retired the notification queue.
+func TestBitcoindStartRetryAfterStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an initial warmup failure before retiring the client.
+	var tipError atomic.Pointer[btcjson.RPCError]
+	tipError.Store(btcjson.NewRPCError(
+		btcjson.ErrRPCInWarmup, "Loading block index",
+	))
+	client := newBitcoindStartupTestClient(t, tipError.Load)
+
+	var rpcErr *btcjson.RPCError
+	require.ErrorAs(t, client.Start(t.Context()), &rpcErr)
+	require.Equal(t, btcjson.ErrRPCInWarmup, rpcErr.Code)
+	client.Stop()
+	tipError.Store(nil)
+
+	// Act after the node has recovered while the old client stays stopped.
+	err := client.Start(t.Context())
+
+	// Assert startup rejects the retry on the retired queue.
+	require.ErrorIs(t, err, ErrBitcoindClientShuttingDown)
+}
 
 // TestBitcoindEventsZMQ runs all bitcoind event tests using ZMQ subscriptions.
 //
@@ -48,6 +509,26 @@ func TestBitcoindEventsZMQ(t *testing.T) {
 //nolint:paralleltest
 func TestBitcoindEventsRPC(t *testing.T) {
 	runBitcoindEventsTests(t, true)
+
+	t.Run("SubscriptionSourceShutdown", func(t *testing.T) {
+		// Arrange a live subscription before the client registers any
+		// watches, so closure depends on observing the backing quit.
+		client := setupBitcoind(t, setupMiner(t), true)
+		sub := client.SubscribeChainEvents(t.Context())
+
+		// Act on the backing connection. The subscription precedes
+		// watch registration, so connection stop cannot find the
+		// client in the registered set to stop it directly.
+		client.chainConn.Stop()
+
+		// Assert the connection's terminal signal reaches the client
+		// even without a native watch on that connection.
+		select {
+		case <-sub.Done:
+		case <-time.After(defaultTestTimeout):
+			t.Fatal("subscription outlived its backing connection")
+		}
+	})
 }
 
 // runBitcoindEventsTests runs the suite of bitcoind event tests with the
@@ -95,18 +576,87 @@ func runBitcoindEventsTests(t *testing.T, rpcPolling bool) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			// Initialize a fresh miner for the test case.
 			miner1 := setupMiner(t)
-			addr := miner1.P2PAddress()
 
 			// Initialize a fresh bitcoind client for EVERY test
 			// case.
-			btcClient := setupBitcoind(t, addr, rpcPolling)
+			btcClient := setupBitcoind(t, miner1, rpcPolling)
 
 			test.testFn(t, miner1, btcClient)
 		})
+	}
+}
+
+// TestBitcoindEventsWatchAddrsFromTip applies the live-tip contract.
+//
+//nolint:paralleltest // Btcd's rpctest ports can collide across subtests.
+func TestBitcoindEventsWatchAddrsFromTip(t *testing.T) {
+	backends := []struct {
+		name       string
+		rpcPolling bool
+	}{
+		{
+			name:       "ZMQ",
+			rpcPolling: false,
+		},
+		{
+			name:       "RPC",
+			rpcPolling: true,
+		},
+	}
+
+	for _, backend := range backends {
+		t.Run(backend.name, func(t *testing.T) {
+			// Arrange: mine history before bitcoind starts and select its
+			// transport from data, excluding stale ZMQ transaction events.
+			miner := setupMiner(t)
+			addr := mineHistoricalWatchAddr(t, miner)
+			client := setupBitcoind(t, miner, backend.rpcPolling)
+
+			// Act: prove no hidden rescan with an isolated client, then run
+			// the production contract on the selected transport.
+			assertWatchAddrsFromTipDoesNotRescan(t, client, addr)
+			testWatchAddrsFromTipConformance(
+				t, miner, client, addr,
+			)
+
+			// Assert: one future notification drains through a later block.
+		})
+	}
+}
+
+// assertWatchAddrsFromTipDoesNotRescan uses a handler-free test client.
+func assertWatchAddrsFromTipDoesNotRescan(t *testing.T,
+	client *BitcoindClient, addr address.Address) {
+
+	t.Helper()
+
+	// Arrange: start only the sibling queue so registration owns the wait
+	// group and every tracked goroutine belongs to the operation under test.
+	probe, err := client.chainConn.NewBitcoindClient()
+	require.NoError(t, err)
+	probe.notificationQueue.Start()
+
+	atomic.StoreUint32(&probe.notifyBlocks, 1)
+	defer probe.Stop()
+
+	// Act: wait for registration work, then enqueue its FIFO marker.
+	err = probe.WatchAddrsFromTip(t.Context(), []address.Address{addr})
+	require.NoError(t, err)
+	probe.WaitForShutdown()
+
+	probe.notificationQueue.ChanIn() <- ClientConnected{}
+
+	// Assert: reach the marker without a historical rescan completion.
+	for ntfn := range probe.Notifications() {
+		if _, ok := ntfn.(ClientConnected); ok {
+			return
+		}
+
+		_, rescanned := ntfn.(*RescanFinished)
+		require.False(t, rescanned)
 	}
 }
 
@@ -155,10 +705,12 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	require.NoError(client.NotifyBlocks())
 	ntfns := client.Notifications()
 
-	// Send an event to the ntfns after the tx event has been received.
-	// Otherwise the orders of the events might get messed up if we send
-	// events shortly.
-	miner.Client.Generate(1)
+	// Mine one block after the subscription is active. Both connected
+	// notifications below must identify this block.
+	blocks, err := miner.Client.Generate(1)
+	require.NoError(err)
+	require.Len(blocks, 1)
+	blockHash := *blocks[0]
 
 	// We expect to get a ClientConnected notification.
 	waitForClientConnected(t, ntfns)
@@ -166,9 +718,10 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	// We expect to get a FilteredBlockConnected notification.
 	select {
 	case ntfn := <-ntfns:
-		_, ok := ntfn.(FilteredBlockConnected)
+		block, ok := ntfn.(FilteredBlockConnected)
 		require.Truef(ok, "Expected type FilteredBlockConnected, "+
 			"got %T", ntfn)
+		require.Equal(blockHash, block.Block.Hash)
 
 	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for FilteredBlockConnected " +
@@ -178,8 +731,9 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	// We expect to get a BlockConnected notification.
 	select {
 	case ntfn := <-ntfns:
-		_, ok := ntfn.(BlockConnected)
+		block, ok := ntfn.(BlockConnected)
 		require.Truef(ok, "Expected type BlockConnected, got %T", ntfn)
+		require.Equal(blockHash, block.Hash)
 
 	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for BlockConnected notification")
@@ -266,6 +820,7 @@ func testLookupInputMempoolSpend(t *testing.T, miner *rpctest.Harness,
 func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 	t.Helper()
 
+	// Arrange disconnected miners so the shorter branch becomes orphaned.
 	miner2 := setupReorgMiner(t, miner1)
 
 	require := require.New(t)
@@ -315,7 +870,7 @@ func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 	// experience a re-org, miner1 must generate fewer blocks here than
 	// miner2 so that when they reconnect, miner1 does a re-org to switch
 	// to the longer chain.
-	_, err = miner1.Client.Generate(3)
+	oldHashes, err := miner1.Client.Generate(3)
 	require.NoError(err)
 
 	// Read the notifications for the new blocks
@@ -335,9 +890,8 @@ func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 
 	require.False(hash1.IsEqual(hash2))
 
-	// Reconnect the miners. This should result in miner1 reorging to match
-	// miner2. Since our client is connected to a node connected to miner1,
-	// we should get the expected disconnected and connected notifications.
+	// Act by reconnecting the miners so miner1 reorganizes to miner2.
+	// Its connected client must report the old and replacement identities.
 	err = rpctest.ConnectNode(miner1, miner2)
 	require.NoError(err)
 
@@ -357,10 +911,13 @@ func testReorg(t *testing.T, miner1 *rpctest.Harness, client *BitcoindClient) {
 	require.Equal(commonHeight+5, height1)
 	require.True(hash1.IsEqual(hash2))
 
-	// We expect our client to get 3 BlockDisconnected notifications first
-	// signaling the unwinding of its top 3 blocks.
+	// Assert each disconnected identity as well as height: a grandparent
+	// hash would prevent history recovery even though heights descend.
 	for i := 0; i < 3; i++ {
-		_ = waitForBlockNtfn(t, ntfns, commonHeight+int32(3-i), false)
+		hash := waitForBlockNtfn(
+			t, ntfns, commonHeight+int32(3-i), false,
+		)
+		require.Equal(*oldHashes[2-i], hash)
 	}
 
 	// Now we expect 5 BlockConnected notifications.
@@ -487,8 +1044,12 @@ func setupReorgMiner(t *testing.T, miner1 *rpctest.Harness) *rpctest.Harness {
 
 // setupBitcoind starts up a bitcoind node with either a zmq connection or
 // rpc polling connection and returns a client wrapper of this connection.
-func setupBitcoind(t *testing.T, minerAddr string,
+func setupBitcoind(t *testing.T, miner *rpctest.Harness,
 	rpcPolling bool) *BitcoindClient {
+	t.Helper()
+
+	minerHash, minerHeight, err := miner.Client.GetBestBlock()
+	require.NoError(t, err)
 
 	// Start a bitcoind instance and connect it to miner1.
 	tempBitcoindDir := t.TempDir()
@@ -505,7 +1066,7 @@ func setupBitcoind(t *testing.T, minerAddr string,
 		"bitcoind",
 		"-datadir="+tempBitcoindDir,
 		"-regtest",
-		"-connect="+minerAddr,
+		"-connect="+miner.P2PAddress(),
 		"-txindex",
 		"-rpcauth=weks:469e9bb14ab2360f8e226efed5ca6f"+
 			"d$507c670e800a95284294edb5773b05544b"+
@@ -528,6 +1089,30 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	time.Sleep(time.Second)
 
 	host := fmt.Sprintf("127.0.0.1:%d", rpcPort)
+	syncClient, err := rpcclient.New(&rpcclient.ConnConfig{
+		Host:         host,
+		User:         "weks",
+		Pass:         "weks",
+		DisableTLS:   true,
+		HTTPPostMode: true,
+	}, nil)
+	require.NoError(t, err)
+
+	defer syncClient.Shutdown()
+
+	// Wait for bitcoind to reach the miner's exact tip before constructing
+	// the event source. This prevents either the RPC poller or ZMQ subscriber
+	// from observing synchronization blocks as post-start events.
+	require.Eventually(t, func() bool {
+		chainInfo, err := syncClient.GetBlockChainInfo()
+		if err != nil {
+			return false
+		}
+
+		return chainInfo.Blocks == minerHeight &&
+			chainInfo.BestBlockHash == minerHash.String()
+	}, defaultTestTimeout, 100*time.Millisecond)
+
 	cfg := &BitcoindConfig{
 		ChainParams: &chaincfg.RegressionNetParams,
 		Host:        host,
@@ -555,6 +1140,7 @@ func setupBitcoind(t *testing.T, minerAddr string,
 
 	chainConn, err := NewBitcoindConn(cfg)
 	require.NoError(t, err)
+
 	require.NoError(t, chainConn.Start())
 
 	t.Cleanup(func() {
@@ -569,12 +1155,6 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	t.Cleanup(func() {
 		btcClient.Stop()
 	})
-
-	// Wait for bitcoind to sync with the miner.
-	require.Eventually(t, func() bool {
-		_, height, err := btcClient.GetBestBlock()
-		return err == nil && height >= 101
-	}, defaultTestTimeout, 100*time.Millisecond)
 
 	return btcClient
 }
@@ -682,6 +1262,103 @@ func waitForClientConnected(t *testing.T, ntfns <-chan any) {
 	}
 }
 
+// waitForExclusiveRelevantTx rejects every unexpected transaction.
+func waitForExclusiveRelevantTx(t *testing.T, ntfns <-chan any,
+	hash *chainhash.Hash) {
+
+	t.Helper()
+
+	timer := time.NewTimer(defaultTestTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ntfn := <-ntfns:
+			switch value := ntfn.(type) {
+			case RelevantTx:
+				require.True(
+					t, value.TxRecord.Hash.IsEqual(hash),
+					"received unexpected relevant transaction %v",
+					value.TxRecord.Hash,
+				)
+
+				return
+
+			case FilteredBlockConnected:
+				// Bitcoind groups confirmed matches in block notifications,
+				// so inspect every record to expose a historical replay.
+				var found bool
+				for _, tx := range value.RelevantTxs {
+					require.True(
+						t, tx.Hash.IsEqual(hash),
+						"received unexpected relevant transaction %v",
+						tx.Hash,
+					)
+					require.False(
+						t, found,
+						"received duplicate relevant transaction %v",
+						tx.Hash,
+					)
+					found = true
+				}
+
+				if found {
+					return
+				}
+			}
+
+		case <-timer.C:
+			require.FailNow(t, "timed out waiting for RelevantTx "+
+				"notification")
+		}
+	}
+}
+
+// waitForNoRelevantTxUntilBlock drains notifications through an exact later
+// block, failing if a duplicate or delayed historical transaction appears.
+func waitForNoRelevantTxUntilBlock(t *testing.T, ntfns <-chan any,
+	hash *chainhash.Hash) {
+
+	t.Helper()
+
+	timer := time.NewTimer(defaultTestTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ntfn := <-ntfns:
+			switch value := ntfn.(type) {
+			case RelevantTx:
+				require.FailNowf(
+					t, "unexpected relevant transaction",
+					"received transaction %v after the expected "+
+						"future delivery", value.TxRecord.Hash,
+				)
+
+			case FilteredBlockConnected:
+				// Every confirmed match after the expected delivery is a
+				// duplicate or delayed historical notification.
+				for _, tx := range value.RelevantTxs {
+					require.FailNowf(
+						t, "unexpected relevant transaction",
+						"received transaction %v after the "+
+							"expected future delivery", tx.Hash,
+					)
+				}
+
+			case BlockConnected:
+				if value.Hash.IsEqual(hash) {
+					return
+				}
+			}
+
+		case <-timer.C:
+			require.FailNow(t, "timed out waiting for post-delivery "+
+				"BlockConnected notification")
+		}
+	}
+}
+
 // waitForRelevantTx waits for a RelevantTx notification for the passed tx
 // hash on the passed channel. Any other notifications received while waiting
 // are ignored.
@@ -705,4 +1382,865 @@ func waitForRelevantTx(t *testing.T, ntfns <-chan any, hash *chainhash.Hash) {
 				"notification")
 		}
 	}
+}
+
+// waitSubDone waits until sub.Done closes or fails the test on timeout.
+func waitSubDone(t *testing.T, sub EventSubscription) {
+	t.Helper()
+
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for subscription done")
+	}
+}
+
+// TestChainEventSubscriptionUnindexOnCancel verifies that canceling one
+// listener unindexes its exclusive watches, leaves shared watches intact for
+// remaining listeners, and releases the retired listener's own watch maps.
+func TestChainEventSubscriptionUnindexOnCancel(t *testing.T) {
+	t.Parallel()
+
+	// Set up a stream with two active listeners that share one script and
+	// one outpoint while the first listener also owns exclusive keys.
+	stream := newChainEventStream(&chaincfg.RegressionNetParams, nil)
+	ctxA, cancelA := context.WithCancel(t.Context())
+	subA := stream.subscribe(ctxA)
+	subB := stream.subscribe(t.Context())
+
+	sharedScript, onlyAScript := "shared-script", "only-a-script"
+	sharedOP := wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0}
+	onlyAOP := wire.OutPoint{Hash: chainhash.Hash{2}, Index: 1}
+
+	_, err := registerWatchKeys(
+		ctxA, stream, subA.listener, ctxA.Done(),
+		&stream.scriptListeners, &subA.listener.scripts,
+		[]string{sharedScript, onlyAScript},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		ctxA, stream, subA.listener, ctxA.Done(),
+		&stream.outpointListeners, &subA.listener.outpoints,
+		[]wire.OutPoint{sharedOP, onlyAOP},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subB.listener, t.Context().Done(),
+		&stream.scriptListeners, &subB.listener.scripts,
+		[]string{sharedScript},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subB.listener, t.Context().Done(),
+		&stream.outpointListeners, &subB.listener.outpoints,
+		[]wire.OutPoint{sharedOP},
+	)
+	require.NoError(t, err)
+
+	// Cancel the first subscription and wait for retirement to complete.
+	cancelA()
+	waitSubDone(t, subA)
+
+	// Verify subA's exclusive keys were removed, shared keys still map to
+	// subB, and subA's listener watch maps were cleared for GC.
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	require.NoError(t, subA.Err())
+	require.Nil(t, subA.listener.scripts)
+	require.Nil(t, subA.listener.outpoints)
+	require.NotContains(t, stream.scriptListeners, onlyAScript)
+	require.NotContains(t, stream.outpointListeners, onlyAOP)
+	require.Contains(t, stream.scriptListeners[sharedScript], subB.listener)
+	require.NotContains(
+		t, stream.scriptListeners[sharedScript], subA.listener,
+	)
+	require.Contains(t, stream.outpointListeners[sharedOP], subB.listener)
+	require.NotContains(
+		t, stream.outpointListeners[sharedOP], subA.listener,
+	)
+}
+
+// TestChainEventSubscriptionOverflowUnindexesWatches verifies that overflowing
+// a slow listener retires it with ErrEventSubscriptionBufferFull, unindexes
+// its watches immediately, and leaves subsequent publications panic-free.
+func TestChainEventSubscriptionOverflowUnindexesWatches(t *testing.T) {
+	t.Parallel()
+
+	// Enroll a slow listener with watches and an active fast sibling.
+	stream := newChainEventStream(&chaincfg.RegressionNetParams, nil)
+	slow := stream.subscribe(t.Context())
+	fast := stream.subscribe(t.Context())
+
+	op := wire.OutPoint{Hash: chainhash.Hash{5}, Index: 0}
+
+	_, err := registerWatchKeys(
+		t.Context(), stream, slow.listener, t.Context().Done(),
+		&stream.scriptListeners, &slow.listener.scripts,
+		[]string{"overflow-script"},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, slow.listener, t.Context().Done(),
+		&stream.outpointListeners, &slow.listener.outpoints,
+		[]wire.OutPoint{op},
+	)
+	require.NoError(t, err)
+
+	// Overflow slow's buffer while draining fast, then publish once more.
+	for i := range chainEventSubscriberBufferSize + 1 {
+		blk := BlockDisconnected{
+			Block: wtxmgr.Block{Height: int32(i)},
+		}
+		stream.publish(blk)
+
+		ev := <-fast.Events
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, int32(i), ev.Block.Height)
+	}
+
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 999}})
+
+	ev := <-fast.Events
+	require.Equal(t, int32(999), ev.Block.Height)
+
+	// Assert slow retired with ErrEventSubscriptionBufferFull and released
+	// all reverse-index entries and local maps.
+	waitSubDone(t, slow)
+	require.ErrorIs(t, slow.Err(), ErrEventSubscriptionBufferFull)
+	_, err = registerWatchKeys(
+		t.Context(), stream, slow.listener, t.Context().Done(),
+		&stream.scriptListeners, &slow.listener.scripts,
+		[]string{"late-script"},
+	)
+	require.ErrorIs(t, err, ErrEventSubscriptionBufferFull)
+
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	require.Nil(t, slow.listener.scripts)
+	require.Nil(t, slow.listener.outpoints)
+	require.Empty(t, stream.scriptListeners)
+	require.Empty(t, stream.outpointListeners)
+}
+
+// TestChainEventSubscriptionMatchTx verifies single-pass transaction matching:
+// empty-index fast path, bare multisig vs P2PKH distinction, received-output
+// auto-indexing followed by cross-subscriber spend matching, and unknown-
+// outpoint input matching via ComputePkScript.
+func TestChainEventSubscriptionMatchTx(t *testing.T) {
+	t.Parallel()
+
+	params := &chaincfg.RegressionNetParams
+
+	// Generate two distinct key pairs and build P2PK, P2PKH, P2WPKH, and
+	// 1-of-2 bare multisig scripts for testing script matching rules.
+	privA, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	privB, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKeyAddrA, err := address.NewAddressPubKey(
+		privA.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+	pubKeyAddrB, err := address.NewAddressPubKey(
+		privB.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	p2pkhAddrA := pubKeyAddrA.AddressPubKeyHash()
+	wpkhAddrA, err := address.NewAddressWitnessPubKeyHash(
+		p2pkhAddrA.ScriptAddress(), params,
+	)
+	require.NoError(t, err)
+
+	p2pkScriptA, err := txscript.PayToAddrScript(pubKeyAddrA)
+	require.NoError(t, err)
+	p2pkhScriptA, err := txscript.PayToAddrScript(p2pkhAddrA)
+	require.NoError(t, err)
+	wpkhScriptA, err := txscript.PayToAddrScript(wpkhAddrA)
+	require.NoError(t, err)
+	multisigScript, err := txscript.MultiSigScript(
+		[]*address.AddressPubKey{pubKeyAddrA, pubKeyAddrB}, 1,
+	)
+	require.NoError(t, err)
+
+	// Verify the empty-index fast path returns nil without errors.
+	stream := newChainEventStream(params, nil)
+	emptyTx := wire.NewMsgTx(wire.TxVersion)
+	emptyTx.AddTxOut(wire.NewTxOut(1000, p2pkhScriptA))
+	emptyRec, err := wtxmgr.NewTxRecordFromMsgTx(emptyTx, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	require.Nil(t, stream.matchTx(emptyRec))
+	stream.mu.Unlock()
+
+	// Enroll three listeners: subP2PK watches P2PK(A), subP2PKH watches
+	// P2PKH(A), and subWPKH watches P2WPKH(A).
+	subP2PK := stream.subscribe(t.Context())
+	subP2PKH := stream.subscribe(t.Context())
+	subWPKH := stream.subscribe(t.Context())
+	_, err = registerWatchKeys(
+		t.Context(), stream, subP2PK.listener, t.Context().Done(),
+		&stream.scriptListeners, &subP2PK.listener.scripts,
+		[]string{string(p2pkScriptA)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subP2PKH.listener, t.Context().Done(),
+		&stream.scriptListeners, &subP2PKH.listener.scripts,
+		[]string{string(p2pkhScriptA)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subWPKH.listener, t.Context().Done(),
+		&stream.scriptListeners, &subWPKH.listener.scripts,
+		[]string{string(wpkhScriptA)},
+	)
+	require.NoError(t, err)
+
+	// Match a bare multisig output: only subP2PK matches (not subP2PKH),
+	// and the received output outpoint is auto-indexed for subP2PK.
+	msTx := wire.NewMsgTx(wire.TxVersion)
+	msTx.AddTxOut(wire.NewTxOut(2000, multisigScript))
+	msRec, err := wtxmgr.NewTxRecordFromMsgTx(msTx, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	msMatched := stream.matchTx(msRec)
+	stream.mu.Unlock()
+	require.Len(t, msMatched, 1)
+	require.Contains(t, msMatched, subP2PK.listener)
+	require.NotContains(t, msMatched, subP2PKH.listener)
+
+	// Match a subsequent spend of the auto-indexed multisig outpoint that
+	// pays to subP2PKH: both subP2PK (via outpoint) and subP2PKH (via
+	// output) match in one pass.
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&msRec.Hash, 0), nil, nil,
+	))
+	spendTx.AddTxOut(wire.NewTxOut(1500, p2pkhScriptA))
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	spendMatched := stream.matchTx(spendRec)
+	stream.mu.Unlock()
+	require.Len(t, spendMatched, 2)
+	require.Contains(t, spendMatched, subP2PK.listener)
+	require.Contains(t, spendMatched, subP2PKH.listener)
+
+	// Match an unknown-outpoint spend whose P2WPKH witness derives
+	// wpkhScriptA via ComputePkScript without prior outpoint indexing.
+	unknownSpend := wire.NewMsgTx(wire.TxVersion)
+	unknownSpend.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&chainhash.Hash{9}, 0),
+		nil,
+		wire.TxWitness{
+			[]byte{0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01},
+			privA.PubKey().SerializeCompressed(),
+		},
+	))
+	unknownRec, err := wtxmgr.NewTxRecordFromMsgTx(unknownSpend, time.Now())
+	require.NoError(t, err)
+
+	stream.mu.Lock()
+	wpkhMatched := stream.matchTx(unknownRec)
+	stream.mu.Unlock()
+	require.Len(t, wpkhMatched, 1)
+	require.Contains(t, wpkhMatched, subWPKH.listener)
+}
+
+// randTestP2PKHAddr generates a random regtest P2PKH address and its pkScript.
+func randTestP2PKHAddr(t *testing.T) (address.Address, []byte) {
+	t.Helper()
+
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	pubAddr, err := address.NewAddressPubKey(
+		priv.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	addr := pubAddr.AddressPubKeyHash()
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return addr, pkScript
+}
+
+// TestChainEventSubscriptionWatchRegistration verifies zero-value watch
+// rejection without panicking, live WatchOutputs delegation with synchronous
+// mempool spend delivery, unwatched sibling isolation, and post-cancel
+// rejection.
+func TestChainEventSubscriptionWatchRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Set up a random address, outpoint, zero-value subscription, a live
+	// subscription whose NotifySpent synchronously publishes a spend tx,
+	// and an unwatched sibling subscription.
+	addr, _ := randTestP2PKHAddr(t)
+	op := &wire.OutPoint{Hash: chainhash.Hash{11}, Index: 0}
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(wire.NewTxIn(op, nil, nil))
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	var zero EventSubscription
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stream, mc, watched := newMockWatchSub(ctx)
+	unwatched := stream.subscribe(t.Context())
+
+	mc.On("NotifySpent", []*wire.OutPoint{op}).Run(
+		func(mock.Arguments) {
+			stream.publish(RelevantTx{TxRecord: spendRec})
+		},
+	).Return(nil).Once()
+
+	// Register on zero-value and live handles, publish a barrier for the
+	// unwatched sibling, cancel watched, and verify post-cancel rejection.
+	zeroAddrErr := zero.WatchAddrs(t.Context(), []address.Address{addr})
+	zeroOutErr := zero.WatchOutputs(t.Context(), []*wire.OutPoint{op})
+	liveOutErr := watched.WatchOutputs(ctx, []*wire.OutPoint{op})
+
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 9}})
+
+	// Zero-value calls return Canceled; WatchOutputs delivers the
+	// synchronous spend only to watched.
+	require.ErrorIs(t, zeroAddrErr, context.Canceled)
+	require.ErrorIs(t, zeroOutErr, context.Canceled)
+	require.NoError(t, liveOutErr)
+
+	ev := <-watched.Events
+	require.Equal(t, EventMempoolTx, ev.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, ev.RelevantTxs)
+	require.Equal(t, EventBlockDisconnected, (<-unwatched.Events).Type)
+
+	cancel()
+	waitSubDone(t, watched)
+	require.ErrorIs(
+		t, watched.WatchOutputs(t.Context(), []*wire.OutPoint{op}),
+		context.Canceled,
+	)
+	mc.AssertExpectations(t)
+}
+
+// newMockWatchSub creates a regtest stream, mock client, and handle.
+func newMockWatchSub(
+	ctx context.Context) (*chainEventStream, *mockChainClient,
+	EventSubscription) {
+
+	mc := &mockChainClient{}
+	stream := newChainEventStream(&chaincfg.RegressionNetParams, mc)
+	sub := stream.subscribe(ctx)
+
+	return stream, mc, sub
+}
+
+// newExpiredWatchSub creates an already-expired deadline context, mock client,
+// and handle.
+func newExpiredWatchSub(
+	t *testing.T) (context.Context, *mockChainClient, EventSubscription) {
+
+	t.Helper()
+
+	expiredCtx, cancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	t.Cleanup(cancel)
+
+	_, mc, sub := newMockWatchSub(expiredCtx)
+
+	return expiredCtx, mc, sub
+}
+
+// TestChainEventSubscriptionWatchAddrsError verifies WatchAddrs rejects nil
+// addresses and expired deadline contexts without invoking the backend client.
+func TestChainEventSubscriptionWatchAddrsError(t *testing.T) {
+	t.Parallel()
+
+	// Set up an active subscription for invalid-input checks and an
+	// already-expired deadline subscription for deadline preservation.
+	_, mcLive, liveSub := newMockWatchSub(t.Context())
+	expiredCtx, mcExpired, expiredSub := newExpiredWatchSub(t)
+
+	// Attempt both invalid WatchAddrs registrations.
+	nilErr := liveSub.WatchAddrs(t.Context(), []address.Address{nil})
+	deadlineErr := expiredSub.WatchAddrs(expiredCtx, nil)
+
+	// Confirm expected errors are returned without any backend calls.
+	require.ErrorIs(t, nilErr, ErrInvalidParam)
+	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
+	mcLive.AssertExpectations(t)
+	mcExpired.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionWatchOutputsError verifies WatchOutputs rejects
+// nil outpoints and expired deadline contexts without invoking the backend.
+func TestChainEventSubscriptionWatchOutputsError(t *testing.T) {
+	t.Parallel()
+
+	// Set up an active subscription for nil-outpoint validation and an
+	// already-expired deadline subscription for deadline preservation.
+	_, mcLive, liveSub := newMockWatchSub(t.Context())
+	expiredCtx, mcExpired, expiredSub := newExpiredWatchSub(t)
+
+	// Attempt both invalid WatchOutputs registrations.
+	nilErr := liveSub.WatchOutputs(t.Context(), []*wire.OutPoint{nil})
+	deadlineErr := expiredSub.WatchOutputs(expiredCtx, nil)
+
+	// Confirm expected errors are returned without invoking NotifySpent.
+	require.ErrorIs(t, nilErr, ErrInvalidParam)
+	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
+	mcLive.AssertExpectations(t)
+	mcExpired.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionWatchRollbackError verifies that a failed
+// WatchAddrs or WatchOutputs withdraws only the failed registration's newly
+// added keys while preserving pre-existing watches and sibling delivery.
+func TestChainEventSubscriptionWatchRollbackError(t *testing.T) {
+	t.Parallel()
+
+	// Enroll subFail with pre-existing watches (keepAddr, keepOP) and an
+	// independent sibling subOK that will succeed for failAddr and failOP.
+	keepAddr, keepScript := randTestP2PKHAddr(t)
+	failAddr, failScript := randTestP2PKHAddr(t)
+	keepOP := &wire.OutPoint{Hash: chainhash.Hash{41}, Index: 0}
+	failOP := &wire.OutPoint{Hash: chainhash.Hash{42}, Index: 1}
+	regErr := errors.New("backend registration failed")
+
+	stream, mc, subFail := newMockWatchSub(t.Context())
+	subOK := stream.subscribe(t.Context())
+
+	mc.On("WatchAddrsFromTip",
+		mock.Anything, []address.Address{keepAddr},
+	).Return(nil).Once()
+	mc.On("NotifySpent", []*wire.OutPoint{keepOP}).Return(nil).Once()
+	mc.On("WatchAddrsFromTip",
+		mock.Anything, []address.Address{keepAddr, failAddr},
+	).Return(regErr).Once()
+	mc.On("NotifySpent",
+		[]*wire.OutPoint{keepOP, failOP},
+	).Return(regErr).Once()
+	mc.On("WatchAddrsFromTip",
+		mock.Anything, []address.Address{failAddr},
+	).Return(nil).Once()
+	mc.On("NotifySpent", []*wire.OutPoint{failOP}).Return(nil).Once()
+
+	require.NoError(
+		t, subFail.WatchAddrs(t.Context(), []address.Address{keepAddr}),
+	)
+	require.NoError(
+		t, subFail.WatchOutputs(t.Context(), []*wire.OutPoint{keepOP}),
+	)
+
+	makeTx := func(txOut *wire.TxOut, txIn *wire.TxIn) *wtxmgr.TxRecord {
+		tx := wire.NewMsgTx(wire.TxVersion)
+		if txIn != nil {
+			tx.AddTxIn(txIn)
+		}
+
+		if txOut != nil {
+			tx.AddTxOut(txOut)
+		}
+
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, err)
+
+		return rec
+	}
+	failAddrRec := makeTx(wire.NewTxOut(1100, failScript), nil)
+	failOPRec := makeTx(nil, wire.NewTxIn(failOP, nil, nil))
+	keepAddrRec := makeTx(wire.NewTxOut(1200, keepScript), nil)
+	keepOPRec := makeTx(nil, wire.NewTxIn(keepOP, nil, nil))
+
+	// Fail overlapping registrations on subFail while succeeding on subOK,
+	// then publish matching txns followed by a disconnect barrier.
+	addrErr := subFail.WatchAddrs(
+		t.Context(), []address.Address{keepAddr, failAddr},
+	)
+	outErr := subFail.WatchOutputs(
+		t.Context(), []*wire.OutPoint{keepOP, failOP},
+	)
+	require.NoError(
+		t, subOK.WatchAddrs(t.Context(), []address.Address{failAddr}),
+	)
+	require.NoError(
+		t, subOK.WatchOutputs(t.Context(), []*wire.OutPoint{failOP}),
+	)
+
+	stream.publish(RelevantTx{TxRecord: failAddrRec})
+	stream.publish(RelevantTx{TxRecord: failOPRec})
+	stream.publish(RelevantTx{TxRecord: keepAddrRec})
+	stream.publish(RelevantTx{TxRecord: keepOPRec})
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 8}})
+
+	// Confirm the failed calls surfaced regErr, subOK received only failAddr
+	// and failOP txns, and subFail kept receiving keepAddr and keepOP txns.
+	require.ErrorIs(t, addrErr, regErr)
+	require.ErrorIs(t, outErr, regErr)
+
+	okAddrEv := waitChainEvent(t, subOK.Events)
+	require.Equal(t, EventMempoolTx, okAddrEv.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{failAddrRec}, okAddrEv.RelevantTxs)
+
+	okOPEv := waitChainEvent(t, subOK.Events)
+	require.Equal(t, EventMempoolTx, okOPEv.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{failOPRec}, okOPEv.RelevantTxs)
+
+	okBarrier := waitChainEvent(t, subOK.Events)
+	require.Equal(t, EventBlockDisconnected, okBarrier.Type)
+
+	failKeepAddrEv := waitChainEvent(t, subFail.Events)
+	require.Equal(t, EventMempoolTx, failKeepAddrEv.Type)
+	require.Equal(
+		t, []*wtxmgr.TxRecord{keepAddrRec}, failKeepAddrEv.RelevantTxs,
+	)
+
+	failKeepOPEv := waitChainEvent(t, subFail.Events)
+	require.Equal(t, EventMempoolTx, failKeepOPEv.Type)
+	require.Equal(
+		t, []*wtxmgr.TxRecord{keepOPRec}, failKeepOPEv.RelevantTxs,
+	)
+
+	failBarrier := waitChainEvent(t, subFail.Events)
+	require.Equal(t, EventBlockDisconnected, failBarrier.Type)
+	mc.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionAutoWatchRollbackError verifies that a received
+// output auto-indexed during a failing WatchOutputs call retains its own
+// watch reference after rollback so subsequent spends still deliver.
+func TestChainEventSubscriptionAutoWatchRollbackError(t *testing.T) {
+	t.Parallel()
+
+	// Set up a Taproot watched address whose key-path spends carry only a
+	// 64-byte witness, plus a funding outpoint whose NotifySpent fails after
+	// synchronously delivering the funding tx.
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	tapAddr, err := address.NewAddressTaproot(
+		priv.PubKey().SerializeCompressed()[1:],
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+	tapScript, err := txscript.PayToAddrScript(tapAddr)
+	require.NoError(t, err)
+
+	stream, mc, watched := newMockWatchSub(t.Context())
+	mc.On("WatchAddrsFromTip",
+		mock.Anything, []address.Address{tapAddr},
+	).Return(nil).Once()
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{tapAddr}),
+	)
+
+	fundTx := wire.NewMsgTx(wire.TxVersion)
+	fundTx.AddTxOut(wire.NewTxOut(5000, tapScript))
+	fundRec, err := wtxmgr.NewTxRecordFromMsgTx(fundTx, time.Now())
+	require.NoError(t, err)
+
+	fundOP := wire.OutPoint{Hash: fundRec.Hash, Index: 0}
+
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: fundOP,
+		Witness:          wire.TxWitness{make([]byte, 64)},
+	})
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	regErr := errors.New("backend NotifySpent failed")
+	mc.On("NotifySpent", []*wire.OutPoint{&fundOP}).Run(
+		func(mock.Arguments) {
+			stream.publish(RelevantTx{TxRecord: fundRec})
+		},
+	).Return(regErr).Once()
+
+	// Fail WatchOutputs on fundOP, then publish the Taproot key-path spend
+	// and a disconnect barrier.
+	watchErr := watched.WatchOutputs(t.Context(), []*wire.OutPoint{&fundOP})
+
+	stream.publish(RelevantTx{TxRecord: spendRec})
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 11}})
+
+	// Confirm the failed call returned regErr while the auto-indexed
+	// outpoint survived rollback and delivered the subsequent spend.
+	require.ErrorIs(t, watchErr, regErr)
+
+	fundEv := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventMempoolTx, fundEv.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{fundRec}, fundEv.RelevantTxs)
+
+	spendEv := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventMempoolTx, spendEv.Type)
+	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, spendEv.RelevantTxs)
+
+	barrierEv := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventBlockDisconnected, barrierEv.Type)
+	mc.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionWatchConcurrentClose verifies concurrent
+// WatchAddrs, WatchOutputs, and stream close calls do not race on index fields
+// during registration or rollback.
+func TestChainEventSubscriptionWatchConcurrentClose(t *testing.T) {
+	t.Parallel()
+
+	// Set up a live subscription whose backend rejects watch calls so both
+	// registration and rollback paths overlap stream.close().
+	addr, _ := randTestP2PKHAddr(t)
+	op := &wire.OutPoint{Hash: chainhash.Hash{51}, Index: 0}
+	regErr := errors.New("backend closed")
+
+	stream, mc, sub := newMockWatchSub(t.Context())
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr},
+	).Return(regErr).Maybe()
+	mc.On("NotifySpent", []*wire.OutPoint{op}).Return(regErr).Maybe()
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	closed := make(chan struct{})
+
+	// Release WatchAddrs, WatchOutputs, and stream.close() simultaneously.
+	go func() {
+		<-start
+
+		errs <- sub.WatchAddrs(t.Context(), []address.Address{addr})
+	}()
+	go func() {
+		<-start
+
+		errs <- sub.WatchOutputs(t.Context(), []*wire.OutPoint{op})
+	}()
+	go func() {
+		<-start
+		stream.close()
+		close(closed)
+	}()
+
+	close(start)
+	<-closed
+
+	// Confirm both watch calls terminated with Canceled or regErr cleanly.
+	for range 2 {
+		err := <-errs
+		require.True(
+			t, errors.Is(err, context.Canceled) ||
+				errors.Is(err, regErr),
+		)
+	}
+}
+
+// TestChainEventSubscriptionMempoolTx verifies unconfirmed RelevantTx emits
+// EventMempoolTx only to matched listeners while confirmed RelevantTx is
+// ignored on EventSubscription.
+func TestChainEventSubscriptionMempoolTx(t *testing.T) {
+	t.Parallel()
+
+	// Set up a watched subscription, an unwatched sibling, and two
+	// distinct txns paying to the watched address so a leaked confirmed tx
+	// cannot masquerade as the unconfirmed mempool tx.
+	addrA, scriptA := randTestP2PKHAddr(t)
+	stream, mc, watched := newMockWatchSub(t.Context())
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addrA},
+	).Return(nil).Once()
+
+	unwatched := stream.subscribe(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addrA}),
+	)
+
+	confirmedTx := wire.NewMsgTx(wire.TxVersion)
+	confirmedTx.AddTxOut(wire.NewTxOut(1000, scriptA))
+	confirmedRec, err := wtxmgr.NewTxRecordFromMsgTx(
+		confirmedTx, time.Now(),
+	)
+	require.NoError(t, err)
+
+	mempoolTx := wire.NewMsgTx(wire.TxVersion)
+	mempoolTx.AddTxOut(wire.NewTxOut(2000, scriptA))
+	mempoolRec, err := wtxmgr.NewTxRecordFromMsgTx(mempoolTx, time.Now())
+	require.NoError(t, err)
+
+	// Publish the confirmed RelevantTx, the unconfirmed RelevantTx, and a
+	// block-disconnect barrier.
+	stream.publish(RelevantTx{
+		TxRecord: confirmedRec,
+		Block:    &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 1}},
+	})
+	stream.publish(RelevantTx{TxRecord: mempoolRec, Block: nil})
+	stream.publish(BlockDisconnected{Block: wtxmgr.Block{Height: 2}})
+
+	// Confirm watched receives only the unconfirmed mempool tx immediately
+	// followed by the disconnect barrier, while unwatched skips straight
+	// to the disconnect barrier.
+	ev := <-watched.Events
+	require.Equal(t, EventMempoolTx, ev.Type)
+	require.Nil(t, ev.Block)
+	require.Equal(t, []*wtxmgr.TxRecord{mempoolRec}, ev.RelevantTxs)
+
+	barrier := <-watched.Events
+	require.Equal(t, EventBlockDisconnected, barrier.Type)
+	require.Equal(t, int32(2), barrier.Block.Height)
+	require.Equal(t, EventBlockDisconnected, (<-unwatched.Events).Type)
+	mc.AssertExpectations(t)
+}
+
+// TestChainEventSubscriptionBlockEvents verifies FilteredBlockConnected
+// scoping (including same-block parent-to-child spends without mutating the
+// input slice), BlockDisconnected delivery, and suppression of legacy markers.
+func TestChainEventSubscriptionBlockEvents(t *testing.T) {
+	t.Parallel()
+
+	// Enroll watched and unwatched subscriptions and build a block
+	// containing a watched parent, an unrelated tx, and a child spending
+	// the parent's output.
+	addrA, scriptA := randTestP2PKHAddr(t)
+	_, scriptOther := randTestP2PKHAddr(t)
+	stream, mc, watched := newMockWatchSub(t.Context())
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addrA},
+	).Return(nil).Once()
+
+	unwatched := stream.subscribe(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addrA}),
+	)
+
+	makeRec := func(tx *wire.MsgTx) *wtxmgr.TxRecord {
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, err)
+
+		return rec
+	}
+	parent := wire.NewMsgTx(wire.TxVersion)
+	parent.AddTxOut(wire.NewTxOut(5000, scriptA))
+	parentRec := makeRec(parent)
+
+	unrelated := wire.NewMsgTx(wire.TxVersion)
+	unrelated.AddTxOut(wire.NewTxOut(1000, scriptOther))
+	unrelatedRec := makeRec(unrelated)
+
+	child := wire.NewMsgTx(wire.TxVersion)
+	child.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&parentRec.Hash, 0), nil, nil,
+	))
+	child.AddTxOut(wire.NewTxOut(4000, scriptOther))
+	childRec := makeRec(child)
+
+	origSlice := []*wtxmgr.TxRecord{parentRec, unrelatedRec, childRec}
+	blk := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Hash: chainhash.Hash{22}, Height: 5},
+	}
+
+	// Publish suppressed legacy markers, the filtered block, and a block
+	// disconnect.
+	stream.publish(ClientConnected{})
+	stream.publish(BlockConnected(*blk))
+	stream.publish(&RescanProgress{Hash: blk.Hash, Height: blk.Height})
+	stream.publish(FilteredBlockConnected{
+		Block: blk, RelevantTxs: origSlice,
+	})
+	stream.publish(BlockDisconnected(*blk))
+
+	// Confirm watched receives only parent and child in block order without
+	// mutating origSlice, unwatched receives an empty block, and the
+	// disconnect follows.
+	wBlk := <-watched.Events
+	require.Equal(t, EventBlockConnected, wBlk.Type)
+	require.Equal(t, blk, wBlk.Block)
+	require.Equal(
+		t, []*wtxmgr.TxRecord{parentRec, childRec}, wBlk.RelevantTxs,
+	)
+	require.Equal(
+		t, []*wtxmgr.TxRecord{parentRec, unrelatedRec, childRec},
+		origSlice,
+	)
+
+	uBlk := <-unwatched.Events
+	require.Equal(t, EventBlockConnected, uBlk.Type)
+	require.Nil(t, uBlk.RelevantTxs)
+
+	wDisc := <-watched.Events
+	require.Equal(t, EventBlockDisconnected, wDisc.Type)
+	require.Equal(t, blk.Hash, wDisc.Block.Hash)
+	require.Equal(t, EventUnknown, Event{}.Type)
+	mc.AssertExpectations(t)
+}
+
+// TestBitcoindScopedWatch verifies BitcoindClient scopes mempool RelevantTx
+// and FilteredBlockConnected delivery to watched subscriptions and keeps
+// unwatched siblings isolated.
+func TestBitcoindScopedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Start a BitcoindClient fixture configured for regtest with block
+	// notifications enabled and enroll watched and unwatched subscriptions.
+	client := newBitcoindStartupTestClient(t, nil)
+	client.chainConn.cfg.ChainParams = &chaincfg.RegressionNetParams
+	client.chainConn.events = &bitcoindRPCPollingEvents{
+		mempool: newMempool(&mempoolConfig{}),
+	}
+	require.NoError(t, client.Start(t.Context()))
+	atomic.StoreUint32(&client.notifyBlocks, 1)
+
+	addr, pkScript := randTestP2PKHAddr(t)
+	scopedOP := &wire.OutPoint{Hash: chainhash.Hash{77}, Index: 0}
+	watched := client.SubscribeChainEvents(t.Context())
+	unwatched := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addr}),
+	)
+	require.NoError(
+		t, watched.WatchOutputs(t.Context(), []*wire.OutPoint{scopedOP}),
+	)
+
+	// Drive a mempool tx through filterTx followed by a block containing a
+	// fresh scoped address tx and a scoped outpoint spend.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(wire.NewTxOut(2500, pkScript))
+	_, rec, err := client.filterTx(btcutil.NewTx(tx), nil, true)
+	require.NoError(t, err)
+
+	blockTx := wire.NewMsgTx(wire.TxVersion)
+	blockTx.AddTxOut(wire.NewTxOut(3500, pkScript))
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(wire.NewTxIn(scopedOP, nil, nil))
+	block := &wire.MsgBlock{
+		Header: wire.BlockHeader{Timestamp: time.Now()},
+		Transactions: []*wire.MsgTx{
+			blockTx,
+			spendTx,
+		},
+	}
+	client.filterBlock(block, 10, true)
+
+	// Watched receives EventMempoolTx then the connected block with
+	// blockTx and spendTx; unwatched receives only the empty connected block.
+	memEv := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventMempoolTx, memEv.Type)
+	require.Nil(t, memEv.Block)
+	require.Len(t, memEv.RelevantTxs, 1)
+	require.Equal(t, rec.Hash, memEv.RelevantTxs[0].Hash)
+
+	wBlk := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventBlockConnected, wBlk.Type)
+	require.Equal(t, int32(10), wBlk.Block.Height)
+	require.Len(t, wBlk.RelevantTxs, 2)
+	require.Equal(t, blockTx.TxHash(), wBlk.RelevantTxs[0].Hash)
+	require.Equal(t, spendTx.TxHash(), wBlk.RelevantTxs[1].Hash)
+
+	uBlk := waitChainEvent(t, unwatched.Events)
+	require.Equal(t, EventBlockConnected, uBlk.Type)
+	require.Equal(t, int32(10), uBlk.Block.Height)
+	require.Empty(t, uBlk.RelevantTxs)
 }

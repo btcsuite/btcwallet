@@ -18,13 +18,12 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/davecgh/go-spew/spew"
 )
 
@@ -40,18 +39,167 @@ var (
 type TxPublisher interface {
 	// CheckMempoolAcceptance checks if a transaction would be accepted by
 	// the mempool without broadcasting.
+	//
+	// Not every chain backend keeps a mempool to ask. One that does not,
+	// such as a light client, returns chain.ErrUnimplemented instead of a
+	// verdict, so a caller that must work against any backend treats that
+	// as "unknown" rather than as a rejection.
 	CheckMempoolAcceptance(ctx context.Context, tx *wire.MsgTx) error
 
 	// Broadcast broadcasts a transaction to the network.
+	//
+	// When the backend cannot answer the acceptance check, the transaction
+	// is published without one, so a nil return means it was sent, not that
+	// the network accepted it.
 	Broadcast(ctx context.Context, tx *wire.MsgTx, label string) error
 }
+
+// txRebroadcaster retries existing publication intent without creating history
+// from a syncer snapshot that may have been deleted since it was read.
+type txRebroadcaster interface {
+	// rebroadcast only relays a still-published transaction; it cannot insert
+	// history or promote Pending intent like an explicit Broadcast can.
+	rebroadcast(ctx context.Context, tx *wire.MsgTx) error
+}
+
+// Wallet supplies the syncer's private, non-creating publication capability.
+var _ txRebroadcaster = (*Wallet)(nil)
 
 // A compile time check to ensure that Wallet implements the interface.
 var _ TxPublisher = (*Wallet)(nil)
 
+// checkMempoolAcceptanceReq borrows the transaction until the chain check ends.
+type checkMempoolAcceptanceReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	respErrChan chan error
+}
+
+// broadcastReq keeps recording, registration and publication in one admission.
+type broadcastReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	label       string
+	respErrChan chan error
+}
+
+// rebroadcastReq joins a background retry to the Wallet's existing lifetime.
+// It carries no recording authority, unlike an explicit broadcastReq.
+type rebroadcastReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	respErrChan chan error
+}
+
+// rebroadcast admits the syncer's retry and waits until its dependency access
+// completes. The syncer owns valid transaction inputs and Wallet lifetime.
+func (w *Wallet) rebroadcast(ctx context.Context, tx *wire.MsgTx) error {
+	// Reuse normal admission and joining so Stop drains this retry too.
+	r := rebroadcastReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		tx:          tx,
+		respErrChan: make(chan error, 1),
+	}
+
+	err := w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	return <-r.respErrChan
+}
+
+// handleRebroadcast retries current Published intent without changing history.
+// Deletion after its read may allow late relay; a late refusal must not delete
+// a newer explicit submission with the same txid and different witness.
+func (w *Wallet) handleRebroadcast(r rebroadcastReq) {
+	// A snapshot is not fresh submission authority: deletion, confirmation,
+	// status or witness replacement can make it ineligible before this read.
+	// A later replacement can still overlap relay, so errors stay
+	// history-neutral.
+	info, err := w.store.GetTx(
+		r.ctx, db.GetTxQuery{
+			WalletID: w.id,
+			Txid:     r.tx.TxHash(),
+		},
+	)
+	// Lookup errors take precedence over row identity, which is meaningful
+	// only after a successful read.
+	switch {
+	case errors.Is(err, db.ErrTxNotFound):
+		r.respErrChan <- nil
+
+		return
+
+	case err != nil:
+		r.respErrChan <- err
+
+		return
+
+	case info.Status != db.TxStatusPublished, info.Block != nil,
+		chainhash.DoubleHashH(info.SerializedTx) != r.tx.WitnessHash():
+		r.respErrChan <- nil
+
+		return
+	}
+
+	// Known results need no repair on this path. Unsupported preflight still
+	// permits relay, while policy refusal preserves existing tracked history.
+	err = w.checkMempool(r.ctx, r.tx)
+	if errors.Is(err, errAlreadyBroadcasted) {
+		r.respErrChan <- nil
+
+		return
+	}
+
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	// Reuse only read-only ownership resolution, never addTxToWallet: a
+	// concurrent delete must not turn this stale retry into a new record.
+	owned, err := w.filterOwnedAddresses(r.ctx, w.extractTxAddrs(r.tx))
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	ourAddrs := make([]address.Address, 0, len(owned))
+	for _, info := range owned {
+		ourAddrs = append(ourAddrs, info.addr)
+	}
+
+	// Relay replies describe this attempt, not the current txid's record.
+	// Deletion may have admitted another witness while the send was in flight,
+	// so background failures have no authority to clean up current history.
+	err = w.publishTx(r.tx, ourAddrs)
+	if err != nil {
+		r.respErrChan <- err
+
+		return
+	}
+
+	w.notifyTx(r.ctx, r.tx.TxHash())
+
+	r.respErrChan <- nil
+}
+
 // CheckMempoolAcceptance checks if a transaction would be accepted by the
 // mempool without broadcasting.
-func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
+//
+// A chain backend with no mempool cannot answer the question and returns
+// chain.ErrUnimplemented rather than a verdict; a backend too old to serve the
+// check returns rpcclient.ErrBackendVersion. Neither means the transaction was
+// rejected.
+//
+// NOTE: This is part of the TxPublisher interface.
+func (w *Wallet) CheckMempoolAcceptance(ctx context.Context,
 	tx *wire.MsgTx) error {
 
 	err := w.state.validateStarted()
@@ -62,6 +210,34 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	if tx == nil {
 		return ErrTxCannotBeNil
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := checkMempoolAcceptanceReq{
+		reqCtx: reqCtx{ctx: ctx},
+		tx:     tx,
+
+		respErrChan: make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleCheckMempoolAcceptance delivers the result of an accepted component
+// request.
+func (w *Wallet) handleCheckMempoolAcceptance(r checkMempoolAcceptanceReq) {
+	// Reuse acceptance checks also performed inside an admitted broadcast.
+	r.respErrChan <- w.checkMempoolAcceptance(r.ctx, r.tx)
+}
+
+// checkMempoolAcceptance queries the chain inside its accepted request.
+func (w *Wallet) checkMempoolAcceptance(_ context.Context,
+	tx *wire.MsgTx) error {
 
 	// TODO(yy): thread context through.
 	// The TestMempoolAccept rpc expects a slice of transactions.
@@ -100,6 +276,23 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 
 // Broadcast broadcasts a tx to the network. It is the main implementation of
 // the TxPublisher interface.
+//
+// A backend that cannot answer the mempool acceptance check does not stop the
+// publish: the tx is sent without a verdict, so a nil return reports that it
+// was handed to the network, not that the network kept it.
+//
+// Already-in-mempool submissions still record relevant history and labels
+// without sending again. Already-mined preflight returns success without
+// creating unconfirmed history; block processing owns confirmation.
+// Preflight rejection records nothing new.
+// After recording, publication-policy
+// failures and unknown outcomes retain history and input claims; recognized
+// malformed/mandatory-script rejections clean up. ErrTxRetained also wraps
+// readback failures after recording; later validation or explicit deletion can
+// still end active tracking.
+// DeleteUnconfirmedTx removes a retained unconfirmed branch. A changed witness
+// returns ErrTxWitnessMismatch before sending an unconfirmed retry.
+// TxStatusPublished tracks publication/rebroadcast, not successful delivery.
 func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
 
@@ -112,48 +305,112 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 		return ErrTxCannotBeNil
 	}
 
-	// We'll start by checking if the tx is acceptable to the mempool.
-	err = w.checkMempool(ctx, tx)
-	if errors.Is(err, errAlreadyBroadcasted) {
-		return nil
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := broadcastReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		tx:          tx,
+		label:       label,
+		respErrChan: make(chan error, 1),
 	}
 
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return err
 	}
 
-	// First, we'll attempt to add the tx to our wallet's DB. This will
-	// allow us to track the tx's confirmation status, and also
-	// re-broadcast it upon startup. If any of the subsequent steps fail,
-	// this tx must be removed.
-	ourAddrs, err := w.addTxToWallet(tx, label)
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleBroadcast runs the explicit submission flow within one admission:
+//   - Check mempool policy before recording a new attempt.
+//   - Record relevant history and inputs before any network submission.
+//   - Register owned outputs and send the transaction.
+//   - Notify on success; on failure, remove only recognized invalid attempts
+//     and report any retained history to the caller.
+//
+// For example, B can be recorded alongside competing A before its send reply
+// arrives. The syncer may record competitor C while that reply is held. B's
+// eventual reply does not settle A/B/C; only confirmation chooses a winner.
+// Admission joins dependency access through Stop, not concurrent graph writes.
+func (w *Wallet) handleBroadcast(r broadcastReq) {
+	// The admitted caller retains its inputs until the entire flow completes.
+	r.respErrChan <- w.broadcastTx(r.ctx, r.tx, r.label)
+}
+
+// broadcastTx records an explicit submission before watches and relay, keeping
+// policy failures from silently abandoning the wallet's tracked input claims.
+func (w *Wallet) broadcastTx(ctx context.Context, tx *wire.MsgTx,
+	label string) error {
+
+	// Mempool-known preflight repairs history. A mined verdict lacks the
+	// block metadata required to record confirmation, so leave that history
+	// to block processing instead of inventing an unconfirmed row.
+	mempoolErr := w.checkMempool(ctx, tx)
+	if errors.Is(mempoolErr, chain.ErrTxAlreadyKnown) ||
+		errors.Is(mempoolErr, chain.ErrTxAlreadyConfirmed) {
+
+		return nil
+	}
+
+	if mempoolErr != nil && !errors.Is(mempoolErr, errAlreadyBroadcasted) {
+		return mempoolErr
+	}
+
+	// Record first so even an uncertain send result leaves enough durable
+	// information to track confirmation and retry publication.
+	ourAddrs, recorded, err := w.addTxToWallet(ctx, tx, label)
 	if err != nil {
 		return err
 	}
 
-	// Now, we'll attempt to publish the tx. On successful attempt, we
-	// return immediately. On any failures, we remove it from the tx store
-	// to prevent subsequent attempts with stale transaction data.
-	err = w.publishTx(tx, ourAddrs)
-	if err == nil {
-		return nil
+	// Mempool-known submissions repair history without sending again. Other
+	// send replies have no graph authority: competing attempts stay recorded.
+	if !errors.Is(mempoolErr, errAlreadyBroadcasted) {
+		err = w.publishTx(tx, ourAddrs)
+		if err != nil {
+			return w.handlePublicationFailure(ctx, tx, recorded, err)
+		}
 	}
 
+	// Only relevant, recorded transactions have a detail to announce.
+	// Best-effort delivery cannot undo a successful network submission.
+	if recorded {
+		w.notifyTx(ctx, tx.TxHash())
+	}
+
+	return nil
+}
+
+// handlePublicationFailure preserves uncertain attempts and cleans up only
+// recognized malformed/script rejections. A failed cleanup retains both causes.
+func (w *Wallet) handlePublicationFailure(ctx context.Context, tx *wire.MsgTx,
+	recorded bool, err error) error {
+
+	// Cleanup depends on the refusal reason, not which attempt inserted
+	// the row. Publication-policy errors must never abandon a tracked spend.
 	txid := tx.TxHash()
-	log.Errorf("%v: broadcast failed: %v", txid, err)
+	if recorded && shouldRemoveTx(err) {
+		// A recognized malformed/script rejection keeps the existing
+		// cleanup behavior; policy and uncertain outcomes never enter it.
+		cleanupErr := w.deleteUnminedTx(ctx, tx)
+		// Absence means cleanup is complete; other failures retain the
+		// claims signal and remain inspectable beside the send error.
+		if errors.Is(cleanupErr, db.ErrTxNotFound) {
+			cleanupErr = nil
+		}
 
-	// If the tx was rejected for any other reason, then we'll remove it
-	// from the tx store, as otherwise, we'll attempt to continually
-	// re-broadcast it, and the UTXO state of the wallet won't be accurate.
-	removeErr := w.removeUnminedTx(tx)
-	if removeErr != nil {
-		log.Warnf("Unable to remove tx %v after broadcast failed: %v",
-			txid, removeErr)
-
-		// Return a wrapped error to give the caller full context.
-		return fmt.Errorf("broadcast failed: %w; and failed to "+
-			"remove from wallet: %v", err, removeErr)
+		recorded = cleanupErr != nil
+		err = errors.Join(err, cleanupErr)
 	}
+
+	// Expose retained claims without hiding the publication/cleanup causes.
+	if recorded {
+		err = fmt.Errorf("%w: tx %v remains recorded: %w",
+			ErrTxRetained, txid, err)
+	}
+
+	log.Warnf("%v: broadcast failed: %v", txid, err)
 
 	return err
 }
@@ -166,15 +423,34 @@ var (
 	// ErrTxCannotBeNil is returned when a nil transaction is passed to a
 	// function.
 	ErrTxCannotBeNil = errors.New("tx cannot be nil")
+
+	// ErrTxRetained wraps failures after recording when active history and
+	// input claims remain or a failed readback cannot establish their state.
+	// Later validation/conflict/deletion can release claims; leases cannot.
+	ErrTxRetained = errors.New("transaction retained after publication failure")
+
+	// ErrTxWitnessMismatch rejects unconfirmed retries with the same txid but
+	// different witness bytes. Explicitly remove the branch before recording
+	// another witness; stored bytes remain unchanged.
+	ErrTxWitnessMismatch = errors.New(
+		"transaction exists with a different witness",
+	)
+
+	// ErrTxRetainedInvalid is returned when a tx cannot be recorded for
+	// publishing because the store already retains a row for the same hash in
+	// a terminal invalid state (failed or replaced). The record-before-publish
+	// step refuses to report success in that case so the caller does not
+	// publish a tx whose only stored row is invalid and untracked.
+	ErrTxRetainedInvalid = errors.New("tx exists in a retained invalid state")
 )
 
-// checkMempool is a helper function that checks if a tx is acceptable to the
-// mempool before broadcasting.
+// checkMempool checks acceptance before recording and reports any active
+// unconfirmed spend claims left in place when preflight refuses a retry.
 func (w *Wallet) checkMempool(ctx context.Context,
 	tx *wire.MsgTx) error {
 
 	// We'll start by checking if the tx is acceptable to the mempool.
-	err := w.CheckMempoolAcceptance(ctx, tx)
+	err := w.checkMempoolAcceptance(ctx, tx)
 
 	switch {
 	// If the tx is already in the mempool or confirmed, we can return
@@ -185,10 +461,9 @@ func (w *Wallet) checkMempool(ctx context.Context,
 
 		log.Infof("Tx %v already broadcasted", tx.TxHash())
 
-		// TODO(yy): Add a new method UpdateTxLabel to allow updating
-		// the label of a tx. With this change, the label passed in
-		// will be ignored if the tx is already known.
-		return errAlreadyBroadcasted
+		// Preserve the backend reason so explicit submission can distinguish
+		// mined history from a mempool entry before choosing to record.
+		return fmt.Errorf("%w: %w", errAlreadyBroadcasted, err)
 
 	// If the backend does not support the mempool acceptance test, we'll
 	// just attempt to publish the tx.
@@ -203,7 +478,23 @@ func (w *Wallet) checkMempool(ctx context.Context,
 	// If the tx was rejected for any other reason, we'll return the error
 	// directly.
 	case err != nil:
-		return fmt.Errorf("tx rejected by mempool: %w", err)
+		err = fmt.Errorf("tx rejected by mempool: %w", err)
+
+		// Preflight writes nothing, but an earlier attempt may still
+		// claim the inputs. Report that fact without hiding a read failure.
+		existing, lookupErr := w.store.GetTx(ctx, db.GetTxQuery{
+			WalletID: w.id,
+			Txid:     tx.TxHash(),
+		})
+		switch {
+		case errors.Is(lookupErr, db.ErrTxNotFound):
+		case lookupErr != nil:
+			err = errors.Join(err, lookupErr)
+		case existing.Block == nil && db.IsUnminedStatus(existing.Status):
+			err = fmt.Errorf("%w: %w", ErrTxRetained, err)
+		}
+
+		return err
 
 	// Otherwise, the tx is valid and we can publish it.
 	default:
@@ -217,9 +508,6 @@ type creditInfo struct {
 	// index is the output index of the credit.
 	index uint32
 
-	// ma is the managed address of the credit.
-	ma waddrmgr.ManagedAddress
-
 	// addr is the address of the credit.
 	addr address.Address
 }
@@ -227,8 +515,8 @@ type creditInfo struct {
 // ownedAddrInfo holds information about a wallet-owned address and the
 // transaction output indices that pay to it.
 type ownedAddrInfo struct {
-	// managedAddr represents the managed address.
-	managedAddr waddrmgr.ManagedAddress
+	// addr is the wallet-owned address.
+	addr address.Address
 
 	// outputIndices contains the transaction output indices that contain
 	// this address. The indices are not guaranteed to be sorted in any
@@ -245,10 +533,9 @@ type ownedAddrInfo struct {
 // This is done outside of any database transaction to avoid holding locks
 // during computationally expensive work.
 //
-// 2. Filter: Second, it uses a fast, read-only database transaction to
-// filter the large list of potential addresses down to the small set that is
-// actually owned by the wallet. This minimizes the time spent in the final,
-// more expensive write transaction.
+// 2. Filter: Second, it uses Store address lookups to filter the large list of
+// potential addresses down to the small set that is actually owned by the
+// wallet. This minimizes the time spent in the final, more expensive write.
 //
 // 3. Plan: Third, it prepares a definitive "write plan" in memory. This plan
 // is a simple slice of structs that contains all the information needed to
@@ -259,13 +546,13 @@ type ownedAddrInfo struct {
 // transaction. This transaction contains no business logic and only performs
 // the necessary database writes, ensuring that the exclusive database lock is
 // held for the shortest possible time.
-func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
-	label string) ([]address.Address, error) {
-
-	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	if err != nil {
-		return nil, err
-	}
+//
+// It returns the wallet-owned output addresses and a recorded flag reporting
+// whether a tx row was actually written to the store. The flag is required
+// because a debit-only sweep records a row yet returns zero addresses, so
+// callers cannot infer recording from the address slice alone.
+func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
+	label string) ([]address.Address, bool, error) {
 
 	// Stage 1: Extract potential addresses from all transaction outputs.
 	// This is a CPU-intensive operation that is performed entirely in
@@ -273,16 +560,37 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 	txOutAddrs := w.extractTxAddrs(tx)
 
 	// Stage 2: Filter the extracted addresses to find which ones are owned
-	// by the wallet. This is done in a fast, read-only database
-	// transaction to minimize contention.
-	ownedAddrs, err := w.filterOwnedAddresses(txOutAddrs)
+	// by the wallet.
+	ownedAddrs, err := w.filterOwnedAddresses(ctx, txOutAddrs)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	// If the transaction has no outputs relevant to us, we can exit early.
+	// If the transaction has no outputs relevant to us, it may still be a
+	// sweep that spends our own coins. We check the input side before
+	// giving up so the tx is still tracked (and can later be removed).
 	if len(ownedAddrs) == 0 {
-		return nil, nil
+		spendsOurs, err := w.spendsWalletOutput(ctx, tx)
+		if err != nil {
+			return nil, false, err
+		}
+
+		// Neither outputs nor inputs are wallet-relevant, so we can
+		// safely exit without recording anything. recorded is false so
+		// the caller does not remove a tx that was never written.
+		if !spendsOurs {
+			return nil, false, nil
+		}
+
+		// The tx spends a wallet output but credits none, so record it
+		// with an empty credit set. It is now tracked, so recorded is
+		// true even though no addresses are returned.
+		err = w.recordTxAndCredits(ctx, tx, label, nil)
+		if err != nil {
+			return nil, false, err
+		}
+
+		return nil, true, nil
 	}
 
 	// Stage 3: Prepare a definitive "write plan". This plan is created in
@@ -303,84 +611,137 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 	// Iterate directly over owned addresses and their pre-computed output
 	// indices. This correctly handles the edge case where a single
 	// transaction has multiple outputs paying to the same address.
-	for addr, info := range ownedAddrs {
+	for _, info := range ownedAddrs {
 		for _, index := range info.outputIndices {
 			creditsToWrite = append(creditsToWrite, creditInfo{
 				index: index,
-				ma:    info.managedAddr,
-				addr:  addr,
+				addr:  info.addr,
 			})
 		}
 
-		ourAddrs = append(ourAddrs, addr)
+		ourAddrs = append(ourAddrs, info.addr)
 	}
 
 	// Stage 4: Atomically execute the write plan. This is the only stage
 	// that takes an exclusive database lock, and it is designed to be as
 	// fast as possible, containing no business logic.
-	err = w.recordTxAndCredits(txRec, label, creditsToWrite)
+	err = w.recordTxAndCredits(ctx, tx, label, creditsToWrite)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return ourAddrs, nil
+	return ourAddrs, true, nil
 }
 
 // recordTxAndCredits performs a single atomic database transaction to execute a
 // pre-computed "write plan" for a transaction.
-func (w *Wallet) recordTxAndCredits(txRec *wtxmgr.TxRecord, label string,
-	creditsToWrite []creditInfo) error {
+func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
+	label string, creditsToWrite []creditInfo) error {
 
-	return walletdb.Update(w.cfg.DB, func(dbTx walletdb.ReadWriteTx) error {
-		addrmgrNs := dbTx.ReadWriteBucket(waddrmgrNamespaceKey)
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+	// The Store contract records exactly one credit per output index
+	// (CreateTxParams.Credits is keyed by index, so "duplicate credited
+	// outputs are impossible by construction"). A bare-multisig output the
+	// wallet partly owns can yield more than one owned member address for
+	// the same index, so the write plan may carry several creditInfo entries
+	// that collapse onto one key. Pick the lexicographically smallest
+	// EncodeAddress() as the canonical owner instead of letting whichever
+	// entry happens to be visited last win: a map-iteration-order-dependent
+	// choice would record a nondeterministic owner across runs. The only
+	// effect not captured for the dropped members is marking an imported
+	// multisig member's address used, which does not feed gap-limit
+	// derivation, so a single canonical owner is sufficient here.
+	credits := make(map[uint32]address.Address, len(creditsToWrite))
+	for _, credit := range creditsToWrite {
+		existing, ok := credits[credit.index]
+		if !ok ||
+			credit.addr.EncodeAddress() < existing.EncodeAddress() {
 
-		// If there is a label we should write, get the namespace key
-		// and record it in the tx store.
-		if len(label) != 0 {
-			txHash := txRec.MsgTx.TxHash()
-
-			err := w.txStore.PutTxLabel(txmgrNs, txHash, label)
-			if err != nil {
-				return err
-			}
+			credits[credit.index] = credit.addr
 		}
+	}
 
-		// At the moment all notified txs are assumed to actually be
-		// relevant. This assumption will not hold true when SPV
-		// support is added, but until then, simply insert the tx
-		// because there should either be one or more relevant inputs
-		// or outputs.
-		exists, err := w.txStore.InsertTxCheckIfExists(
-			txmgrNs, txRec, nil,
-		)
-		if err != nil {
-			return err
-		}
+	err := w.store.CreateTx(ctx, db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+		Label:    label,
+		Credits:  credits,
+	})
+	if err != nil && !errors.Is(err, db.ErrTxAlreadyExists) {
+		return err
+	}
 
-		// If the tx has already been recorded, we can return early.
-		if exists {
-			return nil
-		}
+	// SQL can replay successfully while KVDB reports a duplicate. Inspect
+	// the retained bytes in either case before sending a different witness.
+	err = w.handleExistingTx(ctx, tx, label)
+	if err == nil || errors.Is(err, ErrTxRetainedInvalid) {
+		return err
+	}
 
-		// Now, execute the write plan.
-		for _, credit := range creditsToWrite {
-			err := w.txStore.AddCredit(
-				txmgrNs, txRec, nil, credit.index,
-				credit.ma.Internal(),
-			)
-			if err != nil {
-				return err
-			}
+	// Recording has committed or found a row. A reconciliation failure
+	// cannot establish that its input claims have been released; only known
+	// terminal history above can omit the retained-state signal.
+	return fmt.Errorf("%w: %w", ErrTxRetained, err)
+}
 
-			err = w.addrStore.MarkUsed(addrmgrNs, credit.addr)
-			if err != nil {
-				return err
-			}
+// handleExistingTx checks live status and stored witness bytes before sending.
+func (w *Wallet) handleExistingTx(ctx context.Context, tx *wire.MsgTx,
+	label string) error {
+
+	txHash := tx.TxHash()
+
+	existing, err := w.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	})
+	if err != nil {
+		return err
+	}
+
+	// A publication retry cannot revive terminal transaction history.
+	// Reject it before sending; retained input facts alone do not make a
+	// failed or replaced transaction eligible again.
+	if !db.IsUnminedStatus(existing.Status) {
+		return fmt.Errorf("%w: tx %v exists with status %v",
+			ErrTxRetainedInvalid, txHash, existing.Status)
+	}
+
+	// The immutable stored serialization includes the witness. An equal
+	// txid alone cannot make a changed unconfirmed witness an exact retry.
+	if existing.Block == nil &&
+		chainhash.DoubleHashH(existing.SerializedTx) != tx.WitnessHash() {
+
+		return fmt.Errorf("%w: tx %v", ErrTxWitnessMismatch, txHash)
+	}
+
+	// The live row already retains its credits and input facts. Promote a
+	// Pending duplicate to Published, matching new publication attempts,
+	// while preserving its existing label when none was supplied.
+	if len(label) == 0 || label == existing.Label {
+		if existing.Status == db.TxStatusPending {
+			state := db.UpdateTxState{Status: db.TxStatusPublished}
+
+			return w.store.UpdateTx(ctx, db.UpdateTxParams{
+				WalletID: w.id,
+				Txid:     txHash,
+				State:    &state,
+			})
 		}
 
 		return nil
-	})
+	}
+
+	params := db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     txHash,
+		Label:    &label,
+	}
+	if existing.Status == db.TxStatusPending {
+		params.State = &db.UpdateTxState{Status: db.TxStatusPublished}
+	}
+
+	return w.store.UpdateTx(ctx, params)
 }
 
 // extractTxAddrs extracts all potential addresses from a transaction's outputs.
@@ -400,10 +761,8 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]address.Address {
 			continue
 		}
 
-		// It's not possible for a transaction to have this many
-		// outputs, so we can ignore the gosec error.
-		//
-		//nolint:gosec
+		// Transaction output indices fit in uint32 under consensus
+		// block size limits.
 		txOutAddrs[uint32(i)] = addrs
 	}
 
@@ -416,57 +775,184 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]address.Address {
 // filters a potentially large set of addresses down to the small subset that
 // the wallet needs to act on.
 //
-// The function is optimized to handle transactions with multiple outputs
-// paying to the same address. It internally de-duplicates the addresses to
-// ensure that the expensive database lookup (`w.addrStore.Address`) is
-// performed only once for each unique address.
-func (w *Wallet) filterOwnedAddresses(
+// The function is optimized to handle transactions with multiple outputs paying
+// to the same address. It internally de-duplicates the addresses and resolves
+// wallet ownership for the entire set with a single batched Store lookup,
+// rather than one lookup per address.
+func (w *Wallet) filterOwnedAddresses(ctx context.Context,
 	txOutAddrs map[uint32][]address.Address) (
-	map[address.Address]ownedAddrInfo, error) {
+	map[string]ownedAddrInfo, error) {
 
-	ownedAddrs := make(map[address.Address]ownedAddrInfo)
+	ownedAddrs := make(map[string]ownedAddrInfo)
 
-	// Pre-deduplicate addresses outside the DB transaction.
-	uniqueAddrs := make(map[address.Address][]uint32)
+	// Pre-deduplicate addresses outside the Store write path.
+	uniqueAddrs := make(map[string]ownedAddrInfo)
 	for index, addrs := range txOutAddrs {
 		for _, addr := range addrs {
-			uniqueAddrs[addr] = append(uniqueAddrs[addr], index)
+			key := addr.EncodeAddress()
+			info := uniqueAddrs[key]
+
+			if info.addr == nil {
+				info.addr = addr
+			}
+
+			info.outputIndices = append(info.outputIndices, index)
+			uniqueAddrs[key] = info
 		}
 	}
 
-	err := walletdb.View(w.cfg.DB, func(dbTx walletdb.ReadTx) error {
-		addrmgrNs := dbTx.ReadBucket(waddrmgrNamespaceKey)
+	// Resolve each unique address by its own script rather than the whole
+	// output script. For a single-address output these are identical, but
+	// for a bare-multisig output it correctly resolves the wallet-owned
+	// member, which the multisig script itself would never match.
+	//
+	// The scripts are gathered up front so the wallet-ownership question is
+	// answered with a single batched Store lookup instead of one lookup per
+	// address.
+	scriptToKey := make(map[string]string, len(uniqueAddrs))
+	scripts := make([][]byte, 0, len(uniqueAddrs))
 
-		for addr, indices := range uniqueAddrs {
-			ma, err := w.addrStore.Address(addrmgrNs, addr)
-
-			// If the address is not found, it simply means
-			// it does not belong to the wallet. This is
-			// the expected case for most addresses, so we
-			// can safely continue to the next one.
-			if waddrmgr.IsError(
-				err, waddrmgr.ErrAddressNotFound) {
-
-				continue
-			}
-
-			if err != nil {
-				return err
-			}
-
-			ownedAddrs[addr] = ownedAddrInfo{
-				managedAddr:   ma,
-				outputIndices: indices,
-			}
+	for key, info := range uniqueAddrs {
+		ownScript, err := txscript.PayToAddrScript(info.addr)
+		if err != nil {
+			return nil, err
 		}
 
-		return nil
-	})
+		scriptKey := string(ownScript)
+		if _, ok := scriptToKey[scriptKey]; ok {
+			continue
+		}
+
+		scriptToKey[scriptKey] = key
+
+		scripts = append(scripts, ownScript)
+	}
+
+	// Ask the Store which of the gathered scripts are wallet-owned in one
+	// operation. A script present in the result map is owned; an absent one
+	// simply does not belong to the wallet, which is the expected case for
+	// most addresses.
+	owned, err := w.store.ResolveOwnedAddresses(
+		ctx, db.ResolveOwnedAddressesQuery{
+			WalletID:      w.id,
+			ScriptPubKeys: scripts,
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
 
+	for scriptKey, info := range owned {
+		// Retain key ownership for signing without opting excluded
+		// accounts into automatic receiving credits or watches.
+		if info.NoChainSync {
+			continue
+		}
+
+		key := scriptToKey[scriptKey]
+		ownedAddrs[key] = uniqueAddrs[key]
+	}
+
 	return ownedAddrs, nil
+}
+
+// spendsWalletOutput reports whether the transaction spends at least one output
+// owned by the wallet, so a sweep that pays no wallet-owned outputs is still
+// recognized as ours.
+//
+// Wallet relevance cannot rely on current-UTXO membership alone. GetUtxo only
+// sees the current unspent set, so a no-change tx that re-spends a wallet
+// output already consumed by another unmined wallet tx (a fee-bump / RBF /
+// sweep replacement) would miss on GetUtxo and be wrongly classified as
+// wallet-unrelated. Such a tx must still be treated as ours so it is recorded
+// and the store-level input-conflict path can arbitrate the double-spend before
+// it broadcasts unrecorded. We therefore also consult the parent transaction's
+// wallet-owned outputs, which persist in the store even after the output is
+// spent, instead of treating an absent current UTXO as proof of
+// non-ownership.
+func (w *Wallet) spendsWalletOutput(ctx context.Context,
+	tx *wire.MsgTx) (bool, error) {
+
+	// Cache parent-tx ownership lookups so several inputs spending the same
+	// parent only cost one GetTxDetail call.
+	ownedParents := make(map[chainhash.Hash]map[uint32]struct{})
+
+	for _, txIn := range tx.TxIn {
+		outPoint := txIn.PreviousOutPoint
+
+		_, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+			WalletID: w.id,
+			OutPoint: outPoint,
+		})
+		if err == nil {
+			// The output is a current wallet UTXO, so the tx clearly
+			// spends our funds.
+			return true, nil
+		}
+
+		if !errors.Is(err, db.ErrUtxoNotFound) {
+			return false, err
+		}
+
+		// The output is not a current UTXO. It may still be a wallet
+		// output already spent by another unmined wallet tx, which the
+		// parent's recorded owned outputs reveal.
+		ownedOutputs, err := w.walletOwnedOutputs(
+			ctx, outPoint.Hash, ownedParents,
+		)
+		if err != nil {
+			return false, err
+		}
+
+		if _, ok := ownedOutputs[outPoint.Index]; ok {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// walletOwnedOutputs returns the set of output indexes that the wallet owns in
+// the transaction identified by txHash, memoizing the per-parent lookup in
+// cache. A parent the wallet does not record contributes an empty set, so its
+// outputs are treated as not wallet-owned.
+func (w *Wallet) walletOwnedOutputs(ctx context.Context,
+	txHash chainhash.Hash,
+	cache map[chainhash.Hash]map[uint32]struct{}) (map[uint32]struct{},
+	error) {
+
+	if owned, ok := cache[txHash]; ok {
+		return owned, nil
+	}
+
+	detail, err := w.store.GetTxDetail(ctx, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	})
+
+	// A parent the wallet never recorded cannot have contributed a
+	// wallet-owned output, so it spends none of our funds. Memoize a
+	// non-nil empty set so a later cache hit returns the same value and the
+	// caller can index the result without a nil check.
+	if errors.Is(err, db.ErrTxNotFound) {
+		empty := make(map[uint32]struct{})
+		cache[txHash] = empty
+
+		return empty, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	owned := make(map[uint32]struct{}, len(detail.OwnedOutputs))
+	for _, output := range detail.OwnedOutputs {
+		owned[output.Index] = struct{}{}
+	}
+
+	cache[txHash] = owned
+
+	return owned, nil
 }
 
 // publishTx is a helper function that handles the process of broadcasting a
@@ -476,7 +962,7 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// We'll also ask to be notified of the tx once it confirms on-chain.
 	// This is done outside of the database tx to prevent backend
 	// interaction within it.
-	err := w.cfg.Chain.NotifyReceived(ourAddrs)
+	err := w.chainSyncer.notifyReceived(w.lifetimeCtx, w.id, ourAddrs)
 	if err != nil {
 		return err
 	}
@@ -499,37 +985,47 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// If the tx was rejected, we need to determine why and act
 	// accordingly.
 	//
-	// NOTE: This check for ErrTxAlreadyInMempool should only be triggered
-	// if the wallet is running without mempool acceptance checks (e.g.,
-	// with an older version of the chain backend or with Neutrino).
-	// Otherwise, this condition should have been caught earlier by the
-	// `checkMempool` function.
-	if errors.Is(rpcErr, chain.ErrTxAlreadyInMempool) {
-		log.Infof("%v: tx already in mempool", txid)
+	// NOTE: These already-broadcast checks should only be triggered if the
+	// wallet is running without mempool acceptance checks (e.g., with an
+	// older version of the chain backend or with Neutrino). Otherwise, this
+	// condition should have been caught earlier by the `checkMempool`
+	// function, which treats the same set of errors as already broadcast.
+	switch {
+	case errors.Is(rpcErr, chain.ErrTxAlreadyInMempool),
+		errors.Is(rpcErr, chain.ErrTxAlreadyKnown),
+		errors.Is(rpcErr, chain.ErrTxAlreadyConfirmed):
+
+		// The tx is already known, confirmed, or in the mempool, so it
+		// was accepted by the network. Treat this as a successful
+		// publish so the recorded tx keeps being tracked rather than
+		// removed by the caller.
+		log.Infof("%v: tx already known/confirmed/in mempool", txid)
+
 		return nil
-	}
 
 	// If the tx was rejected for any other reason, then we'll return the
 	// error and let the caller handle the cleanup.
-	return rpcErr
+	default:
+		return rpcErr
+	}
 }
 
-// removeUnminedTx removes a tx from the unconfirmed store.
-func (w *Wallet) removeUnminedTx(tx *wire.MsgTx) error {
+// deleteUnminedTx removes a tx and its recorded descendants from the
+// unconfirmed store. A publication error does not prove the tx can never
+// confirm, so cleanup leaves no history the chain would later contradict.
+func (w *Wallet) deleteUnminedTx(ctx context.Context,
+	tx *wire.MsgTx) error {
+
 	txHash := tx.TxHash()
 
-	dbErr := walletdb.Update(w.cfg.DB, func(dbTx walletdb.ReadWriteTx) error {
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-		if err != nil {
-			return err
-		}
-
-		return w.txStore.RemoveUnminedTx(txmgrNs, txRec)
+	dbErr := w.store.DeleteUnminedTx(ctx, db.DeleteUnminedTxParams{
+		WalletID: w.id,
+		Txid:     txHash,
 	})
 	if dbErr != nil {
-		log.Warnf("Unable to remove invalid tx %v: %v", txHash, dbErr)
+		log.Warnf("Unable to remove invalid tx %v: %v", txHash,
+			dbErr)
+
 		return dbErr
 	}
 
@@ -553,4 +1049,29 @@ func (w *Wallet) removeUnminedTx(tx *wire.MsgTx) error {
 	}
 
 	return nil
+}
+
+// shouldRemoveTx reports whether a mapped publication error permits removing
+// the recorded branch. Policy and unknown outcomes keep the spend tracked.
+func shouldRemoveTx(err error) bool {
+	// Match only known malformed/mandatory-script identities. Subscription
+	// failures and unrecognized send errors provide no deletion verdict.
+	switch {
+	case errors.Is(err, chain.ErrEmptyOutput),
+		errors.Is(err, chain.ErrEmptyInput),
+		errors.Is(err, chain.ErrDuplicateInput),
+		errors.Is(err, chain.ErrEmptyPrevOut),
+		errors.Is(err, chain.ErrBelowOutValue),
+		errors.Is(err, chain.ErrNegativeOutput),
+		errors.Is(err, chain.ErrLargeOutput),
+		errors.Is(err, chain.ErrLargeTotalOutput),
+		errors.Is(err, chain.ErrScriptVerifyFlag),
+		errors.Is(err, chain.ErrInvalidOpcode),
+		errors.Is(err, chain.ErrOversizeTx):
+
+		return true
+
+	default:
+		return false
+	}
 }

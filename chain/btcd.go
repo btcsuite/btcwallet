@@ -5,6 +5,7 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,7 @@ type RPCClient struct {
 
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
+	eventStream         *chainEventStream
 	currentBlock        chan *waddrmgr.BlockStamp
 
 	quit    chan struct{}
@@ -47,6 +49,26 @@ type RPCClient struct {
 // A compile-time check to ensure that RPCClient satisfies the chain.Interface
 // interface.
 var _ Interface = (*RPCClient)(nil)
+
+// notificationHandlers builds the default btcd websocket callbacks shared by
+// NewRPCClient and NewRPCClientWithConfig. The deprecated btcd handlers remain
+// required for legacy chain.Interface notifications and active
+// EventSubscription block-disconnect delivery.
+//
+//nolint:staticcheck // Keep deprecated btcd callbacks for chain notifications.
+func (c *RPCClient) notificationHandlers() *rpcclient.NotificationHandlers {
+	return &rpcclient.NotificationHandlers{
+		OnClientConnected:        c.onClientConnect,
+		OnBlockConnected:         c.onBlockConnected,
+		OnBlockDisconnected:      c.onBlockDisconnected,
+		OnFilteredBlockConnected: c.onFilteredBlockConnected,
+		OnRelevantTxAccepted:     c.onRelevantTxAccepted,
+		OnRecvTx:                 c.onRecvTx,
+		OnRedeemingTx:            c.onRedeemingTx,
+		OnRescanFinished:         c.onRescanFinished,
+		OnRescanProgress:         c.onRescanProgress,
+	}
+}
 
 // NewRPCClient creates a client connection to the server described by the
 // connect string.  If disableTLS is false, the remote RPC certificate must be
@@ -81,16 +103,11 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
-	ntfnCallbacks := &rpcclient.NotificationHandlers{
-		OnClientConnected:   client.onClientConnect,
-		OnBlockConnected:    client.onBlockConnected,
-		OnBlockDisconnected: client.onBlockDisconnected,
-		OnRecvTx:            client.onRecvTx,
-		OnRedeemingTx:       client.onRedeemingTx,
-		OnRescanFinished:    client.onRescanFinished,
-		OnRescanProgress:    client.onRescanProgress,
-	}
-	rpcClient, err := rpcclient.New(client.connConfig, ntfnCallbacks)
+	client.eventStream = newChainEventStream(chainParams, client)
+
+	rpcClient, err := rpcclient.New(
+		client.connConfig, client.notificationHandlers(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -193,20 +210,13 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
+	client.eventStream = newChainEventStream(cfg.Chain, client)
 
 	// Use the configed notification callbacks, if not set, default to the
 	// callbacks defined in this package.
 	ntfnCallbacks := cfg.NotificationHandlers
 	if ntfnCallbacks == nil {
-		ntfnCallbacks = &rpcclient.NotificationHandlers{
-			OnClientConnected:   client.onClientConnect,
-			OnBlockConnected:    client.onBlockConnected,
-			OnBlockDisconnected: client.onBlockDisconnected,
-			OnRecvTx:            client.onRecvTx,
-			OnRedeemingTx:       client.onRedeemingTx,
-			OnRescanFinished:    client.onRescanFinished,
-			OnRescanProgress:    client.onRescanProgress,
-		}
+		ntfnCallbacks = client.notificationHandlers()
 	}
 
 	// Create the RPC client using the above config.
@@ -278,10 +288,11 @@ func (c *RPCClient) Start(_ context.Context) error {
 
 	c.quitMtx.Lock()
 	c.started = true
-	c.quitMtx.Unlock()
-
 	c.wg.Add(1)
 	go c.handler()
+
+	c.quitMtx.Unlock()
+
 	return nil
 }
 
@@ -299,6 +310,7 @@ func (c *RPCClient) Stop() {
 		c.batchClient.WaitForShutdown()
 
 		if !c.started {
+			c.eventStream.close()
 			close(c.dequeueNotification)
 		}
 	}
@@ -336,6 +348,68 @@ func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []address.Address,
 	return c.Client.Rescan(startHash, addrs, flatOutpoints) // nolint:staticcheck
 }
 
+// NotifyReceived registers addresses with both btcd's legacy notification
+// filter and LoadTxFilter so legacy Notifications() receives matching txns and
+// btcd's shared filter includes them; EventSubscription delivery still
+// requires enrolling watches via EventSubscription.WatchAddrs.
+func (c *RPCClient) NotifyReceived(addrs []address.Address) error {
+	// Keep legacy NotifyReceived for OnRecvTx consumers alongside
+	// LoadTxFilter.
+	//nolint:staticcheck
+	err := c.Client.NotifyReceived(addrs)
+	if err != nil {
+		return err
+	}
+
+	if len(addrs) == 0 {
+		return nil
+	}
+
+	return c.LoadTxFilter(false, addrs, nil)
+}
+
+// NotifySpent registers outpoints with both btcd's legacy notification filter
+// and LoadTxFilter without stealth-enabling NotifyBlocks.
+func (c *RPCClient) NotifySpent(points []*wire.OutPoint) error {
+	flat := make([]wire.OutPoint, len(points))
+	for i, op := range points {
+		if op == nil {
+			return fmt.Errorf("%w: nil outpoint at index %d",
+				ErrInvalidParam, i)
+		}
+
+		flat[i] = *op
+	}
+
+	// Keep legacy NotifySpent for OnRedeemingTx consumers alongside
+	// LoadTxFilter.
+	//nolint:staticcheck
+	err := c.Client.NotifySpent(points)
+	if err != nil {
+		return err
+	}
+
+	if len(flat) == 0 {
+		return nil
+	}
+
+	return c.LoadTxFilter(false, nil, flat)
+}
+
+// WatchAddrsFromTip registers addresses with btcd's transaction notification
+// filters without issuing a rescan. The context is checked before registration
+// so a canceled delivery attempt cannot introduce new watches.
+func (c *RPCClient) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	return c.NotifyReceived(addrs)
+}
+
 // GetCFilter returns a compact filter for the given block hash and filter
 // type. It wraps the underlying rpcclient method and converts the result to a
 // *gcs.Filter.
@@ -371,6 +445,13 @@ func (c *RPCClient) WaitForShutdown() {
 // later reads.
 func (c *RPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
+}
+
+// SubscribeChainEvents enrolls a reader on the started RPCClient.
+func (c *RPCClient) SubscribeChainEvents(
+	ctx context.Context) EventSubscription {
+
+	return c.eventStream.subscribe(ctx)
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
@@ -515,16 +596,79 @@ func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time ti
 }
 
 func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time) {
-	select {
-	case c.enqueueNotification <- BlockDisconnected{
+	ntfn := BlockDisconnected{
 		Block: wtxmgr.Block{
 			Hash:   *hash,
 			Height: height,
 		},
 		Time: time,
-	}:
+	}
+	if c.eventStream.hasSubscribers() {
+		c.eventStream.publish(ntfn)
+	}
+
+	select {
+	case c.enqueueNotification <- ntfn:
 	case <-c.quit:
 	}
+}
+
+// onFilteredBlockConnected publishes btcd's atomic filtered block notification
+// directly to EventSubscription in websocket wire order.
+func (c *RPCClient) onFilteredBlockConnected(height int32,
+	header *wire.BlockHeader, txs []*btcutil.Tx) {
+
+	if !c.eventStream.hasSubscribers() {
+		return
+	}
+
+	recs := make([]*wtxmgr.TxRecord, 0, len(txs))
+	for _, tx := range txs {
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(
+			tx.MsgTx(), header.Timestamp,
+		)
+		if err != nil {
+			log.Errorf("Cannot create filtered block tx: %v", err)
+			continue
+		}
+
+		recs = append(recs, rec)
+	}
+
+	blk := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Hash: header.BlockHash(), Height: height},
+		Time:  header.Timestamp,
+	}
+
+	c.eventStream.publish(FilteredBlockConnected{
+		Block: blk, RelevantTxs: recs,
+	})
+}
+
+// onRelevantTxAccepted decodes rawTx via wire.MsgTx so witness txns keep their
+// canonical txid, and publishes an unconfirmed RelevantTx to EventSubscription.
+func (c *RPCClient) onRelevantTxAccepted(rawTx []byte) {
+	if !c.eventStream.hasSubscribers() {
+		return
+	}
+
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(rawTx))
+	if err != nil {
+		log.Errorf("Cannot deserialize relevant tx: %v", err)
+
+		return
+	}
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(&msgTx, time.Now())
+	if err != nil {
+		log.Errorf("Cannot create relevant tx record: %v", err)
+
+		return
+	}
+
+	c.eventStream.publish(RelevantTx{rec, nil})
 }
 
 func (c *RPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
@@ -567,14 +711,17 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 
 }
 
-// handler maintains a queue of notifications and the current state (best
-// block) of the chain.
+// handler delivers native notifications and maintains the last notified block.
 func (c *RPCClient) handler() {
+	defer c.wg.Done()
+
+	stream := c.eventStream
+	defer stream.close()
+
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
 		c.Stop()
-		c.wg.Done()
 		return
 	}
 
@@ -605,6 +752,7 @@ out:
 				enqueue = nil
 				continue
 			}
+
 			if len(notifications) == 0 {
 				next = n
 				dequeue = c.dequeueNotification
@@ -641,7 +789,6 @@ out:
 
 	c.Stop()
 	close(c.dequeueNotification)
-	c.wg.Done()
 }
 
 // POSTClient creates the equivalent HTTP POST rpcclient.Client.

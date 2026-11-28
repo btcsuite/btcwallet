@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -230,3 +231,33 @@ func (m *mockGetRawTxReceiver) Receive() (*btcutil.Tx, error) {
 
 // Compile time assert the implementation.
 var _ getRawTxReceiver = (*mockGetRawTxReceiver)(nil)
+
+// mockChainClient mocks Interface for internal package-chain tests that cannot
+// import bwtest/mock without creating a chain -> bwtest/mock -> chain import
+// cycle.
+type mockChainClient struct {
+	// Mock records and verifies expected watch delegation calls.
+	mock.Mock
+
+	// Interface satisfies the remaining methods not exercised by watch
+	// tests.
+	Interface
+}
+
+// WatchAddrsFromTip records and returns the configured mock error.
+func (m *mockChainClient) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	args := m.Called(ctx, addrs)
+
+	return args.Error(0)
+}
+
+// NotifySpent records and returns the configured mock error.
+func (m *mockChainClient) NotifySpent(points []*wire.OutPoint) error {
+	args := m.Called(points)
+
+	return args.Error(0)
+}
+
+var _ Interface = (*mockChainClient)(nil)

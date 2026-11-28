@@ -53,8 +53,42 @@ type Interface interface {
 	Rescan(*chainhash.Hash, []address.Address,
 		map[wire.OutPoint]address.Address) error
 	NotifyReceived([]address.Address) error
+
+	// NotifySpent adds outpoints to the full-node transaction watch set.
+	// Notifications may describe unmined or confirmed spends; this does not
+	// promise a complete mempool snapshot. Neutrino treats this as a no-op;
+	// its confirmed spends are discovered by block scanning.
+	NotifySpent([]*wire.OutPoint) error
+
+	// WatchAddrsFromTip requests address notification registration after a
+	// context cancellation preflight. Btcd and bitcoind add only live filter
+	// entries. Neutrino temporarily retains NotifyReceived's legacy historical
+	// behavior until its live-watch lifecycle receives a dedicated design.
+	WatchAddrsFromTip(context.Context, []address.Address) error
 	NotifyBlocks() error
+
+	// Notifications returns the client's shared, unbounded notification
+	// queue. Drain it continually to release queued events, including
+	// while subscriptions are active. On btcd and Neutrino, legacy
+	// dequeue also advances BlockStamp.
+	//
+	// Deprecated: Use [Interface.SubscribeChainEvents] for independent
+	// subscriptions.
 	Notifications() <-chan interface{}
+
+	// SubscribeChainEvents enrolls an independent reader on a started
+	// client, delivering normalized [Event] values in source order.
+	// Call NotifyBlocks for block events and block-confirmed output spend
+	// tracking. Use [EventSubscription.WatchAddrs] and
+	// [EventSubscription.WatchOutputs] for scoped tx watches; local watch
+	// routing is retained until retirement, while backend-wide filter
+	// resets (LoadTxFilter) or Neutrino Rescan replacements clear native
+	// coverage unless watches are re-registered. Buffer overflow ends the
+	// subscription with [ErrEventSubscriptionBufferFull]. Check
+	// [EventSubscription.Err] after Done closes, and cancel ctx when
+	// finished.
+	SubscribeChainEvents(ctx context.Context) EventSubscription
+
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
 	SubmitPackage(txns []*wire.MsgTx,

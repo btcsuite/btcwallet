@@ -1,5 +1,24 @@
 DEV_TAGS = dev
 LOG_TAGS =
+IT_TAGS ?=
+
+# Integration test DB selections derived from the `db` variable (sqlite, postgres).
+# Defaults to sqlite if not specified.
+ifeq ($(db),postgres)
+IT_TAGS += test_db_postgres
+IT_DB_LABEL := PostgreSQL
+IT_DB_TYPE := postgres
+else
+IT_TAGS :=
+IT_DB_LABEL := SQLite
+IT_DB_TYPE := sqlite
+endif
+
+# Enable integration test coverage
+ifeq ($(cover),1)
+ITEST_DB_COVERPROFILE = coverage-itest-$(IT_DB_TYPE).txt
+ITEST_DB_COVERAGE = -coverprofile=$(ITEST_DB_COVERPROFILE) -coverpkg=$(PKG)/wallet/internal/db/... -covermode=atomic
+endif
 
 GOCC ?= go
 GOLIST := $(GOCC) list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'
@@ -39,6 +58,10 @@ ifneq ($(nocache),)
 TEST_FLAGS += -test.count=1
 endif
 
+ifneq ($(benchmem),)
+TEST_FLAGS += -test.benchmem
+endif
+
 # Define the log tags that will be applied only when running unit tests. If none
 # are provided, we default to "debug stdlog" which will be standard debug log
 # output.
@@ -61,7 +84,7 @@ UNIT_RACE := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -race $(UNI
 
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
-UNIT_BENCH := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE $(UNITPKG)
+UNIT_BENCH := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -test.bench=. -test.run=NONE $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
@@ -70,8 +93,11 @@ UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAG
 
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
-UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE
+UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -test.bench=. -test.run=NONE
 UNIT_RACE := $(UNIT) -race
 endif
 
 UNIT_COVER := $(GOTEST) $(COVER_FLAGS) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(COVER_PKG)
+
+ITEST_DB := $(GOTEST) $(ITEST_DB_COVERAGE) -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest
+ITEST_DB_RACE := $(GOTEST) -race -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest

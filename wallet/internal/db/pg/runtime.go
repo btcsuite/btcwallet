@@ -1,0 +1,170 @@
+package pg
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+)
+
+var (
+	// Compile-time interface checks keep Store aligned with the shared runtime
+	// hook contracts.
+	_ dbruntime.ReadHooks  = (*Store)(nil)
+	_ dbruntime.WriteHooks = (*Store)(nil)
+)
+
+// Default PostgreSQL read retry settings.
+const (
+	// defaultReadMaxAttempts keeps retries bounded to one initial attempt plus
+	// up to two retries for short-lived serialization or lock failures.
+	defaultReadMaxAttempts = 3
+
+	// defaultReadBaseDelay starts backoff at 10 ms so brief transient conflicts
+	// can clear without noticeably delaying callers.
+	defaultReadBaseDelay = 10 * time.Millisecond
+
+	// defaultReadMaxDelay caps retry backoff at 100 ms so repeated transient
+	// errors do not stall wallet operations for too long.
+	defaultReadMaxDelay = 100 * time.Millisecond
+)
+
+// execRead executes one PostgreSQL read operation through the shared runtime
+// helper.
+func (s *Store) execRead(ctx context.Context,
+	fn func(*sqlc.Queries) error) error {
+
+	_, err := dbruntime.Read(
+		ctx, s, s.queries, defaultReadConfig(),
+		func(_ context.Context, q *sqlc.Queries) (struct{}, error) {
+			return struct{}{}, fn(q)
+		},
+	)
+
+	return err
+}
+
+// execWrite executes one PostgreSQL write operation through the shared runtime
+// helper.
+func (s *Store) execWrite(ctx context.Context,
+	fn func(*sqlc.Queries) error) error {
+
+	// Keep all native transaction outcomes in the shared runtime; cleanup
+	// uses an independent deadline even when the request was canceled.
+	// Commit marks unknown outcomes before shared error classification.
+	_, err := dbruntime.Write(
+		ctx, s, dbruntime.WriteTxOps[pgx.Tx, *sqlc.Queries]{
+			Begin: func(ctx context.Context) (pgx.Tx, error) {
+				return s.pool.Begin(ctx)
+			},
+			Bind: func(tx pgx.Tx) *sqlc.Queries {
+				return s.queries.WithTx(tx)
+			},
+			Commit: func(tx pgx.Tx) error {
+				err := tx.Commit(ctx)
+				if isCommitAmbiguous(err) {
+					return &dbruntime.AmbiguousTxCommitError{Err: err}
+				}
+
+				return err
+			},
+			Rollback: func(tx pgx.Tx) error {
+				return rollbackTx(ctx, tx.Rollback)
+			},
+		},
+		func(qtx *sqlc.Queries) (struct{}, error) {
+			return struct{}{}, fn(qtx)
+		},
+	)
+
+	return err
+}
+
+// lockTxGraph orders a Wallet's graph writes until the SQL transaction ends.
+// A child must not commit between a descendant read and its parent's removal.
+func lockTxGraph(ctx context.Context, qtx *sqlc.Queries, walletID int64) error {
+	// This query uses FOR NO KEY UPDATE to lock the Wallet row. The lock
+	// permits foreign key checks and lasts until this transaction ends.
+	_, err := qtx.GetWalletForAccountCreation(ctx, walletID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lock wallet transaction graph: %w", err)
+	}
+
+	// If the Wallet does not exist, let the caller's normal checks report
+	// the error. There is no graph to lock.
+	return nil
+}
+
+// rollbackTx rolls back a PostgreSQL transaction with a fresh bounded context
+// so caller cancellation cannot prevent cleanup.
+func rollbackTx(ctx context.Context,
+	rollback func(context.Context) error) error {
+
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), db.DefaultConnectionTimeout,
+	)
+	defer cancel()
+
+	return rollback(ctx)
+}
+
+// defaultReadConfig returns the PostgreSQL read retry policy.
+func defaultReadConfig() dbruntime.ReadConfig {
+	// TODO(yy): make it configurable.
+	return dbruntime.ReadConfig{
+		MaxAttempts: defaultReadMaxAttempts,
+		BaseDelay:   defaultReadBaseDelay,
+		MaxDelay:    defaultReadMaxDelay,
+	}
+}
+
+// CheckHealthy reports whether a prior fatal SQL backend error poisoned the
+// store.
+func (s *Store) CheckHealthy() error {
+	return s.runtimeStats.CheckHealthy()
+}
+
+// ClassifyError normalizes one PostgreSQL backend error into the shared SQL
+// error model while preserving ordinary domain errors unchanged.
+func (s *Store) ClassifyError(err error) error {
+	return dberr.Normalize(dberr.BackendPostgres, mapErr, err)
+}
+
+// RecordError records one classified PostgreSQL backend error and marks the
+// store unhealthy after fatal failures.
+func (s *Store) RecordError(err error) {
+	s.runtimeStats.RecordError(err)
+}
+
+// RecordRetryAttempt records one PostgreSQL read retry attempt.
+func (s *Store) RecordRetryAttempt() {
+	s.runtimeStats.RecordRetryAttempt()
+}
+
+// RecordRetrySuccess records one successful PostgreSQL read retry outcome.
+func (s *Store) RecordRetrySuccess() {
+	s.runtimeStats.RecordRetrySuccess()
+}
+
+// RecordRetryExhausted records one exhausted PostgreSQL read retry sequence.
+func (s *Store) RecordRetryExhausted() {
+	s.runtimeStats.RecordRetryExhausted()
+}
+
+// RecordAmbiguousTxCommit records one PostgreSQL commit failure with unknown
+// outcome.
+func (s *Store) RecordAmbiguousTxCommit() {
+	s.runtimeStats.RecordAmbiguousTxCommit()
+}
+
+// StatsSnapshot returns the current PostgreSQL runtime counters.
+func (s *Store) StatsSnapshot() dbruntime.StatsSnapshot {
+	return s.runtimeStats.Snapshot(dberr.BackendPostgres)
+}

@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -9,8 +10,10 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -142,46 +145,171 @@ func TestNeutrinoClientSequentialStartStop(t *testing.T) {
 	}
 }
 
-// TestNeutrinoClientNotifyReceived verifies that a call to NotifyReceived sets
-// the client into the scanning state and that subsequent calls while scanning
-// will call Update on the client's Rescanner.
-func TestNeutrinoClientNotifyReceived(t *testing.T) {
-	var (
-		nc                      = newMockNeutrinoClient()
-		wantNotifyReceivedCalls = 50
-		wantUpdateCalls         = wantNotifyReceivedCalls - 1
-	)
+// TestNeutrinoClientSubscriptionGeneration ties each reader to one client run.
+func TestNeutrinoClientSubscriptionGeneration(t *testing.T) {
+	t.Parallel()
 
-	// executeCalls calls NotifyReceived() synchronously n times without
-	// blocking the test and requires no error after each call.
-	executeCalls := func(n int) <-chan struct{} {
-		done := make(chan struct{})
+	// Arrange a service that supplies a tip for each run. Join the current
+	// generation even on a failed assertion so its handler cannot leak.
+	client := newMockNeutrinoClient()
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+	service.On("Start").Return(nil).Twice()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{}, nil).Twice()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
 
-		go func() {
-			defer close(done)
+	require.NoError(t, client.Start(t.Context()))
+	first := client.SubscribeChainEvents(t.Context())
+	hash := chainhash.Hash{1}
+	client.onBlockDisconnected(&hash, 1, time.Time{})
 
-			var addrs []address.Address
-			for i := 0; i < n; i++ {
-				err := nc.NotifyReceived(addrs)
-				require.NoError(t, err)
-			}
-		}()
-
-		return done
-	}
-
-	// Wait for all calls to complete or test to time out.
-	timeout := time.After(maxDur)
 	select {
-	case <-timeout:
-		t.Fatal("timed out")
-	case <-executeCalls(wantNotifyReceivedCalls):
-		// Require that the expected number of calls to Update were made
-		// once done sending all NotifyReceived calls.
-		mockRescan := nc.rescan.(*mockRescanner)
-		gotUpdateCalls := mockRescan.updateArgs.Len()
-		require.Equal(t, wantUpdateCalls, gotUpdateCalls)
+	case ev := <-first.Events:
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, hash, ev.Block.Hash)
+		require.Equal(t, int32(1), ev.Block.Height)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "first generation missed disconnect event")
 	}
+
+	// Act by joining the first run before reopening the same client. The
+	// new subscriber and its marker belong to the second handler only.
+	client.Stop()
+	client.WaitForShutdown()
+	require.NoError(t, client.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	second := client.SubscribeChainEvents(ctx)
+	nextHash := chainhash.Hash{2}
+	client.onBlockDisconnected(&nextHash, 2, time.Time{})
+
+	// Assert the first generation retired and the current generation
+	// delivers its own marker before canceling while the client runs.
+	select {
+	case <-first.Done:
+	default:
+		require.FailNow(t, "first generation still subscribed")
+	}
+
+	select {
+	case ev := <-second.Events:
+		require.Equal(t, EventBlockDisconnected, ev.Type)
+		require.Equal(t, nextHash, ev.Block.Hash)
+		require.Equal(t, int32(2), ev.Block.Height)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "second generation missed disconnect event")
+	}
+
+	// The second generation also offers the marker to its legacy reader.
+	legacyHash := waitForBlockNtfn(t, client.Notifications(), 2, false)
+	require.Equal(t, nextHash, legacyHash)
+	cancel()
+
+	select {
+	case <-second.Done:
+	case <-time.After(defaultTestTimeout):
+		t.Fatal("the restarted handler did not retire a canceled reader")
+	}
+
+	service.AssertExpectations(t)
+}
+
+// TestNeutrinoClientNotifyReceived verifies live watch updates preserve the
+// birthday selected before the native scan starts, including concurrent hints.
+func TestNeutrinoClientNotifyReceived(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Activate the native scan with an early birthday, then route
+	// callbacks through its existing notification channels without a service
+	// worker. A block between the two birthdays exposes any later mutation.
+	const eventCount = 50
+
+	nc := newMockNeutrinoClient()
+
+	// Leave room for an incorrectly emitted control block so a broken
+	// birthday filter fails the assertion instead of blocking the callback.
+	notifications := make(chan interface{}, eventCount+1)
+	nc.enqueueNotification = notifications
+	nc.dequeueNotification = notifications
+	birthday := time.Unix(100, 0)
+	laterBirthday := time.Unix(300, 0)
+	blockTime := time.Unix(200, 0)
+
+	nc.SetStartTime(birthday)
+	require.NoError(t, nc.NotifyReceived(nil))
+
+	service, ok := nc.CS.(*mockChainService)
+	require.True(t, ok)
+
+	service.On("BestBlock").Return(testBestBlock, nil).Times(eventCount + 1)
+
+	start := make(chan struct{})
+	updates := make(chan error, 1)
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+
+	// Act: A pre-birthday block must stay filtered, proving the initial hint
+	// took effect. Later hints overlap post-birthday callbacks while repeated
+	// address registration must reuse the already active scan.
+	nc.onBlockConnected(&chainhash.Hash{}, 1, time.Unix(50, 0))
+
+	// Offer a later hint first so the delivery assertion is deterministic
+	// even if the scheduler runs the callbacks before the remaining updates.
+	nc.SetStartTime(laterBirthday)
+
+	go func() {
+		defer workers.Done()
+
+		<-start
+
+		for range eventCount - 1 {
+			nc.SetStartTime(laterBirthday)
+
+			err := nc.NotifyReceived(nil)
+			if err != nil {
+				updates <- err
+				return
+			}
+		}
+
+		updates <- nil
+	}()
+	go func() {
+		defer workers.Done()
+
+		<-start
+
+		for range eventCount {
+			nc.onBlockConnected(&chainhash.Hash{}, 1, blockTime)
+		}
+	}()
+
+	close(start)
+	workers.Wait()
+
+	// Assert: Only the post-birthday blocks are delivered, and all later
+	// registrations extend the same rescan. Join both paths
+	// before reading outputs or verifying exact dependency expectations.
+	require.NoError(t, <-updates)
+	require.Len(t, notifications, eventCount)
+
+	for range eventCount {
+		event, ok := (<-nc.Notifications()).(BlockConnected)
+		require.True(t, ok)
+		require.Equal(t, int32(1), event.Height)
+		require.Equal(t, blockTime, event.Time)
+	}
+
+	rescan, ok := nc.rescan.(*mockRescanner)
+	require.True(t, ok)
+	require.Equal(t, eventCount-1, rescan.updateArgs.Len())
+	service.AssertExpectations(t)
 }
 
 // TestNeutrinoClientNotifyReceivedRescan verifies concurrent calls to
@@ -315,4 +443,71 @@ func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 
 		require.Equal(t, wantMsgs, gotMsgs)
 	}
+}
+
+// TestNeutrinoClientScopedWatch verifies NeutrinoClient delegates WatchAddrs
+// to start the native rescan once and scopes EventBlockConnected tx
+// delivery strictly to the watched subscription.
+func TestNeutrinoClientScopedWatch(t *testing.T) {
+	t.Parallel()
+
+	// Configure a mock chain service and reuse mockRescanner while counting
+	// rescan starts triggered by WatchAddrs.
+	var rescanStarts int
+
+	client := &NeutrinoClient{
+		CS:          &mockChainService{},
+		chainParams: &chaincfg.RegressionNetParams,
+		newRescan: func(...neutrino.RescanOption) rescanner {
+			rescanStarts++
+
+			return &mockRescanner{}
+		},
+	}
+	service, ok := client.CS.(*mockChainService)
+	require.True(t, ok)
+	service.On("Start").Return(nil).Once()
+	service.On("BestBlock").Return(&headerfs.BlockStamp{
+		Height: 10,
+	}, nil).Twice()
+	t.Cleanup(func() {
+		client.Stop()
+		client.WaitForShutdown()
+	})
+
+	require.NoError(t, client.Start(t.Context()))
+
+	// Enroll watched and unwatched subscriptions and register addr on
+	// watched.
+	addr, pkScript := randTestP2PKHAddr(t)
+	watched := client.SubscribeChainEvents(t.Context())
+	unwatched := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, watched.WatchAddrs(t.Context(), []address.Address{addr}),
+	)
+	require.Equal(t, 1, rescanStarts)
+
+	// Emit a filtered block containing a tx paying to addr.
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(wire.NewTxOut(5000, pkScript))
+	txHash := tx.TxHash()
+	hdr := &wire.BlockHeader{Timestamp: time.Now()}
+	client.onFilteredBlockConnected(11, hdr, []*btcutil.Tx{
+		btcutil.NewTx(tx),
+	})
+
+	// Watched receives the tx inside EventBlockConnected; unwatched
+	// receives the block with zero relevant txns.
+	wBlk := waitChainEvent(t, watched.Events)
+	require.Equal(t, EventBlockConnected, wBlk.Type)
+	require.Equal(t, int32(11), wBlk.Block.Height)
+	require.Len(t, wBlk.RelevantTxs, 1)
+	require.Equal(t, txHash, wBlk.RelevantTxs[0].Hash)
+
+	uBlk := waitChainEvent(t, unwatched.Events)
+	require.Equal(t, EventBlockConnected, uBlk.Type)
+	require.Equal(t, int32(11), uBlk.Block.Height)
+	require.Empty(t, uBlk.RelevantTxs)
+
+	service.AssertExpectations(t)
 }

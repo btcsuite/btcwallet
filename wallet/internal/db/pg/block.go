@@ -1,0 +1,105 @@
+package pg
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// buildBlock constructs a Block from the given PostgreSQL block
+// fields.
+func buildBlock(height sql.NullInt32, hash []byte,
+	timestamp sql.NullInt64) (*db.Block, error) {
+
+	height32, err := db.NullInt32ToUint32(height)
+	if err != nil {
+		return nil, fmt.Errorf("block height: %w", err)
+	}
+
+	return db.BuildBlock(hash, height32, timestamp.Int64)
+}
+
+// ensureBlockExists ensures that a block exists in the database.
+func ensureBlockExists(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, block *db.Block) error {
+
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return fmt.Errorf("convert block height: %w", err)
+	}
+
+	blockParams := sqlc.InsertWalletBlockParams{
+		WalletID:       int64(walletID),
+		BlockHeight:    height,
+		HeaderHash:     block.Hash[:],
+		BlockTimestamp: block.Timestamp.Unix(),
+	}
+
+	err = qtx.InsertWalletBlock(ctx, blockParams)
+	if err != nil {
+		// wallet_blocks has a single foreign key on wallet_id; map a
+		// foreign-key failure back to ErrWalletNotFound so callers
+		// updating or writing checkpoints for a missing wallet keep the
+		// documented sentinel without querying an aborted transaction.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) &&
+			pgErr.Code == codeForeignKeyViolation {
+
+			return fmt.Errorf(
+				"wallet %d: %w", walletID, db.ErrWalletNotFound,
+			)
+		}
+
+		return fmt.Errorf("insert block: %w", err)
+	}
+
+	_, err = requireBlockMatches(ctx, qtx, walletID, block)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// requireBlockMatches loads the owning Wallet's block row and verifies its
+// metadata against the supplied confirmation reference.
+func requireBlockMatches(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, block *db.Block) (int32, error) {
+
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return 0, fmt.Errorf("convert block height: %w", err)
+	}
+
+	storedBlock, err := qtx.GetWalletBlockByHeight(
+		ctx, sqlc.GetWalletBlockByHeightParams{
+			WalletID: int64(walletID), BlockHeight: height,
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("block %d: %w", block.Height,
+				db.ErrBlockNotFound)
+		}
+
+		return 0, fmt.Errorf("get block by height: %w", err)
+	}
+
+	if !bytes.Equal(storedBlock.HeaderHash, block.Hash[:]) {
+		return 0, fmt.Errorf("block %d header hash: %w", block.Height,
+			db.ErrBlockMismatch)
+	}
+
+	if storedBlock.BlockTimestamp != block.Timestamp.Unix() {
+		return 0, fmt.Errorf("block %d timestamp: %w", block.Height,
+			db.ErrBlockMismatch)
+	}
+
+	return height, nil
+}

@@ -1,14 +1,156 @@
 package wallet
 
 import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"iter"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestWalletID verifies that Wallet.ID returns the cached runtime ID.
+func TestWalletID(t *testing.T) {
+	t.Parallel()
+
+	w := &Wallet{id: 42}
+
+	require.Equal(t, uint32(42), w.ID())
+}
+
+// TestManagerBuildsWalletsFromRuntimePolicy verifies sibling SQL Wallets use
+// inherited and explicit policy while retaining independent mutable snapshots.
+func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Configure exact Store creations for inherited, disabled and
+	// explicit lookahead policies using the same Manager snapshot.
+	const (
+		secondWalletName = "second"
+		thirdWalletName  = "third"
+	)
+
+	store := &walletmock.Store{}
+	for i, name := range []string{"first", secondWalletName, thirdWalletName} {
+		walletID := uint32(i + 1)
+		store.On(
+			"CreateWallet", mock.Anything,
+			mock.MatchedBy(func(params db.CreateWalletParams) bool {
+				return params.Name == name
+			}),
+		).Return(&db.WalletInfo{
+			ID:          walletID,
+			Name:        name,
+			IsWatchOnly: true,
+		}, nil).Once()
+		store.On("GetWallet", mock.Anything, name).Return(
+			&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+		).Once()
+		store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+			WalletID: walletID,
+		}).
+			Return([]db.AccountInfo{}, nil).Once()
+		store.On("DeleteExpiredLeases", mock.Anything, walletID).
+			Return(nil).Once()
+	}
+
+	manager := testSQLManager(t, store)
+	chainSource := manager.config.ChainSource
+	manager.config.SyncMethod = SyncMethodFullBlocks
+	manager.config.WalletSyncRetryInterval = 2 * time.Second
+	manager.config.RecoveryWindow = 12
+	manager.config.AutoLockDuration = 3 * time.Minute
+	manager.config.MaxCFilterItems = 50
+	params := CreateWalletParams{
+		Mode:              ModeShell,
+		WatchOnly:         true,
+		PrivatePassphrase: []byte("private"),
+	}
+
+	// Act: Create Wallets with inherited, zero and nonzero lookahead, then
+	// mutate one network snapshot after all three are assembled.
+	params.Name = "first"
+	first, err := manager.Create(params)
+	require.NoError(t, err)
+
+	zero := uint32(0)
+	params.Name = secondWalletName
+	params.RecoveryWindow = &zero
+	second, err := manager.Create(params)
+	require.NoError(t, err)
+
+	window := uint32(32)
+	params.Name = thirdWalletName
+	params.RecoveryWindow = &window
+	third, err := manager.Create(params)
+	require.NoError(t, err)
+
+	first.cfg.ChainParams.Name = "mutated"
+
+	// Assert: Verify the caller-owned source is shared while scalar policy is
+	// copied, explicit overrides stay local, and each Store call occurs
+	// exactly once.
+	require.Same(t, chainSource, first.cfg.Chain)
+	require.Same(t, chainSource, second.cfg.Chain)
+	require.Equal(t, SyncMethodFullBlocks, first.cfg.SyncMethod)
+	require.Equal(t, first.cfg.SyncMethod, second.cfg.SyncMethod)
+	require.Equal(t, 2*time.Second, first.cfg.WalletSyncRetryInterval)
+	require.Equal(t, first.cfg.WalletSyncRetryInterval,
+		second.cfg.WalletSyncRetryInterval)
+	require.Equal(t, uint32(12), first.cfg.RecoveryWindow)
+	require.Zero(t, second.cfg.RecoveryWindow)
+	require.Equal(t, window, third.cfg.RecoveryWindow)
+	require.Equal(t, uint32(12), manager.config.RecoveryWindow)
+	require.Equal(t, 3*time.Minute, first.cfg.AutoLockDuration)
+	require.Equal(t, first.cfg.AutoLockDuration, second.cfg.AutoLockDuration)
+	require.Equal(t, uint32(50), first.cfg.MaxCFilterItems)
+	require.Equal(t, first.cfg.MaxCFilterItems, second.cfg.MaxCFilterItems)
+	require.NotEqual(t, first.cfg.ChainParams.Name,
+		second.cfg.ChainParams.Name)
+}
+
+// TestManagerCreateRecoveryValidation verifies excessive lookahead is rejected
+// before persistence and a corrected request can create the same Wallet name.
+func TestManagerCreateRecoveryValidation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the existing real SQL fixture and valid creation input,
+	// changing only the lookahead to exceed the supported recovery maximum.
+	manager := testSQLiteManager(t)
+	base := sqliteCreateParams(t)
+	window := uint32(MaxRecoveryWindow + 1)
+	params := base
+	params.RecoveryWindow = &window
+
+	// Act: Submit the excessive recovery request through public creation.
+	w, err := manager.Create(params)
+
+	// Assert: Rejection publishes no handle and consumes no durable identity;
+	// corrected input must still create the same name on the same Manager.
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrWalletParams)
+	_, err = manager.Create(base)
+	require.NoError(t, err)
+}
 
 // TestManagerCreateSuccess verifies that a wallet can be successfully created
 // in various modes. It checks that the Manager correctly initializes the
@@ -36,6 +178,9 @@ func TestManagerCreateSuccess(t *testing.T) {
 	acctXPub, err := acctKey.Neuter()
 	require.NoError(t, err)
 
+	// Supply zero explicitly so the shell retains its origin metadata.
+	fingerprint := MasterFingerprint(0)
+
 	// Arrange: Define test cases for different creation modes.
 	tests := []struct {
 		name   string
@@ -46,7 +191,6 @@ func TestManagerCreateSuccess(t *testing.T) {
 			name: "ModeGenSeed",
 			params: CreateWalletParams{
 				Mode:              ModeGenSeed,
-				PubPassphrase:     []byte("public"),
 				PrivatePassphrase: []byte("private"),
 				Birthday:          time.Now(),
 			},
@@ -56,7 +200,6 @@ func TestManagerCreateSuccess(t *testing.T) {
 			params: CreateWalletParams{
 				Mode:              ModeImportSeed,
 				Seed:              seed,
-				PubPassphrase:     []byte("public"),
 				PrivatePassphrase: []byte("private"),
 				Birthday:          time.Now(),
 			},
@@ -66,7 +209,6 @@ func TestManagerCreateSuccess(t *testing.T) {
 			params: CreateWalletParams{
 				Mode:              ModeImportExtKey,
 				RootKey:           rootKey,
-				PubPassphrase:     []byte("public"),
 				PrivatePassphrase: []byte("private"),
 				Birthday:          time.Now(),
 			},
@@ -75,16 +217,14 @@ func TestManagerCreateSuccess(t *testing.T) {
 			name: "ModeShell",
 			params: CreateWalletParams{
 				Mode: ModeShell,
-				InitialAccounts: []WatchOnlyAccount{{
-					Scope:                waddrmgr.KeyScopeBIP0049Plus,
+				InitialAccounts: []ImportAccountParams{{
 					XPub:                 acctXPub,
-					MasterKeyFingerprint: 0,
+					MasterKeyFingerprint: &fingerprint,
 					Name:                 "test-shell-account",
 					AddrType:             waddrmgr.NestedWitnessPubKey,
 				}},
-				WatchOnly:     true,
-				PubPassphrase: []byte("public"),
-				Birthday:      time.Now(),
+				WatchOnly: true,
+				Birthday:  time.Now(),
 			},
 		},
 	}
@@ -93,402 +233,1079 @@ func TestManagerCreateSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Create a fresh test database for this run. We use setupTestDB
-			// which ensures we have a clean slate (empty buckets) to verify
-			// that Create correctly initializes the schema.
-			db, cleanup := setupTestDB(t)
-			t.Cleanup(cleanup)
+			m := testKVDBManager(t)
 
-			m := NewManager()
-			cfg := Config{
-				DB:             db,
-				Chain:          &mockChain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				PubPassphrase:  []byte("public"),
-				RecoveryWindow: MinRecoveryWindow,
-			}
-
-			// Attempt to create the wallet with the specified parameters.
-			w, err := m.Create(cfg, tc.params)
+			// Act: Attach the durable identity to the mode-specific request and
+			// create it through the Manager-owned runtime policy.
+			params := tc.params
+			params.Name = testWalletName
+			params.PubPassphrase = []byte("public")
+			w, err := m.Create(params)
 
 			// Verify that the wallet was created successfully and returned
 			// without error.
 			require.NoError(t, err)
 			require.NotNil(t, w)
+			require.Zero(t, w.ID())
 
-			// Verify internal state: Ensure the manager is tracking the
-			// newly created wallet in its internal map, keyed by the
-			// configuration name.
-			m.RLock()
-			loadedW, ok := m.wallets["test-wallet"]
-			m.RUnlock()
+			// Creation has settled, and this fixture has no native input
+			// or further requests that could change the published Wallet set.
+			loadedW, ok := m.wallets[testWalletName]
 			require.True(t, ok)
 			require.Same(t, w, loadedW)
 
 			// If ModeShell, verify account was imported.
 			if tc.params.Mode == ModeShell {
-				// We can't use w.GetAccount here because the wallet is not
-				// started. We'll verify directly against the address manager.
-				err := walletdb.View(db, func(tx walletdb.ReadTx) error {
-					ns := tx.ReadBucket(waddrmgrNamespaceKey)
-
-					scopeMgr, err := w.addrStore.FetchScopedKeyManager(
-						tc.params.InitialAccounts[0].Scope,
-					)
-					if err != nil {
-						return err
-					}
-
-					_, err = scopeMgr.LookupAccount(
-						ns, tc.params.InitialAccounts[0].Name,
-					)
-
-					return err
-				})
+				info, err := w.cache.GetAccount(
+					t.Context(), db.GetAccountQuery{
+						WalletID: w.id,
+						Scope: db.KeyScope(
+							waddrmgr.KeyScopeBIP0049Plus,
+						),
+						Name: &tc.params.InitialAccounts[0].Name,
+					},
+				)
 				require.NoError(t, err)
+				require.Equal(
+					t, tc.params.InitialAccounts[0].Name,
+					info.AccountName,
+				)
 			}
 		})
 	}
 }
 
-// TestManagerCreateError verifies that wallet creation fails when invalid
-// parameters are provided. This ensures that the Manager correctly validates
-// inputs before attempting to modify the database.
-func TestManagerCreateError(t *testing.T) {
+// createWalletPolicyCase keeps creation inputs and expected outcomes
+// together for the single public Manager policy-test loop.
+type createWalletPolicyCase struct {
+	name       string
+	params     CreateWalletParams
+	wantErr    error
+	wantErrMsg string
+}
+
+// TestCreateWalletParamsPolicy proves invalid modes and genesis identities
+// fail before backend creation; successful modes have their own creation test.
+func TestCreateWalletParamsPolicy(t *testing.T) {
 	t.Parallel()
 
-	// Pre-calculate cryptographic material to construct specific test
-	// scenarios.
+	// Arrange: Keep valid mode inputs together and vary root metadata
+	// independently so a missing check cannot be hidden by another failure.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	require.NoError(t, err)
 
 	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
 	require.NoError(t, err)
-
-	pubKey, err := rootKey.Neuter()
+	rootXPub, err := rootKey.Neuter()
 	require.NoError(t, err)
 
-	tests := []struct {
-		name        string
-		params      CreateWalletParams
-		expectedErr string
-	}{
+	accountKey, err := rootKey.Derive(hdkeychain.HardenedKeyStart + 44)
+	require.NoError(t, err)
+	accountKey, err = accountKey.Derive(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
+	accountKey, err = accountKey.Derive(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
+	accountXPub, err := accountKey.Neuter()
+	require.NoError(t, err)
+
+	// Supply valid zero metadata so rejection fixtures isolate declared
+	// paths and script ownership rather than optional origin presence.
+	fingerprint := MasterFingerprint(0)
+	initialXPub := []ImportAccountParams{
 		{
-			name: "ModeImportSeed missing seed",
-			params: CreateWalletParams{
-				Mode: ModeImportSeed,
-				Seed: nil,
-			},
-			expectedErr: "seed is required",
+			Name:                 "initial",
+			XPub:                 accountXPub,
+			MasterKeyFingerprint: &fingerprint,
+			AddrType:             waddrmgr.WitnessPubKey,
 		},
+	}
+	initialXPrv := []ImportAccountParams{{XPub: rootKey}}
+	initialNil := []ImportAccountParams{{}}
+
+	tests := []createWalletPolicyCase{
 		{
-			name: "ModeImportExtKey missing key",
-			params: CreateWalletParams{
-				Mode:    ModeImportExtKey,
-				RootKey: nil,
-			},
-			expectedErr: "root key is required",
-		},
-		{
-			name: "Public Key for Non-WatchOnly",
-			params: CreateWalletParams{
-				Mode:      ModeImportExtKey,
-				RootKey:   pubKey,
-				WatchOnly: false,
-			},
-			expectedErr: "private key required",
-		},
-		{
-			name: "Unknown Mode",
+			name: "unknown mode",
 			params: CreateWalletParams{
 				Mode: ModeUnknown,
 			},
-			expectedErr: "unknown mode",
 		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			db, cleanup := setupTestDB(t)
-			t.Cleanup(cleanup)
-
-			m := NewManager()
-			cfg := Config{
-				DB:             db,
-				Chain:          &mockChain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			}
-
-			// Attempt to create the wallet. We expect this to fail due to
-			// the invalid parameters configured in the test case.
-			_, err := m.Create(cfg, tc.params)
-
-			// Verify that the error matches our expectation.
-			require.Error(t, err)
-			require.ErrorContains(t, err, tc.expectedErr)
-		})
-	}
-}
-
-// TestCreateWalletParams_Validate verifies that the validate method enforces
-// the correct constraints for each creation mode.
-func TestCreateWalletParams_Validate(t *testing.T) {
-	t.Parallel()
-
-	// Pre-calculate cryptographic material to construct specific test
-	// scenarios.
-	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-	require.NoError(t, err)
-
-	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name        string
-		params      CreateWalletParams
-		expectedErr string
-	}{
 		{
-			name: "ModeGenSeed with Seed",
+			name: "generated seed watch-only",
+			params: CreateWalletParams{
+				Mode:      ModeGenSeed,
+				WatchOnly: true,
+			},
+		},
+		{
+			name: "generated seed with explicit seed",
 			params: CreateWalletParams{
 				Mode: ModeGenSeed,
 				Seed: seed,
 			},
-			expectedErr: "seed should not be set for ModeGenSeed",
 		},
 		{
-			name: "ModeGenSeed with RootKey",
+			name: "generated seed with root key",
 			params: CreateWalletParams{
 				Mode:    ModeGenSeed,
 				RootKey: rootKey,
 			},
-			expectedErr: "root key should not be set for ModeGenSeed",
 		},
 		{
-			name: "ModeImportSeed with RootKey",
+			name: "generated seed with initial account",
+			params: CreateWalletParams{
+				Mode:            ModeGenSeed,
+				InitialAccounts: initialXPub,
+			},
+		},
+		{
+			name: "imported seed watch-only",
+			params: CreateWalletParams{
+				Mode:      ModeImportSeed,
+				Seed:      seed,
+				WatchOnly: true,
+			},
+		},
+		{
+			name: "imported seed missing seed",
+			params: CreateWalletParams{
+				Mode: ModeImportSeed,
+			},
+		},
+		{
+			name: "imported seed with root key",
 			params: CreateWalletParams{
 				Mode:    ModeImportSeed,
 				Seed:    seed,
 				RootKey: rootKey,
 			},
-			expectedErr: "root key should not be set for ModeImportSeed",
 		},
 		{
-			name: "ModeImportExtKey with Seed",
+			name: "imported seed with initial account",
+			params: CreateWalletParams{
+				Mode:            ModeImportSeed,
+				Seed:            seed,
+				InitialAccounts: initialXPub,
+			},
+		},
+		{
+			name: "private root watch-only",
+			params: CreateWalletParams{
+				Mode:      ModeImportExtKey,
+				RootKey:   rootKey,
+				WatchOnly: true,
+			},
+		},
+		{
+			name: "extended root missing key",
+			params: CreateWalletParams{
+				Mode: ModeImportExtKey,
+			},
+		},
+		{
+			name: "XPub root spendable",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootXPub,
+			},
+		},
+		{
+			name: "XPub root watch-only",
+			params: CreateWalletParams{
+				Mode:      ModeImportExtKey,
+				RootKey:   rootXPub,
+				WatchOnly: true,
+			},
+		},
+		{
+			name: "extended root with seed",
 			params: CreateWalletParams{
 				Mode:    ModeImportExtKey,
 				RootKey: rootKey,
 				Seed:    seed,
 			},
-			expectedErr: "seed should not be set for ModeImportExtKey",
 		},
 		{
-			name: "ModeShell with Seed",
+			name: "extended root with initial account",
+			params: CreateWalletParams{
+				Mode:            ModeImportExtKey,
+				RootKey:         rootKey,
+				InitialAccounts: initialXPub,
+			},
+		},
+		{
+			name: "spendable shell",
 			params: CreateWalletParams{
 				Mode: ModeShell,
-				Seed: seed,
 			},
-			expectedErr: "seed should not be set for ModeShell",
 		},
 		{
-			name: "Unknown Mode",
+			name: "shell with seed",
 			params: CreateWalletParams{
-				Mode: ModeUnknown,
+				Mode:      ModeShell,
+				Seed:      seed,
+				WatchOnly: true,
 			},
-			expectedErr: "unknown mode",
 		},
 		{
-			name: "InitialAccounts with ModeGenSeed",
+			name: "shell with root key",
 			params: CreateWalletParams{
-				Mode: ModeGenSeed,
-				InitialAccounts: []WatchOnlyAccount{{
-					Name: "test",
-				}},
+				Mode:      ModeShell,
+				RootKey:   rootKey,
+				WatchOnly: true,
 			},
-			expectedErr: "initial accounts should only " +
-				"be set for ModeShell",
-		}}
+		},
+		{
+			name: "shell with nil account key",
+			params: CreateWalletParams{
+				Mode:            ModeShell,
+				WatchOnly:       true,
+				InitialAccounts: initialNil,
+			},
+			wantErrMsg: "needs XPub",
+		},
+		{
+			name: "shell with private account key",
+			params: CreateWalletParams{
+				Mode:            ModeShell,
+				WatchOnly:       true,
+				InitialAccounts: initialXPrv,
+			},
+			wantErrMsg: "needs XPub, not XPrv",
+		},
+	}
+
+	// Keep genesis fixture variants in a data-only builder so every mode and
+	// identity row still exercises the same public call and strict mock.
+	tests = append(tests, genesisKeyPolicyCases(
+		t, rootKey, initialXPub[0],
+	)...)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := tc.params.validate()
-			require.Error(t, err)
-			require.ErrorContains(t, err, tc.expectedErr)
+			// Arrange: Allow no backend calls so each rejected input must
+			// fail before Vault preparation or Store mutation can begin.
+			backend := &managerBackendMock{}
+			params := tc.params
+			params.Name = testWalletName
+
+			// Validation must leave Store untouched. Fixture cleanup joins work
+			// without closing the strictly untouched backend.
+			lifetimeCtx, cancel := context.WithCancel(context.Background())
+			m := &Manager{
+				lifetimeCtx: lifetimeCtx,
+				cancel:      cancel,
+				wallets:     make(map[string]*Wallet),
+				requestChan: make(chan createWalletReq),
+				backend:     backend,
+				config: ManagerConfig{
+					ChainSource: &bwmock.Chain{},
+					ChainParams: chainParams,
+				},
+			}
+
+			m.chainSyncer = newChainSyncer(
+				m.config.ChainSource, &m.config.ChainParams,
+			)
+			m.started.Store(true)
+			m.wg.Go(m.mainLoop)
+			t.Cleanup(func() {
+				cancel()
+				m.wg.Wait()
+			})
+
+			// Act: Ask Manager to create from the selected parameter shape,
+			// allowing validation to decide whether backend mutation begins.
+			wallet, err := m.Create(params)
+
+			// Assert: Invalid genesis input stays a validation error, leaves no
+			// published Wallet and never crosses the strict backend boundary.
+			require.Nil(t, wallet)
+			require.Empty(t, m.wallets)
+			require.NotErrorIs(t, err, ErrWalletExists)
+
+			require.ErrorIs(t, err, ErrWalletParams)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			}
+
+			if tc.wantErrMsg != "" {
+				require.ErrorContains(t, err, tc.wantErrMsg)
+			}
+
+			backend.AssertExpectations(t)
 		})
 	}
 }
 
-// TestManagerCreate_InvalidConfig verifies that the Create method performs
-// configuration validation before proceeding with any operations.
-func TestManagerCreate_InvalidConfig(t *testing.T) {
-	t.Parallel()
+// genesisKeyPolicyCases constructs only malformed identity fixtures; the
+// caller owns Manager invocation, dependency expectations, and assertions.
+func genesisKeyPolicyCases(t *testing.T,
+	rootKey *hdkeychain.ExtendedKey,
+	initialAccount ImportAccountParams) []createWalletPolicyCase {
 
-	m := NewManager()
+	t.Helper()
 
-	// Call Create with an empty Config struct. This should fail because
-	// required fields like DB and ChainParams are missing.
-	w, err := m.Create(Config{}, CreateWalletParams{})
+	// Construct malformed roots without a serialization round trip so the
+	// public Manager boundary must reject each invalid origin field itself.
+	rootPriv, err := rootKey.ECPrivKey()
+	require.NoError(t, err)
 
-	require.ErrorIs(t, err, ErrMissingParam)
-	require.ErrorContains(t, err, "DB")
-	require.Nil(t, w)
+	rootDepth := hdkeychain.NewExtendedKey(
+		rootKey.Version(), rootPriv.Serialize(), rootKey.ChainCode(),
+		[]byte{0, 0, 0, 0}, 1, 0, true,
+	)
+	rootParent := hdkeychain.NewExtendedKey(
+		rootKey.Version(), rootPriv.Serialize(), rootKey.ChainCode(),
+		[]byte{0, 0, 0, 1}, 0, 0, true,
+	)
+	rootChild := hdkeychain.NewExtendedKey(
+		rootKey.Version(), rootPriv.Serialize(), rootKey.ChainCode(),
+		[]byte{0, 0, 0, 0}, 0, 1, true,
+	)
+	wrongNetworkRoot, err := rootKey.CloneWithVersion(
+		chaincfg.MainNetParams.HDPrivateKeyID[:],
+	)
+	require.NoError(t, err)
+
+	// Keep key material fixed while varying origin metadata and version
+	// bytes, proving that neither can distinguish overlapping script owners.
+	accountXPub := initialAccount.XPub
+	pubKey, err := accountXPub.ECPubKey()
+	require.NoError(t, err)
+
+	alias := hdkeychain.NewExtendedKey(
+		binary.BigEndian.AppendUint32(
+			nil, uint32(waddrmgr.HDVersionTestNetBIP0084),
+		),
+		pubKey.SerializeCompressed(), accountXPub.ChainCode(),
+		[]byte{1, 2, 3, 4}, 3, hdkeychain.HardenedKeyStart+1, false,
+	)
+	otherFingerprint := MasterFingerprint(1)
+	aliasAccount := initialAccount
+	aliasAccount.Name = "alias"
+	aliasAccount.XPub = alias
+	aliasAccount.MasterKeyFingerprint = &otherFingerprint
+
+	// Hybrid BIP49 shares its internal witness branch with the BIP84 alias,
+	// so equal payloads still conflict across those different scopes.
+	upubVersion := binary.BigEndian.AppendUint32(
+		nil, uint32(waddrmgr.HDVersionTestNetBIP0049),
+	)
+	upub, err := accountXPub.CloneWithVersion(upubVersion)
+	require.NoError(t, err)
+
+	plusAccount := initialAccount
+	plusAccount.XPub = upub
+
+	// Custom scopes have no canonical schema; leaving their account override
+	// absent must fail before dependencies can establish incomplete identity.
+	missingSchema := initialAccount
+	missingSchema.Scope = &waddrmgr.KeyScope{
+		Purpose: 1017,
+		Coin:    0,
+	}
+
+	// Distinct keys at hardened child zero isolate occupied numbered slots
+	// from payload collisions, independently of optional origin metadata.
+	otherKey, _ := importAccountTestKey(t, 84)
+	numberedFirst := initialAccount
+	numberedScope := waddrmgr.KeyScopeBIP0084
+	numberedFirst.Scope = &numberedScope
+	numberedOther := numberedFirst
+	numberedOther.Name = "other"
+	numberedOther.XPub = otherKey
+
+	return []createWalletPolicyCase{
+		{
+			name: "shell custom scope requires schema",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					missingSchema,
+				},
+			},
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name: "shell payload overlap within scope",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					initialAccount,
+					aliasAccount,
+				},
+			},
+			wantErr: ErrAccountIdentityCollision,
+		},
+		{
+			name: "shell internal overlap across scopes",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					plusAccount,
+					aliasAccount,
+				},
+			},
+			wantErr: ErrAccountIdentityCollision,
+		},
+		{
+			name: "shell declared account number conflict",
+			params: CreateWalletParams{
+				Mode:      ModeShell,
+				WatchOnly: true,
+				InitialAccounts: []ImportAccountParams{
+					numberedFirst,
+					numberedOther,
+				},
+			},
+			wantErr: ErrAccountAlreadyExists,
+		},
+		{
+			name: "root depth must be zero",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootDepth,
+			},
+		},
+		{
+			name: "root parent fingerprint must be zero",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootParent,
+			},
+		},
+		{
+			name: "root child index must be zero",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootChild,
+			},
+		},
+		{
+			name: "root network must match",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: wrongNetworkRoot,
+			},
+		},
+	}
 }
 
-// TestManagerLoadSuccess verifies that an existing wallet can be successfully
-// loaded from the database. This tests the persistence and restoration flow.
-func TestManagerLoadSuccess(t *testing.T) {
-	t.Parallel()
-
-	// Initialize a database and create a wallet to serve as our existing
-	// state.
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
-	m := NewManager()
-	cfg := Config{
-		DB:             db,
-		Chain:          &mockChain{},
-		ChainParams:    &chainParams,
-		Name:           "test-wallet",
-		PubPassphrase:  []byte("public"),
-		RecoveryWindow: MinRecoveryWindow,
-	}
-	params := CreateWalletParams{
-		Mode:              ModeGenSeed,
-		PubPassphrase:     []byte("public"),
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now(),
-	}
-
-	wCreated, err := m.Create(cfg, params)
-	require.NoError(t, err)
-	require.NotNil(t, wCreated)
-
-	// Create a new Manager instance to simulate a fresh start (e.g., daemon
-	// restart) and attempt to load the wallet from the existing database.
-	m2 := NewManager()
-	w, err := m2.Load(cfg)
-
-	// Verify that the load operation succeeded and returned a valid wallet.
-	require.NoError(t, err)
-	require.NotNil(t, w)
-
-	// Ensure the loaded wallet is correctly registered in the new manager.
-	m2.RLock()
-	loadedW, ok := m2.wallets["test-wallet"]
-	m2.RUnlock()
-	require.True(t, ok)
-	require.Same(t, w, loadedW)
+// managerBackendMock is the strict Manager storage-boundary test double.
+type managerBackendMock struct {
+	mock.Mock
 }
 
-// TestManagerLoad_ExistingWallet verifies that if Load is called for a wallet
-// that is already managed in memory, the Manager detects this.
-func TestManagerLoad_ExistingWallet(t *testing.T) {
-	t.Parallel()
+// managerBackendMock implements managerBackend.
+var _ managerBackend = (*managerBackendMock)(nil)
 
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
+// listWallets returns the durable data configured by the current test.
+func (b *managerBackendMock) listWallets(
+	ctx context.Context) ([]*walletData, error) {
 
-	m := NewManager()
-	cfg := Config{
-		DB:             db,
-		Chain:          &mockChain{},
-		ChainParams:    &chainParams,
-		Name:           "test-wallet",
-		PubPassphrase:  []byte("public"),
-		RecoveryWindow: MinRecoveryWindow,
-	}
-	params := CreateWalletParams{
-		Mode:              ModeGenSeed,
-		PubPassphrase:     []byte("public"),
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now(),
+	args := b.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
 	}
 
-	wCreated, err := m.Create(cfg, params)
-	require.NoError(t, err)
-
-	// Attempt to load the same wallet again using the same manager instance.
-	// Since it's already loaded in memory, the manager should return the
-	// existing instance rather than reloading from disk.
-	wLoaded, err := m.Load(cfg)
-
-	// Verify that we got the same wallet instance back.
-	require.NoError(t, err)
-	require.Same(t, wCreated, wLoaded)
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).([]*walletData), args.Error(1)
 }
 
-// TestManagerLoadError verifies that Load properly handles invalid
-// configurations and corrupted or uninitialized databases.
-func TestManagerLoadError(t *testing.T) {
-	t.Parallel()
+// create returns the storage result configured by the current test.
+func (b *managerBackendMock) create(ctx context.Context,
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
+	*walletData, error) {
 
-	t.Run("Invalid Config", func(t *testing.T) {
-		t.Parallel()
+	args := b.Called(ctx, params, rootKey)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 
-		m := NewManager()
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).(*walletData), args.Error(1)
+}
 
-		// Attempt to load with an empty config. This should fail validation.
-		w, err := m.Load(Config{})
-		require.ErrorContains(t, err, "missing config parameter")
-		require.Nil(t, w)
+// close returns the configured backend ownership-release result.
+func (b *managerBackendMock) close() error {
+	args := b.Called()
+	return args.Error(0)
+}
+
+// newManagerLifecycleTest supplies strict backend and chain dependencies;
+// fixture cleanup joins runtime work before verifying their expected calls.
+func newManagerLifecycleTest(t *testing.T,
+	backend *managerBackendMock, source *bwmock.Chain) *Manager {
+
+	t.Helper()
+
+	// Manager owns the service lifetime; fixture Stop joins before assertions.
+	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	manager := &Manager{
+		lifetimeCtx: lifetimeCtx,
+		cancel:      cancel,
+		wallets:     make(map[string]*Wallet),
+		requestChan: make(chan createWalletReq),
+		chainEvents: source.Notifications(),
+		backend:     backend,
+		config: ManagerConfig{
+			ChainSource: source,
+			ChainParams: chainParams,
+		},
+	}
+
+	manager.chainSyncer = newChainSyncer(source, &manager.config.ChainParams)
+
+	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
+	t.Cleanup(func() {
+		backend.AssertExpectations(t)
+		source.AssertExpectations(t)
+	})
+	t.Cleanup(func() {
+		_ = stopManagerForTest(t, manager)
 	})
 
-	t.Run("Uninitialized DB", func(t *testing.T) {
-		t.Parallel()
+	return manager
+}
 
-		db, cleanup := setupTestDB(t)
-		t.Cleanup(cleanup)
+// TestManagerStartStopPublishesStableSet verifies only the admitted Start
+// returns the complete ordered set, without rebuilding an active runtime.
+func TestManagerStartStopPublishesStableSet(t *testing.T) {
+	t.Parallel()
 
-		m := NewManager()
-		cfg := Config{
-			DB:          db,
-			Chain:       &mockChain{},
-			ChainParams: &chainParams,
-			Name:        "test",
+	// Arrange: Use real Wallet startup dependencies and a strict one-shot
+	// discovery expectation to verify complete, ordered publication.
+
+	data := make([]*walletData, 0, 2)
+	for i, name := range []string{"first", "second"} {
+		_, deps := createTestWalletWithMocks(t)
+		id := uint32(i + 1)
+
+		deps.store.On("GetWallet", mock.Anything, name).Return(
+			&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+		).Once()
+		deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+			WalletID: id,
+		}).Return([]db.AccountInfo{}, nil).Once()
+		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
+			Return(nil).Once()
+		deps.vault.On("Lock").Return().Once()
+		data = append(data, &walletData{
+			id:    id,
+			name:  name,
+			store: deps.store,
+			vault: deps.vault,
+		})
+	}
+
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return(data, nil).Once()
+	backend.On("close").Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	chain.On("IsCurrent").Return(false).Maybe()
+
+	// Act: Publish the durable set, then reject another Start without
+	// querying storage again or exposing a replacement set.
+	wallets, err := manager.Start(t.Context())
+
+	// Hold Stop before its callback cancels the lifetime or clears started.
+	// A second Start during that pause must reject the still-running Manager
+	// without rebuilding Wallets or touching storage again.
+	reserved, release := make(chan struct{}), make(chan struct{})
+	releaseStop := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseStop)
+
+	cancel := manager.cancel
+	manager.cancel = sync.OnceFunc(func() {
+		close(reserved)
+		<-release
+		cancel()
+	})
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- manager.Stop() }()
+
+	<-reserved
+
+	late, lateErr := manager.Start(t.Context())
+
+	releaseStop()
+
+	stopErr := <-stopped
+
+	// Assert: The rejected call returns no pointers, while Start exposes
+	// every durable Wallet in the backend's stable identifier order. The
+	// repeated-start diagnostic explains the rejection to callers.
+	require.Nil(t, late)
+	require.ErrorIs(t, lateErr, ErrStateForbidden)
+	require.ErrorContains(t, lateErr, "already started")
+	require.NoError(t, stopErr)
+	require.NoError(t, err)
+	require.Len(t, wallets, 2)
+
+	for i, w := range wallets {
+		require.Equal(t, uint32(i+1), w.ID())
+	}
+}
+
+// TestManagerStartFailureCleansPartialSet verifies failed startup drains
+// its partially assembled Wallet set before returning the primary error.
+func TestManagerStartFailureCleansPartialSet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The second Wallet fails its birthday read. Hold the first
+	// Wallet's real vault cleanup so the primary error cannot escape before
+	// the original call finishes cleaning up its partially started set.
+	_, firstDeps := createTestWalletWithMocks(t)
+	_, secondDeps := createTestWalletWithMocks(t)
+	startErr := errors.New("birthday unavailable")
+
+	firstDeps.store.On("GetWallet", mock.Anything, "first").Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	firstDeps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 1,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	firstDeps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
+		Return(nil).Once()
+	secondDeps.store.On("GetWallet", mock.Anything, "second").
+		Return(nil, startErr).Once()
+
+	cleanupEntered := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	firstDeps.vault.On("Lock").Run(func(mock.Arguments) {
+		close(cleanupEntered)
+		<-releaseCleanup
+	}).Return().Once()
+
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return([]*walletData{
+		{
+			id:    1,
+			name:  "first",
+			store: firstDeps.store,
+			vault: firstDeps.vault,
+		},
+		{
+			id:    2,
+			name:  "second",
+			store: secondDeps.store,
+			vault: secondDeps.vault,
+		},
+	}, nil).Once()
+	backend.On("close").Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	chain.On("IsCurrent").Return(false).Maybe()
+
+	// Preserve both return values to detect any partial Wallet publication
+	// alongside the primary startup failure.
+	type startOutcome struct {
+		wallets []*Wallet
+		err     error
+	}
+
+	firstResult := make(chan startOutcome, 1)
+
+	// Act: Hold the original attempt in cleanup, verify it has not returned,
+	// then release the Wallet and collect the completed startup failure.
+	go func() {
+		wallets, err := manager.Start(t.Context())
+		firstResult <- startOutcome{
+			wallets: wallets,
+			err:     err,
+		}
+	}()
+
+	<-cleanupEntered
+
+	select {
+	case result := <-firstResult:
+		close(releaseCleanup)
+		t.Fatalf("Start returned before cleanup completed: %v", result.err)
+	default:
+	}
+
+	close(releaseCleanup)
+
+	first := <-firstResult
+	terminalWallets, terminalErr := manager.Start(t.Context())
+
+	// Assert: No partial pointers escape startup. The original call
+	// returns its primary failure after storage closes; a later Start
+	// cannot reuse the failed Manager.
+	require.Nil(t, first.wallets)
+	require.ErrorIs(t, first.err, startErr)
+	require.Nil(t, terminalWallets)
+	require.ErrorIs(t, terminalErr, ErrManagerStopped)
+
+	w, err := manager.Create(CreateWalletParams{})
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrManagerStopped)
+}
+
+// TestManagerStartCancellationCleansUp verifies the caller's cancellation
+// reaches discovery and its failure returns only after storage cleanup.
+func TestManagerStartCancellationCleansUp(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Discovery waits on the supplied context. The close callback
+	// signals the cleanup boundary that must precede the caller's result.
+	entered := make(chan struct{})
+	closed := make(chan struct{})
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Run(func(args mock.Arguments) {
+		close(entered)
+		ctx, ok := args.Get(0).(context.Context)
+		if !ok {
+			t.Error("discovery requires a context")
+
+			return
 		}
 
-		// Attempt to load from a database that has valid buckets but no
-		// wallet data (waddrmgr is not initialized). This should fail
-		// at the database loading step.
-		w, err := m.Load(cfg)
+		<-ctx.Done()
+	}).Return(nil, context.Canceled).Once()
+	backend.On("close").Run(func(mock.Arguments) {
+		close(closed)
+	}).Return(nil).Once()
 
-		// We expect an error from waddrmgr.Open indicating the address
-		// manager namespace is missing or invalid.
-		require.Error(t, err)
-		require.Nil(t, w)
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	result := make(chan error, 1)
+
+	// Act: Cancel only after discovery has begun, exercising cancellation
+	// of accepted work rather than a request rejected before admission.
+	go func() {
+		_, err := manager.Start(ctx)
+		result <- err
+	}()
+
+	<-entered
+	cancel()
+
+	err := <-result
+
+	// Assert: The caller receives cancellation after synchronous cleanup,
+	// with no detached attempt left to hold the backend open.
+	require.ErrorIs(t, err, context.Canceled)
+
+	select {
+	case <-closed:
+	default:
+		t.Fatal("Start returned before closing storage")
+	}
+}
+
+// TestManagerStopWaitsForCleanup verifies the accepted Stop joins backend
+// closure and returns its cleanup failure directly.
+func TestManagerStopWaitsForCleanup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start an empty Manager and hold its backend closure so the
+	// accepted Stop cannot report completion before the resource is released.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	closeErr := errors.New("backend close")
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+	backend.On("close").Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(closeErr).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+
+	releaseWork := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseWork)
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	// Act: Stop the started Manager and observe its result while storage is
+	// held, then allow the resource owner to finish cleanup.
+	result := make(chan error, 1)
+	go func() { result <- manager.Stop() }()
+
+	<-entered
+
+	select {
+	case err := <-result:
+		t.Fatalf("Stop returned before storage cleanup: %v", err)
+	default:
+	}
+
+	releaseWork()
+
+	// Assert: The accepted caller receives the backend failure after closure;
+	// the strict close expectation rules out a second resource release.
+	require.ErrorIs(t, <-result, closeErr)
+}
+
+// TestManagerStopRejectsStopped verifies invalid Stop calls leave cleanup to
+// the accepted lifecycle, including while that cleanup remains unfinished.
+func TestManagerStopRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	t.Run("initial stopped", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Keep the newly constructed Manager Stopped. Strict calls
+		// permit one later startup and one close by its accepted Stop only.
+		backend := &managerBackendMock{}
+		backend.On("listWallets", mock.Anything).
+			Return([]*walletData{}, nil).Once()
+		backend.On("close").Return(nil).Once()
+
+		source := &bwmock.Chain{}
+		source.On("Notifications").Return((<-chan any)(nil)).Once()
+		manager := newManagerLifecycleTest(t, backend, source)
+
+		// Act: Reject Stop before startup, then exercise the intended lifecycle
+		// to verify that rejection did not dispose the constructor resources.
+		rejected := manager.Stop()
+		_, startErr := manager.Start(t.Context())
+		stopErr := manager.Stop()
+
+		// Assert: Only the first call is invalid; the subsequent legal calls
+		// retain the open backend and complete its single resource release.
+		require.ErrorIs(t, rejected, ErrManagerStopped)
+		require.NoError(t, startErr)
+		require.NoError(t, stopErr)
+	})
+
+	t.Run("duplicate during cleanup", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			t.Helper()
+
+			// Arrange: Hold the accepted Stop inside backend closure. A second
+			// Stop must reject without joining that held resource operation.
+			entered, release := make(chan struct{}), make(chan struct{})
+			backend := &managerBackendMock{}
+			backend.On("listWallets", mock.Anything).
+				Return([]*walletData{}, nil).Once()
+			backend.On("close").Run(func(mock.Arguments) {
+				close(entered)
+				<-release
+			}).Return(nil).Once()
+
+			source := &bwmock.Chain{}
+			source.On("Notifications").Return((<-chan any)(nil)).Once()
+			manager := newManagerLifecycleTest(t, backend, source)
+
+			releaseWork := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(releaseWork)
+			_, err := manager.Start(t.Context())
+			require.NoError(t, err)
+
+			// Act: Leave the accepted caller blocked in cleanup, then settle a
+			// duplicate caller while the owner still cannot finish the first.
+			first, duplicate := make(chan error, 1), make(chan error, 1)
+			go func() { first <- manager.Stop() }()
+
+			<-entered
+
+			go func() { duplicate <- manager.Stop() }()
+
+			synctest.Wait()
+
+			// Assert: The rejected caller returns before closure is released.
+			// The accepted caller still waits, then completes the one close.
+			select {
+			case err := <-duplicate:
+				require.ErrorIs(t, err, ErrManagerStopped)
+			default:
+				t.Fatal("duplicate Stop joined held cleanup")
+			}
+
+			require.Empty(t, first)
+			releaseWork()
+			require.NoError(t, <-first)
+		})
 	})
 }
 
-// TestManagerString verifies that the String representation of the Manager
-// correctly lists the tracked wallets in alphabetical order.
-func TestManagerString(t *testing.T) {
+// TestManagerStopWaitsForStart verifies Stop lets synchronous startup settle
+// before closing its storage, and cannot return while that work is still held.
+func TestManagerStopWaitsForStart(t *testing.T) {
 	t.Parallel()
+
+	// Arrange: Discovery holds the Manager's accepted startup work. Closure
+	// checks that this dependency has settled before it releases storage.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return([]*walletData{}, nil).Once()
+	backend.On("close").Run(func(mock.Arguments) {
+		select {
+		case <-release:
+		default:
+			t.Error("backend closed during discovery")
+		}
+	}).Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+
+	started := make(chan error, 1)
+	stopped := make(chan error, 1)
+	callingStop := make(chan struct{})
+
+	// Act: Queue Stop behind accepted discovery, then let startup settle.
+	// After shutdown, attempt Start again to check terminal admission.
+	go func() {
+		_, err := manager.Start(t.Context())
+		started <- err
+	}()
+
+	<-entered
+
+	go func() {
+		close(callingStop)
+
+		err := manager.Stop()
+
+		select {
+		case <-release:
+		default:
+			t.Error("Stop returned during discovery")
+		}
+
+		stopped <- err
+	}()
+
+	<-callingStop
+	<-manager.lifetimeCtx.Done()
+
+	close(release)
+
+	startErr := <-started
+	stopErr := <-stopped
+	terminalWallets, terminalErr := manager.Start(t.Context())
+
+	// Assert: The admitted Start finishes normally; Stop waits and cleans up
+	// exactly once. Terminal startup cannot publish another runtime set.
+	require.NoError(t, startErr)
+	require.NoError(t, stopErr)
+	require.Nil(t, terminalWallets)
+	require.ErrorIs(t, terminalErr, ErrManagerStopped)
+}
+
+// TestManagerCreateBeforeStart verifies creation rejects an inactive Manager
+// before request validation or durable storage access.
+func TestManagerCreateBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Leave the Manager unstarted and expect only fixture cleanup.
+	// An empty request distinguishes lifecycle admission from validation.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+
+	// Act: Submit creation before any Start has admitted runtime work.
+	w, err := manager.Create(CreateWalletParams{})
+
+	// Assert: No Wallet escapes and the lifecycle sentinel takes precedence
+	// over request errors; unexpected backend access fails the strict mock.
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrManagerStopped)
+}
+
+// TestManagerCreateAfterStop verifies creation rejects a terminal Manager
+// without accessing its closed storage or validating the request.
+func TestManagerCreateAfterStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Complete terminal shutdown before attempting creation. The
+	// strict close expectation also covers later fixture disposal.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, manager.Stop())
+
+	// Act: Submit an empty request after shutdown has released storage.
+	w, err := manager.Create(CreateWalletParams{})
+
+	// Assert: Terminal admission returns no Wallet and preserves the stopped
+	// identity instead of reaching validation or closed backend dependencies.
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrManagerStopped)
+}
+
+// managerLifecycleCreateParams returns a rootless request so lifecycle tests
+// exercise admission and teardown without unrelated random key derivation.
+func managerLifecycleCreateParams(name string) CreateWalletParams {
+	return CreateWalletParams{
+		Name:              name,
+		Mode:              ModeShell,
+		WatchOnly:         true,
+		PrivatePassphrase: []byte("private"),
+	}
+}
+
+// TestManagerCreateRejectsInvalidInitialAccounts verifies bad import inputs
+// cannot persist a candidate or stop an existing Wallet.
+func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use a valid account key and change only its network or address
+	// type, so each request reaches the import checks missing from preflight.
+	key, _ := importAccountTestKey(t, 44)
+	wrongNetwork, err := key.CloneWithVersion(
+		chaincfg.MainNetParams.HDPublicKeyID[:],
+	)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name     string
-		setup    func(*Manager)
-		expected string
+		key      *hdkeychain.ExtendedKey
+		addrType waddrmgr.AddressType
 	}{
 		{
-			name:     "empty",
-			setup:    func(m *Manager) {},
-			expected: "active_wallets=[]",
+			name:     "wrong network",
+			key:      wrongNetwork,
+			addrType: waddrmgr.WitnessPubKey,
 		},
 		{
-			name: "multiple sorted",
-			setup: func(m *Manager) {
-				m.wallets["wallet-b"] = &Wallet{}
-				m.wallets["wallet-a"] = &Wallet{}
-			},
-			expected: "active_wallets=[wallet-a wallet-b]",
+			name:     "unsupported address type",
+			key:      key,
+			addrType: waddrmgr.PubKeyHash,
 		},
 	}
 
@@ -496,21 +1313,518 @@ func TestManagerString(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			m := NewManager()
-			tc.setup(m)
-			require.Equal(t, tc.expected, m.String())
+			// Arrange: Keep one Wallet running in real storage to detect
+			// both unwanted shutdown and a leftover candidate row.
+			m := testSQLiteManager(t)
+			existing, err := m.Create(
+				managerLifecycleCreateParams("existing"),
+			)
+			require.NoError(t, err)
+
+			fingerprint := MasterFingerprint(0)
+			params := managerLifecycleCreateParams("candidate")
+			params.InitialAccounts = []ImportAccountParams{
+				{
+					MasterKeyFingerprint: &fingerprint,
+					Name:                 "initial-account",
+					XPub:                 tc.key,
+					AddrType:             tc.addrType,
+				},
+			}
+
+			// Act: Request another Wallet with invalid initial account
+			// input while the first Wallet is still in use.
+			candidate, err := m.Create(params)
+
+			// Assert: The request fails without a handle. A public read
+			// still works, and corrected input can use the same Wallet
+			// name, proving no durable candidate was left behind.
+			require.Nil(t, candidate)
+			require.ErrorIs(t, err, ErrWalletParams)
+
+			_, err = existing.ListAccounts(t.Context())
+			require.NoError(t, err)
+
+			params.InitialAccounts[0].XPub = key
+			params.InitialAccounts[0].AddrType = waddrmgr.WitnessPubKey
+			candidate, err = m.Create(params)
+			require.NoError(t, err)
+			require.NotNil(t, candidate)
 		})
 	}
 }
 
-// TestManager_deriveFromSeed verifies the internal helper method
-// deriveFromSeed, checking that it correctly derives a master private key
-// from a seed and validates inputs.
-func TestManager_deriveFromSeed(t *testing.T) {
+// TestManagerCreatePreservesInitialAccountIdentity verifies genesis accepts
+// equal XPub payloads with disjoint scripts and per-account BIP49 schemas.
+func TestManagerCreatePreservesInitialAccountIdentity(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
-	cfg := Config{ChainParams: &chainParams}
+	// Arrange: Distinct BIP49 keys share a scope with strict and hybrid
+	// schemas. Keep the original key for a disjoint Taproot alias, while
+	// inferred scopes avoid numbered slots in all three accounts. Omit the
+	// first fingerprint and supply zero on its peer to retain both origins.
+	key, _ := importAccountTestKey(t, 44)
+	otherKey, _ := importAccountTestKey(t, 84)
+	upubVersion := binary.BigEndian.AppendUint32(
+		nil, uint32(waddrmgr.HDVersionTestNetBIP0049),
+	)
+	strictKey, err := key.CloneWithVersion(upubVersion)
+	require.NoError(t, err)
+	hybridKey, err := otherKey.CloneWithVersion(upubVersion)
+	require.NoError(t, err)
+
+	fingerprint := MasterFingerprint(0)
+	bip49Scope := waddrmgr.KeyScopeBIP0049Plus
+	m := testSQLiteManager(t)
+	params := managerLifecycleCreateParams("identities")
+	params.InitialAccounts = []ImportAccountParams{
+		{
+			Name:     "first",
+			XPub:     strictKey,
+			AddrType: waddrmgr.NestedWitnessPubKey,
+		},
+		{
+			Name:                 "second",
+			XPub:                 key,
+			MasterKeyFingerprint: &fingerprint,
+			AddrType:             waddrmgr.TaprootPubKey,
+		},
+		{
+			Name:                 "third",
+			XPub:                 hybridKey,
+			MasterKeyFingerprint: &fingerprint,
+			AddrType:             waddrmgr.WitnessPubKey,
+		},
+	}
+
+	// Act: Create the shell through Manager admission with all three accounts.
+	w, err := m.Create(params)
+
+	// Assert: Creation keeps every account and its effective branch schema;
+	// a reused scope must not replace requested types or collapse omitted
+	// origin metadata into a supplied-zero fingerprint.
+	require.NoError(t, err)
+	accounts, err := w.ListAccounts(t.Context())
+	require.NoError(t, err)
+	require.Len(t, accounts, len(params.InitialAccounts))
+
+	strict, err := w.GetAccount(t.Context(), bip49Scope, "first")
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.KeyScopeBIP0049AddrSchema, strict.AddrSchema)
+	require.Nil(t, strict.MasterKeyFingerprint)
+
+	hybrid, err := w.GetAccount(t.Context(), bip49Scope, "third")
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.ScopeAddrMap[bip49Scope], hybrid.AddrSchema)
+	require.Equal(t, &fingerprint, hybrid.MasterKeyFingerprint)
+}
+
+// TestManagerCreateLifecycleSerializesStop verifies accepted creation finishes
+// startup before Stop can close storage, and real chain work drains first.
+func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block the candidate's runtime read and its chain worker at
+	// separate dependencies. Storage closure checks that both have returned.
+	_, deps := createTestWalletWithMocks(t)
+	startupEntered := make(chan struct{})
+	releaseStartup := make(chan struct{})
+	chainEntered := make(chan struct{})
+	releaseChain := make(chan struct{})
+
+	deps.store.On("GetWallet", mock.Anything, "created").
+		Run(func(mock.Arguments) {
+			close(startupEntered)
+			<-releaseStartup
+		}).Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 1,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
+		Return(nil).Once()
+	vaultLock := deps.vault.On("Lock").Return().Once()
+
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+
+	params := managerLifecycleCreateParams("created")
+	backend.On("create", mock.Anything, params, mock.Anything).
+		Return(&walletData{
+			id:    1,
+			name:  params.Name,
+			store: deps.store,
+			vault: deps.vault,
+		}, nil).Once()
+	// Vault locking follows worker joins, so storage must close after it.
+	backend.On("close").Return(nil).Once().NotBefore(vaultLock)
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+
+	manager := newManagerLifecycleTest(t, backend, source)
+	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	chain.On("IsCurrent").Run(func(mock.Arguments) {
+		close(chainEntered)
+		<-releaseChain
+	}).Return(false).Once()
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	type createOutcome struct {
+		wallet *Wallet
+		err    error
+	}
+
+	created := make(chan createOutcome, 1)
+	stopped := make(chan error, 1)
+
+	// Act: Accept creation, start Stop while startup is held, then let the
+	// real chain dependency finish before shutdown can dispose storage.
+	go func() {
+		w, err := manager.Create(params)
+		created <- createOutcome{
+			wallet: w,
+			err:    err,
+		}
+	}()
+
+	<-startupEntered
+
+	go func() { stopped <- manager.Stop() }()
+
+	close(releaseStartup)
+
+	outcome := <-created
+
+	<-chainEntered
+	close(releaseChain)
+
+	stopErr := <-stopped
+
+	// Assert: Create publishes a started pointer, whose owned worker joins
+	// before the one storage close and whose retained API is then terminal.
+	require.NoError(t, outcome.err)
+	require.NotNil(t, outcome.wallet)
+	require.NoError(t, stopErr)
+	require.ErrorIs(t, outcome.wallet.Lock(t.Context()), ErrWalletStopped)
+}
+
+// TestManagerCreateLifecycleStartFailureStopsManager keeps startup and cleanup
+// errors with Create until its failed candidate and shared storage close.
+func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Hold startup and storage closure separately. Failure must
+	// finish cleanup before either lifecycle caller completes.
+	_, deps := createTestWalletWithMocks(t)
+	createErr := errors.New("candidate birthday")
+	closeErr := errors.New("backend close")
+	birthdayEntered := make(chan struct{})
+	birthdayRelease := make(chan struct{})
+	deps.store.On("GetWallet", mock.Anything, "candidate").Run(
+		func(mock.Arguments) {
+			close(birthdayEntered)
+			<-birthdayRelease
+		},
+	).Return(nil, createErr).Once()
+
+	params := managerLifecycleCreateParams("candidate")
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
+	backend.On("create", mock.Anything, params, mock.Anything).
+		Return(&walletData{
+			id:    1,
+			name:  params.Name,
+			store: deps.store,
+			vault: deps.vault,
+		}, nil).Once()
+	// Hold storage closure so returning a primary Create error cannot hide
+	// unfinished cleanup. Concurrent Stop must wait for the same result.
+	closing := make(chan struct{})
+	release := make(chan struct{})
+	backend.On("close").Run(func(mock.Arguments) {
+		close(closing)
+		<-release
+	}).Return(closeErr).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	// Release test gates before fixture Stop, even after failed assertions.
+	releaseBirthday := sync.OnceFunc(func() { close(birthdayRelease) })
+	releaseClose := sync.OnceFunc(func() { close(release) })
+
+	t.Cleanup(releaseBirthday)
+	t.Cleanup(releaseClose)
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	// Keep both results pending until cleanup finishes.
+	type createOutcome struct {
+		wallet *Wallet
+		err    error
+	}
+
+	created := make(chan createOutcome, 1)
+	stopped := make(chan error, 1)
+
+	// Act: Run creation into the held dependency, then observe Stop and
+	// the failing request while storage cleanup is still blocked.
+	go func() {
+		w, err := manager.Create(params)
+		created <- createOutcome{
+			wallet: w,
+			err:    err,
+		}
+	}()
+
+	<-birthdayEntered
+
+	// Wait for Stop cancellation before releasing startup, so cleanup
+	// ordering does not depend on mutex scheduling or the runtime owner.
+	go func() { stopped <- manager.Stop() }()
+
+	<-manager.lifetimeCtx.Done()
+
+	releaseBirthday()
+
+	select {
+	case <-closing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed Create did not reach storage cleanup")
+	}
+
+	// Assert: Neither the candidate nor its error escapes while storage
+	// cleanup is held. Stop must wait for that same cleanup.
+	select {
+	case result := <-created:
+		t.Fatalf("Create returned before cleanup completed: %v", result.err)
+	default:
+	}
+
+	releaseClose()
+
+	var outcome createOutcome
+	select {
+	case outcome = <-created:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed Create did not finish cleanup")
+	}
+
+	select {
+	case stopErr := <-stopped:
+		require.ErrorIs(t, stopErr, ErrManagerStopped)
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Stop did not join terminal cleanup")
+	}
+
+	require.Nil(t, outcome.wallet)
+	require.ErrorIs(t, outcome.err, createErr)
+	require.ErrorIs(t, outcome.err, closeErr)
+}
+
+// TestSQLManagerBackendListsWallets verifies ordered complete listing and
+// all-or-nothing iterator failures.
+func TestSQLManagerBackendListsWallets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		rows      []db.WalletInfo
+		iterErr   error
+		wantIDs   []uint32
+		wantNames []string
+	}{
+		{
+			name:      "empty store",
+			wantIDs:   []uint32{},
+			wantNames: []string{},
+		},
+		{
+			name: "ordered store rows",
+			rows: []db.WalletInfo{
+				{
+					ID:   4,
+					Name: "first",
+				},
+				{
+					ID:   9,
+					Name: "second",
+				},
+			},
+			wantIDs:   []uint32{4, 9},
+			wantNames: []string{"first", "second"},
+		},
+		{
+			name:    "iterator failure",
+			iterErr: errDBMock,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Yield ordered rows and an optional terminal error from
+			// the Store iterator used by the backend discovery boundary.
+			store := &walletmock.Store{}
+			sequence := iter.Seq2[db.WalletInfo, error](func(
+				yield func(db.WalletInfo, error) bool) {
+
+				for _, row := range test.rows {
+					if !yield(row, nil) {
+						return
+					}
+				}
+
+				if test.iterErr != nil {
+					yield(db.WalletInfo{}, test.iterErr)
+				}
+			})
+			store.On(
+				"IterWallets", mock.Anything, mock.Anything,
+			).Return(sequence, nil).Once()
+
+			backend := &sqlManagerBackend{store: store}
+
+			// Act: Resolve the complete startup listing through the SQL
+			// backend boundary rather than calling the Store directly.
+			wallets, err := backend.listWallets(t.Context())
+
+			// Assert: Iterator failure prevents a partial handoff; otherwise
+			// the non-nil result preserves each durable ID and name exactly.
+			if test.iterErr != nil {
+				require.ErrorIs(t, err, test.iterErr)
+				require.Nil(t, wallets)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, wallets)
+
+				ids := make([]uint32, 0, len(wallets))
+				names := make([]string, 0, len(wallets))
+
+				for _, wallet := range wallets {
+					ids = append(ids, wallet.id)
+					names = append(names, wallet.name)
+				}
+
+				require.Equal(t, test.wantIDs, ids)
+				require.Equal(t, test.wantNames, names)
+			}
+
+			store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestKVDBManagerBackendListsZeroOrOneWallet verifies legacy startup listing
+// treats an uninitialized database as empty and an initialized database as the
+// backend's sole anonymous Wallet, without inventing another identity.
+func TestKVDBManagerBackendListsZeroOrOneWallet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty database", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Open a fresh legacy database whose address and transaction
+		// namespaces have never been created.
+		manager := testKVDBManager(t)
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		// Act: List startup data through the backend's zero-or-one boundary.
+		wallets, err := backend.listWallets(t.Context())
+
+		// Assert: Absence is a successful, initialized empty result rather
+		// than an attempted load or a missing-Wallet error.
+		require.NoError(t, err)
+		require.NotNil(t, wallets)
+		require.Empty(t, wallets)
+	})
+
+	t.Run("initialized database", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create and close the sole legacy Wallet with a non-empty
+		// public passphrase, then configure a new Manager with the same bytes.
+		// Mutating the caller slice after construction proves listing uses the
+		// Manager's immutable copy through the existing load path.
+		dbPath := testKVDBPath(t)
+		pubPassphrase := []byte("startup-public")
+		creator := testKVDBManagerAt(t, dbPath)
+		_, err := creator.Create(CreateWalletParams{
+			Name:              testWalletName,
+			Mode:              ModeShell,
+			WatchOnly:         true,
+			PubPassphrase:     pubPassphrase,
+			PrivatePassphrase: []byte("private"),
+			Birthday:          time.Now(),
+		})
+		require.NoError(t, err)
+		require.NoError(t, creator.Stop())
+
+		manager, err := NewManager(t.Context(), ManagerConfig{
+			Backend:           DBBackendKVDB,
+			DataSource:        dbPath,
+			ChainParams:       chainParams,
+			ChainSource:       createTestChain(t),
+			KVDBPubPassphrase: pubPassphrase,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = stopManagerForTest(t, manager)
+		})
+
+		pubPassphrase[0] ^= 0xff
+
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		// Act: List the occupied database through the backend boundary.
+		wallets, err := backend.listWallets(t.Context())
+
+		// Assert: The existing loader returns one Wallet under kvdb's absent
+		// durable name rather than inventing an alias or a second identity.
+		require.NoError(t, err)
+		require.Len(t, wallets, 1)
+		require.Empty(t, wallets[0].name)
+	})
+}
+
+// TestManagerCreateRejectsMissingIdentityBeforeAssembly verifies Create
+// rejects an absent durable key before Store work.
+func TestManagerCreateRejectsMissingIdentityBeforeAssembly(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Give Create a strict Store mock with no expectations. The
+	// otherwise empty request makes the missing durable identity the only
+	// relevant input.
+	store := &walletmock.Store{}
+	manager := testSQLManager(t, store)
+
+	// Act: Invoke Create without the durable identity required for cache and
+	// Store selection.
+	w, err := manager.Create(CreateWalletParams{})
+
+	// Assert: The identity error is primary, no partial Wallet escapes, and
+	// the strict Store confirms validation happened before durable work or
+	// Wallet assembly.
+	require.ErrorIs(t, err, ErrMissingParam)
+	require.ErrorContains(t, err, "Name")
+	require.Nil(t, w)
+}
+
+// TestManagerDeriveFromSeed verifies the internal helper method
+// deriveFromSeed, checking that it correctly derives a master private key
+// from a seed and validates inputs.
+func TestManagerDeriveFromSeed(t *testing.T) {
+	t.Parallel()
+
+	m := testKVDBManager(t)
 
 	t.Run("Success", func(t *testing.T) {
 		t.Parallel()
@@ -518,7 +1832,7 @@ func TestManager_deriveFromSeed(t *testing.T) {
 		seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 		require.NoError(t, err)
 
-		key, err := m.deriveFromSeed(cfg, seed)
+		key, err := m.deriveFromSeed(seed)
 
 		// Verify we got a valid private extended key.
 		require.NoError(t, err)
@@ -529,7 +1843,7 @@ func TestManager_deriveFromSeed(t *testing.T) {
 	t.Run("Empty Seed", func(t *testing.T) {
 		t.Parallel()
 
-		key, err := m.deriveFromSeed(cfg, nil)
+		key, err := m.deriveFromSeed(nil)
 		require.ErrorIs(t, err, ErrWalletParams)
 		require.ErrorContains(t, err, "seed is required")
 		require.Nil(t, key)
@@ -539,62 +1853,1415 @@ func TestManager_deriveFromSeed(t *testing.T) {
 		t.Parallel()
 
 		// Providing a seed that is too short for hdkeychain.NewMaster.
-		key, err := m.deriveFromSeed(cfg, []byte{0x01})
+		key, err := m.deriveFromSeed([]byte{0x01})
 		require.ErrorContains(t, err, "failed to derive master key")
 		require.Nil(t, key)
 	})
 }
 
-// TestManager_genRootKey verifies the internal helper method genRootKey,
-// ensuring it generates a random seed and derives a valid master key.
-func TestManager_genRootKey(t *testing.T) {
+// TestManagerGenRootKey observes destruction of the generated seed without
+// destroying the independently derived master returned to its owner.
+func TestManagerGenRootKey(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
-	cfg := Config{ChainParams: &chainParams}
+	// Arrange: Keep the generator's original allocation observable and derive
+	// the expected master before cleanup can erase its input bytes.
+	m := testKVDBManager(t)
+	seed := fixedTestSeed()
+	wantMaster, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
 
-	key, err := m.genRootKey(cfg)
+	// Act: Supply the owned buffer through the production generator signature
+	// so the observation concerns the seed Manager receives, not a copy.
+	key, err := m.genRootKey(func(length uint8) ([]byte, error) {
+		require.Equal(t, uint8(hdkeychain.RecommendedSeedLen), length)
 
-	// Verify we got a valid private extended key.
+		return seed, nil
+	})
+
+	// Assert: The original seed is cleared while the returned master still
+	// reproduces the expected private root and supports private derivation.
 	require.NoError(t, err)
 	require.NotNil(t, key)
+
+	require.Equal(t, make([]byte, len(seed)), seed)
+	require.Equal(t, wantMaster.String(), key.String())
 	require.True(t, key.IsPrivate())
+	_, err = key.Derive(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
 }
 
-// TestManager_deriveRootKey verifies the high-level key derivation logic,
-// checking that it correctly dispatches to the appropriate helper based on
-// the creation mode.
-func TestManager_deriveRootKey(t *testing.T) {
+// TestManagerCreateBoundsGenesisSecrets verifies successful creation destroys
+// Manager-derived roots while preserving usable caller seeds and XPrvs.
+func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
-	cfg := Config{ChainParams: &chainParams}
+	for name, tc := range genesisCreateCases(t) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	// 1. ModeShell: Should return nil/nil (no root key for shell).
+			// Arrange: Capture the live root at the existing backend boundary
+			// and return mock-backed data with the required startup reads.
+			params := tc.params
+			params.Name = testWalletName
+			params.PrivatePassphrase = []byte("private")
+			_, deps := createTestWalletWithMocks(t)
+			deps.store.On("GetWallet", mock.Anything, params.Name).
+				Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).
+				Once()
+			deps.store.On("ListAccounts", mock.Anything,
+				db.ListAccountsQuery{WalletID: 1}).
+				Return([]db.AccountInfo{}, nil).Once()
+			deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
+				Return(nil).Once()
+			deps.vault.On("Lock").Return().Once()
+
+			var observedRoot *hdkeychain.ExtendedKey
+
+			var observedPrivate bool
+
+			backend := &managerBackendMock{}
+			backend.On("create", mock.Anything, params, mock.Anything).
+				Return(&walletData{
+					id:    1,
+					name:  params.Name,
+					store: deps.store,
+					vault: deps.vault,
+				}, nil).Run(func(args mock.Arguments) {
+				observedRoot, _ = args.Get(2).(*hdkeychain.ExtendedKey)
+				observedPrivate = observedRoot != nil &&
+					observedRoot.IsPrivate()
+			}).Once()
+			backend.On("close").Return(nil).Once()
+
+			source := &bwmock.Chain{}
+			source.On("Notifications").Return((<-chan any)(nil)).Once()
+			manager := newManagerLifecycleTest(t, backend, source)
+			manager.started.Store(true)
+			manager.wg.Go(manager.mainLoop)
+			chain, ok := manager.config.ChainSource.(*bwmock.Chain)
+			require.True(t, ok)
+			chain.On("IsCurrent").Return(false).Maybe()
+
+			// Act: Complete public creation, including private runtime startup,
+			// before examining the captured preparation root and caller input.
+			wallet, err := manager.Create(params)
+
+			// Assert: Derived roots no longer expose key material; borrowed
+			// roots and seeds retain their bytes and remain useful to callers.
+			require.NoError(t, err)
+			require.NotNil(t, wallet)
+			require.True(t, observedPrivate)
+			require.Equal(t, tc.wantRoot, observedRoot.String())
+			require.Equal(t, tc.wantRootPrivate, observedRoot.IsPrivate())
+			require.Equal(t, tc.wantSeed, params.Seed)
+
+			// Preserved roots must retain caller identity and support private
+			// derivation, beyond matching the case's serialized expectation.
+			if tc.wantRootPrivate {
+				require.Same(t, params.RootKey, observedRoot)
+				_, err := params.RootKey.Derive(
+					hdkeychain.HardenedKeyStart,
+				)
+				require.NoError(t, err)
+			}
+
+			// Preserved seed bytes must still reproduce the declared master
+			// after public creation has returned.
+			if tc.wantSeedMaster != "" {
+				master, err := hdkeychain.NewMaster(
+					params.Seed, &chainParams,
+				)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantSeedMaster, master.String())
+			}
+		})
+	}
+}
+
+// TestManagerCreateBoundsGenesisSecretsOnFailure verifies backend failure
+// destroys derived roots while caller material remains unchanged and usable.
+func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range genesisCreateCases(t) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Observe a valid root before returning a later creation
+			// error; fixture cleanup owns backend expectation verification.
+			params := tc.params
+			params.Name = testWalletName
+			params.PrivatePassphrase = []byte("private")
+
+			var observedRoot *hdkeychain.ExtendedKey
+
+			var observedPrivate bool
+
+			backend := &managerBackendMock{}
+			backend.On("create", mock.Anything, params, mock.Anything).
+				Return(nil, errDBMock).Run(func(args mock.Arguments) {
+				observedRoot, _ = args.Get(2).(*hdkeychain.ExtendedKey)
+				observedPrivate = observedRoot != nil &&
+					observedRoot.IsPrivate()
+			}).Once()
+			backend.On("close").Return(nil).Once()
+
+			source := &bwmock.Chain{}
+			source.On("Notifications").Return((<-chan any)(nil)).Once()
+			manager := newManagerLifecycleTest(t, backend, source)
+			manager.started.Store(true)
+			manager.wg.Go(manager.mainLoop)
+
+			// Act: Let the public request return its backend failure before
+			// inspecting the original root object and borrowed input bytes.
+			wallet, err := manager.Create(params)
+
+			// Assert: Failure preserves the original error and borrowed
+			// material, but leaves no usable Manager-derived root or Wallet.
+			require.ErrorIs(t, err, errDBMock)
+			require.Nil(t, wallet)
+			require.True(t, observedPrivate)
+			require.Equal(t, tc.wantRoot, observedRoot.String())
+			require.Equal(t, tc.wantRootPrivate, observedRoot.IsPrivate())
+			require.Equal(t, tc.wantSeed, params.Seed)
+
+			// Preserved roots must retain caller identity and support private
+			// derivation after the backend error has unwound preparation.
+			if tc.wantRootPrivate {
+				require.Same(t, params.RootKey, observedRoot)
+				_, err := params.RootKey.Derive(
+					hdkeychain.HardenedKeyStart,
+				)
+				require.NoError(t, err)
+			}
+
+			// Preserved seed bytes must still reproduce the declared master
+			// even when no Wallet was returned.
+			if tc.wantSeedMaster != "" {
+				master, err := hdkeychain.NewMaster(
+					params.Seed, &chainParams,
+				)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantSeedMaster, master.String())
+			}
+		})
+	}
+}
+
+// genesisCreateCase declares the post-return secret outcomes independently
+// of the inputs so each public-creation test can assert ownership directly.
+type genesisCreateCase struct {
+	params          CreateWalletParams
+	wantRoot        string
+	wantRootPrivate bool
+	wantSeed        []byte
+	wantSeedMaster  string
+}
+
+// genesisCreateCases shares deterministic inputs and expected ownership
+// outcomes while leaving mock expectations and assertions in each test.
+func genesisCreateCases(t *testing.T) map[string]genesisCreateCase {
+	t.Helper()
+
+	// Each test receives its own imported root; subtests share no mutable
+	// signing material across separate public creation outcomes.
+	root, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+
+	return map[string]genesisCreateCase{
+		"generated seed": {
+			params: CreateWalletParams{
+				Mode: ModeGenSeed,
+			},
+			wantRoot:        "zeroed extended key",
+			wantRootPrivate: false,
+			wantSeed:        nil,
+			wantSeedMaster:  "",
+		},
+		"imported seed": {
+			params: CreateWalletParams{
+				Mode: ModeImportSeed,
+				Seed: fixedTestSeed(),
+			},
+			wantRoot:        "zeroed extended key",
+			wantRootPrivate: false,
+			wantSeed:        fixedTestSeed(),
+			wantSeedMaster:  root.String(),
+		},
+		"imported XPrv": {
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: root,
+			},
+			wantRoot:        root.String(),
+			wantRootPrivate: true,
+			wantSeed:        nil,
+			wantSeedMaster:  "",
+		},
+	}
+}
+
+// TestManagerCreateBoundsGenesisSecretsOnPanic verifies that preparation
+// unwinding destroys the owned root even when backend creation panics.
+func TestManagerCreateBoundsGenesisSecretsOnPanic(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Capture the valid generated root immediately before a backend
+	// panic, without creating runtime resources that would obscure cleanup.
+	params := CreateWalletParams{
+		Name:              testWalletName,
+		Mode:              ModeGenSeed,
+		PrivatePassphrase: []byte("private"),
+	}
+
+	var observedRoot *hdkeychain.ExtendedKey
+
+	backend := &managerBackendMock{}
+	backend.On("create", mock.Anything, params, mock.Anything).
+		Return(nil, nil).Run(func(args mock.Arguments) {
+		var ok bool
+		observedRoot, ok = args.Get(2).(*hdkeychain.ExtendedKey)
+		require.True(t, ok)
+		require.True(t, observedRoot.IsPrivate())
+		panic(errDBMock)
+	}).Once()
+	t.Cleanup(func() { backend.AssertExpectations(t) })
+
+	manager := &Manager{
+		config: ManagerConfig{
+			ChainParams: chainParams,
+		},
+		backend: backend,
+	}
+
+	// Act: Recover in the preparation caller so the root-clearing defer has
+	// unwound before inspecting the captured key; no runtime is involved.
+	require.PanicsWithValue(t, errDBMock, func() {
+		_, _ = manager.createWallet(t.Context(), params)
+	})
+
+	// Assert: The captured master no longer exposes private material even
+	// though preparation did not return through an ordinary error path.
+	require.NotNil(t, observedRoot)
+	require.False(t, observedRoot.IsPrivate())
+	require.Equal(t, "zeroed extended key", observedRoot.String())
+}
+
+// TestManagerDeriveRootKey verifies the high-level key derivation logic,
+// checking that it correctly dispatches to the appropriate helper based on
+// the creation mode.
+func TestManagerDeriveRootKey(t *testing.T) {
+	t.Parallel()
+
+	m := testKVDBManager(t)
+
+	// ModeShell should return nil/nil because it has no root key.
 	t.Run("ModeShell", func(t *testing.T) {
 		t.Parallel()
 
-		key, err := m.deriveRootKey(cfg, CreateWalletParams{Mode: ModeShell})
+		key, err := m.deriveRootKey(CreateWalletParams{Mode: ModeShell})
 		require.NoError(t, err)
 		require.Nil(t, key)
 	})
 
-	t.Run("ModeUnknown", func(t *testing.T) {
-		t.Parallel()
-
-		key, err := m.deriveRootKey(cfg, CreateWalletParams{Mode: ModeUnknown})
-		require.ErrorIs(t, err, ErrWalletParams)
-		require.ErrorContains(t, err, "unknown mode")
-		require.Nil(t, key)
-	})
-
-	// 3. ModeGenSeed: Should return a newly generated private key.
+	// ModeGenSeed should return a newly generated private key.
 	t.Run("ModeGenSeed", func(t *testing.T) {
 		t.Parallel()
 
-		key, err := m.deriveRootKey(cfg, CreateWalletParams{Mode: ModeGenSeed})
+		key, err := m.deriveRootKey(CreateWalletParams{Mode: ModeGenSeed})
 		require.NoError(t, err)
 		require.NotNil(t, key)
 		require.True(t, key.IsPrivate())
 	})
+}
+
+// TestManagerKVDBCreateWatchOnlyShell verifies that the legacy kvdb backend
+// creates a rootless watch-only wallet with an empty private passphrase,
+// preserving the behavior of the legacy watch-only constructor.
+func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
+	t.Parallel()
+
+	params := CreateWalletParams{
+		Name:          testWalletName,
+		Mode:          ModeShell,
+		WatchOnly:     true,
+		PubPassphrase: []byte("public"),
+		Birthday:      time.Now(),
+	}
+
+	w, err := testKVDBManager(t).Create(params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.True(t, w.IsWatchOnly())
+
+	// No root key was supplied, so no master fingerprint is cached. The value
+	// is unobservable on a watch-only wallet regardless: it is reported only
+	// for derived accounts, which such a wallet cannot have.
+	require.Zero(t, w.masterFingerprint)
+}
+
+// TestManagerKVDBRejectsSecondCreate verifies cached names and other aliases
+// share the duplicate identity without replacing the original Wallet.
+func TestManagerKVDBRejectsSecondCreate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Occupy the database so the same-name cache and the legacy
+	// single-wallet guard can reject their respective duplicate requests.
+	m := testKVDBManager(t)
+	params := CreateWalletParams{
+		Name:              "first",
+		Mode:              ModeGenSeed,
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+	first, err := m.Create(params)
+	require.NoError(t, err)
+
+	// Act: Request both the cached name and a different legacy alias.
+	for _, name := range []string{params.Name, "second"} {
+		replacement := params
+		replacement.Name = name
+		duplicate, err := m.Create(replacement)
+
+		// Assert: Each alias reports the public duplicate identity without
+		// returning another Wallet or replacing the published pointer.
+		require.ErrorIs(t, err, ErrWalletExists)
+		require.Nil(t, duplicate)
+		require.Same(t, first, m.wallets[params.Name])
+	}
+}
+
+// TestManagerKVDBOpenerStartsWallet verifies that successive Managers can
+// acquire the same database and unlock its original wallet.
+func TestManagerKVDBOpenerStartsWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare an empty database. Each call to the opener must
+	// acquire its own file lock, so a leaked first handle prevents reopen.
+	path := testKVDBPath(t)
+	conn, err := walletdb.Create("bdb", path, true, time.Second, false)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	cfg := ManagerConfig{
+		Backend:           DBBackendKVDB,
+		ChainParams:       chainParams,
+		ChainSource:       createTestChain(t),
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
+		OpenKVDB: func(context.Context) (walletdb.DB, error) {
+			return walletdb.Open(
+				"bdb", path, true, time.Second, false,
+			)
+		},
+	}
+
+	// Persist a spendable wallet in the database selected by the opener.
+	first, err := NewManager(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stopManagerForTest(t, first) })
+	_, err = first.Start(t.Context())
+	require.NoError(t, err)
+
+	pass := []byte("private")
+	_, err = first.Create(CreateWalletParams{
+		Name:              testWalletName,
+		Mode:              ModeGenSeed,
+		PubPassphrase:     cfg.KVDBPubPassphrase,
+		PrivatePassphrase: pass,
+		Birthday:          time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, first.Stop())
+
+	// Act: End the second construction request before starting the wallet.
+	// The handle must remain usable throughout the wallet lifetime.
+	openCtx, cancel := context.WithCancel(t.Context())
+	second, err := NewManager(openCtx, cfg)
+
+	cancel()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stopManagerForTest(t, second) })
+	loaded, err := second.Start(t.Context())
+
+	// Assert: Unlocking the recovered wallet with its creation credential
+	// proves that startup used the database prepared by the first Manager.
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.NoError(t, loaded[0].Unlock(t.Context(), UnlockRequest{
+		Passphrase: pass,
+	}))
+}
+
+// TestManagerKVDBOpenerError verifies that failed acquisition cannot publish
+// a Manager or silently select a different database.
+func TestManagerKVDBOpenerError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The opener returns its request error. A live request thus
+	// models a nil success and a canceled one provides a concrete error.
+	cfg := ManagerConfig{
+		Backend:     DBBackendKVDB,
+		ChainParams: chainParams,
+		ChainSource: createTestChain(t),
+		OpenKVDB: func(ctx context.Context) (walletdb.DB, error) {
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: Construct with each request to exercise both opener outcomes.
+	failed, openErr := NewManager(ctx, cfg)
+	missing, nilErr := NewManager(t.Context(), cfg)
+
+	// Assert: Preserve the cancellation and diagnose the invalid handle
+	// at construction, before startup can attempt its first wallet read.
+	require.ErrorIs(t, openErr, context.Canceled)
+	require.Nil(t, failed)
+	require.ErrorIs(t, nilErr, ErrInvalidParam)
+	require.Nil(t, missing)
+}
+
+// TestManagerKVDBCreateMissingNameAfterReopen verifies an unnamed startup
+// entry cannot hide the caller's missing-name validation error.
+func TestManagerKVDBCreateMissingNameAfterReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use the fixture's public passphrase across reopen so startup
+	// installs the existing Wallet under its unnamed legacy cache key.
+	dbPath := testKVDBPath(t)
+	m := testKVDBManagerAt(t, dbPath)
+	params := managerLifecycleCreateParams("existing")
+	params.PubPassphrase = []byte(InsecurePubPassphrase)
+	_, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, m.Stop())
+	m = testKVDBManagerAt(t, dbPath)
+
+	// Act: Request creation without a name while the unnamed entry is cached.
+	duplicate, err := m.Create(CreateWalletParams{})
+
+	// Assert: Validation keeps its public identity instead of misclassifying
+	// the absent name as a duplicate of the startup entry.
+	require.ErrorIs(t, err, ErrMissingParam)
+	require.Nil(t, duplicate)
+}
+
+// TestManagerCreateRejectsActiveDuplicate verifies an occupied active name
+// prevents a second Store create and keeps the original Wallet usable.
+func TestManagerCreateRejectsActiveDuplicate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Permit exactly one durable create and its ordinary startup;
+	// fixture cleanup verifies that a duplicate never consumes another call.
+	params := managerLifecycleCreateParams("active-wallet")
+	store := &walletmock.Store{}
+	store.On("CreateWallet", mock.Anything,
+		mock.AnythingOfType("db.CreateWalletParams")).Return(&db.WalletInfo{
+		ID:          1,
+		Name:        params.Name,
+		IsWatchOnly: true,
+	}, nil).Once()
+	store.On("GetWallet", mock.Anything, params.Name).
+		Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 1,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).Return(nil).Once()
+	m := testSQLManager(t, store)
+	first, err := m.Create(params)
+	require.NoError(t, err)
+
+	// Act: Ask for the same active name with replacement credentials.
+	params.PrivatePassphrase = []byte("replacement-private")
+	duplicate, err := m.Create(params)
+
+	// Assert: The public duplicate identity returns no candidate, leaves the
+	// original pointer published, and permits a public call on that Wallet.
+	require.ErrorIs(t, err, ErrWalletExists)
+	require.Nil(t, duplicate)
+	require.Same(t, first, m.wallets[params.Name])
+	require.NoError(t, first.Lock(t.Context()))
+}
+
+// TestManagerCreateFailureLeavesManagerReusable verifies that a failed Create
+// leaves no durable trace in the Manager: the wallet is not published, the name
+// is still free, and the database the Manager opened is released exactly once
+// by Stop. The harness relies on this — it registers the Manager before any
+// Create so that a failing Create still releases the database it opened.
+func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		manager func(testing.TB) *Manager
+	}{
+		{
+			name:    "kvdb",
+			manager: testKVDBManager,
+		},
+		{
+			name:    "sqlite",
+			manager: testSQLiteManager,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := tc.manager(t)
+			// Arrange + Act: a seed too short for BIP32 fails root
+			// derivation, after the Manager has already opened its
+			// database.
+			seed, err := hdkeychain.GenerateSeed(
+				hdkeychain.RecommendedSeedLen,
+			)
+			require.NoError(t, err)
+
+			w, err := m.Create(CreateWalletParams{
+				Name:              testWalletName,
+				Mode:              ModeImportSeed,
+				Seed:              seed[:hdkeychain.MinSeedBytes-1],
+				PubPassphrase:     []byte("public"),
+				PrivatePassphrase: []byte("private"),
+				Birthday:          time.Now(),
+			})
+			require.ErrorIs(t, err, hdkeychain.ErrInvalidSeedLen)
+			require.Nil(t, w)
+
+			// Assert: nothing was published, so the name is free and
+			// a corrected create succeeds over the same database.
+			w, err = m.Create(CreateWalletParams{
+				Name:              testWalletName,
+				Mode:              ModeImportSeed,
+				Seed:              seed,
+				PubPassphrase:     []byte("public"),
+				PrivatePassphrase: []byte("private"),
+				Birthday:          time.Now(),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, w)
+
+			// Stop releases the one database the Manager owns. It is
+			// called once, after quiescence.
+			require.NoError(t, m.Stop())
+		})
+	}
+}
+
+// TestManagerCreateImportsDeclaredAccount verifies pre-start SQL imports use
+// the same declared scope/schema and encoded account number as public imports.
+func TestManagerCreateImportsDeclaredAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use generic XPub version bytes with lnd's custom witness scope,
+	// requesting SQL chain exclusion through the same pre-start import input.
+	m := testSQLiteManager(t)
+	key, _ := importAccountTestKey(t, 44)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	fingerprint := MasterFingerprint(0)
+	params := managerLifecycleCreateParams("declared-initial")
+	params.InitialAccounts = []ImportAccountParams{
+		{
+			MasterKeyFingerprint: &fingerprint,
+			Name:                 testAccountName,
+			XPub:                 key,
+			Scope:                &scope,
+			AddrSchema:           &schema,
+			NoChainSync:          true,
+		},
+	}
+
+	// Act: create the shell with its initial imported account before startup,
+	// then inspect the returned account through the started public interface.
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	info, err := w.GetAccount(t.Context(), scope, testAccountName)
+
+	// Assert: initial import retains declared identity and a present-zero
+	// fingerprint, effective witness schema and persisted SQL chain exclusion.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.True(t, info.NoChainSync)
+	require.Equal(t, AccountNumber(0), *info.AccountNumber)
+	require.Equal(t, scope, info.KeyScope)
+	require.Equal(t, schema, info.AddrSchema)
+	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
+}
+
+// TestManagerCreateImportsDeclaredKVDBAccount verifies initial kvdb imports
+// use the same custom scope, schema and known number as live imports.
+func TestManagerCreateImportsDeclaredKVDBAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a generic account XPub declares lnd's custom key-family scope.
+	// Its explicit witness schema supplies the missing canonical scope default.
+	m := testKVDBManager(t)
+	key, _ := importAccountTestKey(t, 84)
+	scope := waddrmgr.KeyScope{Purpose: 1017, Coin: 0}
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	fingerprint := MasterFingerprint(0)
+	params := managerLifecycleCreateParams("kvdb-initial")
+	params.InitialAccounts = []ImportAccountParams{
+		{
+			MasterKeyFingerprint: &fingerprint,
+			Name:                 testAccountName,
+			XPub:                 key,
+			Scope:                &scope,
+			AddrSchema:           &schema,
+		},
+	}
+
+	// Act: create and start the Wallet with its declared import before startup.
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	info, err := w.GetAccount(t.Context(), scope, testAccountName)
+
+	// Assert: declaration metadata survives Manager preflight and native kvdb
+	// persistence, including account zero and its caller-supplied fingerprint.
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Equal(t, AccountNumber(0), *info.AccountNumber)
+	require.Equal(t, scope, info.KeyScope)
+	require.Equal(t, schema, info.AddrSchema)
+	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
+}
+
+// TestChainSyncerWatchAddresses verifies ownership precedes tip-based
+// activation, including a retry after its native subscription fails.
+func TestChainSyncerWatchAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The exact native arguments must activate routing inside
+	// the call, before either its causal failure or successful retry.
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{PkScript: script})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	addrs := []address.Address{addr}
+	wallets := []*Wallet{{id: 1}}
+	failure := errors.New("subscription failed")
+
+	client := createTestChain(t)
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+
+	s := newChainSyncer(client, &chainParams)
+
+	var received []TxEntries
+
+	callback := func(mock.Arguments) {
+		events := s.routeChainEvent(
+			chain.RelevantTx{TxRecord: rec}, wallets,
+		)
+		received = append(received, events[1].matches)
+	}
+	client.On("WatchAddrsFromTip", t.Context(), addrs).Run(callback).
+		Return(failure).Once()
+	client.On("WatchAddrsFromTip", t.Context(), addrs).Run(callback).
+		Return(nil).Once()
+
+	// Act: Repeat the identical producer request after native failure.
+	firstErr := s.watchAddresses(t.Context(), 1, addrs)
+	retryErr := s.watchAddresses(t.Context(), 1, addrs)
+
+	// Assert: Wrapped errors retain identity; both activations already
+	// have one recipient, and fixture cleanup verifies the exact calls.
+	require.ErrorIs(t, firstErr, failure)
+	require.NoError(t, retryErr)
+	require.Len(t, received, 2)
+
+	for _, matches := range received {
+		require.Len(t, matches, 1)
+		require.Same(t, rec, matches[0].Rec)
+	}
+}
+
+// TestChainSyncerWatchOutpoints verifies ownership precedes spent-output
+// activation, including a retry after its native subscription fails.
+func TestChainSyncerWatchOutpoints(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The exact native arguments must activate routing inside
+	// the call, before either its causal failure or successful retry.
+	point := wire.OutPoint{Index: 7}
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&point, nil, nil))
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	points := []*wire.OutPoint{&point}
+	wallets := []*Wallet{{id: 1}}
+	failure := errors.New("subscription failed")
+
+	client := createTestChain(t)
+	client.On("NotifySpent", mock.Anything).Unset()
+
+	s := newChainSyncer(client, &chainParams)
+
+	var received []TxEntries
+
+	callback := func(mock.Arguments) {
+		events := s.routeChainEvent(
+			chain.RelevantTx{TxRecord: rec}, wallets,
+		)
+		received = append(received, events[1].matches)
+	}
+	client.On("NotifySpent", points).Run(callback).
+		Return(failure).Once()
+	client.On("NotifySpent", points).Run(callback).
+		Return(nil).Once()
+
+	// Act: Repeat the identical producer request after native failure.
+	firstErr := s.watchOutpoints(t.Context(), 1, points)
+	retryErr := s.watchOutpoints(t.Context(), 1, points)
+
+	// Assert: Wrapped errors retain identity; both activations already
+	// have one recipient, and fixture cleanup verifies the exact calls.
+	require.ErrorIs(t, firstErr, failure)
+	require.NoError(t, retryErr)
+	require.Len(t, received, 2)
+
+	for _, matches := range received {
+		require.Len(t, matches, 1)
+		require.Same(t, rec, matches[0].Rec)
+	}
+}
+
+// TestChainSyncerNotifyReceived verifies ownership precedes publication
+// activation, including a retry after its native subscription fails.
+func TestChainSyncerNotifyReceived(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An accepted publication retains native registration even
+	// after shutdown cancels the lifetime that its caller supplies.
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{PkScript: script})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	addrs := []address.Address{addr}
+	wallets := []*Wallet{{id: 1}}
+	failure := errors.New("subscription failed")
+
+	client := createTestChain(t)
+
+	s := newChainSyncer(client, &chainParams)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	var received []TxEntries
+
+	callback := func(mock.Arguments) {
+		events := s.routeChainEvent(
+			chain.RelevantTx{TxRecord: rec}, wallets,
+		)
+		received = append(received, events[1].matches)
+	}
+	client.On("NotifyReceived", addrs).Run(callback).
+		Return(failure).Once()
+	client.On("NotifyReceived", addrs).Run(callback).
+		Return(nil).Once()
+
+	// Act: Register and retry despite the already-canceled lifetime.
+	firstErr := s.notifyReceived(ctx, 1, addrs)
+	retryErr := s.notifyReceived(ctx, 1, addrs)
+
+	// Assert: Cancellation cannot replace the native result; both calls
+	// find one recipient. Fixture cleanup verifies exact activation.
+	require.ErrorIs(t, firstErr, failure)
+	require.NoError(t, retryErr)
+	require.Len(t, received, 2)
+
+	for _, matches := range received {
+		require.Len(t, matches, 1)
+		require.Same(t, rec, matches[0].Rec)
+	}
+}
+
+// TestChainSyncerRouting checks shared watches and input-only spends before
+// any Wallet has recovered or stored their funding transaction.
+func TestChainSyncerRouting(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two Wallets share an address; a third watches nothing. An
+	// input-address spend arrives before recovery learns its funding output.
+	// A later parent has duplicate outputs to check recipient deduplication.
+	client := createTestChain(t)
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+		Return(nil).Twice()
+
+	s := newChainSyncer(client, &chainParams)
+
+	root, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+	pubKey, err := root.ECPubKey()
+	require.NoError(t, err)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	for _, id := range []uint32{1, 2} {
+		require.NoError(
+			t, s.watchAddresses(
+				t.Context(), id, []address.Address{addr},
+			),
+		)
+	}
+
+	// The unrelated output must remain the only source of credit metadata;
+	// the watched address belongs solely to the unknown input's witness.
+	otherAddr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	otherScript, err := txscript.PayToAddrScript(otherAddr)
+	require.NoError(t, err)
+
+	unknownSpend := wire.NewMsgTx(2)
+	unknownSpend.AddTxIn(
+		wire.NewTxIn(
+			&wire.OutPoint{Index: 1}, nil, wire.TxWitness{
+				// Native validation owns signature checking; routing needs
+				// the public key to recover the spent output's address.
+				[]byte{}, pubKey.SerializeCompressed(),
+			},
+		),
+	)
+	unknownSpend.AddTxOut(&wire.TxOut{PkScript: otherScript})
+	unknownRec, err := wtxmgr.NewTxRecordFromMsgTx(unknownSpend, time.Now())
+	require.NoError(t, err)
+
+	originalSpend := unknownSpend.Copy()
+
+	parent := wire.NewMsgTx(2)
+	parent.AddTxOut(&wire.TxOut{PkScript: script})
+	parent.AddTxOut(&wire.TxOut{PkScript: script})
+	parentRec, err := wtxmgr.NewTxRecordFromMsgTx(parent, time.Now())
+	require.NoError(t, err)
+
+	child := wire.NewMsgTx(2)
+	child.AddTxIn(
+		wire.NewTxIn(
+			&wire.OutPoint{
+				Hash: parentRec.Hash,
+			}, nil, nil,
+		),
+	)
+	childRec, err := wtxmgr.NewTxRecordFromMsgTx(child, time.Now())
+	require.NoError(t, err)
+
+	wallets := []*Wallet{{id: 1}, {id: 2}, {id: 3}}
+	block := chain.FilteredBlockConnected{
+		Block:       &wtxmgr.BlockMeta{},
+		RelevantTxs: []*wtxmgr.TxRecord{parentRec, childRec},
+	}
+
+	original := parent.Copy()
+
+	// Act: Route the input-address-only spend before learning any outpoint,
+	// then the parent/child block and a later known-outpoint notification.
+	unknown := s.routeChainEvent(
+		chain.RelevantTx{TxRecord: unknownRec}, wallets,
+	)
+	events := s.routeChainEvent(block, wallets)
+	spend := s.routeChainEvent(chain.RelevantTx{TxRecord: childRec}, wallets)
+
+	// Assert: Both watched Wallets receive the early spend once, without
+	// turning its input address into output credit metadata. Existing ordered
+	// descendant routing and empty progress retain their original payloads.
+	require.Len(t, unknown, 2)
+	require.NotContains(t, unknown, uint32(3))
+	require.Equal(t, originalSpend, unknownSpend)
+	require.Len(t, events, len(wallets))
+
+	for _, id := range []uint32{1, 2} {
+		require.Len(t, unknown[id].matches, 1)
+		match := unknown[id].matches[0]
+		require.Same(t, unknownRec, match.Rec)
+		require.Len(t, match.Entries, 1)
+		require.Equal(t, otherAddr, match.Entries[0].Address)
+		require.Zero(t, match.Entries[0].Credit.Index)
+		require.Len(t, events[id].matches, 2)
+		require.Equal(
+			t, []*wtxmgr.TxRecord{parentRec, childRec},
+			[]*wtxmgr.TxRecord{
+				events[id].matches[0].Rec, events[id].matches[1].Rec,
+			},
+		)
+		require.Len(t, spend[id].matches, 1)
+	}
+
+	require.Empty(t, events[3].matches)
+	require.NotContains(t, spend, uint32(3))
+	require.Equal(t, block, events[1].notification)
+	require.Equal(t, original, parent)
+}
+
+// TestChainSyncerProgressRouting preserves ordinary control handlers and
+// delivers empty filtered blocks to every Wallet for checkpoint progress.
+func TestChainSyncerProgressRouting(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Header-only events must remain catch-up wakeups, disconnects
+	// keep rollback handling, and actual empty filtered blocks carry progress.
+	tests := []struct {
+		name         string
+		notification any
+	}{
+		{
+			name:         "header",
+			notification: chain.BlockConnected{},
+		},
+		{
+			name:         "disconnect",
+			notification: chain.BlockDisconnected{},
+		},
+		{
+			name: "empty filtered block",
+			notification: chain.FilteredBlockConnected{
+				Block: &wtxmgr.BlockMeta{},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: No watches are needed for block/control recipients.
+			s := newChainSyncer(createTestChain(t), &chainParams)
+
+			wallets := []*Wallet{{id: 1}, {id: 2}}
+
+			// Act: Route the original payload through normal membership.
+			events := s.routeChainEvent(test.notification, wallets)
+
+			// Assert: Every Wallet gets the original type and metadata
+			// without invented transaction matches or header checkpoints.
+			require.Len(t, events, len(wallets))
+
+			for _, event := range events {
+				require.Equal(t, test.notification, event.notification)
+				require.Empty(t, event.matches)
+			}
+		})
+	}
+}
+
+// TestManagerChainSourceClosed verifies a lost required stream tears down both
+// real Wallet workers before closing their shared database, without self-join.
+func TestManagerChainSourceClosed(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep both processors waiting for backend sync. Their normal
+	// cleanup locks each vault before the single backend close expectation.
+	data := make([]*walletData, 0, 2)
+	for i, name := range []string{"first", "second"} {
+		_, deps := createTestWalletWithMocks(t)
+		id := uint32(i + 1)
+
+		deps.store.On("GetWallet", mock.Anything, name).Return(
+			&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+		).Once()
+		deps.store.On(
+			"ListAccounts", mock.Anything, db.ListAccountsQuery{
+				WalletID: id,
+			},
+		).Return([]db.AccountInfo{}, nil).Once()
+		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
+			Return(nil).Once()
+		deps.vault.On("Lock").Return().Once()
+		data = append(
+			data, &walletData{
+				id:    id,
+				name:  name,
+				store: deps.store,
+				vault: deps.vault,
+			},
+		)
+	}
+
+	closed := make(chan struct{})
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return(data, nil).Once()
+	backend.On("close").Run(
+		func(mock.Arguments) {
+			close(closed)
+		},
+	).Return(nil).Once()
+
+	notifications := make(chan any)
+	source := &bwmock.Chain{}
+	source.On("Notifications").
+		Return((<-chan any)(notifications)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	client, ok := manager.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+
+	client.On("IsCurrent").Return(false).Maybe()
+
+	wallets, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	// Act: Lose the one stream while both Wallets are running.
+	close(notifications)
+
+	// Assert: Automatic teardown finishes without an external Stop rescuing
+	// it; retained Wallets are inert and later public Stop is rejected.
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closed source did not stop Manager")
+	}
+
+	for _, w := range wallets {
+		require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
+		require.Equal(
+			t, lifecycleStopped, lifecycle(w.state.lifecycle.Load()),
+		)
+	}
+
+	require.ErrorIs(t, manager.Stop(), ErrManagerStopped)
+}
+
+// TestManagerChainEventOrder proves source order and bounded delivery
+// while an uncancelled Wallet deliberately stops draining its inbox.
+func TestManagerChainEventOrder(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A data-only Wallet isolates delivery from Store processing.
+	// Three headers expose the capacity-one bound without extra worker queues.
+	notifications := make(chan any, 3)
+
+	w := &Wallet{
+		id:             1,
+		lifetimeCtx:    t.Context(),
+		chainEventChan: make(chan chainEvent, 1),
+	}
+
+	// Reuse owned cleanup so the same source fixture remains valid when the
+	// loop becomes responsible for terminal storage release.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").
+		Return((<-chan any)(notifications)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	backend.On("listWallets", mock.Anything).
+		Return([]*walletData{}, nil).Once()
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	manager.wallets["first"] = w
+
+	// Act: Queue three headers and let the loop block its second delivery
+	// behind the full first mailbox; it cannot consume the third event.
+	for height := int32(1); height <= 3; height++ {
+		notifications <- chain.BlockConnected{
+			Block: wtxmgr.Block{Height: height},
+		}
+	}
+
+	require.Eventually(
+		t, func() bool {
+			return len(notifications) == 1 && len(w.chainEventChan) == 1
+		}, time.Second, time.Millisecond,
+	)
+
+	// Assert: Releasing capacity admits each unchanged header in FIFO order.
+	// The first delivery did not wait for Wallet persistence or processing.
+	for height := int32(1); height <= 3; height++ {
+		select {
+		case event := <-w.chainEventChan:
+			header, ok := event.notification.(chain.BlockConnected)
+			require.True(t, ok)
+			require.Equal(t, height, header.Height)
+		case <-time.After(time.Second):
+			t.Fatal("delivery failed to resume after mailbox drain")
+		}
+	}
+}
+
+// TestManagerChainEventMembership verifies snapshots include a newly published
+// Wallet without retaining the Manager lock during mailbox delivery.
+func TestManagerChainEventMembership(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Only the first Wallet is published for the initial snapshot.
+	first := &Wallet{
+		id:             1,
+		lifetimeCtx:    t.Context(),
+		chainEventChan: make(chan chainEvent, 1),
+	}
+	second := &Wallet{
+		id:             2,
+		lifetimeCtx:    t.Context(),
+		chainEventChan: make(chan chainEvent, 1),
+	}
+
+	manager := &Manager{
+		wallets:     map[string]*Wallet{"first": first},
+		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
+	}
+
+	// Act: Publish between two synchronous owner-turn dispatches.
+	require.NoError(
+		t, manager.dispatchChainEvent(
+			t.Context(), chain.BlockConnected{},
+		),
+	)
+	manager.wallets["second"] = second
+
+	<-first.chainEventChan
+	require.NoError(
+		t, manager.dispatchChainEvent(
+			t.Context(), chain.ClientConnected{},
+		),
+	)
+
+	// Assert: Both current members receive the next control event unchanged.
+	require.IsType(
+		t, chain.ClientConnected{}, (<-first.chainEventChan).notification,
+	)
+	require.IsType(
+		t, chain.ClientConnected{}, (<-second.chainEventChan).notification,
+	)
+}
+
+// TestManagerChainEventBlockedStop verifies terminal cancellation releases a
+// reader blocked on a real Wallet whose asynchronous initialization is pending.
+func TestManagerChainEventBlockedStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Hold the backend call itself, since an initialization wait now
+	// services its mailbox. A second header still forces delivery to block.
+	client := createTestChain(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+
+	client.On("IsCurrent").Unset()
+	client.On("IsCurrent").Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(false).Once()
+
+	notifications := make(chan any, 2)
+
+	client.On("Notifications").Unset()
+	client.On("Notifications").
+		Return((<-chan any)(notifications)).Once()
+	manager := testSQLiteManagerWithChain(t, client)
+
+	// Release a held dependency before fixture Stop, even if a prerequisite
+	// fails. The backend call is existing blocking I/O, not another worker.
+	releaseBackend := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseBackend)
+
+	w, err := manager.Create(sqliteCreateParams(t))
+	require.NoError(t, err)
+
+	<-entered
+
+	notifications <- chain.BlockConnected{}
+
+	notifications <- chain.BlockConnected{}
+
+	require.Eventually(
+		t, func() bool {
+			return len(notifications) == 0 && len(w.chainEventChan) == 1
+		}, time.Second, time.Millisecond,
+	)
+
+	// Act: Stop while reader delivery has no available mailbox capacity.
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- manager.Stop()
+	}()
+
+	<-w.lifetimeCtx.Done()
+	releaseBackend()
+
+	// Assert: Stop joins both reader and Wallet rather than waiting for
+	// initialization to become ready or closing Store underneath either one.
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("full mailbox blocked terminal Stop")
+	}
+
+	require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
+}
+
+// TestManagerChainCanceledSourceRejectsCreate rejects terminal admission after
+// Stop cancels its lifetime, before it obtains the lock to close storage.
+func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reproduce the terminal source lifetime while backend remains
+	// open and started remains true. No create/storage expectation is allowed.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+
+	source := &bwmock.Chain{}
+	source.On("Notifications").Return((<-chan any)(nil)).Once()
+	manager := newManagerLifecycleTest(t, backend, source)
+	manager.started.Store(true)
+	manager.cancel()
+
+	// Act: Try creation before the ordinary cleanup owner closes the Store.
+	w, err := manager.Create(CreateWalletParams{Name: "late"})
+
+	// Assert: The terminal source rejects this call before validation or
+	// backend preparation; fixture cleanup alone owns the one Store close.
+	require.ErrorIs(t, err, ErrManagerStopped)
+	require.Nil(t, w)
+}
+
+// TestManagerRollbackKvdbAheadOfTip reproduces mined notifications arriving
+// before the sync stamp and requires immediate, readable replacement history.
+func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange real stores while syncing, with an owned credit persisted by a
+	// mined notification that does not advance the earlier complete sync tip.
+	source := bwmock.NewGenesisChain(t, true)
+	source.On("TestMempoolAccept", mock.Anything, float64(0)).
+		Return(nil, chain.ErrTxAlreadyInMempool).Maybe()
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend: DBBackendKVDB, DataSource: testKVDBPath(t),
+		ChainParams: chainParams, ChainSource: source,
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Stop()) })
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
+
+	params := managerLifecycleCreateParams(testWalletName)
+	params.PubPassphrase = []byte(InsecurePubPassphrase)
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		info, readErr := w.Info(t.Context())
+		return readErr == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
+	backend, ok := m.backend.(*kvdbManagerBackend)
+	require.True(t, ok)
+	s, ok := w.sync.(*syncer)
+	require.True(t, ok)
+
+	mgr, conn := backend.addressMgr, backend.db
+
+	s.state.Store(uint32(syncStateSyncing))
+
+	stamp := waddrmgr.BlockStamp{
+		Height:    1,
+		Hash:      chainhash.Hash{1},
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		return mgr.SetSyncedTo(tx.ReadWriteBucket(waddrmgrNamespaceKey), &stamp)
+	})
+	require.NoError(t, err)
+
+	old := reorgBlock(2)
+	replacement := old
+	replacement.Hash = chainhash.Hash{22}
+	oldTx, newTx := reorgRecord(t, 80), reorgRecord(t, 81)
+
+	// The configured source must supply the canonical observation. After
+	// it, a lower source tip keeps background catch-up idle, so recovery
+	// and stale replay must preserve history before any rescan can help.
+	source.On("GetBestBlock").Unset()
+	source.On("GetBestBlock").Return(&replacement.Hash, int32(2), nil).Twice()
+	source.On("GetBestBlock").Return(chainParams.GenesisHash, int32(0), nil).
+		Maybe()
+	source.On("GetBlockHash", int64(1)).Return(&stamp.Hash, nil).Once()
+	expectDisconnectHeaders(source, 2, stamp.Hash, replacement.Hash)
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.RelevantTx{
+			TxRecord: oldTx,
+			Block:    &old,
+		},
+		matches: liveMatches(oldTx),
+	}))
+
+	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
+		return s.txStore.AddCredit(
+			tx.ReadWriteBucket(wtxmgrNamespaceKey), oldTx, &old, 0, false,
+		)
+	})
+	require.NoError(t, err)
+	require.Equal(t, stamp, mgr.SyncedTo())
+
+	// Act on the disconnect while the manager is still below the orphan.
+	require.NoError(t, s.processChainEvent(
+		t.Context(), chainEvent{notification: chain.BlockDisconnected(old)},
+	))
+
+	// Assert the orphan and its credit are already unmined before any
+	// replacement or later rescan; its earlier full sync stamp is unchanged.
+	orphan, err := s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		WalletID: 0,
+		Txid:     oldTx.Hash,
+	})
+	require.NoError(t, err)
+	require.Nil(t, orphan.Block)
+	require.Len(t, orphan.OwnedOutputs, 1)
+	require.Equal(t, stamp, mgr.SyncedTo())
+
+	// Act by accepting the replacement and replaying a delayed old detach.
+	// The stored replacement identity must make that replay harmless.
+	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
+		notification: chain.FilteredBlockConnected{
+			Block:       &replacement,
+			RelevantTxs: []*wtxmgr.TxRecord{newTx},
+		},
+		matches: liveMatches(newTx),
+	}))
+	require.NoError(t, s.processChainEvent(
+		t.Context(), chainEvent{notification: chain.BlockDisconnected(old)},
+	))
+
+	// Assert one complete history query resolves the replacement, while the
+	// old transaction remains in the unmined pool with its credit intact.
+	history, err := s.store.ListTxns(
+		t.Context(), db.ListTxnsQuery{EndHeight: 2},
+	)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, newTx.Hash, history[0].Hash)
+	require.Equal(t, replacement.Hash, history[0].Block.Hash)
+	orphan, err = s.store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		Txid: oldTx.Hash,
+	})
+	require.NoError(t, err)
+	require.Nil(t, orphan.Block)
+	require.Len(t, orphan.OwnedOutputs, 1)
 }

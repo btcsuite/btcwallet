@@ -239,6 +239,69 @@ func TestProcessPaymentHandlesOrchestration(t *testing.T) {
 }
 ```
 
+## 6. Prefer `mock.Mock` for Interface Mocks
+
+When a test needs to implement an interface for expectations or call
+verification, prefer embedding `mock.Mock` from `github.com/stretchr/testify/mock`
+over writing a bespoke stub struct. This preference applies specifically when you
+need to verify that methods were called with certain arguments or a specific
+number of times. For simple stubs that only return static values without
+tracking calls, a basic struct or function literal may still be appropriate.
+
+Using `mock.Mock` provides several advantages:
+- **Explicit Expectations:** Define exactly which methods must be called, and
+  with what arguments, using `On(...).Return(...)`.
+- **Call Verification:** Use `AssertExpectations(t)` to ensure all expected
+  calls were made. This is cleaner than manually tracking call counts in a stub.
+- **Consistent API:** Aligns with existing project tests, making mocks easier
+  to read and maintain.
+
+### Example: Using `mock.Mock`
+
+First, define the mock struct by embedding the concrete `mock.Mock` type. In
+the method implementation, use `m.Called` to record the call and return the
+arguments. Use a defensive type assertion to safely handle unexpected return
+types:
+
+```go
+type mockStore struct {
+	mock.Mock
+}
+
+func (m *mockStore) TxDetails(ctx context.Context, hash *chainhash.Hash) (*wtxmgr.TxDetails, error) {
+	args := m.Called(ctx, hash)
+	
+	// Safely handle the first return value with a type assertion.
+	details, ok := args.Get(0).(*wtxmgr.TxDetails)
+	if !ok && args.Get(0) != nil {
+		// Return an error if the mock was misconfigured with the wrong type.
+		return nil, fmt.Errorf("mock type error: TxDetails result")
+	}
+	
+	return details, args.Error(1)
+}
+```
+
+Then, use the mock in your test by setting expectations and asserting them at
+the end of the "Assert" block.
+
+```go
+func TestGetTx(t *testing.T) {
+	// Arrange
+	store := &mockStore{}
+	store.On("TxDetails", mock.Anything, TstTxHash).
+		Return(&wtxmgr.TxDetails{...}, nil).Once()
+
+	// Act
+	tx, err := GetTx(store, TstTxHash)
+
+	// Assert
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+	store.AssertExpectations(t)
+}
+```
+
 ## 7. Prefer `require` Over `assert`
 
 The `testify` library provides both `require` and `assert` packages.

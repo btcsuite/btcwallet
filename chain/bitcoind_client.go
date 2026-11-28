@@ -43,7 +43,6 @@ type BitcoindClient struct {
 	// notifications to the caller. This must be used atomically.
 	notifyBlocks uint32
 
-	started int32 // To be used atomically.
 	stopped int32 // To be used atomically.
 
 	// birthday is the earliest time for which we should begin scanning the
@@ -68,6 +67,7 @@ type BitcoindClient struct {
 	batchClient *rpcclient.Client
 
 	// bestBlock keeps track of the tip of the current best chain.
+	// bestBlockMtx also orders notification queue startup with retirement.
 	bestBlockMtx sync.RWMutex
 	bestBlock    waddrmgr.BlockStamp
 
@@ -108,6 +108,7 @@ type BitcoindClient struct {
 	// BlockConnected notifications for greater block heights can remove the
 	// need to process earlier notifications still waiting to be processed.
 	notificationQueue *ConcurrentQueue
+	eventStream       *chainEventStream
 
 	// txNtfns is a channel through which transaction events will be
 	// retrieved from the backing bitcoind connection, either via ZMQ or
@@ -355,6 +356,13 @@ func (c *BitcoindClient) Notifications() <-chan interface{} {
 	return c.notificationQueue.ChanOut()
 }
 
+// SubscribeChainEvents enrolls a reader on the started BitcoindClient.
+func (c *BitcoindClient) SubscribeChainEvents(
+	ctx context.Context) EventSubscription {
+
+	return c.eventStream.subscribe(ctx)
+}
+
 // NotifyReceived allows the chain backend to notify the caller whenever a
 // transaction pays to any of the given addresses.
 //
@@ -365,6 +373,23 @@ func (c *BitcoindClient) NotifyReceived(addrs []address.Address) error {
 	_ = c.NotifyBlocks()
 
 	return nil
+}
+
+// WatchAddrsFromTip adds addresses to bitcoind's existing in-memory
+// notification filter and starts block notifications without invoking either
+// historical rescan entry point. Reusing the filter maps also makes repeated
+// registrations idempotent.
+func (c *BitcoindClient) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	c.updateWatchedFilters(addrs)
+
+	return c.NotifyBlocks()
 }
 
 // NotifySpent allows the chain backend to notify the caller whenever a
@@ -589,21 +614,21 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 
 // Start initializes the bitcoind rescan client using the backing bitcoind
 // connection and starts all goroutines necessary in order to process rescans
-// and ZMQ notifications.
+// and ZMQ notifications. Concurrent starts launch a single queue worker.
+// A failed tip lookup leaves startup retryable.
 //
 // NOTE: This is part of the chain.Interface interface.
 func (c *BitcoindClient) Start(_ context.Context) error {
-	if !atomic.CompareAndSwapInt32(&c.started, 0, 1) {
+	// A repeat start must succeed even if later tip RPCs would fail.
+	c.bestBlockMtx.RLock()
+	started := c.eventStream != nil
+	c.bestBlockMtx.RUnlock()
+
+	if started {
 		return nil
 	}
 
-	// Start the notification queue and immediately dispatch a
-	// ClientConnected notification to the caller. This is needed as some of
-	// the callers will require this notification before proceeding.
-	c.notificationQueue.Start()
-	c.notificationQueue.ChanIn() <- ClientConnected{}
-
-	// Retrieve the best block of the chain.
+	// Resolve the tip first so a failed RPC leaves the queue untouched.
 	bestHash, bestHeight, err := c.GetBestBlock()
 	if err != nil {
 		return fmt.Errorf("unable to retrieve best block: %w", err)
@@ -615,12 +640,35 @@ func (c *BitcoindClient) Start(_ context.Context) error {
 	}
 
 	c.bestBlockMtx.Lock()
+	defer c.bestBlockMtx.Unlock()
+
+	// Another caller may have published the worker during the tip RPCs.
+	if c.eventStream != nil {
+		return nil
+	}
+
+	// Stop may have retired the queue while startup was reading the tip.
+	if atomic.LoadInt32(&c.stopped) != 0 {
+		return ErrBitcoindClientShuttingDown
+	}
+
 	c.bestBlock = waddrmgr.BlockStamp{
 		Hash:      *bestHash,
 		Height:    bestHeight,
 		Timestamp: time.Unix(bestHeader.Time, 0),
 	}
-	c.bestBlockMtx.Unlock()
+
+	stream := newChainEventStream(c.chainConn.cfg.ChainParams, c)
+
+	// The startup marker predates enrollment. Seed it in the FIFO so
+	// only future intake can publish to subscribers.
+	c.notificationQueue.enqueue(ClientConnected{})
+	c.wg.Go(func() {
+		defer stream.close()
+
+		c.notificationQueue.run(stream, c.chainConn.quit)
+	})
+	c.eventStream = stream
 
 	return nil
 }
@@ -636,14 +684,18 @@ func (c *BitcoindClient) Stop() {
 
 	close(c.quit)
 
+	// Retire the queue under the startup publication barrier before
+	// waiting for the RPC client to shut down.
+	c.bestBlockMtx.Lock()
+	c.notificationQueue.Stop()
+	c.bestBlockMtx.Unlock()
+
 	// Remove this client's reference from the bitcoind connection to
 	// prevent sending notifications to it after it's been stopped.
 	c.chainConn.RemoveClient(c.id)
 
 	c.batchClient.Shutdown()
 	c.batchClient.WaitForShutdown()
-
-	c.notificationQueue.Stop()
 }
 
 // WaitForShutdown blocks until the client has finished disconnecting and all
@@ -726,22 +778,30 @@ func (c *BitcoindClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	return &bestBlock, nil
 }
 
+// enqueueNotification submits a native event while its queue owner can still
+// receive it. Connection shutdown can retire the owner before NotifyBlocks
+// adds the client to the set that gets stopped directly.
+func (c *BitcoindClient) enqueueNotification(event any) {
+	select {
+	case c.notificationQueue.ChanIn() <- event:
+	case <-c.quit:
+	case <-c.chainConn.quit:
+	}
+}
+
 // onBlockConnected is a callback that's executed whenever a new block has been
 // detected. This will queue a BlockConnected notification to the caller.
 func (c *BitcoindClient) onBlockConnected(hash *chainhash.Hash, height int32,
 	timestamp time.Time) {
 
 	if c.shouldNotifyBlocks() {
-		select {
-		case c.notificationQueue.ChanIn() <- BlockConnected{
+		c.enqueueNotification(BlockConnected{
 			Block: wtxmgr.Block{
 				Hash:   *hash,
 				Height: height,
 			},
 			Time: timestamp,
-		}:
-		case <-c.quit:
-		}
+		})
 	}
 }
 
@@ -754,8 +814,7 @@ func (c *BitcoindClient) onFilteredBlockConnected(height int32,
 	header *wire.BlockHeader, relevantTxs []*wtxmgr.TxRecord) {
 
 	if c.shouldNotifyBlocks() {
-		select {
-		case c.notificationQueue.ChanIn() <- FilteredBlockConnected{
+		c.enqueueNotification(FilteredBlockConnected{
 			Block: &wtxmgr.BlockMeta{
 				Block: wtxmgr.Block{
 					Hash:   header.BlockHash(),
@@ -764,9 +823,7 @@ func (c *BitcoindClient) onFilteredBlockConnected(height int32,
 				Time: header.Timestamp,
 			},
 			RelevantTxs: relevantTxs,
-		}:
-		case <-c.quit:
-		}
+		})
 	}
 }
 
@@ -777,16 +834,13 @@ func (c *BitcoindClient) onBlockDisconnected(hash *chainhash.Hash, height int32,
 	timestamp time.Time) {
 
 	if c.shouldNotifyBlocks() {
-		select {
-		case c.notificationQueue.ChanIn() <- BlockDisconnected{
+		c.enqueueNotification(BlockDisconnected{
 			Block: wtxmgr.Block{
 				Hash:   *hash,
 				Height: height,
 			},
 			Time: timestamp,
-		}:
-		case <-c.quit:
-		}
+		})
 	}
 }
 
@@ -804,13 +858,10 @@ func (c *BitcoindClient) onRelevantTx(tx *wtxmgr.TxRecord,
 		return
 	}
 
-	select {
-	case c.notificationQueue.ChanIn() <- RelevantTx{
+	c.enqueueNotification(RelevantTx{
 		TxRecord: tx,
 		Block:    block,
-	}:
-	case <-c.quit:
-	}
+	})
 }
 
 // onRescanProgress is a callback that's executed whenever a rescan is in
@@ -819,14 +870,11 @@ func (c *BitcoindClient) onRelevantTx(tx *wtxmgr.TxRecord,
 func (c *BitcoindClient) onRescanProgress(hash *chainhash.Hash, height int32,
 	timestamp time.Time) {
 
-	select {
-	case c.notificationQueue.ChanIn() <- &RescanProgress{
+	c.enqueueNotification(&RescanProgress{
 		Hash:   *hash,
 		Height: height,
 		Time:   timestamp,
-	}:
-	case <-c.quit:
-	}
+	})
 }
 
 // onRescanFinished is a callback that's executed whenever a rescan has
@@ -835,14 +883,11 @@ func (c *BitcoindClient) onRescanProgress(hash *chainhash.Hash, height int32,
 func (c *BitcoindClient) onRescanFinished(hash *chainhash.Hash, height int32,
 	timestamp time.Time) {
 
-	select {
-	case c.notificationQueue.ChanIn() <- &RescanFinished{
+	c.enqueueNotification(&RescanFinished{
 		Hash:   hash,
 		Height: height,
 		Time:   timestamp,
-	}:
-	case <-c.quit:
-	}
+	})
 }
 
 // reorg processes a reorganization during chain synchronization. This is
@@ -921,7 +966,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		}
 
 		currentBlock.Height--
-		currentBlock.Hash = currentHeader.PrevBlock
+		// Keep the identity of the header just loaded, not its parent.
+		currentBlock.Hash = *prevBlock
 		currentBlock.Timestamp = currentHeader.Timestamp
 
 		// Store the correct block in our list in order to notify it

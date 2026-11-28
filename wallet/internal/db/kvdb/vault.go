@@ -1,0 +1,387 @@
+package kvdb
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
+	"github.com/btcsuite/btcwallet/walletdb"
+)
+
+// LegacyWalletVault adapts the legacy address manager to keyvault.UnsafeVault.
+//
+// Deprecated: remove this adapter with kvdb support.
+type LegacyWalletVault struct {
+	db  walletdb.DB
+	mgr *waddrmgr.Manager
+}
+
+// Compile-time assertion that LegacyWalletVault satisfies keyvault.UnsafeVault.
+var _ keyvault.UnsafeVault = (*LegacyWalletVault)(nil)
+
+// NewLegacyWalletVault creates a Vault backed by a legacy walletdb address
+// manager.
+//
+// Deprecated: remove this constructor with kvdb support.
+func NewLegacyWalletVault(db walletdb.DB,
+	mgr *waddrmgr.Manager) *LegacyWalletVault {
+
+	return &LegacyWalletVault{
+		db:  db,
+		mgr: mgr,
+	}
+}
+
+// Unlock authenticates the private passphrase through the legacy address
+// manager.
+func (v *LegacyWalletVault) Unlock(ctx context.Context,
+	passphrase []byte) error {
+
+	err := checkContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Honor the Vault contract: unlocking an already-unlocked vault must
+	// return ErrVaultUnlocked without re-validating the passphrase.
+	if !v.mgr.IsLocked() {
+		return keyvault.ErrVaultUnlocked
+	}
+
+	err = walletdb.View(v.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		return v.mgr.Unlock(ns, passphrase)
+	})
+	if err != nil {
+		// A driver can fail to finalize the read after the callback has
+		// unlocked the manager. A failed Unlock must leave it locked.
+		v.Lock()
+
+		return fmt.Errorf("view: %w", translateVaultErr(err))
+	}
+
+	return nil
+}
+
+// Lock clears any cached secret key material from the legacy address manager.
+//
+// Lock is idempotent and has nothing to surface for the no-op cases: an
+// already-locked manager returns waddrmgr.ErrLocked and a watch-only manager
+// returns waddrmgr.ErrWatchingOnly (it holds no private material to clear).
+// Both are swallowed. Any other failure is only logged because the
+// keyvault.Vault contract gives Lock no way to surface an error.
+func (v *LegacyWalletVault) Lock() {
+	err := v.mgr.Lock()
+	switch {
+	case err == nil:
+
+	case waddrmgr.IsError(err, waddrmgr.ErrLocked):
+
+	case waddrmgr.IsError(err, waddrmgr.ErrWatchingOnly):
+
+	default:
+		log.Errorf("LegacyWalletVault lock manager: %v", err)
+	}
+}
+
+// IsLocked reports whether the legacy address manager is currently locked.
+func (v *LegacyWalletVault) IsLocked() bool {
+	return v.mgr.IsLocked()
+}
+
+// Encrypt encrypts key material under the requested legacy crypto-key class.
+func (v *LegacyWalletVault) Encrypt(keyType waddrmgr.CryptoKeyType,
+	plaintext []byte) ([]byte, error) {
+
+	return v.crypt(v.mgr.Encrypt, keyType, plaintext, "encrypt")
+}
+
+// Decrypt decrypts key material under the requested legacy crypto-key class.
+func (v *LegacyWalletVault) Decrypt(keyType waddrmgr.CryptoKeyType,
+	ciphertext []byte) ([]byte, error) {
+
+	return v.crypt(v.mgr.Decrypt, keyType, ciphertext, "decrypt")
+}
+
+// DecryptScript returns keyvault.ErrNotImplemented. kvdb callers resolve
+// scripts through the legacy Store lookup and Decrypt.
+//
+// Deprecated: remove this method with kvdb support.
+func (v *LegacyWalletVault) DecryptScript(context.Context, []byte) ([]byte,
+	error) {
+
+	return nil, keyvault.ErrNotImplemented
+}
+
+// ECDH implements keyvault.Vault.ECDH for kvdb wallets. It reads the account
+// secret through the kvdb Store and decrypts it with the legacy manager, so the
+// private key never reaches Wallet. Unlike the SQL vault, the manager's Lock
+// does not wait for this use: its lock covers only Decrypt.
+//
+// Deprecated: kvdb support is being removed; delete this method with it.
+func (v *LegacyWalletVault) ECDH(ctx context.Context, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath, remote *btcec.PublicKey) ([32]byte, error) {
+
+	if remote == nil || !remote.IsOnCurve() {
+		return [32]byte{}, keyvault.ErrInvalidRemoteKey
+	}
+
+	store := NewStore(v.db, nil, v.mgr)
+
+	secret, err := store.GetAccountSecret(ctx, db.GetAccountSecretQuery{
+		Scope:         db.KeyScope(scope),
+		AccountNumber: path.InternalAccount,
+	})
+	if secret != nil {
+		defer clear(secret.EncryptedPrivateKey)
+	}
+
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("fetch account secret: %w", err)
+	}
+
+	if len(secret.EncryptedPrivateKey) == 0 {
+		return [32]byte{}, keyvault.ErrNoPrivateKey
+	}
+
+	accountPriv, err := v.Decrypt(
+		waddrmgr.CKTPrivate, secret.EncryptedPrivateKey,
+	)
+	defer clear(accountPriv)
+
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("decrypt account priv: %w", err)
+	}
+
+	privKey, err := keyvault.DeriveAccountChildKey(accountPriv, path)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	defer privKey.Zero()
+
+	return keyvault.ECDHSecret(privKey, remote), nil
+}
+
+// PubKey implements keyvault.Vault.PubKey for kvdb wallets.
+//
+// Deprecated: kvdb support is being removed; delete this method with it.
+func (v *LegacyWalletVault) PubKey(ctx context.Context,
+	sel signing.KeySelector) (*btcec.PublicKey, error) {
+
+	var pub *btcec.PublicKey
+
+	err := v.useKey(ctx, sel, func(key *btcec.PrivateKey) error {
+		pub = key.PubKey()
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pub, nil
+}
+
+// SignDigest implements keyvault.Vault.SignDigest for kvdb wallets.
+//
+// Deprecated: kvdb support is being removed; delete this method with it.
+func (v *LegacyWalletVault) SignDigest(ctx context.Context,
+	req signing.DigestRequest) (signing.Signature, error) {
+
+	defer req.Tweak.Zero()
+
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("kvdb vault SignDigest: %w", err)
+	}
+
+	var sig signing.Signature
+
+	err = v.useKey(ctx, req.Key, func(key *btcec.PrivateKey) error {
+		sig, err = keyvault.SignDigestWithKey(key, &req)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return sig, nil
+}
+
+// useKey reads the selected key through the kvdb Store, decrypts it with the
+// legacy manager and runs use with the private key, so the key never reaches
+// Wallet. It refuses an invalid selector, then returns keyvault.ErrVaultLocked
+// for a locked manager, both before the Store read; a Lock that lands after the
+// read fails the decrypt the same way. A watch-only manager is never unlocked,
+// so it skips the lock check and the lookup reports keyvault.ErrNoPrivateKey,
+// as the SQL vault does. kvdb reports a script it does not know like a
+// watch-only import, so a missing import returns keyvault.ErrNoPrivateKey too.
+// As for ECDH, the manager's Lock does not wait for this use: its lock covers
+// only the decrypt. Every secret is cleared before return.
+func (v *LegacyWalletVault) useKey(ctx context.Context,
+	sel signing.KeySelector, use func(*btcec.PrivateKey) error) error {
+
+	err := signing.ValidateKeySelector(sel)
+	if err != nil {
+		return fmt.Errorf("kvdb vault: %w", err)
+	}
+
+	if v.mgr.IsLocked() && !v.mgr.WatchOnly() {
+		return fmt.Errorf("kvdb vault: %w", keyvault.ErrVaultLocked)
+	}
+
+	ciphertext, toKey, err := keyvault.LoadEncryptedKey(
+		ctx, NewStore(v.db, nil, v.mgr), 0, sel,
+	)
+	defer clear(ciphertext)
+
+	if err != nil {
+		return fmt.Errorf("kvdb vault: %w", err)
+	}
+
+	return v.useDecryptedKey(ciphertext, toKey, use)
+}
+
+// useDecryptedKey decrypts ciphertext with the legacy manager, turns the
+// plaintext into the private key with toKey and runs use with it. The plaintext
+// and the key are cleared before return.
+func (v *LegacyWalletVault) useDecryptedKey(ciphertext []byte,
+	toKey func([]byte) (*btcec.PrivateKey, error),
+	use func(*btcec.PrivateKey) error) error {
+
+	plaintext, err := v.crypt(
+		v.mgr.Decrypt, waddrmgr.CKTPrivate, ciphertext, "decrypt",
+	)
+	defer clear(plaintext)
+
+	if err != nil {
+		return fmt.Errorf("kvdb vault decrypt private key: %w", err)
+	}
+
+	key, err := toKey(plaintext)
+	if err != nil {
+		return fmt.Errorf("kvdb vault: %w", err)
+	}
+	defer key.Zero()
+
+	return use(key)
+}
+
+// crypt forwards a cipher operation to the address manager and maps its
+// sentinels onto the keyvault ones. The crypto-key class stays a caller
+// argument here: the legacy format records per script row which key protects
+// it, so the adapter cannot pick one for the whole manager.
+func (v *LegacyWalletVault) crypt(op func(waddrmgr.CryptoKeyType,
+	[]byte) ([]byte, error), keyType waddrmgr.CryptoKeyType, in []byte,
+	what string) ([]byte, error) {
+
+	out, err := op(keyType, in)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", what, translateVaultErr(err))
+	}
+
+	return out, nil
+}
+
+// ChangePassphrase re-wraps the address manager's key material inside a single
+// walletdb transaction.
+//
+// The legacy dual layout keeps public metadata and private key material under
+// separate passphrases, so a request may rotate either half or both. Both are
+// applied in the same transaction to preserve the base API's atomicity.
+// Validation and the row writes belong to the address manager, so this works
+// whether or not the manager is unlocked. The manager applies the new material
+// to its own in-memory state; this adapter neither observes nor reorders that.
+//
+//nolint:staticcheck // Implements the legacy kvdb dual-passphrase format.
+func (v *LegacyWalletVault) ChangePassphrase(ctx context.Context,
+	params keyvault.ChangePassphraseParams) error {
+
+	err := params.Validate()
+	if err != nil {
+		return fmt.Errorf("legacy wallet vault ChangePassphrase: %w", err)
+	}
+
+	// Bail before the walletdb access and the expensive scrypt derivation
+	// when the request is already canceled.
+	err = checkContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	changePublic := params.PublicOld != nil
+	changePrivate := params.PrivateOld != nil
+
+	err = walletdb.Update(v.db, func(tx walletdb.ReadWriteTx) error {
+		return v.changePassphraseTx(
+			tx, params, changePublic, changePrivate,
+		)
+	})
+	if err != nil {
+		return fmt.Errorf("update: %w", translateVaultErr(err))
+	}
+
+	return nil
+}
+
+//nolint:staticcheck // Applies the legacy kvdb dual-passphrase fields.
+func (v *LegacyWalletVault) changePassphraseTx(tx walletdb.ReadWriteTx,
+	params keyvault.ChangePassphraseParams, changePublic,
+	changePrivate bool) error {
+
+	ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+	if ns == nil {
+		return errMissingAddrmgrNamespace
+	}
+
+	if changePublic {
+		err := v.mgr.ChangePassphrase(
+			ns, params.PublicOld, params.PublicNew, false,
+			&waddrmgr.DefaultScryptOptions,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	if changePrivate {
+		err := v.mgr.ChangePassphrase(
+			ns, params.PrivateOld, params.PrivateNew, true,
+			&waddrmgr.DefaultScryptOptions,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// translateVaultErr maps the waddrmgr sentinels an adapter method can surface
+// onto their keyvault.Vault equivalents, so callers handle a keyvault.Vault
+// backed by the legacy manager the same way they handle WalletVault. A wrong
+// passphrase (waddrmgr.ErrWrongPassphrase) becomes
+// keyvault.ErrInvalidPassphrase and a locked/watch-only crypto-key access
+// (waddrmgr.ErrLocked) becomes keyvault.ErrVaultLocked, matching what
+// WalletVault returns for those cases. Any other error is returned unchanged.
+func translateVaultErr(err error) error {
+	switch {
+	case waddrmgr.IsError(err, waddrmgr.ErrWrongPassphrase):
+		return keyvault.ErrInvalidPassphrase
+
+	case waddrmgr.IsError(err, waddrmgr.ErrLocked):
+		return keyvault.ErrVaultLocked
+
+	default:
+		return err
+	}
+}

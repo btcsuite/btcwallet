@@ -168,7 +168,7 @@ func BenchmarkGetTxAPI(b *testing.B) {
 			//     legacy API
 			//   - Regression prevention for future changes
 			assertGetTxAPIsEquivalent(
-				b, bw.Wallet, beforeResult, afterResult,
+				b, beforeResult, afterResult,
 			)
 		})
 	}
@@ -263,11 +263,6 @@ func BenchmarkGetTxAPIConcurrently(b *testing.B) {
 			medianIndex := len(bw.allTxs) / 2
 			testTxHash := bw.allTxs[medianIndex].TxHash()
 
-			var (
-				before *GetTransactionResult
-				after  *TxDetail
-			)
-
 			b.Run("0-Before", func(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -277,10 +272,8 @@ func BenchmarkGetTxAPIConcurrently(b *testing.B) {
 						res, err := bw.GetTransaction(
 							testTxHash,
 						)
-						before = res
-
 						require.NoError(b, err)
-						require.NotNil(b, before)
+						require.NotNil(b, res)
 					}
 				})
 			})
@@ -294,15 +287,19 @@ func BenchmarkGetTxAPIConcurrently(b *testing.B) {
 						res, err := bw.GetTx(
 							b.Context(), testTxHash,
 						)
-						after = res
-
 						require.NoError(b, err)
-						require.NotNil(b, after)
+						require.NotNil(b, res)
 					}
 				})
 			})
 
-			assertGetTxAPIsEquivalent(b, bw.Wallet, before, after)
+			before, err := bw.GetTransaction(testTxHash)
+			require.NoError(b, err)
+
+			after, err := bw.GetTx(b.Context(), testTxHash)
+			require.NoError(b, err)
+
+			assertGetTxAPIsEquivalent(b, before, after)
 		})
 	}
 }
@@ -449,8 +446,7 @@ func BenchmarkListTxnsAPI(b *testing.B) {
 
 				for i := 0; b.Loop(); i++ {
 					result, err = bw.ListTxns(
-						b.Context(), startHeight,
-						endHeight,
+						b.Context(), startHeight, endHeight,
 					)
 					require.NoError(b, err)
 
@@ -476,7 +472,7 @@ func BenchmarkListTxnsAPI(b *testing.B) {
 			//     legacy API
 			//   - Regression prevention for future changes
 			assertListTxnsAPIsEquivalent(
-				b, bw.Wallet, beforeResult, afterResult,
+				b, beforeResult, afterResult,
 			)
 		})
 	}
@@ -571,11 +567,6 @@ func BenchmarkListTxnsAPIConcurrently(b *testing.B) {
 				endHeight   int32 = -1
 			)
 
-			var (
-				beforeResult *GetTransactionsResult
-				afterResult  []*TxDetail
-			)
-
 			b.Run("0-Before", func(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -586,8 +577,6 @@ func BenchmarkListTxnsAPIConcurrently(b *testing.B) {
 							startBlock, endBlock,
 							"", nil,
 						)
-						beforeResult = res
-
 						require.NoError(b, err)
 						require.NotNil(b, res)
 					}
@@ -601,19 +590,26 @@ func BenchmarkListTxnsAPIConcurrently(b *testing.B) {
 				b.RunParallel(func(pb *testing.PB) {
 					for pb.Next() {
 						res, err := bw.ListTxns(
-							b.Context(),
-							startHeight, endHeight,
+							b.Context(), startHeight, endHeight,
 						)
-						afterResult = res
-
 						require.NoError(b, err)
 						require.NotNil(b, res)
 					}
 				})
 			})
 
+			beforeResult, err := bw.GetTransactions(
+				startBlock, endBlock, "", nil,
+			)
+			require.NoError(b, err)
+
+			afterResult, err := bw.ListTxns(
+				b.Context(), startHeight, endHeight,
+			)
+			require.NoError(b, err)
+
 			assertListTxnsAPIsEquivalent(
-				b, bw.Wallet, beforeResult, afterResult,
+				b, beforeResult, afterResult,
 			)
 		})
 	}
@@ -621,57 +617,175 @@ func BenchmarkListTxnsAPIConcurrently(b *testing.B) {
 
 // assertGetTxAPIsEquivalent verifies that GetTransaction (legacy) and GetTx
 // (new) return equivalent data for the same transaction.
-func assertGetTxAPIsEquivalent(b *testing.B, w *Wallet,
-	before *GetTransactionResult, after *TxDetail) {
+func assertGetTxAPIsEquivalent(b *testing.B, before *GetTransactionResult,
+	after *TxDetail) {
 
 	b.Helper()
 
 	require.NotNil(b, before)
 	require.NotNil(b, after)
 
-	afterConverted, err := w.GetTransaction(after.Hash)
-	require.NoError(b, err)
-
-	require.GreaterOrEqual(b, afterConverted.Confirmations, int32(0))
-
-	require.Equal(b, before, afterConverted)
+	assertTxSummaryMatchesDetail(b, before.Summary, after)
+	assertGetTxBlockMatchesDetail(b, before, after)
 }
 
 // assertListTxnsAPIsEquivalent verifies that GetTransactions (legacy) and
 // ListTxns (new) return equivalent data for the same block range.
-func assertListTxnsAPIsEquivalent(b *testing.B, w *Wallet,
-	before *GetTransactionsResult, after []*TxDetail) {
+func assertListTxnsAPIsEquivalent(b *testing.B, before *GetTransactionsResult,
+	after []*TxDetail) {
 
 	b.Helper()
 
 	require.NotNil(b, before)
 	require.NotNil(b, after)
 
-	// Use GetTransactions API to fetch all transactions (both confirmed
-	// and unconfirmed) for comparison. Parameters match the benchmark's
-	// "before" case:
-	// - startBlock: nil (from genesis)
-	// - endBlock: nil (to current tip)
-	// - accountName: "" (all accounts)
-	// - cancel: nil (no cancellation)
-	var (
-		startBlock  *BlockIdentifier
-		endBlock    *BlockIdentifier
-		accountName string
-		cancel      <-chan struct{}
-	)
-
-	afterConverted, err := w.GetTransactions(
-		startBlock, endBlock, accountName, cancel,
-	)
-	require.NoError(b, err)
-
 	require.NotEmpty(b, before.MinedTransactions)
 	require.NotEmpty(b, before.UnminedTransactions)
 
-	require.Equal(
-		b, before, afterConverted,
-		"GetTransactions and ListTxns APIs should return equivalent "+
-			"data",
-	)
+	totalTxns := len(before.UnminedTransactions)
+	for _, block := range before.MinedTransactions {
+		totalTxns += len(block.Transactions)
+	}
+
+	require.Len(b, after, totalTxns)
+
+	var idx int
+	for _, block := range before.MinedTransactions {
+		for _, txSummary := range block.Transactions {
+			txDetail := after[idx]
+			assertListedTxBlockMatchesDetail(b, block, txDetail)
+			assertTxSummaryMatchesDetail(b, txSummary, txDetail)
+
+			idx++
+		}
+	}
+
+	for _, txSummary := range before.UnminedTransactions {
+		txDetail := after[idx]
+		require.Nil(b, txDetail.Block)
+		require.Zero(b, txDetail.Confirmations)
+		assertTxSummaryMatchesDetail(b, txSummary, txDetail)
+
+		idx++
+	}
+}
+
+// assertGetTxBlockMatchesDetail verifies that GetTx preserves the block fields
+// returned by GetTransaction.
+func assertGetTxBlockMatchesDetail(b *testing.B,
+	before *GetTransactionResult, after *TxDetail) {
+
+	b.Helper()
+
+	require.Equal(b, before.Confirmations, after.Confirmations)
+
+	if before.BlockHash == nil {
+		require.Nil(b, after.Block)
+		require.Equal(b, int32(-1), before.Height)
+		require.Zero(b, before.Timestamp)
+
+		return
+	}
+
+	require.NotNil(b, after.Block)
+	require.Equal(b, *before.BlockHash, after.Block.Hash)
+	require.Equal(b, before.Height, after.Block.Height)
+	require.Equal(b, before.Timestamp, after.Block.Timestamp)
+}
+
+// assertListedTxBlockMatchesDetail verifies that ListTxns preserves mined block
+// metadata from GetTransactions.
+func assertListedTxBlockMatchesDetail(b *testing.B, block Block,
+	after *TxDetail) {
+
+	b.Helper()
+
+	require.NotNil(b, block.Hash)
+	require.NotNil(b, after.Block)
+	require.Equal(b, *block.Hash, after.Block.Hash)
+	require.Equal(b, block.Height, after.Block.Height)
+	require.Equal(b, block.Timestamp, after.Block.Timestamp)
+	require.Positive(b, after.Confirmations)
+}
+
+// assertTxSummaryMatchesDetail verifies that the wallet tx detail preserves the
+// fields exposed by the legacy transaction summary.
+func assertTxSummaryMatchesDetail(b *testing.B, before TransactionSummary,
+	after *TxDetail) {
+
+	b.Helper()
+
+	require.NotNil(b, before.Hash)
+	require.NotNil(b, before.Tx)
+	require.Equal(b, *before.Hash, after.Hash)
+	require.Equal(b, before.Transaction, after.RawTx)
+	require.Equal(b, before.Fee, after.Fee)
+	require.Equal(b, before.Timestamp, after.ReceivedTime.Unix())
+	require.Equal(b, before.Label, after.Label)
+
+	assertTxInputsMatchDetail(b, before, after)
+	assertTxOutputsMatchDetail(b, before, after)
+	require.Equal(b, expectedSummaryValue(before), int64(after.Value))
+}
+
+// assertTxInputsMatchDetail verifies input order and wallet ownership markers.
+func assertTxInputsMatchDetail(b *testing.B, before TransactionSummary,
+	after *TxDetail) {
+
+	b.Helper()
+
+	ownedInputs := make(map[uint32]struct{}, len(before.MyInputs))
+	for _, input := range before.MyInputs {
+		ownedInputs[input.Index] = struct{}{}
+	}
+
+	require.Len(b, after.PrevOuts, len(before.Tx.TxIn))
+
+	for i, txIn := range before.Tx.TxIn {
+		prevOut := after.PrevOuts[i]
+		require.Equal(b, txIn.PreviousOutPoint, prevOut.OutPoint)
+
+		_, isOwned := ownedInputs[uint32(i)]
+		require.Equal(b, isOwned, prevOut.IsOurs)
+	}
+}
+
+// assertTxOutputsMatchDetail verifies output order, values, scripts, and wallet
+// ownership markers.
+func assertTxOutputsMatchDetail(b *testing.B, before TransactionSummary,
+	after *TxDetail) {
+
+	b.Helper()
+
+	ownedOutputs := make(map[uint32]struct{}, len(before.MyOutputs))
+	for _, output := range before.MyOutputs {
+		ownedOutputs[output.Index] = struct{}{}
+	}
+
+	require.Len(b, after.Outputs, len(before.Tx.TxOut))
+
+	for i, txOut := range before.Tx.TxOut {
+		output := after.Outputs[i]
+		require.Equal(b, i, output.Index)
+		require.Equal(b, txOut.Value, int64(output.Amount))
+		require.Equal(b, txOut.PkScript, output.PkScript)
+
+		_, isOwned := ownedOutputs[uint32(i)]
+		require.Equal(b, isOwned, output.IsOurs)
+	}
+}
+
+// expectedSummaryValue calculates the wallet balance delta encoded by the
+// legacy transaction summary.
+func expectedSummaryValue(summary TransactionSummary) int64 {
+	var value int64
+	for _, input := range summary.MyInputs {
+		value -= int64(input.PreviousAmount)
+	}
+
+	for _, output := range summary.MyOutputs {
+		value += summary.Tx.TxOut[output.Index].Value
+	}
+
+	return value
 }

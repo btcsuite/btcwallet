@@ -1,0 +1,134 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"testing"
+	"time"
+
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/stretchr/testify/require"
+)
+
+// TestCreateTxOpsAdditionalBranches covers remaining sqlite CreateTx branches.
+func TestCreateTxOpsAdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fail metadata loading before a recording target can be built.
+	req := testCreateTxRequest(t)
+	ctx := context.Background()
+	loadOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
+			qtx: sqlc.New(rowDBTX{
+				row: newRow(t, "SELECT 1 FROM missing_table"),
+			}),
+		},
+	}
+
+	// Act: Load the normalized request through the generated metadata query.
+	_, err := loadOps.LoadExisting(ctx, req)
+	// Assert: Loading retains its metadata-specific error context.
+	require.ErrorContains(t, err, "get tx metadata")
+
+	// Arrange: Supply matching block metadata but no transaction row to update.
+	block := testBlock(8)
+	confirmOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
+			qtx: sqlc.New(rowDBTX{
+				row: newRow(
+					t,
+					"SELECT ?, ?, ?",
+					int64(block.Height),
+					block.Hash[:],
+					block.Timestamp.Unix(),
+				),
+				rows: 0,
+			}),
+		},
+	}
+	// Act: Attempt confirmation against the matching stored block.
+	err = confirmOps.ConfirmExisting(ctx, db.CreateTxRequest{
+		Params: db.CreateTxParams{WalletID: 1, Block: block},
+		TxHash: chainhash.Hash{9},
+	}, db.CreateTxExistingTarget{})
+	// Assert: A successful statement affecting no row reports the missing tx.
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+
+	// Arrange: Fail the stored-block lookup before any recording writes.
+	prepareOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
+			qtx: sqlc.New(rowDBTX{
+				row: newRow(t, "SELECT 1 FROM missing_table"),
+			}),
+		},
+	}
+	// Act: Prepare the confirming block through the generated lookup.
+	err = prepareOps.PrepareBlock(ctx, db.CreateTxRequest{
+		Params: db.CreateTxParams{WalletID: 1, Block: block},
+	})
+	// Assert: The preparation failure identifies the block lookup.
+	require.ErrorContains(t, err, "get block by height")
+
+	// Arrange: Fail the input lookup before competing rows can be updated.
+	conflictOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
+			qtx: sqlc.New(rowDBTX{
+				row:      newRow(t, "SELECT ?, ?", int64(5), []byte{1}),
+				queryErr: errDummy,
+			}),
+		},
+	}
+	// Act: Discover conflicts through retained input facts.
+	_, _, err = conflictOps.ListConflictTxns(ctx, req)
+	// Assert: The adapter identifies the failed input-conflict query.
+	require.ErrorContains(t, err, "list input conflicts")
+}
+
+// TestReleaseOutputOpsAdditionalBranches covers remaining sqlite Release paths.
+func TestReleaseOutputOpsAdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	ops := &releaseOutputOps{qtx: sqlc.New(rowDBTX{
+		row: newRow(t, "SELECT 1 FROM missing_table"),
+	})}
+
+	_, err := ops.LookupUtxoID(context.Background(), db.ReleaseOutputParams{
+		WalletID: 1,
+		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0},
+	})
+	require.ErrorContains(t, err, "lookup utxo row")
+
+	_, err = ops.ActiveLockID(context.Background(), 1, 2, time.Now())
+	require.ErrorContains(t, err, "lookup active lease row")
+}
+
+// TestUpdateTxOpsAdditionalBranches covers remaining sqlite UpdateTx branches.
+func TestUpdateTxOpsAdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	txHash := chainhash.Hash{9}
+	loadOps := &updateTxOps{qtx: sqlc.New(rowDBTX{
+		row: newRow(t, "SELECT 1 FROM missing_table"),
+	})}
+	stateOps := &updateTxOps{
+		qtx:         sqlc.New(rowDBTX{rows: 0}),
+		blockHeight: sql.NullInt64{},
+		status:      int64(db.TxStatusPublished),
+	}
+	labelOps := &updateTxOps{qtx: sqlc.New(rowDBTX{rows: 0})}
+
+	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
+	require.ErrorContains(t, err, "get tx metadata")
+
+	err = stateOps.UpdateState(
+		ctx, 1, txHash, db.UpdateTxState{Status: db.TxStatusPublished},
+	)
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+
+	err = labelOps.UpdateLabel(ctx, 1, txHash, "note")
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -25,8 +26,6 @@ var (
 		0xbe, 0x8b, 0x56, 0xc8, 0x83, 0x77, 0x95, 0x59, 0x8b,
 		0xb6, 0xc4, 0x40, 0xc0, 0x64,
 	}
-
-	rootKey, _ = hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
 
 	pubPassphrase   = []byte("_DJr{fL4H0O}*-0\n:V1izc)(6BomK")
 	privPassphrase  = []byte("81lUHXnOMZ@?XXd7O9xyDIWIbXX-lj")
@@ -264,6 +263,21 @@ func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
 	return
 }
 
+// testRootKey returns a master key derived from seed. Every caller gets its own
+// key even though the value is always the same: hdkeychain.ExtendedKey caches
+// derived state on first use, so tests sharing one key mutate it concurrently
+// and race under -race, despite each test only reading from its own view. The
+// value being identical is what makes this safe -- derived addresses and the
+// expected constants below are unchanged.
+func testRootKey(t *testing.T) *hdkeychain.ExtendedKey {
+	t.Helper()
+
+	rootKey, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	require.NoError(t, err)
+
+	return rootKey
+}
+
 // setupManager creates a new address manager and returns a teardown function
 // that should be invoked to ensure it is closed and removed upon completion.
 func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *Manager) {
@@ -282,7 +296,7 @@ func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *Manag
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
