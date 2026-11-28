@@ -6,6 +6,7 @@ package mock
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -16,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -41,35 +43,40 @@ func NewGenesisChain(tb testing.TB, current bool) *Chain {
 	tb.Helper()
 
 	params := &chaincfg.RegressionNetParams
-	chain := &Chain{}
+	m := &Chain{}
 
 	// Tests can replace these defaults when registration is under test.
-	chain.On("BackEnd").Return("mock").Maybe()
-	chain.On("Notifications").Return((<-chan any)(nil)).Maybe()
-	chain.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
+	m.On("BackEnd").Return("mock").Maybe()
+	m.On("Notifications").Return((<-chan any)(nil)).Maybe()
+	m.On("SubscribeChainEvents", mock.Anything).Return(
+		func(ctx context.Context) chain.EventSubscription {
+			return NewEventSubscription(ctx, m)
+		},
+	).Maybe()
+	m.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
 		Return(nil).Maybe()
-	chain.On("NotifySpent", mock.Anything).Return(nil).Maybe()
-	chain.On("IsCurrent").Return(current).Maybe()
+	m.On("NotifySpent", mock.Anything).Return(nil).Maybe()
+	m.On("IsCurrent").Return(current).Maybe()
 
 	// Only a current backend subscribes after completing startup sync.
 	if current {
-		chain.On("NotifyBlocks").Return(nil).Maybe()
+		m.On("NotifyBlocks").Return(nil).Maybe()
 	}
 
-	chain.On("GetBestBlock").Return(
+	m.On("GetBestBlock").Return(
 		params.GenesisHash, int32(0), nil,
 	).Maybe()
-	chain.On("GetBlockHash", int64(0)).Return(
+	m.On("GetBlockHash", int64(0)).Return(
 		params.GenesisHash, nil,
 	).Maybe()
-	chain.On("GetBlockHeader", params.GenesisHash).Return(
+	m.On("GetBlockHeader", params.GenesisHash).Return(
 		&params.GenesisBlock.Header, nil,
 	).Maybe()
 	tb.Cleanup(func() {
-		chain.AssertExpectations(tb)
+		m.AssertExpectations(tb)
 	})
 
-	return chain
+	return m
 }
 
 // Start implements the chain.Interface interface.
@@ -232,14 +239,176 @@ func (m *Chain) Notifications() <-chan any {
 	return args.Get(0).(<-chan any)
 }
 
-// SubscribeChainEvents returns the stream arranged for the caller.
+// SubscribeChainEvents returns the stream arranged for the caller. Tests may
+// supply either a concrete chain.EventSubscription or a factory function
+// func(context.Context) chain.EventSubscription so each enrollment receives a
+// distinct subscription bound to its own context.
 func (m *Chain) SubscribeChainEvents(
 	ctx context.Context) chain.EventSubscription {
 
+	type enrollFunc = func(context.Context) chain.EventSubscription
+
 	args := m.Called(ctx)
+	if enroll, ok := args.Get(0).(enrollFunc); ok {
+		return enroll(ctx)
+	}
+
 	sub, _ := args.Get(0).(chain.EventSubscription)
 
 	return sub
+}
+
+// eventSubBufferSize is the bounded in-memory buffer capacity of mock
+// EventSubscription channels used in tests and benchmarks.
+const eventSubBufferSize = 100
+
+// EventSubscription is an in-memory mock implementation of
+// chain.EventSubscription for tests and benchmarks.
+type EventSubscription struct {
+	mu          sync.Mutex
+	client      chain.Interface
+	blockEvents chan chain.Event
+	mempoolTxns chan *wtxmgr.TxRecord
+	done        chan struct{}
+	canceled    <-chan struct{}
+	stopCtx     func() bool
+	closed      bool
+	err         error
+}
+
+// A compile-time assertion to ensure that EventSubscription implements
+// chain.EventSubscription.
+var _ chain.EventSubscription = (*EventSubscription)(nil)
+
+// NewEventSubscription creates an in-memory EventSubscription tied to ctx that
+// delegates WatchAddrs and WatchOutputs to client.
+func NewEventSubscription(ctx context.Context,
+	client chain.Interface) *EventSubscription {
+
+	sub := &EventSubscription{
+		client:      client,
+		blockEvents: make(chan chain.Event, eventSubBufferSize),
+		mempoolTxns: make(chan *wtxmgr.TxRecord, eventSubBufferSize),
+		done:        make(chan struct{}),
+		canceled:    ctx.Done(),
+	}
+	if ctx.Err() != nil {
+		sub.closeLocked(ctx.Err())
+
+		return sub
+	}
+
+	sub.stopCtx = context.AfterFunc(ctx, func() {
+		sub.Close(ctx.Err())
+	})
+
+	return sub
+}
+
+// BlockEvents returns the buffered block event channel for this mock
+// subscription.
+func (s *EventSubscription) BlockEvents() <-chan chain.Event {
+	return s.blockEvents
+}
+
+// MempoolTxns returns the buffered best-effort mempool tx channel for this
+// mock subscription.
+func (s *EventSubscription) MempoolTxns() <-chan *wtxmgr.TxRecord {
+	return s.mempoolTxns
+}
+
+// Done returns the completion channel for this mock subscription.
+func (s *EventSubscription) Done() <-chan struct{} {
+	return s.done
+}
+
+// Err returns the terminal error after Done closes.
+func (s *EventSubscription) Err() error {
+	select {
+	case <-s.done:
+		return s.err
+	default:
+		return nil
+	}
+}
+
+// Cancel immediately unsubscribes this mock handle and publishes
+// context.Canceled via Err if it has not already terminated.
+func (s *EventSubscription) Cancel() {
+	s.Close(context.Canceled)
+}
+
+// SendBlock enqueues a block event on this subscription or retires it with
+// chain.ErrEventSubscriptionBufferFull if BlockEvents is full.
+func (s *EventSubscription) SendBlock(event chain.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
+
+	select {
+	case s.blockEvents <- event:
+	default:
+		s.closeLocked(chain.ErrEventSubscriptionBufferFull)
+	}
+}
+
+// SendMempoolTx enqueues a matching mempool tx on MempoolTxns, dropping it
+// without retiring the subscription if the mempool buffer is full.
+func (s *EventSubscription) SendMempoolTx(rec *wtxmgr.TxRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
+
+	select {
+	case s.mempoolTxns <- rec:
+	default:
+	}
+}
+
+// Close retires this subscription once with err.
+func (s *EventSubscription) Close(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closeLocked(err)
+}
+
+// closeLocked retires the subscription while s.mu is held.
+func (s *EventSubscription) closeLocked(err error) {
+	if s.closed {
+		return
+	}
+
+	s.closed = true
+	s.err = err
+
+	if s.stopCtx != nil {
+		s.stopCtx()
+	}
+
+	close(s.blockEvents)
+	close(s.mempoolTxns)
+	close(s.done)
+}
+
+// WatchAddrs implements chain.EventSubscription.
+func (s *EventSubscription) WatchAddrs(context.Context,
+	[]address.Address) error {
+
+	return nil
+}
+
+// WatchOutputs implements chain.EventSubscription.
+func (s *EventSubscription) WatchOutputs(context.Context,
+	[]*wire.OutPoint) error {
+
+	return nil
 }
 
 // BackEnd implements the chain.Interface interface.
