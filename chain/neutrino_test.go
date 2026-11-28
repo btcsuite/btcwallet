@@ -508,6 +508,8 @@ func TestNeutrinoClientScopedWatch(t *testing.T) {
 	require.Equal(t, EventBlockConnected, uBlk.Type)
 	require.Equal(t, int32(11), uBlk.Block.Height)
 	require.Empty(t, uBlk.RelevantTxs)
+	require.Empty(t, watched.MempoolTxns())
+	require.Empty(t, unwatched.MempoolTxns())
 
 	service.AssertExpectations(t)
 }

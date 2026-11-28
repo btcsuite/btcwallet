@@ -2399,3 +2399,245 @@ func TestBitcoindClientRescanActivatesLegacyQueue(t *testing.T) {
 	require.True(t, ok, "expected *RescanFinished")
 	require.Equal(t, &tip.Hash, fin.Hash)
 }
+
+// TestChainEventSubscriptionMempoolDropOnFull verifies that filling a slow
+// subscriber's MempoolTxns buffer drops excess mempool tx notifications
+// without retiring the subscription, blocking BlockEvents, affecting a fast
+// sibling, or skipping received-output auto-indexing.
+func TestChainEventSubscriptionMempoolDropOnFull(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: enroll slow and fast subscribers watching a Taproot address
+	// whose key-path spends carry only a 64-byte witness so spend matching
+	// relies exclusively on received-output auto-indexing.
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	tapAddr, err := address.NewAddressTaproot(
+		priv.PubKey().SerializeCompressed()[1:],
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+	tapScript, err := txscript.PayToAddrScript(tapAddr)
+	require.NoError(t, err)
+
+	stream, mc, slow := newMockWatchSub(t.Context())
+	fast := stream.subscribe(t.Context())
+
+	mc.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{tapAddr},
+	).Return(nil).Twice()
+
+	require.NoError(
+		t, slow.WatchAddrs(t.Context(), []address.Address{tapAddr}),
+	)
+	require.NoError(
+		t, fast.WatchAddrs(t.Context(), []address.Address{tapAddr}),
+	)
+
+	capacity := cap(slow.MempoolTxns())
+	require.Equal(t, chainMempoolSubscriberBufferSize, capacity)
+
+	makeFundingTx := func(val int64) *wtxmgr.TxRecord {
+		tx := wire.NewMsgTx(wire.TxVersion)
+		tx.AddTxOut(wire.NewTxOut(val, tapScript))
+		rec, recErr := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, recErr)
+
+		return rec
+	}
+
+	// Act: fill slow's MempoolTxns buffer while draining fast, then publish
+	// an additional funding tx that overflows slow's MempoolTxns buffer,
+	// followed by a block disconnect and a connected block spending the
+	// dropped funding tx's output via a Taproot key-path input.
+	accepted := make([]*wtxmgr.TxRecord, capacity)
+	for i := range capacity {
+		rec := makeFundingTx(int64(1000 + i))
+		accepted[i] = rec
+		stream.publish(RelevantTx{TxRecord: rec})
+		require.Equal(t, rec, waitMempoolTx(t, fast.MempoolTxns()))
+	}
+
+	droppedFundRec := makeFundingTx(99999)
+	stream.publish(RelevantTx{TxRecord: droppedFundRec})
+	require.Equal(t, droppedFundRec, waitMempoolTx(t, fast.MempoolTxns()))
+
+	droppedOP := wire.OutPoint{Hash: droppedFundRec.Hash, Index: 0}
+	spendTx := wire.NewMsgTx(wire.TxVersion)
+	spendTx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: droppedOP,
+		Witness:          wire.TxWitness{make([]byte, 64)},
+	})
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	blk := &wtxmgr.BlockMeta{Hash: chainhash.Hash{88}, Height: 12}
+	stream.publish(BlockDisconnected{Height: 11})
+	stream.publish(FilteredBlockConnected{
+		Block:       blk,
+		RelevantTxs: []*wtxmgr.TxRecord{spendRec},
+	})
+
+	// Assert: slow stayed active with no error and received both block
+	// events including the spend of the dropped funding tx's output.
+	select {
+	case <-slow.Done():
+		require.FailNow(t, "full MempoolTxns retired subscription")
+	default:
+	}
+
+	require.NoError(t, slow.Err())
+
+	discEv := waitChainEvent(t, slow.BlockEvents())
+	require.Equal(t, EventBlockDisconnected, discEv.Type)
+	require.Equal(t, int32(11), discEv.Block.Height)
+
+	connEv := waitChainEvent(t, slow.BlockEvents())
+	require.Equal(t, EventBlockConnected, connEv.Type)
+	require.Equal(t, blk, connEv.Block)
+	require.Equal(t, []*wtxmgr.TxRecord{spendRec}, connEv.RelevantTxs)
+
+	// Drain slow's MempoolTxns to verify strictly the initial accepted
+	// prefix was retained (without droppedFundRec), then publish a new
+	// mempool tx to verify delivery resumes once space frees up.
+	for _, want := range accepted {
+		require.Equal(t, want, waitMempoolTx(t, slow.MempoolTxns()))
+	}
+
+	require.Empty(t, slow.MempoolTxns())
+
+	afterDrainRec := makeFundingTx(77777)
+	stream.publish(RelevantTx{TxRecord: afterDrainRec})
+	require.Equal(t, afterDrainRec, waitMempoolTx(t, slow.MempoolTxns()))
+	require.Equal(t, afterDrainRec, waitMempoolTx(t, fast.MempoolTxns()))
+	mc.AssertExpectations(t)
+}
+
+// drainClosedChan non-blockingly drains all buffered items from ch and
+// verifies ch was already closed before the caller observed Done.
+func drainClosedChan[T any](t *testing.T, ch <-chan T, name string) []T {
+	t.Helper()
+
+	var items []T
+
+	for {
+		select {
+		case item, ok := <-ch:
+			if !ok {
+				return items
+			}
+
+			items = append(items, item)
+		default:
+			require.FailNowf(
+				t, "channel not closed",
+				"%s was not closed before Done", name,
+			)
+		}
+	}
+}
+
+// TestChainEventSubscriptionCloseOrderOnRetirement verifies that context
+// cancellation, source shutdown, and BlockEvents overflow each close both
+// BlockEvents and MempoolTxns before closing Done while preserving already-
+// buffered items and publishing the expected terminal error.
+func TestChainEventSubscriptionCloseOrderOnRetirement(t *testing.T) {
+	t.Parallel()
+
+	newBufferedSub := func(t *testing.T,
+		ctx context.Context) (*chainEventStream, *mockChainClient,
+		EventSubscription, *wtxmgr.TxRecord) {
+
+		t.Helper()
+
+		addr, pkScript := randTestP2PKHAddr(t)
+		stream, mc, sub := newMockWatchSub(ctx)
+		mc.On(
+			"WatchAddrsFromTip", mock.Anything,
+			[]address.Address{addr},
+		).Return(nil).Once()
+		require.NoError(
+			t, sub.WatchAddrs(ctx, []address.Address{addr}),
+		)
+
+		tx := wire.NewMsgTx(wire.TxVersion)
+		tx.AddTxOut(wire.NewTxOut(2000, pkScript))
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, err)
+
+		stream.publish(RelevantTx{TxRecord: rec})
+		stream.publish(BlockDisconnected{Height: 1})
+
+		return stream, mc, sub, rec
+	}
+
+	t.Run("context cancel", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: enroll a cancellable subscription with one unread
+		// block event and one unread mempool tx.
+		ctx, cancel := context.WithCancel(t.Context())
+		_, mc, sub, rec := newBufferedSub(t, ctx)
+
+		// Act: cancel the subscription context and wait for Done.
+		cancel()
+		waitSubDone(t, sub)
+
+		// Assert: both channels closed before Done, buffered items
+		// remained readable, and Err reports nil.
+		require.NoError(t, sub.Err())
+		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
+		require.Len(t, blocks, 1)
+		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
+		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
+		mc.AssertExpectations(t)
+	})
+
+	t.Run("source shutdown", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: enroll a live subscription with one unread block
+		// event and one unread mempool tx.
+		stream, mc, sub, rec := newBufferedSub(t, t.Context())
+
+		// Act: close the owning event stream and wait for Done.
+		stream.close()
+		waitSubDone(t, sub)
+
+		// Assert: both channels closed before Done, buffered items
+		// remained readable, and Err reports nil.
+		require.NoError(t, sub.Err())
+		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
+		require.Len(t, blocks, 1)
+		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
+		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
+		mc.AssertExpectations(t)
+	})
+
+	t.Run("block overflow", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: enroll a subscription with one unread block event
+		// and one unread mempool tx, then overflow BlockEvents.
+		stream, mc, sub, rec := newBufferedSub(t, t.Context())
+
+		// Act: publish enough additional block disconnects to exceed
+		// BlockEvents capacity and wait for Done.
+		maxHeight := int32(chainEventSubscriberBufferSize) + 1
+		for i := int32(2); i <= maxHeight; i++ {
+			stream.publish(BlockDisconnected{Height: i})
+		}
+
+		waitSubDone(t, sub)
+
+		// Assert: both channels closed before Done, all buffered block
+		// events and the buffered mempool tx remained readable, and
+		// Err reports ErrEventSubscriptionBufferFull.
+		require.ErrorIs(t, sub.Err(), ErrEventSubscriptionBufferFull)
+		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
+		require.Len(t, blocks, chainEventSubscriberBufferSize)
+		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
+		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
+		mc.AssertExpectations(t)
+	})
+}
