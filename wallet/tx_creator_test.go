@@ -232,8 +232,8 @@ func expectKeptChange(t *testing.T, w *Wallet, mocks *mockWalletDeps) []byte {
 	changeAddr, _, changeKey := expectedStoreAddress(
 		t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
 	)
-	mocks.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
+	mocks.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{changeAddr},
 	).Return(nil).Once()
 
 	// Only PSBT funding decorates the change output.
@@ -1144,8 +1144,8 @@ func TestCreateTransactionWatchesChange(t *testing.T) {
 		changeAddr, _, _ := expectedStoreAddress(
 			t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
 		)
-		mocks.chain.On(
-			"WatchAddrsFromTip", w.lifetimeCtx,
+		mocks.syncer.On(
+			"watchAddrs", w.lifetimeCtx,
 			[]address.Address{changeAddr},
 		).Return(watchErr).Once()
 
@@ -1160,7 +1160,7 @@ func TestCreateTransactionWatchesChange(t *testing.T) {
 
 		// Assert: Kept change was registered once; a registration
 		// failure returns no transaction.
-		mocks.chain.AssertNumberOfCalls(t, "WatchAddrsFromTip", 1)
+		mocks.syncer.AssertNumberOfCalls(t, "watchAddrs", 1)
 
 		if watchErr != nil {
 			require.ErrorIs(t, err, watchErr)
@@ -2531,8 +2531,8 @@ func TestCreateTransactionManualConfirmationHeight(t *testing.T) {
 		changeAddr, _, _ := expectedStoreAddress(
 			t, storeDerivationAccountPubKey(t), db.TaprootPubKey, 1, 0,
 		)
-		mocks.chain.On(
-			"WatchAddrsFromTip", w.lifetimeCtx,
+		mocks.syncer.On(
+			"watchAddrs", w.lifetimeCtx,
 			[]address.Address{changeAddr},
 		).Return(nil).Once()
 

@@ -48,9 +48,9 @@ relationship metadata, but do not rewrite its historical decision body.
   ADR 0004's import trigger and target scope.
 - [ADR 0006: Wallet Transaction Manager SQL
   Schema](./0006-wtxmgr-sql-schema.md) defines the relational `wtxmgr` schema.
-  ADR 0015 amends it for shared SQL block identity and ADR 0018 for input
-  relationships and competing transaction history. ADR 0017 proposes
-  Wallet-owned block identity and references.
+  ADR 0015 amends it for shared SQL block identity, ADR 0017 amends it for
+  Wallet-owned block identity and references, and ADR 0018 amends it for input
+  relationships and competing transaction history.
 - [ADR 0007: XChaCha20-Poly1305 Encryption](./0007-xchacha20-poly1305-encryption.md) - Replaces XSalsa20-Poly1305 with XChaCha20-Poly1305 for encrypting private key material.
 - [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md) - Defines a modular integration test framework for chain and database backend permutations.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
@@ -73,8 +73,9 @@ relationship metadata, but do not rewrite its historical decision body.
   Subscriptions](./0016-wallet-transaction-subscriptions.md) defines
   best-effort Wallet notifications with bounded subscriber queues.
 - [ADR 0017: Direct Wallet Chain Subscriptions](./0017-manager-chain-routing.md)
-  proposes direct Wallet streams, SQL publication watch readiness and
-  Wallet-owned block history and rollback. It amends ADRs 0006 and 0015.
+  defines direct per-Wallet `EventSubscription` streams with split
+  `BlockEvents()` / `MempoolTxns()` channels, sync-lifecycle watch ownership,
+  and Wallet-owned block history and rollback. It amends ADRs 0006 and 0015.
 - [ADR 0018: Recording Competing
   Transactions](./0018-unconfirmed-transaction-candidates.md) retains competing
   history with indexed inputs and derives spend availability. SQL implementation

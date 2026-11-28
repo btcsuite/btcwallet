@@ -29,7 +29,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -63,8 +62,8 @@ func TestAddressManagerFallbackDuringStop(t *testing.T) {
 
 			<-releaseChan
 		})
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 	deps.vault.On("Lock").Return().Once()
 
@@ -614,8 +613,8 @@ func TestNewAddress(t *testing.T) {
 			expectOldestUnusedOrNew(
 				t, w, deps, selector, tc.internal, stored,
 			)
-			deps.chain.On(
-				"WatchAddrsFromTip", w.lifetimeCtx,
+			deps.syncer.On(
+				"watchAddrs", w.lifetimeCtx,
 				[]address.Address{addr},
 			).Return(nil).Once()
 
@@ -784,8 +783,8 @@ func TestNewAddressReusesOldestUnused(t *testing.T) {
 				)
 			}
 
-			deps.chain.On(
-				"WatchAddrsFromTip", w.lifetimeCtx,
+			deps.syncer.On(
+				"watchAddrs", w.lifetimeCtx,
 				[]address.Address{wantAddr},
 			).Return(nil).Twice()
 
@@ -827,8 +826,8 @@ func TestNewAddressImportedXpubChild(t *testing.T) {
 	stored.IsImported = true
 	stored.AccountNumber = nil
 	expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 
 	// Act: request a receiving address from the imported xpub account.
@@ -988,11 +987,11 @@ func TestNewAddressWatchFailureReusesChild(t *testing.T) {
 		expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
 	}
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(errDBMock).Once()
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 
 	// Act: fail the first registration, then retry.
@@ -1062,8 +1061,8 @@ func TestNewAddressCancellation(t *testing.T) {
 		expectOldestUnusedOrNew(t, w, deps, selector, false, stored).
 			Run(func(mock.Arguments) { cancel() })
 		expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
-		deps.chain.On(
-			"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+		deps.syncer.On(
+			"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 		).Run(func(mock.Arguments) {
 			require.NoError(t, w.lifetimeCtx.Err())
 		}).Return(nil).Twice()
@@ -1103,8 +1102,8 @@ func TestNewAddressBlockedWatch(t *testing.T) {
 	expectOldestUnusedOrNew(t, w, deps, selector, false, stored)
 
 	enteredChan := make(chan struct{})
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Run(func(args mock.Arguments) {
 		ctx, _ := args.Get(0).(context.Context)
 		close(enteredChan)
@@ -1402,8 +1401,8 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
 	), nil).Once()
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 
 	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
@@ -1679,8 +1678,8 @@ func TestImportPublicKey(t *testing.T) {
 		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
 	), nil).Once()
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 
 	// Act: import the public key through the admitted Wallet request.
@@ -1758,8 +1757,8 @@ func TestImportTaprootScript(t *testing.T) {
 		IsWatchOnly:  true,
 	}, nil).Once()
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 
 	// Act: import the script through the public Wallet request boundary.
@@ -1812,12 +1811,12 @@ func TestImportPublicKeySQLWatchFailureRetries(t *testing.T) {
 		"NewImportedAddress", t.Context(), params,
 	).Return(stored, nil).Once().NotBefore(firstImport)
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(errDBMock).Once().NotBefore(firstImport)
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once().NotBefore(repeatedImport)
 
 	// Act: repeat the same import after registration reports failure, using
@@ -1891,12 +1890,12 @@ func TestImportTaprootScriptSQLWatchFailureRetries(t *testing.T) {
 		"NewImportedAddress", t.Context(), params,
 	).Return(stored, nil).Once().NotBefore(firstImport)
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(errDBMock).Once().NotBefore(firstImport)
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once().NotBefore(repeatedImport)
 
 	// Act: import once with a failed registration and then repeat the
@@ -1968,8 +1967,8 @@ func TestImportTaprootScriptSQLReturnsStoredMetadata(t *testing.T) {
 		},
 	).Return(stored, nil).Once()
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Return(nil).Once()
 
 	// Act: repeat the import with a script representation of the owned key.
@@ -2076,8 +2075,8 @@ func TestImportPublicKeySQLFinishesCommittedWatch(t *testing.T) {
 	unblock := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(unblock)
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Run(func(mock.Arguments) {
 		close(entered)
 		<-release
@@ -2166,8 +2165,8 @@ func TestImportTaprootScriptSQLStopJoinsRegistration(t *testing.T) {
 	unblock := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(unblock)
 
-	deps.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+	deps.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 	).Run(func(args mock.Arguments) {
 		ctx, _ := args.Get(0).(context.Context)
 
@@ -2412,7 +2411,7 @@ func TestNewBulkAddressesReturnsWatchedBatch(t *testing.T) {
 			deps.store.On(
 				"NewDerivedAddresses", t.Context(), params, tc.count,
 			).Return(stored, nil).Once()
-			deps.chain.On("WatchAddrsFromTip", w.lifetimeCtx, watched).
+			deps.syncer.On("watchAddrs", w.lifetimeCtx, watched).
 				Return(nil).Once()
 
 			// Act: Allocate through public admission, letting the handler
@@ -2633,8 +2632,8 @@ func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
 				wantErr = context.Canceled
 			}
 
-			deps.chain.On(
-				"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
+			deps.syncer.On(
+				"watchAddrs", w.lifetimeCtx, []address.Address{addr},
 			).Run(func(mock.Arguments) {
 				require.NoError(t, w.lifetimeCtx.Err())
 			}).Return(watchErr).Once()
@@ -2659,11 +2658,11 @@ func TestNewBulkAddressesFinishesCommittedWatch(t *testing.T) {
 func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Keep the first backend non-current so only the public batch
-	// call registers; its failure captures the committed destinations.
+	// Arrange: Sync the first wallet to genesis so its live subscription
+	// is active before failing the public batch registration and capturing
+	// the committed destinations.
 	path := filepath.Join(t.TempDir(), "reopen.sqlite")
-	chainMock := createTestChain(t)
-	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	chainMock := bwmock.NewGenesisChain(t, true)
 
 	openManager := func(chainSource chain.Interface) *Manager {
 		m, err := NewManager(t.Context(), ManagerConfig{
@@ -2684,6 +2683,11 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	params := sqliteCreateParams(t)
 	w, err := m.Create(params)
 	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		info, err := w.Info(t.Context())
+		return err == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
 	require.NoError(t, w.keyVault.Unlock(
 		t.Context(), params.PrivatePassphrase,
 	))
@@ -2702,6 +2706,8 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 			},
 		},
 	))
+
+	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 
 	var committed []address.Address
 	chainMock.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
@@ -2727,7 +2733,6 @@ func TestNewBulkAddressesReplaysCommittedBatch(t *testing.T) {
 	freshChain.On("NotifyBlocks").Run(func(mock.Arguments) {
 		replayed <- restored
 	}).Return(nil).Once()
-	freshChain.On("Notifications").Return((<-chan any)(nil)).Maybe()
 
 	// Act: Fail public delivery, stop the owning Manager to drain the
 	// request loop and close storage, then reopen all durable Wallets.
@@ -3265,13 +3270,20 @@ func TestNewAddressSQLiteConcurrentEmptyBranch(t *testing.T) {
 
 	const callers = 8
 
-	// Arrange: hold the first registration until every later caller has
-	// returned; later registrations succeed immediately.
-	chainMock := createTestChain(t)
-	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+	// Arrange: Sync the wallet so its live subscription is active, then
+	// hold the first registration until every later caller has returned;
+	// later registrations succeed immediately.
+	chainMock := bwmock.NewGenesisChain(t, true)
 
 	path := filepath.Join(t.TempDir(), "concurrent.sqlite")
 	_, w := newReceivingSQLiteWallet(t, path, chainMock)
+	require.Eventually(t, func() bool {
+		info, err := w.Info(t.Context())
+		return err == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
+	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+
 	selector := NewAccountSelectorByName(waddrmgr.KeyScopeBIP0084, "recv")
 
 	enteredChan := make(chan struct{})
@@ -3334,11 +3346,8 @@ func TestNewAddressSQLiteConcurrentEmptyBranch(t *testing.T) {
 func TestNewAddressKVDBAllocatesSuccessive(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: create a kvdb Wallet whose chain accepts each notification.
+	// Arrange: create a kvdb Wallet whose syncer is not yet synced.
 	m := testKVDBManager(t)
-	chainMock, ok := m.config.ChainSource.(*bwmock.Chain)
-	require.True(t, ok)
-	chainMock.On("NotifyReceived", mock.Anything).Return(nil).Times(3)
 
 	params := sqliteCreateParams(t)
 	params.PubPassphrase = []byte("public")
@@ -3378,69 +3387,58 @@ func TestNewAddressKVDBAllocatesSuccessive(t *testing.T) {
 	require.NotEqual(t, second.Addr, third.Addr)
 }
 
-// TestNewAddressKVDBRoutesLiveTransactions prevents native address activation
-// from bypassing Manager ownership and losing the first payment notification.
-func TestNewAddressKVDBRoutesLiveTransactions(t *testing.T) {
+// TestNewAddressKVDBWatchesOnActiveSubscription verifies kvdb NewAddress
+// registers the newly derived address on the active EventSubscription before
+// returning to its caller.
+func TestNewAddressKVDBWatchesOnActiveSubscription(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Keep the real kvdb allocation path, but emit a payment inside
-	// its native subscription call, before NewAddress can return to its caller.
-	m := testKVDBManager(t)
+	// Arrange: Start a real kvdb Manager over a synced mock chain so the
+	// syncer opens an active EventSubscription before NewAddress runs.
+	client := bwmock.NewGenesisChain(t, true)
 
-	// The kvdb fixture supplies this concrete mock for native expectations.
-	client, _ := m.config.ChainSource.(*bwmock.Chain)
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend:           DBBackendKVDB,
+		DataSource:        testKVDBPath(t),
+		ChainParams:       chainParams,
+		ChainSource:       client,
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stopManagerForTest(t, m) })
+
+	_, err = m.Start(t.Context())
+	require.NoError(t, err)
 
 	params := sqliteCreateParams(t)
 	params.PubPassphrase = []byte("public")
 	w, err := m.Create(params)
 	require.NoError(t, err)
 
-	var (
-		callbackErr error
-		record      *wtxmgr.TxRecord
-		matched     TxEntries
-	)
-	client.On("NotifyReceived", mock.MatchedBy(
+	require.Eventually(t, func() bool {
+		info, err := w.Info(t.Context())
+		return err == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
+	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
+
+	var watchedAddr address.Address
+	client.On("WatchAddrsFromTip", w.lifetimeCtx, mock.MatchedBy(
 		func(addrs []address.Address) bool { return len(addrs) == 1 },
 	)).Run(func(args mock.Arguments) {
-		addrs, ok := args.Get(0).([]address.Address)
-		if !ok {
-			callbackErr = errors.New("unexpected subscription addresses")
-			return
-		}
-
-		// Return callback failures to the test goroutine: the native method
-		// runs on Wallet's request worker, where FailNow is not permitted.
-		script, err := txscript.PayToAddrScript(addrs[0])
-		if err != nil {
-			callbackErr = err
-			return
-		}
-		tx := wire.NewMsgTx(2)
-		tx.AddTxOut(&wire.TxOut{Value: 1, PkScript: script})
-		record, callbackErr = wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-		if callbackErr != nil {
-			return
-		}
-
-		events := m.chainSyncer.routeChainEvent(
-			chain.RelevantTx{TxRecord: record}, []*Wallet{w},
-		)
-		matched = events[w.id].matches
+		addrs, _ := args.Get(1).([]address.Address)
+		watchedAddr = addrs[0]
 	}).Return(nil).Once()
 
-	// Act: Allocate through the public single-address API; its response joins
-	// the callback before the test inspects the captured routing result.
-	_, err = w.NewAddress(
+	// Act: Allocate through the public single-address API.
+	info, err := w.NewAddress(
 		t.Context(), NewAccountSelectorByNumber(
 			waddrmgr.KeyScopeBIP0084, 0,
 		), false,
 	)
 
-	// Assert: Ownership was visible during activation rather than installed
-	// afterward. Fixture cleanup verifies the one native subscription call.
+	// Assert: The derived address is registered on the active subscription
+	// before NewAddress returns.
 	require.NoError(t, err)
-	require.NoError(t, callbackErr)
-	require.Len(t, matched, 1)
-	require.Same(t, record, matched[0].Rec)
+	require.Equal(t, info.Addr, watchedAddr)
 }

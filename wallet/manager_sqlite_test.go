@@ -79,15 +79,20 @@ func TestChangeAllocationSQLiteNoChainSync(t *testing.T) {
 func TestChangeWatchFailureSQLiteKeepsChange(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Keep the backend non-current so only the change watch
-	// registers, then allocate change on a chain-synchronized account.
-	m := testSQLiteManager(t)
+	// Arrange: Sync a real SQLite wallet to genesis so an active
+	// subscription is open, then allocate change on a chain-synchronized
+	// account and fail its backend watch registration.
+	chainMock := bwmock.NewGenesisChain(t, true)
+	m := testSQLiteManagerWithChain(t, chainMock)
 	params := sqliteCreateParams(t)
 	w, err := m.Create(params)
 	require.NoError(t, err)
 
-	chainMock, ok := w.cfg.Chain.(*bwmock.Chain)
-	require.True(t, ok)
+	require.Eventually(t, func() bool {
+		info, err := w.Info(t.Context())
+		return err == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
+
 	chainMock.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
 	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
 		Passphrase: params.PrivatePassphrase, Timeout: -1,
@@ -539,9 +544,8 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	// Arrange: Create a durable Wallet through the existing SQLite fixture.
 	// Its strict chain dependency observes the later public derivation, while
 	// Stop releases this Manager's original runtime and database connection.
-	m := testSQLiteManager(t)
-	chainMock, ok := m.config.ChainSource.(*bwmock.Chain)
-	require.True(t, ok)
+	chainMock := bwmock.NewGenesisChain(t, true)
+	m := testSQLiteManagerWithChain(t, chainMock)
 
 	params := sqliteCreateParams(t)
 	original, err := m.Create(params)
@@ -561,6 +565,10 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, wallets, 1)
 	w := wallets[0]
+	require.Eventually(t, func() bool {
+		info, err := w.Info(t.Context())
+		return err == nil && info.Synced
+	}, 5*time.Second, time.Millisecond)
 	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
 		Passphrase: params.PrivatePassphrase,
 		Timeout:    -1,

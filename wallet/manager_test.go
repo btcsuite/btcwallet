@@ -5,16 +5,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"iter"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
@@ -505,9 +504,6 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 				},
 			}
 
-			m.chainSyncer = newChainSyncer(
-				m.config.ChainSource, &m.config.ChainParams,
-			)
 			m.started.Store(true)
 			m.wg.Go(m.mainLoop)
 			t.Cleanup(func() {
@@ -752,15 +748,12 @@ func newManagerLifecycleTest(t *testing.T,
 		cancel:      cancel,
 		wallets:     make(map[string]*Wallet),
 		requestChan: make(chan createWalletReq),
-		chainEvents: source.Notifications(),
 		backend:     backend,
 		config: ManagerConfig{
 			ChainSource: source,
 			ChainParams: chainParams,
 		},
 	}
-
-	manager.chainSyncer = newChainSyncer(source, &manager.config.ChainParams)
 
 	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
 	t.Cleanup(func() {
@@ -809,7 +802,6 @@ func TestManagerStartStopPublishesStableSet(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
@@ -907,7 +899,6 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
 	require.True(t, ok)
@@ -985,7 +976,6 @@ func TestManagerStartCancellationCleansUp(t *testing.T) {
 	}).Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1034,7 +1024,6 @@ func TestManagerStopWaitsForCleanup(t *testing.T) {
 	}).Return(closeErr).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
 	releaseWork := sync.OnceFunc(func() { close(release) })
@@ -1079,7 +1068,6 @@ func TestManagerStopRejectsStopped(t *testing.T) {
 		backend.On("close").Return(nil).Once()
 
 		source := &bwmock.Chain{}
-		source.On("Notifications").Return((<-chan any)(nil)).Once()
 		manager := newManagerLifecycleTest(t, backend, source)
 
 		// Act: Reject Stop before startup, then exercise the intended lifecycle
@@ -1112,7 +1100,6 @@ func TestManagerStopRejectsStopped(t *testing.T) {
 			}).Return(nil).Once()
 
 			source := &bwmock.Chain{}
-			source.On("Notifications").Return((<-chan any)(nil)).Once()
 			manager := newManagerLifecycleTest(t, backend, source)
 
 			releaseWork := sync.OnceFunc(func() { close(release) })
@@ -1170,7 +1157,6 @@ func TestManagerStopWaitsForStart(t *testing.T) {
 	}).Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
 	started := make(chan error, 1)
@@ -1228,7 +1214,6 @@ func TestManagerCreateBeforeStart(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 
 	// Act: Submit creation before any Start has admitted runtime work.
@@ -1251,7 +1236,6 @@ func TestManagerCreateAfterStop(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
 
@@ -1459,7 +1443,6 @@ func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
 	backend.On("close").Return(nil).Once().NotBefore(vaultLock)
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 
 	manager := newManagerLifecycleTest(t, backend, source)
 	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
@@ -1551,7 +1534,6 @@ func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
 	}).Return(closeErr).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	// Release test gates before fixture Stop, even after failed assertions.
 	releaseBirthday := sync.OnceFunc(func() { close(birthdayRelease) })
@@ -1935,7 +1917,6 @@ func TestManagerCreateBoundsGenesisSecrets(t *testing.T) {
 			backend.On("close").Return(nil).Once()
 
 			source := &bwmock.Chain{}
-			source.On("Notifications").Return((<-chan any)(nil)).Once()
 			manager := newManagerLifecycleTest(t, backend, source)
 			manager.started.Store(true)
 			manager.wg.Go(manager.mainLoop)
@@ -2008,7 +1989,6 @@ func TestManagerCreateBoundsGenesisSecretsOnFailure(t *testing.T) {
 			backend.On("close").Return(nil).Once()
 
 			source := &bwmock.Chain{}
-			source.On("Notifications").Return((<-chan any)(nil)).Once()
 			manager := newManagerLifecycleTest(t, backend, source)
 			manager.started.Store(true)
 			manager.wg.Go(manager.mainLoop)
@@ -2530,591 +2510,75 @@ func TestManagerCreateImportsDeclaredKVDBAccount(t *testing.T) {
 	require.Equal(t, MasterFingerprint(0), *info.MasterKeyFingerprint)
 }
 
-// TestChainSyncerWatchAddresses verifies ownership precedes tip-based
-// activation, including a retry after its native subscription fails.
-func TestChainSyncerWatchAddresses(t *testing.T) {
+// TestManagerPerWalletEventSubscriptions verifies that Manager never reads
+// Notifications and each managed Wallet opens its own independent chain event
+// subscription when synced.
+func TestManagerPerWalletEventSubscriptions(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: The exact native arguments must activate routing inside
-	// the call, before either its causal failure or successful retry.
-	addr, err := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), &chainParams,
+	// Arrange: Provide a strict chain source with no Notifications
+	// expectation; each Wallet enrolls via SubscribeChainEvents once
+	// synced at genesis.
+	source := bwmock.NewGenesisChain(t, true)
+	source.On("Notifications").Unset()
+
+	var (
+		mu   sync.Mutex
+		subs []*bwmock.EventSubscription
 	)
-	require.NoError(t, err)
-	script, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
 
-	tx := wire.NewMsgTx(2)
-	tx.AddTxOut(&wire.TxOut{PkScript: script})
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	require.NoError(t, err)
+	source.On("SubscribeChainEvents", mock.Anything).Unset()
+	source.On("SubscribeChainEvents", mock.Anything).Return(
+		func(ctx context.Context) chain.EventSubscription {
+			sub := bwmock.NewEventSubscription(ctx, source)
 
-	addrs := []address.Address{addr}
-	wallets := []*Wallet{{id: 1}}
-	failure := errors.New("subscription failed")
+			mu.Lock()
+			subs = append(subs, sub)
+			mu.Unlock()
 
-	client := createTestChain(t)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
-
-	s := newChainSyncer(client, &chainParams)
-
-	var received []TxEntries
-
-	callback := func(mock.Arguments) {
-		events := s.routeChainEvent(
-			chain.RelevantTx{TxRecord: rec}, wallets,
-		)
-		received = append(received, events[1].matches)
-	}
-	client.On("WatchAddrsFromTip", t.Context(), addrs).Run(callback).
-		Return(failure).Once()
-	client.On("WatchAddrsFromTip", t.Context(), addrs).Run(callback).
-		Return(nil).Once()
-
-	// Act: Repeat the identical producer request after native failure.
-	firstErr := s.watchAddresses(t.Context(), 1, addrs)
-	retryErr := s.watchAddresses(t.Context(), 1, addrs)
-
-	// Assert: Wrapped errors retain identity; both activations already
-	// have one recipient, and fixture cleanup verifies the exact calls.
-	require.ErrorIs(t, firstErr, failure)
-	require.NoError(t, retryErr)
-	require.Len(t, received, 2)
-
-	for _, matches := range received {
-		require.Len(t, matches, 1)
-		require.Same(t, rec, matches[0].Rec)
-	}
-}
-
-// TestChainSyncerWatchOutpoints verifies ownership precedes spent-output
-// activation, including a retry after its native subscription fails.
-func TestChainSyncerWatchOutpoints(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: The exact native arguments must activate routing inside
-	// the call, before either its causal failure or successful retry.
-	point := wire.OutPoint{Index: 7}
-	tx := wire.NewMsgTx(2)
-	tx.AddTxIn(wire.NewTxIn(&point, nil, nil))
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	require.NoError(t, err)
-
-	points := []*wire.OutPoint{&point}
-	wallets := []*Wallet{{id: 1}}
-	failure := errors.New("subscription failed")
-
-	client := createTestChain(t)
-	client.On("NotifySpent", mock.Anything).Unset()
-
-	s := newChainSyncer(client, &chainParams)
-
-	var received []TxEntries
-
-	callback := func(mock.Arguments) {
-		events := s.routeChainEvent(
-			chain.RelevantTx{TxRecord: rec}, wallets,
-		)
-		received = append(received, events[1].matches)
-	}
-	client.On("NotifySpent", points).Run(callback).
-		Return(failure).Once()
-	client.On("NotifySpent", points).Run(callback).
-		Return(nil).Once()
-
-	// Act: Repeat the identical producer request after native failure.
-	firstErr := s.watchOutpoints(t.Context(), 1, points)
-	retryErr := s.watchOutpoints(t.Context(), 1, points)
-
-	// Assert: Wrapped errors retain identity; both activations already
-	// have one recipient, and fixture cleanup verifies the exact calls.
-	require.ErrorIs(t, firstErr, failure)
-	require.NoError(t, retryErr)
-	require.Len(t, received, 2)
-
-	for _, matches := range received {
-		require.Len(t, matches, 1)
-		require.Same(t, rec, matches[0].Rec)
-	}
-}
-
-// TestChainSyncerNotifyReceived verifies ownership precedes publication
-// activation, including a retry after its native subscription fails.
-func TestChainSyncerNotifyReceived(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: An accepted publication retains native registration even
-	// after shutdown cancels the lifetime that its caller supplies.
-	addr, err := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), &chainParams,
-	)
-	require.NoError(t, err)
-	script, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
-	tx := wire.NewMsgTx(2)
-	tx.AddTxOut(&wire.TxOut{PkScript: script})
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	require.NoError(t, err)
-
-	addrs := []address.Address{addr}
-	wallets := []*Wallet{{id: 1}}
-	failure := errors.New("subscription failed")
-
-	client := createTestChain(t)
-
-	s := newChainSyncer(client, &chainParams)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	var received []TxEntries
-
-	callback := func(mock.Arguments) {
-		events := s.routeChainEvent(
-			chain.RelevantTx{TxRecord: rec}, wallets,
-		)
-		received = append(received, events[1].matches)
-	}
-	client.On("NotifyReceived", addrs).Run(callback).
-		Return(failure).Once()
-	client.On("NotifyReceived", addrs).Run(callback).
-		Return(nil).Once()
-
-	// Act: Register and retry despite the already-canceled lifetime.
-	firstErr := s.notifyReceived(ctx, 1, addrs)
-	retryErr := s.notifyReceived(ctx, 1, addrs)
-
-	// Assert: Cancellation cannot replace the native result; both calls
-	// find one recipient. Fixture cleanup verifies exact activation.
-	require.ErrorIs(t, firstErr, failure)
-	require.NoError(t, retryErr)
-	require.Len(t, received, 2)
-
-	for _, matches := range received {
-		require.Len(t, matches, 1)
-		require.Same(t, rec, matches[0].Rec)
-	}
-}
-
-// TestChainSyncerRouting checks shared watches and input-only spends before
-// any Wallet has recovered or stored their funding transaction.
-func TestChainSyncerRouting(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Two Wallets share an address; a third watches nothing. An
-	// input-address spend arrives before recovery learns its funding output.
-	// A later parent has duplicate outputs to check recipient deduplication.
-	client := createTestChain(t)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).Unset()
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Twice()
-
-	s := newChainSyncer(client, &chainParams)
-
-	root, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
-	require.NoError(t, err)
-	pubKey, err := root.ECPubKey()
-	require.NoError(t, err)
-	addr, err := address.NewAddressWitnessPubKeyHash(
-		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
-	)
-	require.NoError(t, err)
-	script, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
-	for _, id := range []uint32{1, 2} {
-		require.NoError(
-			t, s.watchAddresses(
-				t.Context(), id, []address.Address{addr},
-			),
-		)
-	}
-
-	// The unrelated output must remain the only source of credit metadata;
-	// the watched address belongs solely to the unknown input's witness.
-	otherAddr, err := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), &chainParams,
-	)
-	require.NoError(t, err)
-	otherScript, err := txscript.PayToAddrScript(otherAddr)
-	require.NoError(t, err)
-
-	unknownSpend := wire.NewMsgTx(2)
-	unknownSpend.AddTxIn(
-		wire.NewTxIn(
-			&wire.OutPoint{Index: 1}, nil, wire.TxWitness{
-				// Native validation owns signature checking; routing needs
-				// the public key to recover the spent output's address.
-				[]byte{}, pubKey.SerializeCompressed(),
-			},
-		),
-	)
-	unknownSpend.AddTxOut(&wire.TxOut{PkScript: otherScript})
-	unknownRec, err := wtxmgr.NewTxRecordFromMsgTx(unknownSpend, time.Now())
-	require.NoError(t, err)
-
-	originalSpend := unknownSpend.Copy()
-
-	parent := wire.NewMsgTx(2)
-	parent.AddTxOut(&wire.TxOut{PkScript: script})
-	parent.AddTxOut(&wire.TxOut{PkScript: script})
-	parentRec, err := wtxmgr.NewTxRecordFromMsgTx(parent, time.Now())
-	require.NoError(t, err)
-
-	child := wire.NewMsgTx(2)
-	child.AddTxIn(
-		wire.NewTxIn(
-			&wire.OutPoint{
-				Hash: parentRec.Hash,
-			}, nil, nil,
-		),
-	)
-	childRec, err := wtxmgr.NewTxRecordFromMsgTx(child, time.Now())
-	require.NoError(t, err)
-
-	wallets := []*Wallet{{id: 1}, {id: 2}, {id: 3}}
-	block := chain.FilteredBlockConnected{
-		Block:       &wtxmgr.BlockMeta{},
-		RelevantTxs: []*wtxmgr.TxRecord{parentRec, childRec},
-	}
-
-	original := parent.Copy()
-
-	// Act: Route the input-address-only spend before learning any outpoint,
-	// then the parent/child block and a later known-outpoint notification.
-	unknown := s.routeChainEvent(
-		chain.RelevantTx{TxRecord: unknownRec}, wallets,
-	)
-	events := s.routeChainEvent(block, wallets)
-	spend := s.routeChainEvent(chain.RelevantTx{TxRecord: childRec}, wallets)
-
-	// Assert: Both watched Wallets receive the early spend once, without
-	// turning its input address into output credit metadata. Existing ordered
-	// descendant routing and empty progress retain their original payloads.
-	require.Len(t, unknown, 2)
-	require.NotContains(t, unknown, uint32(3))
-	require.Equal(t, originalSpend, unknownSpend)
-	require.Len(t, events, len(wallets))
-
-	for _, id := range []uint32{1, 2} {
-		require.Len(t, unknown[id].matches, 1)
-		match := unknown[id].matches[0]
-		require.Same(t, unknownRec, match.Rec)
-		require.Len(t, match.Entries, 1)
-		require.Equal(t, otherAddr, match.Entries[0].Address)
-		require.Zero(t, match.Entries[0].Credit.Index)
-		require.Len(t, events[id].matches, 2)
-		require.Equal(
-			t, []*wtxmgr.TxRecord{parentRec, childRec},
-			[]*wtxmgr.TxRecord{
-				events[id].matches[0].Rec, events[id].matches[1].Rec,
-			},
-		)
-		require.Len(t, spend[id].matches, 1)
-	}
-
-	require.Empty(t, events[3].matches)
-	require.NotContains(t, spend, uint32(3))
-	require.Equal(t, block, events[1].notification)
-	require.Equal(t, original, parent)
-}
-
-// TestChainSyncerProgressRouting preserves ordinary control handlers and
-// delivers empty filtered blocks to every Wallet for checkpoint progress.
-func TestChainSyncerProgressRouting(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Header-only events must remain catch-up wakeups, disconnects
-	// keep rollback handling, and actual empty filtered blocks carry progress.
-	tests := []struct {
-		name         string
-		notification any
-	}{
-		{
-			name:         "header",
-			notification: chain.BlockConnected{},
+			return sub
 		},
-		{
-			name:         "disconnect",
-			notification: chain.BlockDisconnected{},
-		},
-		{
-			name: "empty filtered block",
-			notification: chain.FilteredBlockConnected{
-				Block: &wtxmgr.BlockMeta{},
-			},
-		},
-	}
+	).Twice()
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
+	m := testSQLiteManagerWithChain(t, source)
 
-			// Arrange: No watches are needed for block/control recipients.
-			s := newChainSyncer(createTestChain(t), &chainParams)
-
-			wallets := []*Wallet{{id: 1}, {id: 2}}
-
-			// Act: Route the original payload through normal membership.
-			events := s.routeChainEvent(test.notification, wallets)
-
-			// Assert: Every Wallet gets the original type and metadata
-			// without invented transaction matches or header checkpoints.
-			require.Len(t, events, len(wallets))
-
-			for _, event := range events {
-				require.Equal(t, test.notification, event.notification)
-				require.Empty(t, event.matches)
-			}
-		})
-	}
-}
-
-// TestManagerChainSourceClosed verifies a lost required stream tears down both
-// real Wallet workers before closing their shared database, without self-join.
-func TestManagerChainSourceClosed(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Keep both processors waiting for backend sync. Their normal
-	// cleanup locks each vault before the single backend close expectation.
-	data := make([]*walletData, 0, 2)
-	for i, name := range []string{"first", "second"} {
-		_, deps := createTestWalletWithMocks(t)
-		id := uint32(i + 1)
-
-		deps.store.On("GetWallet", mock.Anything, name).Return(
-			&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
-		).Once()
-		deps.store.On(
-			"ListAccounts", mock.Anything, db.ListAccountsQuery{
-				WalletID: id,
-			},
-		).Return([]db.AccountInfo{}, nil).Once()
-		deps.store.On("DeleteExpiredLeases", mock.Anything, id).
-			Return(nil).Once()
-		deps.vault.On("Lock").Return().Once()
-		data = append(
-			data, &walletData{
-				id:    id,
-				name:  name,
-				store: deps.store,
-				vault: deps.vault,
-			},
-		)
-	}
-
-	closed := make(chan struct{})
-	backend := &managerBackendMock{}
-	backend.On("listWallets", mock.Anything).Return(data, nil).Once()
-	backend.On("close").Run(
-		func(mock.Arguments) {
-			close(closed)
-		},
-	).Return(nil).Once()
-
-	notifications := make(chan any)
-	source := &bwmock.Chain{}
-	source.On("Notifications").
-		Return((<-chan any)(notifications)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
-	client, ok := manager.config.ChainSource.(*bwmock.Chain)
-	require.True(t, ok)
-
-	client.On("IsCurrent").Return(false).Maybe()
-
-	wallets, err := manager.Start(t.Context())
+	// Act: Create two Wallets and wait for both to reach Synced.
+	firstParams := sqliteCreateParams(t)
+	firstParams.Name = "wallet-first"
+	first, err := m.Create(firstParams)
 	require.NoError(t, err)
 
-	// Act: Lose the one stream while both Wallets are running.
-	close(notifications)
-
-	// Assert: Automatic teardown finishes without an external Stop rescuing
-	// it; retained Wallets are inert and later public Stop is rejected.
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("closed source did not stop Manager")
-	}
-
-	for _, w := range wallets {
-		require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
-		require.Equal(
-			t, lifecycleStopped, lifecycle(w.state.lifecycle.Load()),
-		)
-	}
-
-	require.ErrorIs(t, manager.Stop(), ErrManagerStopped)
-}
-
-// TestManagerChainEventOrder proves source order and bounded delivery
-// while an uncancelled Wallet deliberately stops draining its inbox.
-func TestManagerChainEventOrder(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: A data-only Wallet isolates delivery from Store processing.
-	// Three headers expose the capacity-one bound without extra worker queues.
-	notifications := make(chan any, 3)
-
-	w := &Wallet{
-		id:             1,
-		lifetimeCtx:    t.Context(),
-		chainEventChan: make(chan chainEvent, 1),
-	}
-
-	// Reuse owned cleanup so the same source fixture remains valid when the
-	// loop becomes responsible for terminal storage release.
-	backend := &managerBackendMock{}
-	backend.On("close").Return(nil).Once()
-
-	source := &bwmock.Chain{}
-	source.On("Notifications").
-		Return((<-chan any)(notifications)).Once()
-	manager := newManagerLifecycleTest(t, backend, source)
-	backend.On("listWallets", mock.Anything).
-		Return([]*walletData{}, nil).Once()
-
-	_, err := manager.Start(t.Context())
+	secondParams := sqliteCreateParams(t)
+	secondParams.Name = "wallet-second"
+	second, err := m.Create(secondParams)
 	require.NoError(t, err)
 
-	manager.wallets["first"] = w
-
-	// Act: Queue three headers and let the loop block its second delivery
-	// behind the full first mailbox; it cannot consume the third event.
-	for height := int32(1); height <= 3; height++ {
-		notifications <- chain.BlockConnected{
-			Block: wtxmgr.Block{Height: height},
-		}
+	for _, w := range []*Wallet{first, second} {
+		require.Eventually(t, func() bool {
+			info, err := w.Info(t.Context())
+			return err == nil && info.Synced
+		}, 5*time.Second, time.Millisecond)
 	}
 
-	require.Eventually(
-		t, func() bool {
-			return len(notifications) == 1 && len(w.chainEventChan) == 1
-		}, time.Second, time.Millisecond,
-	)
+	// Assert: Each Wallet received a distinct subscription, and stopping
+	// Manager cancels both subscriptions cleanly.
+	mu.Lock()
 
-	// Assert: Releasing capacity admits each unchanged header in FIFO order.
-	// The first delivery did not wait for Wallet persistence or processing.
-	for height := int32(1); height <= 3; height++ {
+	gotSubs := slices.Clone(subs)
+
+	mu.Unlock()
+
+	require.Len(t, gotSubs, 2)
+	require.NotSame(t, gotSubs[0], gotSubs[1])
+	require.NoError(t, m.Stop())
+
+	for _, sub := range gotSubs {
 		select {
-		case event := <-w.chainEventChan:
-			header, ok := event.notification.(chain.BlockConnected)
-			require.True(t, ok)
-			require.Equal(t, height, header.Height)
+		case <-sub.Done():
 		case <-time.After(time.Second):
-			t.Fatal("delivery failed to resume after mailbox drain")
+			t.Fatal("wallet subscription not closed on Manager Stop")
 		}
 	}
-}
-
-// TestManagerChainEventMembership verifies snapshots include a newly published
-// Wallet without retaining the Manager lock during mailbox delivery.
-func TestManagerChainEventMembership(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Only the first Wallet is published for the initial snapshot.
-	first := &Wallet{
-		id:             1,
-		lifetimeCtx:    t.Context(),
-		chainEventChan: make(chan chainEvent, 1),
-	}
-	second := &Wallet{
-		id:             2,
-		lifetimeCtx:    t.Context(),
-		chainEventChan: make(chan chainEvent, 1),
-	}
-
-	manager := &Manager{
-		wallets:     map[string]*Wallet{"first": first},
-		chainSyncer: newChainSyncer(createTestChain(t), &chainParams),
-	}
-
-	// Act: Publish between two synchronous owner-turn dispatches.
-	require.NoError(
-		t, manager.dispatchChainEvent(
-			t.Context(), chain.BlockConnected{},
-		),
-	)
-	manager.wallets["second"] = second
-
-	<-first.chainEventChan
-	require.NoError(
-		t, manager.dispatchChainEvent(
-			t.Context(), chain.ClientConnected{},
-		),
-	)
-
-	// Assert: Both current members receive the next control event unchanged.
-	require.IsType(
-		t, chain.ClientConnected{}, (<-first.chainEventChan).notification,
-	)
-	require.IsType(
-		t, chain.ClientConnected{}, (<-second.chainEventChan).notification,
-	)
-}
-
-// TestManagerChainEventBlockedStop verifies terminal cancellation releases a
-// reader blocked on a real Wallet whose asynchronous initialization is pending.
-func TestManagerChainEventBlockedStop(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Hold the backend call itself, since an initialization wait now
-	// services its mailbox. A second header still forces delivery to block.
-	client := createTestChain(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-
-	client.On("IsCurrent").Unset()
-	client.On("IsCurrent").Run(func(mock.Arguments) {
-		close(entered)
-		<-release
-	}).Return(false).Once()
-
-	notifications := make(chan any, 2)
-
-	client.On("Notifications").Unset()
-	client.On("Notifications").
-		Return((<-chan any)(notifications)).Once()
-	manager := testSQLiteManagerWithChain(t, client)
-
-	// Release a held dependency before fixture Stop, even if a prerequisite
-	// fails. The backend call is existing blocking I/O, not another worker.
-	releaseBackend := sync.OnceFunc(func() { close(release) })
-	t.Cleanup(releaseBackend)
-
-	w, err := manager.Create(sqliteCreateParams(t))
-	require.NoError(t, err)
-
-	<-entered
-
-	notifications <- chain.BlockConnected{}
-
-	notifications <- chain.BlockConnected{}
-
-	require.Eventually(
-		t, func() bool {
-			return len(notifications) == 0 && len(w.chainEventChan) == 1
-		}, time.Second, time.Millisecond,
-	)
-
-	// Act: Stop while reader delivery has no available mailbox capacity.
-	stopped := make(chan error, 1)
-	go func() {
-		stopped <- manager.Stop()
-	}()
-
-	<-w.lifetimeCtx.Done()
-	releaseBackend()
-
-	// Assert: Stop joins both reader and Wallet rather than waiting for
-	// initialization to become ready or closing Store underneath either one.
-	select {
-	case err := <-stopped:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("full mailbox blocked terminal Stop")
-	}
-
-	require.ErrorIs(t, w.lifetimeCtx.Err(), context.Canceled)
 }
 
 // TestManagerChainCanceledSourceRejectsCreate rejects terminal admission after
@@ -3128,7 +2592,6 @@ func TestManagerChainCanceledSourceRejectsCreate(t *testing.T) {
 	backend.On("close").Return(nil).Once()
 
 	source := &bwmock.Chain{}
-	source.On("Notifications").Return((<-chan any)(nil)).Once()
 	manager := newManagerLifecycleTest(t, backend, source)
 	manager.started.Store(true)
 	manager.cancel()
@@ -3203,14 +2666,13 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	source.On("GetBestBlock").Return(chainParams.GenesisHash, int32(0), nil).
 		Maybe()
 	source.On("GetBlockHash", int64(1)).Return(&stamp.Hash, nil).Once()
+	source.On("GetBlockHeader", &replacement.Hash).Return(
+		&wire.BlockHeader{PrevBlock: stamp.Hash}, nil,
+	).Once()
 	expectDisconnectHeaders(source, 2, stamp.Hash, replacement.Hash)
-	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
-		notification: chain.RelevantTx{
-			TxRecord: oldTx,
-			Block:    &old,
-		},
-		matches: liveMatches(oldTx),
-	}))
+	require.NoError(t, s.putTxNotifications(
+		t.Context(), liveMatches(oldTx), &old,
+	))
 
 	err = walletdb.Update(conn, func(tx walletdb.ReadWriteTx) error {
 		return s.txStore.AddCredit(
@@ -3221,8 +2683,11 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 	require.Equal(t, stamp, mgr.SyncedTo())
 
 	// Act on the disconnect while the manager is still below the orphan.
-	require.NoError(t, s.processChainEvent(
-		t.Context(), chainEvent{notification: chain.BlockDisconnected(old)},
+	require.NoError(t, s.processBlockEvent(
+		t.Context(), chain.Event{
+			Type:  chain.EventBlockDisconnected,
+			Block: &old,
+		},
 	))
 
 	// Assert the orphan and its credit are already unmined before any
@@ -3238,15 +2703,16 @@ func TestManagerRollbackKvdbAheadOfTip(t *testing.T) {
 
 	// Act by accepting the replacement and replaying a delayed old detach.
 	// The stored replacement identity must make that replay harmless.
-	require.NoError(t, s.processChainEvent(t.Context(), chainEvent{
-		notification: chain.FilteredBlockConnected{
-			Block:       &replacement,
-			RelevantTxs: []*wtxmgr.TxRecord{newTx},
-		},
-		matches: liveMatches(newTx),
+	require.NoError(t, s.processBlockEvent(t.Context(), chain.Event{
+		Type:        chain.EventBlockConnected,
+		Block:       &replacement,
+		RelevantTxs: []*wtxmgr.TxRecord{newTx},
 	}))
-	require.NoError(t, s.processChainEvent(
-		t.Context(), chainEvent{notification: chain.BlockDisconnected(old)},
+	require.NoError(t, s.processBlockEvent(
+		t.Context(), chain.Event{
+			Type:  chain.EventBlockDisconnected,
+			Block: &old,
+		},
 	))
 
 	// Assert one complete history query resolves the replacement, while the

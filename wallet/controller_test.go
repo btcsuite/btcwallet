@@ -377,7 +377,6 @@ func TestControllerChangePassphraseDrainsDuringManagerStop(t *testing.T) {
 					Return([]*walletData{}, nil).Once()
 
 				source := &bwmock.Chain{}
-				source.On("Notifications").Return((<-chan any)(nil)).Once()
 				manager := newManagerLifecycleTest(t, backend, source)
 
 				_, err := manager.Start(t.Context())
@@ -2211,7 +2210,6 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 		w, deps := createTestWalletWithMocks(t)
 		w.sync = newSyncer(
 			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
-			w.chainSyncer, w.chainEventChan,
 		)
 		w.state = newWalletState(w.sync)
 
@@ -2222,13 +2220,18 @@ func TestControllerInfoSyncWorkerBackoff(t *testing.T) {
 		}
 		deps.store.On("GetWallet", mock.Anything, "").Return(
 			&db.WalletInfo{SyncedTo: tip}, nil,
-		).Times(4)
+		).Times(5)
 		expectMatchingRollbackBatch(deps.store, deps.chain)
 		deps.chain.On("IsCurrent").Return(true).Once()
+		deps.chain.On("SubscribeChainEvents", mock.Anything).Return(
+			func(ctx context.Context) chain.EventSubscription {
+				return bwmock.NewEventSubscription(ctx, deps.chain)
+			},
+		).Once()
 		deps.chain.On("NotifyBlocks").Return(nil).Once()
 		deps.chain.On("GetBestBlock").Return(
 			&tip.Hash, int32(tip.Height), nil,
-		).Times(3)
+		).Times(4)
 		deps.chain.On("BackEnd").Return("mock").Twice()
 
 		// Complete startup registration with no stored watches so the
@@ -2294,21 +2297,29 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 		w, deps := createTestWalletWithMocks(t)
 		s := newSyncer(
 			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
-			w.chainSyncer, w.chainEventChan,
 		)
 		w.sync = s
 		w.state = newWalletState(s)
 
+		var sub *bwmock.EventSubscription
+
 		tip := &db.Block{Hash: chainhash.Hash{100}, Height: 100}
 		deps.store.On("GetWallet", mock.Anything, "").Return(
 			&db.WalletInfo{SyncedTo: tip}, nil,
-		).Times(5)
+		).Times(6)
 		expectMatchingRollbackBatch(deps.store, deps.chain)
 		deps.chain.On("IsCurrent").Return(true).Once()
+		deps.chain.On("SubscribeChainEvents", mock.Anything).Return(
+			func(ctx context.Context) chain.EventSubscription {
+				sub = bwmock.NewEventSubscription(ctx, deps.chain)
+
+				return sub
+			},
+		).Once()
 		deps.chain.On("NotifyBlocks").Return(nil).Once()
 		deps.chain.On("GetBestBlock").Return(
 			&tip.Hash, int32(tip.Height), nil,
-		).Times(4)
+		).Times(5)
 		deps.store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
 			WalletID: w.id, UnminedOnly: true,
 		}).Return(nil, nil).Times(3)
@@ -2347,6 +2358,9 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 			Block: wtxmgr.Block{Hash: chainhash.Hash{101}, Height: 101},
 			Time:  time.Unix(1710004300, 0).UTC(),
 		}
+		deps.chain.On("GetBlockHeader", &block.Hash).Return(
+			&wire.BlockHeader{PrevBlock: tip.Hash}, nil,
+		).Once()
 		deps.store.On("ApplyTxBatch", mock.Anything, db.TxBatchParams{
 			WalletID:     w.id,
 			Transactions: []db.CreateTxParams{},
@@ -2375,9 +2389,11 @@ func TestControllerTargetedScanFailureKeepsWorker(t *testing.T) {
 
 		synctest.Wait()
 
-		w.chainEventChan <- chainEvent{
-			notification: chain.FilteredBlockConnected{Block: block},
-		}
+		require.NotNil(t, sub)
+		sub.SendBlock(chain.Event{
+			Type:  chain.EventBlockConnected,
+			Block: block,
+		})
 
 		// Assert: Let the worker settle before cleanup verifies persistence
 		// and the single initialization through the mock expectations.
@@ -2915,9 +2931,9 @@ func TestWaitForBackoffStableRun(t *testing.T) {
 func TestWaitForBackoff_UnstableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet with an open, idle mailbox.
+	// Arrange: Create a wallet with an idle syncer.
 	w := &Wallet{
-		sync:        &syncer{chainEventChan: make(chan chainEvent)},
+		sync:        &syncer{},
 		lifetimeCtx: context.Background(),
 	}
 

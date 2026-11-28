@@ -1168,7 +1168,7 @@ func TestDecorateInputsTaprootScript(t *testing.T) {
 	deps.store.ExpectedCalls[inputRead].Twice()
 	deps.store.ExpectedCalls[inputRead+1].Once()
 	deps.store.ExpectedCalls[len(deps.store.ExpectedCalls)-1].Once()
-	deps.chain.ExpectedCalls[len(deps.chain.ExpectedCalls)-1].Once()
+	deps.syncer.ExpectedCalls[len(deps.syncer.ExpectedCalls)-1].Once()
 
 	packet := testFundingPacket(outpoint)
 	packet.UnsignedTx.AddTxOut(wire.NewTxOut(400_000, script))
@@ -1264,7 +1264,7 @@ func TestFundPsbtTaprootScriptWitnessFee(t *testing.T) {
 	deps.store.ExpectedCalls[inputRead].Twice()
 	deps.store.ExpectedCalls[inputRead+1].Once()
 	deps.store.ExpectedCalls[len(deps.store.ExpectedCalls)-1].Once()
-	deps.chain.ExpectedCalls[len(deps.chain.ExpectedCalls)-1].Once()
+	deps.syncer.ExpectedCalls[len(deps.syncer.ExpectedCalls)-1].Once()
 
 	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
 		WalletID: w.id, ScriptPubKey: utxo.PkScript,
@@ -1726,8 +1726,8 @@ func TestFundPsbtImportedAccountSchema(t *testing.T) {
 			)
 			// The funded packet keeps this change, so FundPsbt
 			// registers it before returning.
-			deps.chain.On(
-				"WatchAddrsFromTip", w.lifetimeCtx,
+			deps.syncer.On(
+				"watchAddrs", w.lifetimeCtx,
 				[]address.Address{changeAddr},
 			).Return(nil).Once()
 			// HD coordinates and a public key establish script facts;
@@ -6558,8 +6558,8 @@ func expectFundingSourcesForAddress(t *testing.T, w *Wallet,
 		Branch:            1,
 	}}, nil).Once()
 	// Only a run that returns a funded packet registers its change.
-	mocks.chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{changeAddr},
+	mocks.syncer.On(
+		"watchAddrs", w.lifetimeCtx, []address.Address{changeAddr},
 	).Return(nil).Maybe()
 
 	// The change output is only looked up once funding gets as far as
@@ -7130,9 +7130,9 @@ func TestFundPsbtChangeWatchFailure(t *testing.T) {
 
 	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
 	expectManualFundingSources(t, w, mocks, outPoint)
-	mocks.chain.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+	mocks.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
 		Unset()
-	mocks.chain.On("WatchAddrsFromTip", w.lifetimeCtx, mock.Anything).
+	mocks.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
 		Return(errChainMock).Once()
 
 	tx := wire.NewMsgTx(2)

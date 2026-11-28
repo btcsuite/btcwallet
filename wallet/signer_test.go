@@ -1202,15 +1202,8 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	w, chain, vault := newSQLAddressSigningWallet(t)
+	w, vault := newSQLAddressSigningWallet(t)
 	require.NotNil(t, vault)
-
-	chain.On(
-		"WatchAddrsFromTip", mock.Anything,
-		mock.MatchedBy(func(addrs []address.Address) bool {
-			return len(addrs) == 1
-		}),
-	).Return(nil).Once()
 
 	info, err := w.NewAddress(
 		t.Context(), NewAccountSelectorByName(
@@ -1338,7 +1331,7 @@ func TestResolveDerivedPrivKeyFromStoreDerivedSuccess(t *testing.T) {
 func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	w, chain, vault := newSQLAddressSigningWallet(t)
+	w, vault := newSQLAddressSigningWallet(t)
 
 	// Create a second derived account that lives only in the SQL store; it
 	// has no counterpart in the legacy waddrmgr manager.
@@ -1356,13 +1349,6 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	// The secondary account must not be the wallet's default account 0,
 	// which is the one mirrored through waddrmgr.
 	require.NotZero(t, *secondary.AccountNumber)
-
-	chain.On(
-		"WatchAddrsFromTip", mock.Anything,
-		mock.MatchedBy(func(addrs []address.Address) bool {
-			return len(addrs) == 1
-		}),
-	).Return(nil).Once()
 
 	info, err := w.NewAddress(
 		t.Context(), NewAccountSelectorByName(
@@ -1421,7 +1407,7 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 	t.Parallel()
 
-	w, chain, _ := newSQLAddressSigningWallet(t)
+	w, _ := newSQLAddressSigningWallet(t)
 
 	_, err := w.store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
@@ -1431,13 +1417,6 @@ func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 		}, testAccountDerivationFunc(),
 	)
 	require.NoError(t, err)
-
-	chain.On(
-		"WatchAddrsFromTip", mock.Anything,
-		mock.MatchedBy(func(addrs []address.Address) bool {
-			return len(addrs) == 1
-		}),
-	).Return(nil).Once()
 
 	info, err := w.NewAddress(
 		t.Context(), NewAccountSelectorByName(
@@ -1823,8 +1802,6 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	tapscript := newTestTapscript(t)
 	leafScript := tapscript.Leaves[0].Script
 
-	// SQL import establishes a live watch on the Wallet lifetime before
-	// exposing the persisted script to the following resolution checks.
 	taprootKey, err := tapscript.TaprootKey()
 	require.NoError(t, err)
 
@@ -1832,10 +1809,6 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 		schnorr.SerializePubKey(taprootKey), w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
-
-	chain.On(
-		"WatchAddrsFromTip", w.lifetimeCtx, []address.Address{addr},
-	).Return(nil).Once()
 
 	// Act: Import, inspect ciphertext, then resolve before and after locking.
 	info, err := w.ImportTaprootScript(t.Context(), tapscript)
@@ -1988,9 +1961,7 @@ func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
 
 // newSQLAddressSigningWallet returns a started, unlocked wallet whose address
 // records are stored in SQLite and signing uses a mock vault.
-func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
-	*keyvaultmock.Vault) {
-
+func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *keyvaultmock.Vault) {
 	t.Helper()
 
 	legacyDB, cleanup := setupTestDB(t)
@@ -2077,10 +2048,10 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 		id: walletInfo.ID,
 	}
 
-	// Supply the same routing dependency as Manager assembly before address
-	// or import calls can activate native notifications on this fixture.
-	w.chainSyncer = newChainSyncer(chain, &chainParams)
-	w.chainEventChan = make(chan chainEvent, 1)
+	w.sync = newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+	)
+	w.state = newWalletState(w.sync)
 
 	// Disable auto-lock timing so this fixture exercises only its API call.
 	w.lockTimer.Stop()
@@ -2092,7 +2063,7 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 		vault.AssertExpectations(t)
 	})
 
-	return w, chain, vault
+	return w, vault
 }
 
 // TestSQLImportedXPubDerivation verifies locked public derivation selects a
@@ -2105,7 +2076,7 @@ func TestSQLImportedXPubDerivation(t *testing.T) {
 	// row projection collides with another account's BIP44 number. Distinct
 	// expected children make any selector mix-up observable, and locking the
 	// wallet proves public derivation does not require private-key access.
-	w, _, _ := newSQLAddressSigningWallet(t)
+	w, _ := newSQLAddressSigningWallet(t)
 	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScope(scope)
 	importedKey := testAccountXPrv(t)
@@ -3308,10 +3279,10 @@ func startSQLScriptWallet(t *testing.T, store db.Store,
 		id: walletID,
 	}
 
-	// Supply the same routing dependency as Manager assembly before address
-	// or import calls can activate native notifications on this fixture.
-	w.chainSyncer = newChainSyncer(chain, &chainParams)
-	w.chainEventChan = make(chan chainEvent, 1)
+	w.sync = newSyncer(
+		w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+	)
+	w.state = newWalletState(w.sync)
 
 	// Disable auto-lock timing so this fixture exercises only its API call.
 	w.lockTimer.Stop()

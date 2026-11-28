@@ -939,7 +939,7 @@ func (w *Wallet) deliverStoreAddresses(ctx context.Context,
 	}
 
 	//nolint:contextcheck // Only the Wallet lifetime may cancel registration.
-	err := w.chainSyncer.watchAddresses(w.lifetimeCtx, w.id, addrs)
+	err := w.sync.watchAddrs(w.lifetimeCtx, addrs)
 	if err != nil {
 		return nil, err
 	}
@@ -1090,10 +1090,11 @@ func (w *Wallet) newKVDBAddress(ctx context.Context, selector AccountSelector,
 		return AddressInfo{}, err
 	}
 
-	// Declare ownership before native activation can emit the new payment.
-	err = w.chainSyncer.notifyReceived(
-		ctx, w.id, []address.Address{info.Addr},
-	)
+	// Register the newly derived address on the active subscription (or
+	// mark any in-flight catch-up scan stale).
+	//
+	//nolint:contextcheck // Only the Wallet lifetime may cancel registration.
+	err = w.sync.watchAddrs(w.lifetimeCtx, []address.Address{info.Addr})
 	if err != nil {
 		return AddressInfo{}, err
 	}

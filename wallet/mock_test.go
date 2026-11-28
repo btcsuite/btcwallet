@@ -6,8 +6,8 @@ package wallet
 
 import (
 	"context"
-	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -125,14 +125,6 @@ func (m *mockChainProcessor) run(ctx context.Context) error {
 	return args.Error(0)
 }
 
-// waitForRetry observes the Wallet's retry deadline in controller tests.
-func (m *mockChainProcessor) waitForRetry(ctx context.Context,
-	retry <-chan time.Time) error {
-
-	args := m.Called(ctx, retry)
-	return args.Error(0)
-}
-
 // requestScan implements the chainProcessor interface.
 func (m *mockChainProcessor) requestScan(ctx context.Context,
 	req *scanReq) error {
@@ -153,6 +145,14 @@ func (m *mockChainProcessor) syncedTo(ctx context.Context) (waddrmgr.BlockStamp,
 
 	args := m.Called(ctx)
 	return args.Get(0).(waddrmgr.BlockStamp), args.Error(1)
+}
+
+// watchAddrs implements the chainProcessor interface.
+func (m *mockChainProcessor) watchAddrs(ctx context.Context,
+	addrs []address.Address) error {
+
+	args := m.Called(ctx, addrs)
+	return args.Error(0)
 }
 
 // mockTxPublisher mocks only the syncer's non-creating retry capability.

@@ -11,9 +11,9 @@
   targeted-rescan ownership and [ADR 0006](0006-wtxmgr-sql-schema.md) for SQL
   block identity and canonical-frontier semantics.
 - **Supersedes:** [ADR 0002](0002-controller-syncer-architecture.md).
-- **Amended by:** Proposed [ADR 0017](0017-manager-chain-routing.md) for
-  direct Wallet subscriptions, publication watch readiness and Wallet-owned
-  history and rollback.
+- **Amended by:** [ADR 0017](0017-manager-chain-routing.md) for direct Wallet
+  subscriptions, sync-lifecycle watch ownership, and Wallet-owned history and
+  rollback.
 - **Superseded by:** None.
 
 ## 1. Problem
