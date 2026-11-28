@@ -10,7 +10,7 @@
 - **Amends:** None.
 - **Supersedes:** None.
 - **Amended by:** [ADR 0015](0015-sql-shared-chain-ownership.md) for SQL block
-  identity and canonical-frontier semantics, proposed
+  identity and canonical-frontier semantics,
   [ADR 0017](0017-manager-chain-routing.md) for Wallet-owned block identity
   and references, and [ADR 0018](0018-unconfirmed-transaction-candidates.md)
   for input relationships, derived spend availability and competing
