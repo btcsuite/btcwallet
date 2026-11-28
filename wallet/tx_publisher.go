@@ -367,6 +367,7 @@ func (w *Wallet) broadcastTx(ctx context.Context, tx *wire.MsgTx,
 	// Mempool-known submissions repair history without sending again. Other
 	// send replies have no graph authority: competing attempts stay recorded.
 	if !errors.Is(mempoolErr, errAlreadyBroadcasted) {
+		//nolint:contextcheck // Accepted publication completes through stop.
 		err = w.publishTx(tx, ourAddrs)
 		if err != nil {
 			return w.handlePublicationFailure(ctx, tx, recorded, err)
@@ -961,9 +962,14 @@ func (w *Wallet) walletOwnedOutputs(ctx context.Context,
 func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// We'll also ask to be notified of the tx once it confirms on-chain.
 	// This is done outside of the database tx to prevent backend
-	// interaction within it.
-	err := w.chainSyncer.notifyReceived(w.lifetimeCtx, w.id, ourAddrs)
-	if err != nil {
+	// interaction within it. Accepted publications must complete through
+	// concurrent wallet shutdown, so strip cancellation from lifetimeCtx
+	// and ignore subscription cancellation once lifetimeCtx is canceled.
+	err := w.sync.watchAddrs(context.WithoutCancel(w.lifetimeCtx), ourAddrs)
+	if err != nil &&
+		(w.lifetimeCtx.Err() == nil ||
+			!errors.Is(err, context.Canceled)) {
+
 		return err
 	}
 

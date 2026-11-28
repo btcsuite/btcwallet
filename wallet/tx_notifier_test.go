@@ -25,8 +25,6 @@ func subscriptionWallet(t *testing.T) (*Wallet, *bwmock.Chain, []byte) {
 	t.Helper()
 
 	_, client, w, _ := newLiveWatchManager(t)
-	client.On("WatchAddrsFromTip", mock.Anything, mock.Anything).
-		Return(nil).Once()
 
 	recv, err := w.NewAddress(t.Context(), NewAccountSelectorByName(
 		waddrmgr.KeyScopeBIP0084, waddrmgr.DefaultAccountName,
@@ -70,7 +68,6 @@ func TestTxSubscriptionPublicationOwnership(t *testing.T) {
 	require.NoError(t, err)
 	client.On("TestMempoolAccept", mock.Anything, float64(0)).
 		Return(nil, chain.ErrUnimplemented).Once()
-	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	client.On("SendRawTransaction", mock.Anything, false).
 		Return(nil, nil).Once()
 
@@ -121,7 +118,6 @@ func TestTxSubscriptionSlowConsumer(t *testing.T) {
 	count := TxSubscriptionQueueLimit + 1
 	client.On("TestMempoolAccept", mock.Anything, float64(0)).
 		Return(nil, chain.ErrUnimplemented).Times(count + 1)
-	client.On("NotifyReceived", mock.Anything).Return(nil).Times(count + 1)
 	client.On("SendRawTransaction", mock.Anything, false).
 		Return(nil, nil).Times(count + 1)
 
@@ -168,7 +164,6 @@ func TestTxSubscriptionWalletIsolation(t *testing.T) {
 	require.NoError(t, err)
 	client.On("TestMempoolAccept", mock.Anything, float64(0)).
 		Return(nil, chain.ErrUnimplemented).Once()
-	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	client.On("SendRawTransaction", mock.Anything, false).
 		Return(nil, nil).Once()
 
@@ -207,7 +202,6 @@ func TestTxSubscriptionCancelDuringPublication(t *testing.T) {
 
 	client.On("TestMempoolAccept", mock.Anything, float64(0)).
 		Return(nil, chain.ErrUnimplemented).Once()
-	client.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	client.On("SendRawTransaction", mock.Anything, false).
 		Run(func(mock.Arguments) {
 			close(publishing)

@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -1192,8 +1193,10 @@ func TestPublishTx(t *testing.T) {
 			// native send. Fixture cleanup verifies the mock once.
 			w, m := createStartedWalletWithMocks(t)
 
-			m.syncer.On("watchAddrs", w.lifetimeCtx, addrs).
-				Return(tc.notifyErr).Once()
+			m.syncer.On(
+				"watchAddrs",
+				context.WithoutCancel(w.lifetimeCtx), addrs,
+			).Return(tc.notifyErr).Once()
 
 			m.chain.On("SendRawTransaction", tx, false).
 				Return(nil, tc.sendErr).Once()
@@ -1249,8 +1252,10 @@ func TestBroadcastSuccess(t *testing.T) {
 		Status:       db.TxStatusPublished,
 		Label:        testTxLabel,
 	}, nil).Once()
-	m.syncer.On("watchAddrs", w.lifetimeCtx, []address.Address{addr}).
-		Return(nil).Once()
+	m.syncer.On(
+		"watchAddrs", context.WithoutCancel(w.lifetimeCtx),
+		[]address.Address{addr},
+	).Return(nil).Once()
 	m.chain.On("SendRawTransaction", tx, false).Return(nil, nil).Once()
 
 	// Act: Publish through the public Wallet entry point with both owned
@@ -1338,8 +1343,11 @@ func TestBroadcastAlreadyBroadcastedAtPublish(t *testing.T) {
 			}, nil).Once()
 
 			// publishTx sees the duplicate only at send time.
-			m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-				Return(nil).Once()
+			m.syncer.On(
+				"watchAddrs",
+				context.WithoutCancel(w.lifetimeCtx),
+				mock.Anything,
+			).Return(nil).Once()
 			m.chain.On("SendRawTransaction",
 				mock.Anything, mock.Anything,
 			).Return(nil, tc.sendErr).Once()
@@ -1496,8 +1504,10 @@ func TestBroadcastPublishFailsRetainsTx(t *testing.T) {
 		SerializedTx: serializeTx(t, tx),
 		Status:       db.TxStatusPublished,
 	}, nil).Once()
-	m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-		Return(nil).Once()
+	m.syncer.On(
+		"watchAddrs", context.WithoutCancel(w.lifetimeCtx),
+		mock.Anything,
+	).Return(nil).Once()
 	m.chain.On("SendRawTransaction", tx, false).
 		Return(nil, errPublish).Once()
 
@@ -1541,8 +1551,10 @@ func TestBroadcastRegistrationFailsRetainsTx(t *testing.T) {
 		SerializedTx: serializeTx(t, tx),
 		Status:       db.TxStatusPublished,
 	}, nil).Once()
-	m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-		Return(errDummy).Once()
+	m.syncer.On(
+		"watchAddrs", context.WithoutCancel(w.lifetimeCtx),
+		mock.Anything,
+	).Return(errDummy).Once()
 
 	// Act: Fail publication before the chain send can run.
 	err := w.Broadcast(t.Context(), tx, "")
@@ -1603,8 +1615,11 @@ func TestBroadcastScriptRejectionRemovesTx(t *testing.T) {
 				SerializedTx: serializeTx(t, tx),
 				Status:       db.TxStatusPublished,
 			}, nil).Once()
-			m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-				Return(nil).Once()
+			m.syncer.On(
+				"watchAddrs",
+				context.WithoutCancel(w.lifetimeCtx),
+				mock.Anything,
+			).Return(nil).Once()
 			m.chain.On("SendRawTransaction", tx, false).
 				Return(nil, chain.ErrScriptVerifyFlag).Once()
 			m.store.On("DeleteUnminedTx", mock.Anything,
@@ -1656,8 +1671,10 @@ func TestBroadcastCleanupFailsRetainsSweep(t *testing.T) {
 		SerializedTx: serializeTx(t, tx),
 		Status:       db.TxStatusPublished,
 	}, nil).Once()
-	m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-		Return(nil).Once()
+	m.syncer.On(
+		"watchAddrs", context.WithoutCancel(w.lifetimeCtx),
+		mock.Anything,
+	).Return(nil).Once()
 	m.chain.On("SendRawTransaction", tx, false).
 		Return(nil, chain.ErrScriptVerifyFlag).Once()
 	m.store.On("DeleteUnminedTx", mock.Anything,
@@ -1801,8 +1818,10 @@ func TestBroadcastUnrelatedPublishFailsNoRemove(t *testing.T) {
 	}).Return((*db.TxDetailInfo)(nil), db.ErrTxNotFound).Once()
 
 	// A script rejection would authorize cleanup of a recorded transaction.
-	m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-		Return(nil).Once()
+	m.syncer.On(
+		"watchAddrs", context.WithoutCancel(w.lifetimeCtx),
+		mock.Anything,
+	).Return(nil).Once()
 	m.chain.On("SendRawTransaction",
 		mock.Anything, mock.Anything,
 	).Return(nil, chain.ErrScriptVerifyFlag).Once()
@@ -1950,8 +1969,10 @@ func TestBroadcastRetryLiveDuplicateIdempotent(t *testing.T) {
 	).Return(nil).Once()
 
 	// Recording succeeded idempotently, so publishing proceeds as normal.
-	m.syncer.On("watchAddrs", w.lifetimeCtx, mock.Anything).
-		Return(nil).Once()
+	m.syncer.On(
+		"watchAddrs", context.WithoutCancel(w.lifetimeCtx),
+		mock.Anything,
+	).Return(nil).Once()
 	m.chain.On("SendRawTransaction",
 		mock.Anything, mock.Anything,
 	).Return(nil, nil).Once()
@@ -2662,4 +2683,49 @@ func TestRebroadcastLateRejectionKeepsNewWitness(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, serializeTx(t, next), info.SerializedTx)
+}
+
+// TestPublishTxCompletesWatchDuringShutdown verifies that an admitted
+// publication still completes watchAddrs and SendRawTransaction even if
+// Wallet.stop cancels w.lifetimeCtx before publishTx runs.
+func TestPublishTxCompletesWatchDuringShutdown(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build a wallet with a real syncer whose live subscription
+	// is tied to lifetimeCtx, then cancel lifetimeCtx to simulate
+	// concurrent Wallet.stop before publishTx executes.
+	mockChain := &bwmock.Chain{}
+	ctx, cancel := context.WithCancel(t.Context())
+	sub := bwmock.NewEventSubscription(ctx, mockChain)
+
+	s := newTestSyncer(
+		Config{Chain: mockChain, ChainParams: &chainParams},
+		nil, nil, nil, &walletmock.Store{}, 1,
+	)
+
+	var iface chain.EventSubscription = sub
+	s.sub.Store(&iface)
+
+	w := &Wallet{
+		cfg:         Config{Chain: mockChain, ChainParams: &chainParams},
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		sync:        s,
+	}
+
+	addr := mustNewStandalonePubKeyAddr(t)
+	tx := subscriptionTx(mustPayToAddrScript(addr), 99)
+
+	mockChain.On("SendRawTransaction", tx, false).
+		Return((*chainhash.Hash)(nil), nil).Once()
+
+	cancel()
+
+	// Act: Complete publication after lifetimeCtx has been canceled.
+	err := w.publishTx(tx, []address.Address{addr})
+
+	// Assert: Publication succeeds and reaches SendRawTransaction rather
+	// than failing with context.Canceled.
+	require.NoError(t, err)
+	mockChain.AssertExpectations(t)
 }
