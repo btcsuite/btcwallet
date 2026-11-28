@@ -623,6 +623,52 @@ func (s *chainEventStream) hasSubscribers() bool {
 	return len(s.members) > 0
 }
 
+// watchSnapshot returns deduplicated snapshots of all watched addresses and
+// outpoints currently indexed across active subscribers (including
+// auto-indexed received outpoints).
+func (s *chainEventStream) watchSnapshot() ([]address.Address,
+	[]wire.OutPoint) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var addrs []address.Address
+	if len(s.scriptListeners) > 0 {
+		addrs = make([]address.Address, 0, len(s.scriptListeners))
+		seen := make(map[string]struct{}, len(s.scriptListeners))
+
+		for script := range s.scriptListeners {
+			_, extracted, _, err := txscript.ExtractPkScriptAddrs(
+				[]byte(script), s.params,
+			)
+			if err != nil {
+				continue
+			}
+
+			for _, addr := range extracted {
+				key := addr.EncodeAddress()
+				if _, ok := seen[key]; ok {
+					continue
+				}
+
+				seen[key] = struct{}{}
+
+				addrs = append(addrs, addr)
+			}
+		}
+	}
+
+	var outpoints []wire.OutPoint
+	if len(s.outpointListeners) > 0 {
+		outpoints = make([]wire.OutPoint, 0, len(s.outpointListeners))
+		for op := range s.outpointListeners {
+			outpoints = append(outpoints, op)
+		}
+	}
+
+	return addrs, outpoints
+}
+
 // sendEvent attempts a non-blocking send of ev to l and removes l with
 // ErrEventSubscriptionBufferFull if its buffer is full. Caller must hold s.mu.
 func (s *chainEventStream) sendEvent(l *eventListener, ev Event) {

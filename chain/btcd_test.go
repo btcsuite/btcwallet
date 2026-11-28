@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -667,4 +668,259 @@ func TestRPCClientWatchWithoutNotifyBlocks(t *testing.T) {
 			require.FailNow(t, "legacy Notifications missed tx")
 		}
 	}
+}
+
+// TestRPCClientStartAfterStopError verifies that calling Start after Stop
+// returns ErrClientShutdown, closes future subscriptions cleanly, and leaves
+// repeated Stop calls safe.
+func TestRPCClientStartAfterStopError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an unstarted RPCClient and stop it before Start is invoked.
+	client, err := NewRPCClient(
+		&chaincfg.RegressionNetParams, "127.0.0.1:1", "user", "pass",
+		nil, true, 0,
+	)
+	require.NoError(t, err)
+
+	client.Stop()
+
+	// Act: attempt to start the stopped client and call Stop again.
+	startErr := client.Start(t.Context())
+	client.Stop()
+	sub := client.SubscribeChainEvents(t.Context())
+
+	// Assert: Start fails with ErrClientShutdown and new subscriptions are
+	// already closed with a nil terminal error.
+	require.ErrorIs(t, startErr, rpcclient.ErrClientShutdown)
+
+	select {
+	case <-sub.Done:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "expected subscription Done to be closed")
+	}
+
+	require.NoError(t, sub.Err())
+}
+
+// TestRPCClientConcurrentStart verifies that overlapping Start calls serialize
+// until startup finishes rather than racing into ErrClientAlreadyConnected.
+func TestRPCClientConcurrentStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an unstarted RPCClient connected to a regtest btcd miner.
+	miner := setupBtcdMiner(t)
+	rpcConf := miner.RPCConfig()
+
+	client, err := NewRPCClientWithConfig(&RPCClientConfig{
+		ReconnectAttempts: 1,
+		Chain:             &chaincfg.RegressionNetParams,
+		Conn: &rpcclient.ConnConfig{
+			Host:                 rpcConf.Host,
+			User:                 rpcConf.User,
+			Pass:                 rpcConf.Pass,
+			Certificates:         rpcConf.Certificates,
+			DisableTLS:           false,
+			DisableAutoReconnect: false,
+			DisableConnectOnNew:  true,
+			HTTPPostMode:         false,
+			Endpoint:             "ws",
+		},
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		client.Stop()
+	})
+
+	// Act: invoke Start concurrently from two goroutines.
+	errs := make([]error, 2)
+
+	var wg sync.WaitGroup
+
+	for i := range errs {
+		wg.Add(1)
+
+		go func(idx int) {
+			defer wg.Done()
+
+			errs[idx] = client.Start(t.Context())
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Assert: both Start calls succeed without ErrClientAlreadyConnected.
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+}
+
+// TestRPCClientStartRejectsWhileStopAwaitsConnect verifies that Start returns
+// ErrClientShutdown immediately once Stop closes quit, without waiting for an
+// earlier in-flight Start to finish.
+func TestRPCClientStartRejectsWhileStopAwaitsConnect(t *testing.T) {
+	t.Parallel()
+
+	// Arrange an unstarted RPCClient with simulated in-flight Start and
+	// Connect channels, then invoke Stop in the background so quit closes
+	// while Stop awaits connectDone.
+	client, err := NewRPCClient(
+		&chaincfg.RegressionNetParams, "127.0.0.1:1", "user", "pass",
+		nil, true, 0,
+	)
+	require.NoError(t, err)
+
+	startDone := make(chan struct{})
+	connectDone := make(chan struct{})
+
+	client.quitMtx.Lock()
+	client.startDone = startDone
+	client.connectDone = connectDone
+	client.quitMtx.Unlock()
+
+	var releaseOnce sync.Once
+
+	release := func() {
+		releaseOnce.Do(func() {
+			close(connectDone)
+			close(startDone)
+		})
+	}
+
+	stopDone := make(chan struct{})
+
+	t.Cleanup(func() {
+		release()
+
+		select {
+		case <-stopDone:
+		case <-time.After(defaultTestTimeout):
+			require.FailNow(t, "timed out waiting for Stop to finish")
+		}
+	})
+
+	go func() {
+		defer close(stopDone)
+
+		client.Stop()
+	}()
+
+	select {
+	case <-client.quit:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for Stop to close quit")
+	}
+
+	// Act: call Start while the first Start and Stop are still blocked.
+	startErrCh := make(chan error, 1)
+	go func() {
+		startErrCh <- client.Start(t.Context())
+	}()
+
+	// Assert: the second Start rejects immediately with ErrClientShutdown
+	// before connectDone or startDone closes.
+	select {
+	case startErr := <-startErrCh:
+		require.ErrorIs(t, startErr, rpcclient.ErrClientShutdown)
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "Start blocked while Stop awaited connect")
+	}
+
+	// Release connectDone and startDone so Stop completes cleanly.
+	release()
+
+	select {
+	case <-stopDone:
+	case <-time.After(defaultTestTimeout):
+		require.FailNow(t, "timed out waiting for Stop to finish")
+	}
+}
+
+// TestRPCClientReconnectReplaysFilterAndAutoOutpoint verifies that a btcd
+// websocket reconnect keeps EventSubscription alive, seeds auto-indexed
+// outpoints in OnClientDisconnected before dialing socket 2, and replays
+// LoadTxFilter ahead of NotifyBlocks so post-reconnect spends are delivered.
+func TestRPCClientReconnectReplaysFilterAndAutoOutpoint(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a regtest btcd client with NotifyBlocks enabled, an observer
+	// client to synchronize mined blocks, and an auto-indexed received
+	// outpoint on sub.
+	miner, client := setupBtcd(t)
+	legacy := client.Notifications()
+	waitForClientConnected(t, legacy)
+	require.NoError(t, client.NotifyBlocks())
+
+	obs := setupBtcdClient(t, miner)
+	require.NoError(t, obs.NotifyBlocks())
+	waitForClientConnected(t, obs.Notifications())
+
+	keyA := newTestWPKHKey(t)
+	keyOther := newTestWPKHKey(t)
+	sub := client.SubscribeChainEvents(t.Context())
+	require.NoError(
+		t, sub.WatchAddrs(t.Context(), []address.Address{keyA.addr}),
+	)
+
+	fundOP := fundConfirmedWPKH(t, miner, keyA)
+	fundEv := waitChainEvent(t, sub.Events)
+	require.Equal(t, EventBlockConnected, fundEv.Type)
+	require.Len(t, fundEv.RelevantTxs, 1)
+	require.Equal(t, fundOP.Hash, fundEv.RelevantTxs[0].Hash)
+	waitForBlockNtfn(t, legacy, fundEv.Block.Height, true)
+
+	// Block watchSnapshot inside onClientDisconnect so btcd/rpcclient must
+	// wait for SetReconnectTxFilter before dialing socket 2 and
+	// re-enabling notifyblocks.
+	locked := true
+
+	client.eventStream.mu.Lock()
+	defer func() {
+		if locked {
+			client.eventStream.mu.Unlock()
+		}
+	}()
+
+	// Act: disconnect socket 1 and mine a probe block while
+	// onClientDisconnect is still paused; socket 2 must not connect yet.
+	client.Disconnect()
+
+	probeBlk, err := miner.GenerateAndSubmitBlock(nil, -1, time.Time{})
+	require.NoError(t, err)
+	waitForBlockNtfn(t, obs.Notifications(), probeBlk.Height(), true)
+	require.True(t, client.Disconnected())
+
+	// Release onClientDisconnect so SetReconnectTxFilter seeds fundOP,
+	// socket 2 reconnects with LoadTxFilter ahead of NotifyBlocks, then
+	// mine a spend of fundOP to an unwatched key.
+	client.eventStream.mu.Unlock()
+
+	locked = false
+
+	waitForClientConnected(t, legacy)
+
+	spendTx := signWPKHSpend(
+		t, fundOP, keyA, 10000, keyOther.pkScript, 9000,
+	)
+	spendBlk, err := miner.GenerateAndSubmitBlock(
+		[]*btcutil.Tx{btcutil.NewTx(spendTx)}, -1, time.Time{},
+	)
+	require.NoError(t, err)
+
+	// Assert: sub stays open and delivers the spend matched purely through
+	// the replayed auto-indexed outpoint.
+	spendEv := waitChainEvent(t, sub.Events)
+	select {
+	case <-sub.Done:
+		require.FailNowf(
+			t, "subscription closed unexpectedly", "err=%v",
+			sub.Err(),
+		)
+	default:
+	}
+
+	require.Equal(t, EventBlockConnected, spendEv.Type)
+	require.Equal(t, *spendBlk.Hash(), spendEv.Block.Hash)
+	require.Len(t, spendEv.RelevantTxs, 1)
+	require.Equal(t, spendTx.TxHash(), spendEv.RelevantTxs[0].Hash)
 }
