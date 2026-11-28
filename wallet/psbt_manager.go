@@ -298,7 +298,7 @@ type SignPsbtParams struct {
 	//
 	// A Taproot derivation record names only an x-only key. The tweak
 	// applies to the derived key with the parity it has, as lnd applies it,
-	// so the wallet reads that key from the account's extended public key
+	// so the wallet reads that key through the vault's public key lookup
 	// before it plans the input.
 	//
 	// NOTE: The ideal implementation would be to add a new field to
@@ -1438,8 +1438,10 @@ func (w *Wallet) createTxIntent(packet *psbt.Packet,
 //  2. Planning: Processing every input to determine if it is owned by the
 //     wallet and ready for signing, enforcing strict rules on derivation
 //     paths (one path per input) to ensure deterministic key selection. No
-//     private key is looked up until every input is planned, so a problem on
-//     any input is reported first. An input whose output does not commit to
+//     input is signed until every input is planned, so a problem on any
+//     input is reported first. Planning reads only public keys: a tweaked
+//     Taproot input's base key through the vault and, for FinalizePsbt,
+//     the record key's account key. An input whose output does not commit to
 //     the key the wallet would sign with, or to the script or leaf it would
 //     sign, fails with ErrSigningKeyMismatch, and a legacy or Taproot input
 //     requesting SIGHASH_SINGLE with no output at its index fails with
@@ -1569,7 +1571,7 @@ func (w *Wallet) signPacket(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// Plan every input before signing any, so a problem with one input is
-	// reported before a private key is looked up for another.
+	// reported before another is signed.
 	plans, err := w.planPsbtInputs(
 		ctx, packet, sigHashes, tweaks, autoFinalize,
 	)
@@ -1603,7 +1605,7 @@ func (w *Wallet) signPacket(ctx context.Context, packet *psbt.Packet,
 }
 
 // psbtSignPlan is the signature one input is to receive, settled before any
-// private key is looked up.
+// input is signed.
 type psbtSignPlan struct {
 	// idx is the index of the input being signed.
 	idx int
@@ -1624,8 +1626,9 @@ type psbtSignPlan struct {
 	keyCommitted bool
 }
 
-// planPsbtInputs plans every input the wallet will sign, without looking up a
-// private key.
+// planPsbtInputs plans every input the wallet will sign, without signing any.
+// It reads only public keys: a tweaked Taproot input's base key through the
+// vault and, for FinalizePsbt, the account key derivesRecordKey checks.
 func (w *Wallet) planPsbtInputs(ctx context.Context, packet *psbt.Packet,
 	sigHashes *txscript.TxSigHashes, tweaks map[int]KeyTweak,
 	autoFinalize bool) ([]*psbtSignPlan, error) {
@@ -1686,8 +1689,8 @@ func (w *Wallet) recordKeyPlans(ctx context.Context,
 
 // derivesRecordKey checks, from the account's public key, that the wallet
 // derives the key an auto-signed input's record names at its path. A record
-// naming another key, such as a tweaked one, fails before the private key is
-// derived. A lookup failure is skipped as SignPsbt skips it, through
+// naming another key, such as a tweaked one, fails before the vault is asked
+// for the key. A lookup failure is skipped as SignPsbt skips it, through
 // shouldSkipSigningError.
 func (w *Wallet) derivesRecordKey(ctx context.Context,
 	plan *psbtSignPlan) (bool, error) {
@@ -2211,13 +2214,15 @@ func createBip32SpendDetails(pInput *psbt.PInput,
 }
 
 // planTaprootPsbtInput plans the signature for a single Taproot input of a
-// PSBT, without looking up a private key.
+// PSBT, without signing it.
 //
 // It performs the following steps:
 //  1. Parses the BIP32 derivation path to ensure it is valid.
 //  2. Applies the tweak to the key the wallet derives at the path, read
-//     from the account's extended public key, after checking that the
-//     derivation record names it.
+//     through the vault's public key lookup, after checking that the
+//     derivation record names it. The vault serves hardened children and
+//     reports a missing or watch-only account first, so such an input is
+//     skipped as another signer's.
 //  3. Determines the specific spending path (Key Path vs Script Path) using
 //     createTaprootSpendDetails.
 //  4. Checks that the output commits to the tweaked key or the leaf spent.
@@ -2230,8 +2235,8 @@ func (w *Wallet) planTaprootPsbtInput(ctx context.Context,
 	sigHashes *txscript.TxSigHashes,
 	tweak KeyTweak) (*psbtSignPlan, error) {
 
-	// BIP 341 defines no digest for this, so signing would fail only
-	// after the private key is looked up.
+	// BIP 341 defines no digest for this, so refuse it while planning
+	// rather than when it is signed, after other inputs.
 	err := refuseSingleWithoutOutput(packet, idx)
 	if err != nil {
 		return nil, err
@@ -2261,10 +2266,10 @@ func (w *Wallet) planTaprootPsbtInput(ctx context.Context,
 	// parity of the key the wallet derives.
 	signer := tapDerivation.XOnlyPubKey
 	if tweak != (KeyTweak{}) {
-		base, err := w.derivePathPubKey(ctx, path)
+		// Signing asks the vault for the same key, so a missing or
+		// watch-only account is skipped here as another signer's.
+		base, err := w.signingPubKey(ctx, path)
 		if err != nil {
-			// Key lookup would fail the same way, so an account
-			// the wallet lacks is skipped as another signer's.
 			return nil, fmt.Errorf("%w: %w", errComputeRawSig, err)
 		}
 
@@ -2332,7 +2337,7 @@ func refuseSingleWithoutOutput(packet *psbt.Packet, idx int) error {
 }
 
 // planBip32PsbtInput plans the signature for a single non-Taproot
-// (Legacy/SegWit) input of a PSBT, without looking up a private key.
+// (Legacy/SegWit) input of a PSBT, without signing it or reading its key.
 //
 // It performs the following steps:
 //  1. Parses the BIP32 derivation path.
@@ -2432,7 +2437,7 @@ func (w *Wallet) planBip32PsbtInput(packet *psbt.Packet, idx int,
 func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 	plan *psbtSignPlan) (bool, error) {
 
-	sig, err := w.computeRawSig(ctx, plan.params, plan.signer)
+	sig, err := w.computeRawSigInVault(ctx, plan.params, plan.signer)
 	if err != nil {
 		err = fmt.Errorf("%w: %w", errComputeRawSig, err)
 		if shouldSkipSigningError(err, plan.idx) {
@@ -2454,7 +2459,7 @@ func (w *Wallet) signPlannedInput(ctx context.Context, packet *psbt.Packet,
 // directly: P2PKH, P2WKH, NP2WKH, or a Taproot key path. Any other input with a
 // derivation record, such as one that needs a tweak or spends a script, must
 // already be signed, or the call fails with ErrInputNeedsSignature before any
-// private key is looked up. Inputs without a derivation record are not signed.
+// input is signed. Inputs without a derivation record are not signed.
 // DecorateInputs adds records for the wallet's derived keys but not for
 // imported keys, so inputs paying an imported key must be signed beforehand.
 // An input carrying its parent transaction is finalized as the spent output

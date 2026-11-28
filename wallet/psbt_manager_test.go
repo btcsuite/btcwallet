@@ -29,6 +29,7 @@ import (
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/signing"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -3626,10 +3627,10 @@ func TestSignPsbt(t *testing.T) {
 			signParams := &SignPsbtParams{Packet: packet}
 			w, mocks := createUnlockedWalletWithMocks(t)
 
-			// Arrange: Program the store-routed signer key lookup
-			// for the resolved account.
-			_, _ = expectStoreSignerPrivKey(
-				t, mocks, w.id,
+			// Arrange: Serve the resolved account's key through the
+			// mock vault.
+			_, _ = expectVaultSigner(
+				t, mocks,
 				waddrmgr.KeyScope{Purpose: 84, Coin: test.coin},
 				waddrmgr.DerivationPath{
 					InternalAccount: test.account,
@@ -3726,128 +3727,131 @@ func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 	require.Equal(t, before, after)
 }
 
-// TestSignPsbtClassifiesSignError tests that SignPsbt skips explicit ownership
-// failures while returning cancellation and operational Store errors, from
-// both the private key lookup and the base key read a tweaked Taproot input
-// makes before it.
-func TestSignPsbtClassifiesSignError(t *testing.T) {
+// signKeyRead is an input whose signing reads the wallet's key from the
+// vault at a distinct point.
+type signKeyRead struct {
+	name   string
+	packet *psbt.Packet
+	tweaks map[int]KeyTweak
+}
+
+// signKeyReads returns the two inputs whose signing reads a key from the
+// vault: a P2WPKH input, whose key is read when it is signed, and a tweaked
+// Taproot input, whose base key is read while it is planned.
+func signKeyReads(t *testing.T) []signKeyRead {
+	t.Helper()
+
+	_, walletPub := deriveLeafKeys(t, testAccountXPrv(t), 0, 0)
+	tweak, err := NewAddTweak([32]byte{31: 7})
+	require.NoError(t, err)
+
+	return []signKeyRead{
+		{
+			name:   "key lookup",
+			packet: testP2WPKHSignPacket(t, 0),
+		},
+		{
+			name: "taproot base key read",
+			packet: testTaprootSignPacket(
+				t, testBip86Output(
+					t, testTweakedKey(t, tweak, walletPub),
+				), nil,
+			),
+			tweaks: map[int]KeyTweak{0: tweak},
+		},
+	}
+}
+
+// TestSignPsbtSkipsMissingAccount tests that SignPsbt skips an input whose
+// account the Store lacks as another signer's, whether the vault reports the
+// missing account at the key lookup before a P2WPKH signature or at the base
+// key read a tweaked Taproot input makes while it is planned.
+func TestSignPsbtSkipsMissingAccount(t *testing.T) {
+	t.Parallel()
+
+	for _, read := range signKeyReads(t) {
+		t.Run(read.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an input of an account the Store lacks. The
+			// vault reports it once, and nothing is signed.
+			w, mocks := createUnlockedWalletWithMocks(t)
+			packet := clonePacket(read.packet)
+
+			mocks.vault.On(
+				"PubKey", mock.Anything, mock.Anything,
+			).Return(
+				nil, fmt.Errorf("get account secret: %w",
+					db.ErrAccountNotFound),
+			).Once()
+
+			// Act: sign the packet.
+			result, err := w.SignPsbt(t.Context(), &SignPsbtParams{
+				Packet: packet, InputTweaks: read.tweaks,
+			})
+
+			// Assert: the input is skipped without an error.
+			require.NoError(t, err)
+			require.Empty(t, result.SignedInputs)
+		})
+	}
+}
+
+// TestSignPsbtReturnsKeyReadError tests that SignPsbt returns cancellation and
+// operational Store errors the vault reports, rather than skipping the input,
+// from both the key lookup before a P2WPKH signature and the base key read a
+// tweaked Taproot input makes while it is planned.
+func TestSignPsbtReturnsKeyReadError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		storeErr  error
-		wantError error
+		name     string
+		storeErr error
 	}{
-		{
-			name:     "missing account skips input",
-			storeErr: db.ErrAccountNotFound,
-		},
-		{
-			name:      "canceled context returns error",
-			storeErr:  context.Canceled,
-			wantError: context.Canceled,
-		},
-		{
-			name:      "store failure returns error",
-			storeErr:  errDb,
-			wantError: errDb,
-		},
+		{name: "canceled context", storeErr: context.Canceled},
+		{name: "store failure", storeErr: errDb},
 	}
 
-	reads := []struct {
-		name string
-
-		// taproot fails the base key read of a tweaked Taproot input
-		// rather than the key lookup of a P2WPKH input.
-		taproot bool
-	}{
-		{name: "key lookup"},
-		{name: "taproot base key read", taproot: true},
-	}
-
-	for _, read := range reads {
+	for _, read := range signKeyReads(t) {
 		for _, tc := range tests {
 			t.Run(read.name+" "+tc.name, func(t *testing.T) {
 				t.Parallel()
 
-				// Arrange: an input of the wallet's account whose
-				// Store read fails with the case's error. A failed
-				// base key read must leave the private key unread,
-				// so only that read is programmed.
+				// Arrange: an input of the wallet's account
+				// whose vault key read fails with the case's
+				// Store error. A failed read must stop before
+				// any signature, so only that read is
+				// programmed, once.
 				w, mocks := createUnlockedWalletWithMocks(t)
+				packet := clonePacket(read.packet)
 
-				packet := testP2WPKHSignPacket(t, 0)
+				storeErr := fmt.Errorf("get account secret: %w",
+					tc.storeErr)
+				mocks.vault.On(
+					"PubKey", mock.Anything, mock.Anything,
+				).Return(nil, storeErr).Once()
 
-				var tweaks map[int]KeyTweak
-				if read.taproot {
-					_, walletPub := deriveLeafKeys(
-						t, testAccountXPrv(t), 0, 0,
-					)
-
-					tweak, err := NewAddTweak([32]byte{31: 7})
-					require.NoError(t, err)
-
-					packet = testTaprootSignPacket(
-						t, testBip86Output(
-							t, testTweakedKey(
-								t, tweak, walletPub,
-							),
-						), nil,
-					)
-					tweaks = map[int]KeyTweak{0: tweak}
-
-					var account uint32
-					mocks.store.On("GetAccount", mock.Anything,
-						db.GetAccountQuery{
-							WalletID: w.id,
-							Scope: db.KeyScope{
-								Purpose: 86, Coin: 1,
-							},
-							AccountNumber: &account,
-							SkipBalance:   true,
-						},
-					).Return(
-						(*db.AccountInfo)(nil), tc.storeErr,
-					).Once()
-				} else {
-					mocks.store.On(
-						"GetAccountSecret", mock.Anything,
-						db.GetAccountSecretQuery{
-							WalletID: w.id,
-							Scope: db.KeyScope{
-								Purpose: 84, Coin: 1,
-							},
-							AccountNumber: 0,
-						},
-					).Return(
-						(*db.AccountSecret)(nil), tc.storeErr,
-					).Once()
+				// Act: Deliver the Store's error through the
+				// vault in an admitted public call. A
+				// pre-canceled context could reject before
+				// reaching the vault.
+				params := &SignPsbtParams{
+					Packet:      packet,
+					InputTweaks: read.tweaks,
 				}
+				result, err := w.SignPsbt(t.Context(), params)
 
-				// Act: Deliver the Store's error through an admitted
-				// public call. A pre-canceled context could reject
-				// before reaching the Store.
-				result, err := w.SignPsbt(t.Context(), &SignPsbtParams{
-					Packet: packet, InputTweaks: tweaks,
-				})
-
-				// Assert: Only explicit ownership failures are
-				// skipped.
-				if tc.wantError != nil {
-					require.ErrorIs(t, err, tc.wantError)
-					return
-				}
-
-				require.NoError(t, err)
-				require.Empty(t, result.SignedInputs)
+				// Assert: the error is returned, not skipped.
+				require.ErrorIs(t, err, tc.storeErr)
+				require.Nil(t, result)
 			})
 		}
 	}
 }
 
 // testP2WPKHSignPacket returns a packet with one P2WPKH input per account,
-// each paying the key the store-routed signer derives at that BIP-84 account's
-// branch 0, index 0.
+// each paying the test account's key at branch 0, index 0, which
+// expectVaultSigner serves for that BIP-84 account.
 func testP2WPKHSignPacket(t *testing.T, accounts ...uint32) *psbt.Packet {
 	t.Helper()
 
@@ -3898,24 +3902,23 @@ func testP2WPKHSignPacket(t *testing.T, accounts ...uint32) *psbt.Packet {
 func TestSignPsbtLeavesCallerPacketOnSignError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: input 0 signs, and the store fails the key lookup for
-	// input 1's account.
+	// Arrange: input 0 signs, and the vault's Store lookup fails for input
+	// 1's account.
 	packet := testP2WPKHSignPacket(t, 0, 1)
 	before := clonePacket(packet)
 
 	w, mocks := createUnlockedWalletWithMocks(t)
-	_, _ = expectStoreSignerPrivKey(
-		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+	_, _ = expectVaultSigner(
+		t, mocks, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
 		waddrmgr.DerivationPath{InternalAccount: 0},
 	)
-	mocks.store.On(
-		"GetAccountSecret", mock.Anything,
-		db.GetAccountSecretQuery{
-			WalletID:      w.id,
-			Scope:         db.KeyScope{Purpose: 84, Coin: 1},
-			AccountNumber: 1,
+	mocks.vault.On("PubKey", mock.Anything, mock.MatchedBy(
+		func(sel signing.KeySelector) bool {
+			derived, ok := sel.(signing.DerivedKey)
+
+			return ok && derived.DerivationPath.InternalAccount == 1
 		},
-	).Return((*db.AccountSecret)(nil), errDb).Once()
+	)).Return(nil, errDb).Once()
 
 	// Act: sign the packet.
 	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
@@ -3937,8 +3940,8 @@ func TestSignPsbtCarriesUnknownFields(t *testing.T) {
 	packet.Inputs[0].Unknowns = []*psbt.Unknown{unknown}
 
 	w, mocks := createUnlockedWalletWithMocks(t)
-	_, _ = expectStoreSignerPrivKey(
-		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+	_, _ = expectVaultSigner(
+		t, mocks, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
 		waddrmgr.DerivationPath{InternalAccount: 0},
 	)
 
@@ -3999,8 +4002,8 @@ func TestSignPsbtRejectsInvalidRecordBeforeKeyLookup(t *testing.T) {
 	// Assert: the record is refused, no key was looked up, and the
 	// caller's packet is unchanged.
 	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
-	mocks.store.AssertNotCalled(
-		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	mocks.vault.AssertNotCalled(
+		t, "PubKey", mock.Anything, mock.Anything,
 	)
 	require.Equal(t, before, packet)
 }
@@ -4020,14 +4023,14 @@ func TestSignPsbtPlansEveryInputBeforeKeyLookup(t *testing.T) {
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Act: Submit both inputs together, requiring all planning to finish
-	// before the wallet can look up a private key for the signable input.
+	// before the wallet can ask the vault for the signable input's key.
 	_, err := w.SignPsbt(t.Context(), &SignPsbtParams{Packet: packet})
 
 	// Assert: the bad path is reported, no key was looked up, and the
 	// caller's packet is unchanged.
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
-	mocks.store.AssertNotCalled(
-		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	mocks.vault.AssertNotCalled(
+		t, "PubKey", mock.Anything, mock.Anything,
 	)
 	require.Equal(t, before, packet)
 }
@@ -4072,8 +4075,8 @@ func TestSignPsbtKeepsForeignRecord(t *testing.T) {
 	derivations := clonePacket(packet).Inputs[0].Bip32Derivation
 
 	w, mocks := createUnlockedWalletWithMocks(t)
-	_, _ = expectStoreSignerPrivKey(
-		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+	_, _ = expectVaultSigner(
+		t, mocks, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
 		waddrmgr.DerivationPath{InternalAccount: 0},
 	)
 
@@ -4150,8 +4153,8 @@ func TestSignPsbtRejectsLeafVersionMismatchBeforeKeyLookup(t *testing.T) {
 	// Assert: the record is refused, no key was looked up, and the
 	// caller's packet is unchanged.
 	require.ErrorIs(t, err, ErrInvalidSignatureRecord)
-	mocks.store.AssertNotCalled(
-		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	mocks.vault.AssertNotCalled(
+		t, "PubKey", mock.Anything, mock.Anything,
 	)
 	require.Equal(t, before, packet)
 }
@@ -4316,8 +4319,8 @@ func expectFinalizeSignerKey(t *testing.T, mocks *mockWalletDeps,
 
 	scope := waddrmgr.KeyScope{Purpose: purpose, Coin: 1}
 	expectStorePubKey(t, mocks, walletID, scope, waddrmgr.DerivationPath{})
-	_, _ = expectStoreSignerPrivKey(
-		t, mocks, walletID, scope, waddrmgr.DerivationPath{},
+	_, _ = expectVaultSigner(
+		t, mocks, scope, waddrmgr.DerivationPath{},
 	)
 }
 
@@ -4735,9 +4738,8 @@ func TestFinalizePsbtRequiresSignatureBeforeKeyLookup(t *testing.T) {
 			// Assert: the input is refused, no key was looked up,
 			// and the caller's packet is unchanged.
 			require.ErrorIs(t, err, ErrInputNeedsSignature)
-			mocks.store.AssertNotCalled(
-				t, "GetAccountSecret", mock.Anything,
-				mock.Anything,
+			mocks.vault.AssertNotCalled(
+				t, "PubKey", mock.Anything, mock.Anything,
 			)
 			require.Equal(t, before, clonePacket(packet))
 		})
@@ -4747,8 +4749,8 @@ func TestFinalizePsbtRequiresSignatureBeforeKeyLookup(t *testing.T) {
 // TestFinalizePsbtRefusesRecordNamingAnotherKey tests that FinalizePsbt
 // refuses an unsigned input whose output pays the key its record names when
 // that key, such as a tweaked one, is not the wallet's key at the record's
-// path. The public keys show the mismatch before any private key is looked
-// up, and the caller's packet is unchanged.
+// path. The public keys show the mismatch before the vault is asked for any
+// key, and the caller's packet is unchanged.
 func TestFinalizePsbtRefusesRecordNamingAnotherKey(t *testing.T) {
 	t.Parallel()
 
@@ -4814,13 +4816,12 @@ func TestFinalizePsbtRefusesRecordNamingAnotherKey(t *testing.T) {
 			err := w.FinalizePsbt(t.Context(), packet)
 
 			// Assert: the input is refused as needing a signature
-			// by another key, no private key was looked up, and
-			// the caller's packet is unchanged.
+			// by another key, no key was looked up, and the
+			// caller's packet is unchanged.
 			require.ErrorIs(t, err, ErrInputNeedsSignature)
 			require.ErrorIs(t, err, ErrSigningKeyMismatch)
-			mocks.store.AssertNotCalled(
-				t, "GetAccountSecret", mock.Anything,
-				mock.Anything,
+			mocks.vault.AssertNotCalled(
+				t, "PubKey", mock.Anything, mock.Anything,
 			)
 			require.Equal(t, before, clonePacket(packet))
 		})
@@ -4830,7 +4831,7 @@ func TestFinalizePsbtRefusesRecordNamingAnotherKey(t *testing.T) {
 // TestFinalizePsbtChecksRecordKeyAccount tests the public-key check before an
 // auto-signed input is signed. An account the wallet lacks makes the input
 // another signer's, as in SignPsbt, and any other Store failure is returned.
-// Neither looks up a private key or changes the caller's packet.
+// Neither asks the vault for a key or changes the caller's packet.
 func TestFinalizePsbtChecksRecordKeyAccount(t *testing.T) {
 	t.Parallel()
 
@@ -4868,12 +4869,11 @@ func TestFinalizePsbtChecksRecordKeyAccount(t *testing.T) {
 			// Act: finalize the packet.
 			err := w.FinalizePsbt(t.Context(), packet)
 
-			// Assert: the expected error, no private key lookup,
+			// Assert: the expected error, no vault key lookup,
 			// and an unchanged packet.
 			require.ErrorIs(t, err, tc.wantErr)
-			mocks.store.AssertNotCalled(
-				t, "GetAccountSecret", mock.Anything,
-				mock.Anything,
+			mocks.vault.AssertNotCalled(
+				t, "PubKey", mock.Anything, mock.Anything,
 			)
 			require.Equal(t, before, clonePacket(packet))
 		})
@@ -4956,9 +4956,8 @@ func TestFinalizePsbtFinalizesSignedInputs(t *testing.T) {
 			// looked up.
 			require.NoError(t, err)
 			require.NotEmpty(t, packet.Inputs[0].FinalScriptWitness)
-			mocks.store.AssertNotCalled(
-				t, "GetAccountSecret", mock.Anything,
-				mock.Anything,
+			mocks.vault.AssertNotCalled(
+				t, "PubKey", mock.Anything, mock.Anything,
 			)
 		})
 	}
@@ -8079,11 +8078,10 @@ func TestSignPsbtReconcilesMatchingOrigins(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Allow only the first pass to retrieve its key.
-			// Fixture cleanup verifies the Store and vault calls once.
+			// Arrange: Serve the wallet key through the mock vault.
 			w, mocks := createUnlockedWalletWithMocks(t)
-			key, _ := expectStoreSignerPrivKey(
-				t, mocks, w.id,
+			key, _ := expectVaultSigner(
+				t, mocks,
 				waddrmgr.KeyScope{Purpose: tc.purpose, Coin: 1},
 				waddrmgr.DerivationPath{},
 			)
@@ -8109,6 +8107,8 @@ func TestSignPsbtReconcilesMatchingOrigins(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []uint32{0}, first.SignedInputs)
 			require.Empty(t, second.SignedInputs)
+			mocks.vault.AssertNumberOfCalls(t, "PubKey", 1)
+			mocks.vault.AssertNumberOfCalls(t, "SignDigest", 1)
 			require.Equal(t, signed, tc.packet)
 			require.Equal(
 				t, before.Bip32Derivation,

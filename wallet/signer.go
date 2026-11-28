@@ -799,7 +799,7 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 	r.respChan <- privKeyResp{key: key, err: err}
 }
 
-// derivePathPrivKey resolves the signing private key for a full BIP-32 path.
+// derivePathPrivKey resolves the private key at a full BIP-32 path for export.
 //
 // The private key is resolved entirely through the durable store: the
 // account-level extended private key is fetched by the path's BIP44 account
@@ -808,15 +808,13 @@ func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
 // because the kvdb store adapter exports the legacy address manager's
 // encrypted account material through the same account-secret contract.
 //
-// This resolver is used by the path-driven entry points DerivePrivKey and
-// PSBT signing, which have only a derivation path. SignDigest and the other
-// ComputeRawSig requests sign in the vault instead.
-// Address-driven paths reach the same resolver through privKeyForAddressInfo
-// once the store has resolved the address to its derivation info, so both
-// address the account by number.
+// UnsafeSigner.DerivePrivKey uses it; signing operations keep the key in the
+// vault instead. Address-driven exports reach the same resolver through
+// privKeyForAddressInfo once the store has resolved the address to its
+// derivation info, so both address the account by number.
 //
 // The returned private key is owned by the caller, who is responsible for
-// zeroing it once signing completes.
+// zeroing it once it is no longer needed.
 func (w *Wallet) derivePathPrivKey(ctx context.Context, path BIP32Path) (
 	*btcec.PrivateKey, error) {
 
@@ -1389,8 +1387,10 @@ func mapAccountSecretErr(err error) error {
 // decrypted account key is zeroed before the call returns; the caller must
 // zero the returned key.
 //
-// ECDH and the non-PSBT signers no longer use this UnsafeVault path on either
-// backend. It remains for PSBT signing and private-key export.
+// The Wallet signing APIs (SignDigest, ComputeRawSig, ComputeUnlockingScript,
+// SignPsbt and FinalizePsbt) and ECDH no longer use this UnsafeVault path on
+// either backend. It remains for private-key export, which the legacy RPC
+// signmessage still signs with through PrivKeyForAddress.
 func deriveStoredAccountChildKey(vault keyvault.UnsafeVault,
 	encAccountPriv []byte,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
@@ -1558,46 +1558,8 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 // handleComputeRawSig delivers the result of an accepted component request.
 func (w *Wallet) handleComputeRawSig(r rawSigReq) {
 	// Without a signer record, raw signing runs in the vault.
-	signature, err := w.computeRawSig(r.ctx, r.params, nil)
+	signature, err := w.computeRawSigInVault(r.ctx, r.params, nil)
 	r.respChan <- rawSigResp{signature: signature, err: err}
-}
-
-// computeRawSig signs inside the accepted request. Without signer, the vault
-// signs. With signer set, as PSBT records name keys, Wallet derives the key,
-// checks that the tweaked key is signer, signs and zeroes the key.
-func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams,
-	signer []byte) (RawSignature, error) {
-
-	// The vault signs without giving the key to Wallet code. PSBT
-	// signing, which names the signer, keeps the Wallet key path for now.
-	if signer == nil {
-		return w.computeRawSigInVault(ctx, params)
-	}
-
-	privKey, err := w.derivePathPrivKey(ctx, params.Path)
-	if err != nil {
-		return nil, err
-	}
-	defer privKey.Zero()
-
-	err = params.Tweak.Apply(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidSignParam, err)
-	}
-
-	if !recordKeyIs(signer, privKey.PubKey()) {
-		return nil, fmt.Errorf("%w: derived key differs",
-			ErrSigningKeyMismatch)
-	}
-
-	// With the private key retrieved and tweaked, we can now delegate the
-	// actual signing to the version-specific details object.
-	rawSig, err := signSpendDetails(params.Details, params, privKey)
-	if err != nil {
-		return nil, fmt.Errorf("cannot sign transaction: %w", err)
-	}
-
-	return rawSig, nil
 }
 
 // DerivePrivKey derives a private key from a full BIP-32 derivation
