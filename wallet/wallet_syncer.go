@@ -2255,6 +2255,136 @@ func (s *syncer) processChainEvent(ctx context.Context,
 	}
 }
 
+// processBlockEventBeforeSync handles scan-time block observations without
+// checkpointing past payments omitted by live watches or persisting blocks
+// above the synced tip or on a detached branch.
+func (s *syncer) processBlockEventBeforeSync(ctx context.Context,
+	event chain.Event) error {
+
+	if event.Type != chain.EventBlockConnected || event.Block == nil {
+		return s.processBlockEvent(ctx, event)
+	}
+
+	if len(event.RelevantTxs) == 0 {
+		return nil
+	}
+
+	current, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Leave heights above SyncedTo for advanceChainSync so a disconnected
+	// uncheckpointed block row can never linger above the tip if the
+	// subscription is later retired.
+	if event.Block.Height > current.Height {
+		return nil
+	}
+
+	block, err := storeBlockFromBlockMeta(*event.Block)
+	if err != nil {
+		return err
+	}
+
+	matches := prepareTxMatches(event.RelevantTxs, s.cfg.ChainParams)
+
+	return s.putSupplementalBlockMatches(ctx, matches, block, current)
+}
+
+// processBlockEvent orders a Wallet rewind with the same worker's payment
+// and historical writes for one strictly-ordered block lifecycle event.
+func (s *syncer) processBlockEvent(ctx context.Context,
+	event chain.Event) error {
+
+	switch event.Type {
+	case chain.EventBlockDisconnected:
+		return s.disconnectBlock(ctx, *event.Block)
+
+	case chain.EventBlockConnected:
+		matches := prepareTxMatches(
+			event.RelevantTxs, s.cfg.ChainParams,
+		)
+
+		return s.putBlockNotifications(ctx, matches, event.Block)
+
+	case chain.EventUnknown:
+		return nil
+
+	default:
+		return nil
+	}
+}
+
+// processMempoolTx records one best-effort unconfirmed transaction from the
+// active subscription. Because MempoolTxns is delivered independently of
+// BlockEvents, a late mempool notification for an already-confirmed or
+// superseded transaction is ignored rather than restarting the sync loop.
+func (s *syncer) processMempoolTx(ctx context.Context,
+	rec *wtxmgr.TxRecord) error {
+
+	matches := prepareTxMatches([]*wtxmgr.TxRecord{rec}, s.cfg.ChainParams)
+
+	err := s.putTxNotifications(ctx, matches, nil)
+	if isStaleMempoolTxErr(err) {
+		log.Debugf("Ignoring stale mempool tx %v: %v", rec.Hash, err)
+
+		return nil
+	}
+
+	return err
+}
+
+// isStaleMempoolTxErr reports whether a mempool write failed because confirmed
+// chain state has already recorded, conflicted with, or invalidated the tx.
+func isStaleMempoolTxErr(err error) bool {
+	return errors.Is(err, db.ErrTxAlreadyExists) ||
+		errors.Is(err, db.ErrTxInputConflict) ||
+		errors.Is(err, db.ErrTxInputInvalidParent)
+}
+
+// handleSubClosed reconciles a closed live subscription. BlockEvents buffer
+// overflow reconciles any reorg and triggers an immediate self-healing catch-up
+// and re-subscription; unexpected backend closure returns an error so the sync
+// loop backs off.
+func (s *syncer) handleSubClosed(ctx context.Context,
+	sub chain.EventSubscription) error {
+
+	s.closeSubscription()
+	s.state.Store(uint32(syncStateSyncing))
+
+	select {
+	case <-sub.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	subErr := sub.Err()
+	if errors.Is(subErr, chain.ErrEventSubscriptionBufferFull) {
+		log.Warnf("Chain block event buffer overflowed; resyncing "+
+			"and resubscribing: %v", subErr)
+
+		// A reorg to an equal or shorter height during overflow cannot
+		// be discovered by forward catch-up alone, so reconcile any
+		// fork before returning to advanceChainSync.
+		if s.cfg.Chain.IsCurrent() {
+			return s.checkRollback(ctx)
+		}
+
+		return nil
+	}
+
+	if subErr != nil {
+		return fmt.Errorf("chain event subscription closed: %w", subErr)
+	}
+
+	return errors.New("chain event subscription closed")
+}
+
 // handleScanReq processes a user-initiated rescan request.
 func (s *syncer) handleScanReq(ctx context.Context,
 	req *scanReq) error {
