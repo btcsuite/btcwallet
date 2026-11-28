@@ -86,3 +86,39 @@ func (t *KeyTweak) PubKey(base *btcec.PublicKey) (*btcec.PublicKey, error) {
 
 	return btcec.NewPublicKey(&result.X, &result.Y), nil
 }
+
+// Then returns the tweak that applies t and then next. Applying both to d
+// gives next.mul*(t.mul*d + t.add) + next.add. Either tweak may be secret, so
+// Then zeroes its own copies of both before it returns; the caller's tweaks
+// and the result stay the caller's to clear.
+func (t *KeyTweak) Then(next KeyTweak) KeyTweak {
+	first, second := t.affine(), next.affine()
+	defer first.Zero()
+	defer second.Zero()
+	defer next.Zero()
+
+	var result KeyTweak
+	result.mul.Mul2(&first.mul, &second.mul)
+	result.add.Mul2(&first.add, &second.mul).Add(&second.add)
+
+	// Both multipliers are nonzero, so the product is too. Keep the
+	// identity as the zero value.
+	one := new(btcec.ModNScalar).SetInt(1)
+	if result.mul.Equals(one) && result.add.IsZero() {
+		return KeyTweak{}
+	}
+
+	return result
+}
+
+// affine returns t with its multiplier set, so the identity reads as (1, 0).
+func (t *KeyTweak) affine() KeyTweak {
+	if t == nil || *t == (KeyTweak{}) {
+		var identity KeyTweak
+		identity.mul.SetInt(1)
+
+		return identity
+	}
+
+	return *t
+}

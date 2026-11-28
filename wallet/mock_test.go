@@ -8,7 +8,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -33,30 +32,6 @@ func (m *mockCoinSelectionStrategy) ArrangeCoins(coins []Coin,
 
 	return args.Get(0).([]Coin), args.Error(1)
 }
-
-// mockSpendDetails is a mock implementation of the SpendDetails interface.
-type mockSpendDetails struct {
-	mock.Mock
-}
-
-// A compile-time assertion to ensure that mockSpendDetails implements the
-// SpendDetails interface.
-var _ SpendDetails = (*mockSpendDetails)(nil)
-
-// Sign implements the SpendDetails interface.
-func (m *mockSpendDetails) Sign(params *RawSigParams,
-	privKey *btcec.PrivateKey) (RawSignature, error) {
-
-	args := m.Called(params, privKey)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-
-	return args.Get(0).(RawSignature), args.Error(1)
-}
-
-// isSpendDetails implements the SpendDetails interface.
-func (m *mockSpendDetails) isSpendDetails() {}
 
 // mockController is a mock implementation of the Controller interface.
 type mockController struct {
