@@ -397,18 +397,62 @@ func (s *EventSubscription) closeLocked(err error) {
 	close(s.done)
 }
 
-// WatchAddrs implements chain.EventSubscription.
-func (s *EventSubscription) WatchAddrs(context.Context,
-	[]address.Address) error {
+// checkWatchable verifies ctx and subscription liveness before forwarding
+// watch registration to the mock client.
+func (s *EventSubscription) checkWatchable(ctx context.Context) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-s.canceled:
+		return context.Canceled
+	default:
+	}
+
+	s.mu.Lock()
+	closed := s.closed
+	termErr := s.err
+	s.mu.Unlock()
+
+	if closed {
+		if termErr != nil {
+			return termErr
+		}
+
+		return context.Canceled
+	}
 
 	return nil
 }
 
-// WatchOutputs implements chain.EventSubscription.
-func (s *EventSubscription) WatchOutputs(context.Context,
-	[]*wire.OutPoint) error {
+// WatchAddrs forwards address watch registration to the backing mock client.
+func (s *EventSubscription) WatchAddrs(ctx context.Context,
+	addrs []address.Address) error {
 
-	return nil
+	err := s.checkWatchable(ctx)
+	if err != nil {
+		return err
+	}
+
+	return s.client.WatchAddrsFromTip(ctx, addrs)
+}
+
+// WatchOutputs forwards output watch registration to the backing mock client.
+func (s *EventSubscription) WatchOutputs(ctx context.Context,
+	outpoints []*wire.OutPoint) error {
+
+	err := s.checkWatchable(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(outpoints) == 0 {
+		return nil
+	}
+
+	return s.client.NotifySpent(outpoints)
 }
 
 // BackEnd implements the chain.Interface interface.
