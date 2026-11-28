@@ -28,6 +28,14 @@ const (
 	//
 	// TODO(yy): make this value configurable.
 	chainMempoolSubscriberBufferSize = 1000
+
+	// compressedP2PKScriptLen is the byte length of a standard compressed
+	// P2PK script (OP_DATA_33 + 33-byte pubkey + OP_CHECKSIG).
+	compressedP2PKScriptLen = 35
+
+	// uncompressedP2PKScriptLen is the byte length of a standard
+	// uncompressed P2PK script (OP_DATA_65 + 65-byte pubkey + OP_CHECKSIG).
+	uncompressedP2PKScriptLen = 67
 )
 
 // ErrEventSubscriptionBufferFull means a new block event found a full
@@ -522,39 +530,81 @@ func (s *chainEventStream) recordOutputMatches(
 	}
 }
 
+// mayHavePubKeyEquivalence reports whether pkScript can be a standard P2PK
+// (35- or 67-byte script ending in OP_CHECKSIG) or bare multisig (ending in
+// OP_CHECKMULTISIG) script, gating ExtractPkScriptAddrs so P2PKH, P2WPKH,
+// P2SH, and P2TR outputs incur no fallback parsing.
+func mayHavePubKeyEquivalence(pkScript []byte) bool {
+	n := len(pkScript)
+	if n == 0 {
+		return false
+	}
+
+	last := pkScript[n-1]
+	if last == txscript.OP_CHECKMULTISIG {
+		return true
+	}
+
+	return last == txscript.OP_CHECKSIG &&
+		(n == compressedP2PKScriptLen || n == uncompressedP2PKScriptLen)
+}
+
+// matchExtractedPubKey matches one pubkey extracted from a P2PK or bare
+// multisig output against P2PK watches (for bare multisig) and equivalent
+// P2PKH watches (for both P2PK and bare multisig). Caller must hold s.mu.
+func (s *chainEventStream) matchExtractedPubKey(class txscript.ScriptClass,
+	addr address.Address, op wire.OutPoint,
+	matched *map[*eventListener]struct{}) {
+
+	if class == txscript.MultiSigTy {
+		subScript, err := txscript.PayToAddrScript(addr)
+		if err == nil {
+			s.recordOutputMatches(
+				s.scriptListeners[string(subScript)], op,
+				matched,
+			)
+		}
+	}
+
+	pka, ok := addr.(*address.AddressPubKey)
+	if !ok {
+		return
+	}
+
+	pkhScript, err := txscript.PayToAddrScript(pka.AddressPubKeyHash())
+	if err != nil {
+		return
+	}
+
+	s.recordOutputMatches(
+		s.scriptListeners[string(pkhScript)], op, matched,
+	)
+}
+
 // matchOutput checks whether pkScript matches any watched script directly or
-// via extracted bare multisig pubkeys, adding matching listeners to matched
-// and auto-indexing op for them. Caller must hold s.mu.
+// via extracted P2PK and bare-multisig pubkeys (including their equivalent
+// P2PKH scripts for legacy btcd+KVDB key equivalence), adding matching
+// listeners to matched and auto-indexing op for them. Caller must hold s.mu.
 func (s *chainEventStream) matchOutput(pkScript []byte, op wire.OutPoint,
 	matched *map[*eventListener]struct{}) {
 
 	s.recordOutputMatches(s.scriptListeners[string(pkScript)], op, matched)
 
-	// Bare multisig scripts do not match a single address pkScript, so
-	// extract their constituent pubkeys and match against P2PK watches
-	// without conflating P2PKH watches.
-	if len(pkScript) == 0 ||
-		pkScript[len(pkScript)-1] != txscript.OP_CHECKMULTISIG {
-
+	if !mayHavePubKeyEquivalence(pkScript) {
 		return
 	}
 
 	class, addrs, _, err := txscript.ExtractPkScriptAddrs(
 		pkScript, s.params,
 	)
-	if err != nil || class != txscript.MultiSigTy {
+	if err != nil ||
+		(class != txscript.PubKeyTy && class != txscript.MultiSigTy) {
+
 		return
 	}
 
 	for _, addr := range addrs {
-		subScript, err := txscript.PayToAddrScript(addr)
-		if err != nil {
-			continue
-		}
-
-		s.recordOutputMatches(
-			s.scriptListeners[string(subScript)], op, matched,
-		)
+		s.matchExtractedPubKey(class, addr, op, matched)
 	}
 }
 
