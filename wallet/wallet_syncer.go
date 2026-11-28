@@ -245,6 +245,11 @@ type chainProcessor interface {
 	// syncedTo reads the processed wallet tip with the caller's context so
 	// eligibility decisions use committed wallet state.
 	syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error)
+
+	// watchAddrs registers newly derived, imported, or published addresses
+	// on the active subscription, or marks any in-flight catch-up scan
+	// stale when no subscription is open.
+	watchAddrs(ctx context.Context, addrs []address.Address) error
 }
 
 // txManager combines the Wallet capabilities used by the syncer for
@@ -293,6 +298,16 @@ type syncer struct {
 	chainSyncer    chainRouter
 	chainEventChan <-chan chainEvent
 
+	// sub holds the active per-Wallet chain event subscription while
+	// synced, or nil while catching up, rewinding, or waiting for retry.
+	sub atomic.Pointer[chain.EventSubscription]
+
+	// scanAddrsStale records that watchAddrs observed no active
+	// subscription (or a subscription retired for resync) after persisting
+	// addresses to the Store, so an in-flight scanBatch retries with a
+	// fresh address snapshot before advancing SyncedTo.
+	scanAddrsStale atomic.Bool
+
 	// pendingDisconnect retains the first failed live disconnect so the
 	// next initialization replays it before startup rollback or later
 	// mailbox events can overtake it.
@@ -301,6 +316,89 @@ type syncer struct {
 
 // A compile-time assertion to ensure that syncer implements chainProcessor.
 var _ chainProcessor = (*syncer)(nil)
+
+// currentSub returns the active chain event subscription, or nil while the
+// syncer is catching up, rewinding, or waiting for retry.
+func (s *syncer) currentSub() chain.EventSubscription {
+	sub := s.sub.Load()
+	if sub == nil {
+		return nil
+	}
+
+	return *sub
+}
+
+// closeSubscription retires any active chain event subscription so live
+// notifications stop arriving while the syncer catches up, rewinds, or exits.
+func (s *syncer) closeSubscription() {
+	sub := s.sub.Swap(nil)
+	if sub != nil {
+		(*sub).Cancel()
+	}
+}
+
+// watchAddrs registers addresses on the active subscription when synced. While
+// no subscription is active (or if the active subscription was retired for
+// resync), it marks any in-flight catch-up batch stale so the scan reloads the
+// persisted addresses before advancing SyncedTo.
+func (s *syncer) watchAddrs(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	sub := s.currentSub()
+	if sub == nil {
+		if len(addrs) > 0 {
+			s.scanAddrsStale.Store(true)
+		}
+
+		return nil
+	}
+
+	err = sub.WatchAddrs(ctx, addrs)
+	if err == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return err
+	}
+
+	// If the subscription ended due to syncer cancellation or BlockEvents
+	// overflow and rejected registration for that retirement (rather than
+	// returning an in-flight backend RPC error), catch-up will reload the
+	// persisted watch set before re-entering Synced.
+	if isSubRetiredForResync(sub) && isSubRetirementErr(err) {
+		if len(addrs) > 0 {
+			s.scanAddrsStale.Store(true)
+		}
+
+		return nil
+	}
+
+	return err
+}
+
+// isSubRetirementErr reports whether err is a subscription-retirement error
+// returned by EventSubscription.WatchAddrs rather than a backend RPC failure.
+func isSubRetirementErr(err error) bool {
+	return errors.Is(err, chain.ErrEventSubscriptionBufferFull) ||
+		errors.Is(err, context.Canceled)
+}
+
+// isSubRetiredForResync reports whether a subscription ended because the syncer
+// canceled it or because its BlockEvents buffer overflowed (triggering resync).
+func isSubRetiredForResync(sub chain.EventSubscription) bool {
+	select {
+	case <-sub.Done():
+		return isSubRetirementErr(sub.Err())
+	default:
+		return false
+	}
+}
 
 // refreshLiveWatches registers stored addresses and outpoints for transaction
 // notifications. The Store selects the addresses and outputs to watch.
@@ -2041,6 +2139,11 @@ func (s *syncer) ensureSyncedAtTip(_ context.Context,
 func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	bestHeight int32) error {
 
+	// Clear the stale marker before loading the wallet's persisted scan
+	// state. Any concurrent watchAddrs call while no subscription is active
+	// sets this flag after persisting its addresses to the Store.
+	s.scanAddrsStale.Store(false)
+
 	// Prepare the full recovery state for syncing.
 	scanState, err := s.loadFullScanState(ctx)
 	if err != nil {
@@ -2082,6 +2185,13 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 		}
 
 		parent = results[i].meta.Hash
+	}
+
+	// If new addresses were persisted and registered while no subscription
+	// was active during this batch scan, retry this batch with a fresh
+	// scan snapshot instead of advancing SyncedTo past those addresses.
+	if s.scanAddrsStale.Load() {
+		return nil
 	}
 
 	// Process Batch (Update). We do this in a single DB transaction.
