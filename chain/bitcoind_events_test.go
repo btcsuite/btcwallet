@@ -1540,9 +1540,9 @@ func TestChainEventSubscriptionOverflowUnindexesWatches(t *testing.T) {
 }
 
 // TestChainEventSubscriptionMatchTx verifies single-pass transaction matching:
-// empty-index fast path, bare multisig vs P2PKH distinction, received-output
-// auto-indexing followed by cross-subscriber spend matching, and unknown-
-// outpoint input matching via ComputePkScript.
+// empty-index fast path, bare multisig matching P2PK and P2PKH watches (while
+// excluding P2WPKH), received-output auto-indexing followed by cross-subscriber
+// spend matching, and unknown-outpoint input matching via ComputePkScript.
 func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	t.Parallel()
 
@@ -1616,8 +1616,9 @@ func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Match a bare multisig output: only subP2PK matches (not subP2PKH),
-	// and the received output outpoint is auto-indexed for subP2PK.
+	// Match a bare multisig output: both subP2PK and subP2PKH match (while
+	// subWPKH does not), and the received output outpoint is auto-indexed
+	// for both matched listeners.
 	msTx := wire.NewMsgTx(wire.TxVersion)
 	msTx.AddTxOut(wire.NewTxOut(2000, multisigScript))
 	msRec, err := wtxmgr.NewTxRecordFromMsgTx(msTx, time.Now())
@@ -1626,27 +1627,29 @@ func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	stream.mu.Lock()
 	msMatched := stream.matchTx(msRec)
 	stream.mu.Unlock()
-	require.Len(t, msMatched, 1)
+	require.Len(t, msMatched, 2)
 	require.Contains(t, msMatched, subP2PK.listener)
-	require.NotContains(t, msMatched, subP2PKH.listener)
+	require.Contains(t, msMatched, subP2PKH.listener)
+	require.NotContains(t, msMatched, subWPKH.listener)
 
 	// Match a subsequent spend of the auto-indexed multisig outpoint that
-	// pays to subP2PKH: both subP2PK (via outpoint) and subP2PKH (via
-	// output) match in one pass.
+	// pays to subWPKH: subP2PK and subP2PKH match via outpoint and subWPKH
+	// matches via output in one pass.
 	spendTx := wire.NewMsgTx(wire.TxVersion)
 	spendTx.AddTxIn(wire.NewTxIn(
 		wire.NewOutPoint(&msRec.Hash, 0), nil, nil,
 	))
-	spendTx.AddTxOut(wire.NewTxOut(1500, p2pkhScriptA))
+	spendTx.AddTxOut(wire.NewTxOut(1500, wpkhScriptA))
 	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
 	require.NoError(t, err)
 
 	stream.mu.Lock()
 	spendMatched := stream.matchTx(spendRec)
 	stream.mu.Unlock()
-	require.Len(t, spendMatched, 2)
+	require.Len(t, spendMatched, 3)
 	require.Contains(t, spendMatched, subP2PK.listener)
 	require.Contains(t, spendMatched, subP2PKH.listener)
+	require.Contains(t, spendMatched, subWPKH.listener)
 
 	// Match an unknown-outpoint spend whose P2WPKH witness derives
 	// wpkhScriptA via ComputePkScript without prior outpoint indexing.
@@ -1667,6 +1670,167 @@ func TestChainEventSubscriptionMatchTx(t *testing.T) {
 	stream.mu.Unlock()
 	require.Len(t, wpkhMatched, 1)
 	require.Contains(t, wpkhMatched, subWPKH.listener)
+}
+
+// TestChainEventSubscriptionP2PKAndMultisigMatchP2PKH verifies legacy btcd and
+// KVDB key equivalence: compressed P2PK, uncompressed P2PK, and bare multisig
+// outputs match watched P2PKH scripts (and P2PK watches for bare multisig)
+// while auto-indexing received outpoints once per listener.
+func TestChainEventSubscriptionP2PKAndMultisigMatchP2PKH(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: build compressed P2PK, uncompressed P2PK, equivalent P2PKH,
+	// P2WPKH, and 1-of-2 bare multisig scripts for key A plus a second key.
+	params := &chaincfg.RegressionNetParams
+	privA, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	privB, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	compPubA, err := address.NewAddressPubKey(
+		privA.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+	uncompPubA, err := address.NewAddressPubKey(
+		privA.PubKey().SerializeUncompressed(), params,
+	)
+	require.NoError(t, err)
+	pubB, err := address.NewAddressPubKey(
+		privB.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	compP2PKScript, err := txscript.PayToAddrScript(compPubA)
+	require.NoError(t, err)
+	require.Len(t, compP2PKScript, compressedP2PKScriptLen)
+
+	uncompP2PKScript, err := txscript.PayToAddrScript(uncompPubA)
+	require.NoError(t, err)
+	require.Len(t, uncompP2PKScript, uncompressedP2PKScriptLen)
+
+	compP2PKHScript, err := txscript.PayToAddrScript(
+		compPubA.AddressPubKeyHash(),
+	)
+	require.NoError(t, err)
+	uncompP2PKHScript, err := txscript.PayToAddrScript(
+		uncompPubA.AddressPubKeyHash(),
+	)
+	require.NoError(t, err)
+
+	wpkhAddrA, err := address.NewAddressWitnessPubKeyHash(
+		compPubA.AddressPubKeyHash().ScriptAddress(), params,
+	)
+	require.NoError(t, err)
+	wpkhScriptA, err := txscript.PayToAddrScript(wpkhAddrA)
+	require.NoError(t, err)
+
+	multisigScript, err := txscript.MultiSigScript(
+		[]*address.AddressPubKey{compPubA, pubB}, 1,
+	)
+	require.NoError(t, err)
+
+	stream := newChainEventStream(params, nil)
+	subCompP2PKH := stream.subscribe(t.Context())
+	subUncompP2PKH := stream.subscribe(t.Context())
+	subBoth := stream.subscribe(t.Context())
+	subWPKH := stream.subscribe(t.Context())
+
+	_, err = registerWatchKeys(
+		t.Context(), stream, subCompP2PKH.listener, t.Context().Done(),
+		&stream.scriptListeners, &subCompP2PKH.listener.scripts,
+		[]string{string(compP2PKHScript)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subUncompP2PKH.listener,
+		t.Context().Done(), &stream.scriptListeners,
+		&subUncompP2PKH.listener.scripts,
+		[]string{string(uncompP2PKHScript)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subBoth.listener, t.Context().Done(),
+		&stream.scriptListeners, &subBoth.listener.scripts,
+		[]string{string(compP2PKScript), string(compP2PKHScript)},
+	)
+	require.NoError(t, err)
+	_, err = registerWatchKeys(
+		t.Context(), stream, subWPKH.listener, t.Context().Done(),
+		&stream.scriptListeners, &subWPKH.listener.scripts,
+		[]string{string(wpkhScriptA)},
+	)
+	require.NoError(t, err)
+
+	makeFunding := func(script []byte, val int64) *wtxmgr.TxRecord {
+		tx := wire.NewMsgTx(wire.TxVersion)
+		tx.AddTxOut(wire.NewTxOut(val, script))
+		rec, recErr := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, recErr)
+
+		return rec
+	}
+
+	makeSpend := func(op wire.OutPoint) *wtxmgr.TxRecord {
+		tx := wire.NewMsgTx(wire.TxVersion)
+		tx.AddTxIn(wire.NewTxIn(&op, nil, nil))
+		rec, recErr := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, recErr)
+
+		return rec
+	}
+
+	// Act: match compressed P2PK, uncompressed P2PK, and 1-of-2 bare
+	// multisig funding txns, then match spends of each received output.
+	compP2PKRec := makeFunding(compP2PKScript, 1000)
+	uncompP2PKRec := makeFunding(uncompP2PKScript, 2000)
+	msRec := makeFunding(multisigScript, 3000)
+
+	stream.mu.Lock()
+	compMatched := stream.matchTx(compP2PKRec)
+	uncompMatched := stream.matchTx(uncompP2PKRec)
+	msMatched := stream.matchTx(msRec)
+
+	compOP := wire.OutPoint{Hash: compP2PKRec.Hash, Index: 0}
+	uncompOP := wire.OutPoint{Hash: uncompP2PKRec.Hash, Index: 0}
+	msOP := wire.OutPoint{Hash: msRec.Hash, Index: 0}
+
+	compBothRefCount := subBoth.listener.outpoints[compOP]
+	msBothRefCount := subBoth.listener.outpoints[msOP]
+
+	compSpendMatched := stream.matchTx(makeSpend(compOP))
+	uncompSpendMatched := stream.matchTx(makeSpend(uncompOP))
+	msSpendMatched := stream.matchTx(makeSpend(msOP))
+	stream.mu.Unlock()
+
+	// Assert: compressed P2PK and bare multisig match P2PKH-only and
+	// combined P2PK+P2PKH listeners (never P2WPKH), uncompressed P2PK
+	// matches its uncompressed P2PKH-only listener, auto-indexed outpoint
+	// refcounts stay idempotent at 1, and all subsequent spends match.
+	require.Len(t, compMatched, 2)
+	require.Contains(t, compMatched, subCompP2PKH.listener)
+	require.Contains(t, compMatched, subBoth.listener)
+	require.NotContains(t, compMatched, subWPKH.listener)
+	require.Equal(t, 1, compBothRefCount)
+
+	require.Len(t, uncompMatched, 1)
+	require.Contains(t, uncompMatched, subUncompP2PKH.listener)
+
+	require.Len(t, msMatched, 2)
+	require.Contains(t, msMatched, subCompP2PKH.listener)
+	require.Contains(t, msMatched, subBoth.listener)
+	require.NotContains(t, msMatched, subWPKH.listener)
+	require.Equal(t, 1, msBothRefCount)
+
+	require.Len(t, compSpendMatched, 2)
+	require.Contains(t, compSpendMatched, subCompP2PKH.listener)
+	require.Contains(t, compSpendMatched, subBoth.listener)
+
+	require.Len(t, uncompSpendMatched, 1)
+	require.Contains(t, uncompSpendMatched, subUncompP2PKH.listener)
+
+	require.Len(t, msSpendMatched, 2)
+	require.Contains(t, msSpendMatched, subCompP2PKH.listener)
+	require.Contains(t, msSpendMatched, subBoth.listener)
 }
 
 // randTestP2PKHAddr generates a random regtest P2PKH address and its pkScript.
