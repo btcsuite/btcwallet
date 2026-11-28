@@ -2,6 +2,7 @@ package chain
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -56,17 +57,25 @@ type ZMQConfig struct {
 	RPCBatchInterval time.Duration
 }
 
+// zmqConn abstracts the ZMQ socket methods used by bitcoindZMQEvents so
+// shutdown and receive-error handling can be unit-tested deterministically.
+type zmqConn interface {
+	Close() error
+	Receive(bufs [][]byte) ([][]byte, error)
+	RemoteAddr() net.Addr
+}
+
 // bitcoindZMQEvents delivers block and transaction notifications that it gets
 // from ZMQ connections to bitcoind.
 type bitcoindZMQEvents struct {
 	cfg *ZMQConfig
 
 	// blockConn is the ZMQ connection we'll use to read raw block events.
-	blockConn *gozmq.Conn
+	blockConn zmqConn
 
 	// txConn is the ZMQ connection we'll use to read raw transaction
 	// events.
-	txConn *gozmq.Conn
+	txConn zmqConn
 
 	// blockNtfns is a channel to which any new blocks will be sent.
 	blockNtfns chan *wire.MsgBlock
@@ -192,20 +201,58 @@ func (b *bitcoindZMQEvents) Start() error {
 
 // Stop cleans up any of the resources and goroutines held by bitcoindZMQEvents.
 func (b *bitcoindZMQEvents) Stop() error {
+	// Signal shutdown before closing the ZMQ sockets so unblocked Receive
+	// calls observe quit immediately instead of spinning and logging
+	// closed-connection errors while the second socket closes.
+	close(b.quit)
 	b.mempool.Shutdown()
 
 	var returnErr error
-	if err := b.txConn.Close(); err != nil {
+
+	err := b.txConn.Close()
+	if err != nil {
 		returnErr = err
 	}
 
-	if err := b.blockConn.Close(); err != nil {
+	err = b.blockConn.Close()
+	if err != nil {
 		returnErr = err
 	}
 
-	close(b.quit)
 	b.wg.Wait()
+
 	return returnErr
+}
+
+// handleZMQReceiveError classifies a ZMQ Receive error and reports whether the
+// reader loop should exit. Shutdown signals, io.EOF, and net.ErrClosed exit
+// quietly so closing sockets during Stop does not spin or spam error logs.
+func handleZMQReceiveError(quit <-chan struct{}, topic string,
+	err error) bool {
+
+	select {
+	case <-quit:
+		return true
+	default:
+	}
+
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+
+	// It's possible that the connection to the socket continuously times
+	// out, so we'll prevent logging this error to prevent spamming the
+	// logs.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		log.Tracef("Re-establishing timed out ZMQ %v connection", topic)
+
+		return false
+	}
+
+	log.Errorf("Unable to receive ZMQ %v message: %v", topic, err)
+
+	return false
 }
 
 // TxNotifications returns a channel which will deliver new transactions.
@@ -276,24 +323,13 @@ func (b *bitcoindZMQEvents) blockEventHandler() {
 		)
 		bufs, err = b.blockConn.Receive(bufs)
 		if err != nil {
-			// EOF should only be returned if the connection was
-			// explicitly closed, so we can exit at this point.
-			if err == io.EOF {
+			if handleZMQReceiveError(
+				b.quit, rawBlockZMQCommand, err,
+			) {
+
 				return
 			}
 
-			// It's possible that the connection to the socket
-			// continuously times out, so we'll prevent logging this
-			// error to prevent spamming the logs.
-			netErr, ok := err.(net.Error)
-			if ok && netErr.Timeout() {
-				log.Trace("Re-establishing timed out ZMQ " +
-					"block connection")
-				continue
-			}
-
-			log.Errorf("Unable to receive ZMQ %v message: %v",
-				rawBlockZMQCommand, err)
 			continue
 		}
 
@@ -373,24 +409,13 @@ func (b *bitcoindZMQEvents) txEventHandler() {
 		)
 		bufs, err = b.txConn.Receive(bufs)
 		if err != nil {
-			// EOF should only be returned if the connection was
-			// explicitly closed, so we can exit at this point.
-			if err == io.EOF {
+			if handleZMQReceiveError(
+				b.quit, rawTxZMQCommand, err,
+			) {
+
 				return
 			}
 
-			// It's possible that the connection to the socket
-			// continuously times out, so we'll prevent logging this
-			// error to prevent spamming the logs.
-			netErr, ok := err.(net.Error)
-			if ok && netErr.Timeout() {
-				log.Trace("Re-establishing timed out ZMQ " +
-					"transaction connection")
-				continue
-			}
-
-			log.Errorf("Unable to receive ZMQ %v message: %v",
-				rawTxZMQCommand, err)
 			continue
 		}
 
