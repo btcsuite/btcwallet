@@ -10206,3 +10206,878 @@ func TestSyncerDisconnectDoesNotRetryIndeterminateCommit(t *testing.T) {
 	})
 }
 
+// TestSyncerSubscriptionOpensAtTipAndClosesOnRewind verifies that syncer opens
+// its EventSubscription only when catching up to the chain tip, transitions to
+// Synced after a tip recheck, and closes the subscription on scanWithRewind.
+func TestSyncerSubscriptionOpensAtTipAndClosesOnRewind(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up a store-backed syncer at height 100 matching the
+	// chain tip and expect subscription enrollment, watch refresh, block
+	// notifications, and a subsequent rewind to height 50.
+	const (
+		walletID   uint32 = 41
+		walletName        = "sub-lifecycle"
+	)
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Name:        walletName,
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+
+	tipHash := chainhash.Hash{0x10}
+	rewindHash := chainhash.Hash{0x05}
+	rewindTime := time.Unix(1710000050, 0).UTC()
+	tipBlock := &db.Block{Height: 100, Hash: tipHash}
+
+	var enrolled *bwmock.EventSubscription
+
+	mockChain.On("GetBestBlock").
+		Return(&tipHash, int32(100), nil).Twice()
+	store.On("GetWallet", mock.Anything, walletName).
+		Return(&db.WalletInfo{SyncedTo: tipBlock}, nil).Times(3)
+	mockChain.On("SubscribeChainEvents", mock.Anything).Return(
+		func(ctx context.Context) chain.EventSubscription {
+			enrolled = bwmock.NewEventSubscription(ctx, mockChain)
+
+			return enrolled
+		},
+	).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Return(db.WatchSet{}, nil).Once()
+	mockChain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address(nil),
+	).Return(nil).Once()
+	mockChain.On("NotifyBlocks").Return(nil).Once()
+	store.On(
+		"RewindWallet", mock.Anything, db.RewindWalletParams{
+			WalletID: walletID,
+			Block: db.Block{
+				Height:    50,
+				Hash:      rewindHash,
+				Timestamp: rewindTime,
+			},
+		},
+	).Return(nil).Once()
+
+	// Act: Call advanceChainSync twice to open the subscription and pass
+	// the tip recheck, then trigger a full rewind to height 50.
+	finished, err := s.advanceChainSync(t.Context())
+	require.NoError(t, err)
+	require.False(t, finished)
+	require.NotNil(t, s.currentSub())
+	require.NotNil(t, enrolled)
+
+	finished, err = s.advanceChainSync(t.Context())
+	require.NoError(t, err)
+	require.True(t, finished)
+	require.Equal(t, syncStateSynced, s.syncState())
+
+	rewindErr := s.scanWithRewind(t.Context(), &scanReq{
+		typ: scanTypeRewind,
+		startBlock: waddrmgr.BlockStamp{
+			Height:    50,
+			Hash:      rewindHash,
+			Timestamp: rewindTime,
+		},
+	})
+
+	// Assert: Rewind closed the live subscription, retired its Done
+	// channel, and switched the syncer back to Syncing.
+	require.NoError(t, rewindErr)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+
+	select {
+	case <-enrolled.Done():
+	case <-time.After(time.Second):
+		require.Fail(t, "enrolled subscription was not closed on rewind")
+	}
+
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestSyncerUnexpectedSubCloseReturnsError verifies that an unexpected
+// non-overflow subscription closure returns an error so the sync loop backs
+// off rather than spinning immediately.
+func TestSyncerUnexpectedSubCloseReturnsError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Attach a live subscription to a synced syncer and close it
+	// without ErrEventSubscriptionBufferFull while the context stays live.
+	mockChain := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{Chain: mockChain, ChainParams: &chainParams},
+		nil, nil, nil, &walletmock.Store{}, 0,
+	)
+	s.state.Store(uint32(syncStateSynced))
+
+	sub := attachTestSubscription(t, s, mockChain)
+	sub.Close(nil)
+
+	// Act: Wait for the next live event on the unexpectedly closed stream.
+	err := s.waitForEvent(t.Context())
+
+	// Assert: Closure propagates an error, clears the subscription, and
+	// switches state to Syncing.
+	require.Error(t, err)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+}
+
+// TestSyncerWatchAddrsWithoutSubMarksScanStale verifies that watchAddrs called
+// while no subscription is open marks an in-flight scanBatch stale so SyncedTo
+// is not advanced past newly persisted addresses.
+func TestSyncerWatchAddrsWithoutSubMarksScanStale(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up a syncer with no active subscription scanning height
+	// 101. Invoke watchAddrs mid-scan inside GetBlocks; omit ApplyScanBatch
+	// so any premature checkpoint write fails the strict store mock.
+	const walletID uint32 = 42
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+			SyncMethod:  SyncMethodFullBlocks,
+		}, nil, nil, nil, store, walletID,
+	)
+
+	tipHash := chainhash.Hash{0xaa}
+	nextBlock := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: tipHash,
+		Timestamp: time.Unix(1710000101, 0),
+	})
+	nextHash := nextBlock.BlockHash()
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo(nil), nil).Twice()
+	store.On("ListAddresses", mock.Anything, mock.Anything).
+		Return(page.Result[db.AddressInfo, uint32]{}, nil).Once()
+	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).
+		Return([]db.UtxoInfo(nil), nil).Once()
+	mockChain.On("GetBlockHashes", int64(101), int64(101)).
+		Return([]chainhash.Hash{nextHash}, nil).Once()
+
+	var watchErr error
+	mockChain.On("GetBlockHeaders", []chainhash.Hash{nextHash}).
+		Run(func(mock.Arguments) {
+			watchErr = s.watchAddrs(
+				t.Context(), []address.Address{addr},
+			)
+		}).Return([]*wire.BlockHeader{&nextBlock.Header}, nil).Once()
+
+	// Act: Run scanBatch for height 101 while watchAddrs fires mid-scan.
+	err = s.scanBatch(
+		t.Context(),
+		waddrmgr.BlockStamp{Height: 100, Hash: tipHash}, 101,
+	)
+
+	// Assert: Both watchAddrs and scanBatch return nil, scanAddrsStale is
+	// set, and ApplyScanBatch was never called.
+	require.NoError(t, watchErr)
+	require.NoError(t, err)
+	require.True(t, s.scanAddrsStale.Load())
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
+// TestSyncerWatchAddrsRetiredSubMarksScanStale verifies that watchAddrs marks
+// scanAddrsStale and returns nil when the active subscription was retired by
+// BlockEvents overflow.
+func TestSyncerWatchAddrsRetiredSubMarksScanStale(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Attach a subscription retired by BlockEvents overflow.
+	mockChain := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{Chain: mockChain, ChainParams: &chainParams},
+		nil, nil, nil, &walletmock.Store{}, 0,
+	)
+	sub := attachTestSubscription(t, s, mockChain)
+	sub.Close(chain.ErrEventSubscriptionBufferFull)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	// Act: Register an address against the retired subscription.
+	err = s.watchAddrs(t.Context(), []address.Address{addr})
+
+	// Assert: Registration returns nil and marks scanAddrsStale so catch-up
+	// reloads the persisted address set before re-subscribing.
+	require.NoError(t, err)
+	require.True(t, s.scanAddrsStale.Load())
+}
+
+// TestSyncerProcessMempoolTxIgnoresStaleErrors verifies that late best-effort
+// mempool notifications rejected by already-confirmed or conflicting state are
+// ignored idempotently without failing the sync loop.
+func TestSyncerProcessMempoolTxIgnoresStaleErrors(t *testing.T) {
+	t.Parallel()
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := subscriptionTx(script, 77)
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		storeErr error
+	}{
+		{
+			name:     "already exists",
+			storeErr: db.ErrTxAlreadyExists,
+		},
+		{
+			name:     "input conflict",
+			storeErr: db.ErrTxInputConflict,
+		},
+		{
+			name:     "invalid parent",
+			storeErr: db.ErrTxInputInvalidParent,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Configure the store to reject the mempool
+			// write with the stale-tx sentinel error.
+			store := &walletmock.Store{}
+			s := newTestSyncer(
+				Config{ChainParams: &chainParams},
+				nil, nil, nil, store, 43,
+			)
+			store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+				Return(tc.storeErr).Once()
+
+			// Act: Process the late mempool tx record.
+			err := s.processMempoolTx(t.Context(), rec)
+
+			// Assert: Stale mempool conflicts are ignored cleanly.
+			require.NoError(t, err)
+			store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestSyncerProcessMempoolTxPropagatesStoreError verifies that unexpected
+// storage failures during mempool tx processing propagate to the sync loop.
+func TestSyncerProcessMempoolTxPropagatesStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build a valid mempool tx record and fail ApplyTxBatch with
+	// a non-stale database error.
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(
+		subscriptionTx(script, 78), time.Now(),
+	)
+	require.NoError(t, err)
+
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{ChainParams: &chainParams},
+		nil, nil, nil, store, 44,
+	)
+	store.On("ApplyTxBatch", mock.Anything, mock.Anything).
+		Return(errDBMock).Once()
+
+	// Act: Process the mempool tx record against the failing store.
+	err = s.processMempoolTx(t.Context(), rec)
+
+	// Assert: Non-stale database errors propagate to the caller.
+	require.ErrorIs(t, err, errDBMock)
+	store.AssertExpectations(t)
+}
+
+// TestPutBlockNotificationsSkipsDisjointParent verifies that a live block at
+// current.Height+1 whose PrevBlock does not match the synced tip hash is
+// skipped without error and without writing to the store so the next sync
+// iteration reconciles the fork.
+func TestPutBlockNotificationsSkipsDisjointParent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Sync to height 10 with tipHash, then deliver a height-11
+	// block whose header points to a different parent hash.
+	const (
+		walletID   uint32 = 45
+		walletName        = "disjoint-parent"
+	)
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Name:        walletName,
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+
+	tipHash := chainhash.Hash{0x0a}
+	nextHash := chainhash.Hash{0x0b}
+	wrongParent := chainhash.Hash{0xff}
+
+	store.On("GetWallet", mock.Anything, walletName).Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{Height: 10, Hash: tipHash},
+		}, nil,
+	).Once()
+	mockChain.On("GetBlockHeader", &nextHash).Return(
+		&wire.BlockHeader{PrevBlock: wrongParent}, nil,
+	).Once()
+
+	// Act: Attempt to commit the disjoint height-11 block notification.
+	err := s.putBlockNotifications(t.Context(), nil, &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 11, Hash: nextHash},
+	})
+
+	// Assert: Parent mismatch is skipped without error and performs no
+	// store write.
+	require.NoError(t, err)
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestAdvanceChainSyncTipHashDivergenceReturnsStateChanged verifies that
+// reaching bestHeight with a different tip hash returns ErrStateChanged so the
+// syncer reconciles the fork instead of reporting Synced.
+func TestAdvanceChainSyncTipHashDivergenceReturnsStateChanged(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Configure a syncer at height 100 whose stored hash differs
+	// from the chain backend's best hash at height 100.
+	const (
+		walletID   uint32 = 46
+		walletName        = "divergent-tip"
+	)
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Name:        walletName,
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+
+	storeHash := chainhash.Hash{0x01}
+	chainHash := chainhash.Hash{0x02}
+
+	mockChain.On("GetBestBlock").
+		Return(&chainHash, int32(100), nil).Once()
+	store.On("GetWallet", mock.Anything, walletName).Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{Height: 100, Hash: storeHash},
+		}, nil,
+	).Once()
+
+	// Act: Check sync advancement against the divergent tip hash.
+	finished, err := s.advanceChainSync(t.Context())
+
+	// Assert: Divergence reports ErrStateChanged and does not mark Synced.
+	require.False(t, finished)
+	require.ErrorIs(t, err, ErrStateChanged)
+	require.NotEqual(t, syncStateSynced, s.syncState())
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestSyncerOpenSubscriptionSubClosedRetries verifies that unexpected
+// subscription closure during watch activation while the wallet context stays
+// live returns a retryable error from run rather than exiting cleanly.
+func TestSyncerOpenSubscriptionSubClosedRetries(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up a syncer at genesis whose enrolled subscription
+	// closes unexpectedly during LoadWatchSet while ctx remains active.
+	const (
+		walletID   uint32 = 47
+		walletName        = "open-sub-closed"
+	)
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Name:        walletName,
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+
+	genesis := &db.Block{Height: 0, Hash: *chainParams.GenesisHash}
+
+	var enrolled *bwmock.EventSubscription
+
+	mockChain.On("IsCurrent").Return(true).Once()
+	mockChain.On("GetBestBlock").
+		Return(chainParams.GenesisHash, int32(0), nil).Once()
+	store.On("GetWallet", mock.Anything, walletName).
+		Return(&db.WalletInfo{SyncedTo: genesis}, nil).Twice()
+	mockChain.On("SubscribeChainEvents", mock.Anything).Return(
+		func(ctx context.Context) chain.EventSubscription {
+			enrolled = bwmock.NewEventSubscription(ctx, mockChain)
+
+			return enrolled
+		},
+	).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Run(func(mock.Arguments) {
+			enrolled.Close(nil)
+		}).Return(db.WatchSet{}, nil).Once()
+
+	// Act: Run the sync worker until watch activation observes the closed
+	// subscription.
+	err := s.run(t.Context())
+
+	// Assert: Worker returns an error for retry backoff instead of
+	// treating subscription cancellation as a clean shutdown.
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.Canceled)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestSyncerOpenSubscriptionOverflowRecovers verifies that BlockEvents
+// overflow during watch activation closes the subscription, switches to
+// Syncing, and returns nil so the sync loop immediately catches up and
+// resubscribes.
+func TestSyncerOpenSubscriptionOverflowRecovers(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up a syncer whose enrolled subscription overflows with
+	// ErrEventSubscriptionBufferFull during LoadWatchSet.
+	const walletID uint32 = 48
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, walletID,
+	)
+
+	var enrolled *bwmock.EventSubscription
+
+	mockChain.On("SubscribeChainEvents", mock.Anything).Return(
+		func(ctx context.Context) chain.EventSubscription {
+			enrolled = bwmock.NewEventSubscription(ctx, mockChain)
+
+			return enrolled
+		},
+	).Once()
+	store.On("LoadWatchSet", mock.Anything, walletID).
+		Run(func(mock.Arguments) {
+			enrolled.Close(chain.ErrEventSubscriptionBufferFull)
+		}).Return(db.WatchSet{}, nil).Once()
+	mockChain.On("IsCurrent").Return(false).Once()
+
+	// Act: Open the subscription while overflow happens during watch load.
+	err := s.openSubscription(t.Context())
+
+	// Assert: Overflow self-heals by returning nil, clearing the
+	// subscription, and leaving state in Syncing for immediate retry.
+	require.NoError(t, err)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestProcessBlockEventBeforeSyncSkipsAboveTipAndDetachedBranch verifies that
+// scan-time block event replay never persists blocks above SyncedTo or on a
+// detached branch.
+func TestProcessBlockEventBeforeSyncSkipsAboveTipAndDetachedBranch(
+	t *testing.T) {
+
+	t.Parallel()
+
+	tipHash := chainhash.Hash{0x0a}
+	otherHash := chainhash.Hash{0xff}
+	payment := reorgRecord(t, 91)
+
+	tests := []struct {
+		name  string
+		block wtxmgr.BlockMeta
+	}{
+		{
+			name: "above synced tip",
+			block: wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 11, Hash: otherHash},
+			},
+		},
+		{
+			name: "detached branch at tip height",
+			block: wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 10, Hash: otherHash},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Seed synced tip at height 10 with tipHash
+			// and omit ApplyTxBatch so any write fails the mock.
+			const (
+				walletID   uint32 = 49
+				walletName        = "presync-branch-guard"
+			)
+
+			store := &walletmock.Store{}
+			s := newTestSyncer(
+				Config{
+					Name:        walletName,
+					ChainParams: &chainParams,
+				}, nil, nil, nil, store, walletID,
+			)
+			store.On("GetWallet", mock.Anything, walletName).Return(
+				&db.WalletInfo{
+					SyncedTo: &db.Block{
+						Height: 10,
+						Hash:   tipHash,
+					},
+				}, nil,
+			).Once()
+
+			// Act: Replay the queued connected block event.
+			err := s.processBlockEventBeforeSync(
+				t.Context(), chain.Event{
+					Type:        chain.EventBlockConnected,
+					Block:       &tc.block,
+					RelevantTxs: []*wtxmgr.TxRecord{payment},
+				},
+			)
+
+			// Assert: Both above-tip and detached events are
+			// skipped cleanly without writing to the store.
+			require.NoError(t, err)
+			store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestSyncerBlockEventsOverflowReconcilesReorg verifies that when BlockEvents
+// overflows across an equal-height reorg, handleSubClosed runs checkRollback
+// immediately so the wallet rewinds to the fork point without backoff.
+func TestSyncerBlockEventsOverflowReconcilesReorg(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed a real SQLite wallet synced to losing block 1 while
+	// the chain backend is current on competing height-1 block B1.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	src := &bwmock.Chain{}
+	t.Cleanup(func() { src.AssertExpectations(t) })
+
+	genesis := db.Block{
+		Height:    0,
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	a1 := db.Block{
+		Height:    1,
+		Hash:      chainhash.Hash{0xa1},
+		Timestamp: time.Unix(2, 0).UTC(),
+	}
+	b1Hash := chainhash.Hash{0xb1}
+
+	require.NoError(t, store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{genesis, a1},
+	}))
+
+	s := newTestSyncer(
+		Config{
+			Name:        "sql-watch-only-scripts",
+			Chain:       src,
+			ChainParams: &chainParams,
+		}, nil, nil, nil, store, id,
+	)
+	s.state.Store(uint32(syncStateSynced))
+
+	sub := attachTestSubscription(t, s, src)
+	sub.Close(chain.ErrEventSubscriptionBufferFull)
+
+	src.On("IsCurrent").Return(true).Once()
+	src.On("GetBestBlock").Return(&b1Hash, int32(1), nil).Twice()
+	src.On("GetBlockHashes", int64(0), int64(1)).
+		Return([]chainhash.Hash{genesis.Hash, b1Hash}, nil).Once()
+	src.On("GetBlockHeader", &genesis.Hash).
+		Return(&chainParams.GenesisBlock.Header, nil).Once()
+	expectDisconnectHeaders(src, 1, genesis.Hash, b1Hash)
+
+	// Act: Observe the overflowed subscription in waitForEvent.
+	err := s.waitForEvent(ctx)
+
+	// Assert: Overflow self-heals by rewinding SyncedTo to genesis and
+	// clearing the retired subscription without returning an error.
+	require.NoError(t, err)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+
+	tip, err := s.syncedTo(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, tip.Height)
+	require.Equal(t, genesis.Hash, tip.Hash)
+}
+
+// TestSyncerPreCommitOverflowRetriesWithoutBackoff verifies that a pre-commit
+// BlockEvents overflow during short-gap catch-up discards the stale batch
+// without committing and returns nil from runSyncStep so the worker retries
+// immediately without backoff.
+func TestSyncerPreCommitOverflowRetriesWithoutBackoff(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Sync a store-backed syncer at height 10 with a live
+	// subscription, then overflow sub during the height-11 fetch so
+	// checkForRollbackBeforeCommit observes the closed channel before
+	// ApplyScanBatch. Omit ApplyScanBatch so any commit fails the mock.
+	const (
+		walletID   uint32 = 50
+		walletName        = "precommit-overflow-retry"
+	)
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newTestSyncer(
+		Config{
+			Name:        walletName,
+			Chain:       mockChain,
+			ChainParams: &chainParams,
+			SyncMethod:  SyncMethodFullBlocks,
+		}, nil, nil, &mockTxPublisher{}, store, walletID,
+	)
+	s.state.Store(uint32(syncStateSynced))
+
+	sub := attachTestSubscription(t, s, mockChain)
+
+	tipHash := chainhash.Hash{0x10}
+	nextBlock := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: tipHash,
+		Timestamp: time.Unix(1710000011, 0),
+	})
+	nextHash := nextBlock.BlockHash()
+
+	mockChain.On("GetBestBlock").
+		Return(&nextHash, int32(11), nil).Once()
+	store.On("GetWallet", mock.Anything, walletName).Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{Height: 10, Hash: tipHash},
+		}, nil,
+	).Once()
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo(nil), nil).Twice()
+	store.On("ListAddresses", mock.Anything, mock.Anything).
+		Return(page.Result[db.AddressInfo, uint32]{}, nil).Once()
+	store.On("ListOutputsToWatch", mock.Anything, walletID).
+		Return([]db.UtxoInfo(nil), nil).Once()
+	mockChain.On("GetBlockHashes", int64(11), int64(11)).
+		Return([]chainhash.Hash{nextHash}, nil).Once()
+	mockChain.On("GetBlockHeaders", []chainhash.Hash{nextHash}).
+		Run(func(mock.Arguments) {
+			sub.Close(chain.ErrEventSubscriptionBufferFull)
+		}).Return([]*wire.BlockHeader{&nextBlock.Header}, nil).Once()
+	mockChain.On("IsCurrent").Return(false).Once()
+
+	// Act: Run one sync step across the short-gap catch-up fetch.
+	err := s.runSyncStep(t.Context())
+
+	// Assert: runSyncStep returns nil (no backoff), discards the stale
+	// batch without calling ApplyScanBatch, clears sub, and sets Syncing.
+	require.NoError(t, err)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestSyncerRetiredSubBeforeReadyReconciles verifies that ensureSyncedAtTip
+// reconciles an already-retired subscription instead of declaring Synced.
+func TestSyncerRetiredSubBeforeReadyReconciles(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Attach a subscription retired by BlockEvents overflow while
+	// wallet and chain tips match at height 100.
+	mockChain := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{Chain: mockChain, ChainParams: &chainParams},
+		nil, nil, nil, &walletmock.Store{}, 51,
+	)
+
+	sub := attachTestSubscription(t, s, mockChain)
+	sub.Close(chain.ErrEventSubscriptionBufferFull)
+	mockChain.On("IsCurrent").Return(false).Once()
+
+	tipHash := chainhash.Hash{0x33}
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: tipHash}
+
+	// Act: Run the final readiness check against the retired subscription.
+	finished, err := s.ensureSyncedAtTip(t.Context(), tip, &tipHash, 100)
+
+	// Assert: Readiness is withheld, overflow self-heals with nil error,
+	// sub is cleared, and state transitions to Syncing.
+	require.NoError(t, err)
+	require.False(t, finished)
+	require.Nil(t, s.currentSub())
+	require.Equal(t, syncStateSyncing, s.syncState())
+	mockChain.AssertExpectations(t)
+}
+
+// TestSyncerWatchAddrsInFlightRPCErrorPropagatesOnClose verifies that a real
+// backend RPC failure during WatchAddrsFromTip is propagated even if the
+// syncer closes its subscription while the RPC is in flight.
+func TestSyncerWatchAddrsInFlightRPCErrorPropagatesOnClose(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Attach a live subscription whose WatchAddrsFromTip closes
+	// the syncer subscription mid-RPC and returns errChainMock.
+	mockChain := &bwmock.Chain{}
+	s := newTestSyncer(
+		Config{Chain: mockChain, ChainParams: &chainParams},
+		nil, nil, nil, &walletmock.Store{}, 0,
+	)
+	attachTestSubscription(t, s, mockChain)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	mockChain.On(
+		"WatchAddrsFromTip", mock.Anything, []address.Address{addr},
+	).Run(func(mock.Arguments) {
+		s.closeSubscription()
+	}).Return(errChainMock).Once()
+
+	// Act: Register the address while closeSubscription races the RPC.
+	err = s.watchAddrs(t.Context(), []address.Address{addr})
+
+	// Assert: Genuine backend RPC error is preserved and scanAddrsStale
+	// remains false.
+	require.ErrorIs(t, err, errChainMock)
+	require.False(t, s.scanAddrsStale.Load())
+	mockChain.AssertExpectations(t)
+}
+
+// TestSyncerPurgesDetachedTargetedBlockAboveTipOnMismatch verifies that an
+// orphaned confirmed block persisted above SyncedTo by a targeted scan is
+// purged when forward catch-up hits db.ErrBlockMismatch on a replacement
+// branch (even after BlockEvents overflow dropped its disconnect), and that
+// buffered disconnects are drained before closing sub on large gaps.
+func TestSyncerPurgesDetachedTargetedBlockAboveTipOnMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Seed a real SQLite wallet synced to A1 (height 1) with an
+	// above-checkpoint targeted-scan confirmation in losing block A2
+	// (height 2), while the canonical chain replaced A2 with B2.
+	ctx := t.Context()
+	store, _, id := newSQLScriptVault(t)
+	src := &bwmock.Chain{}
+	t.Cleanup(func() { src.AssertExpectations(t) })
+
+	genesis := db.Block{
+		Height:    0,
+		Hash:      *chainParams.GenesisHash,
+		Timestamp: time.Unix(1, 0).UTC(),
+	}
+	a1 := db.Block{
+		Height:    1,
+		Hash:      chainhash.Hash{0xa1},
+		Timestamp: time.Unix(2, 0).UTC(),
+	}
+	a2Meta := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: 2, Hash: chainhash.Hash{0xa2}},
+		Time:  time.Unix(3, 0).UTC(),
+	}
+	b2Block := wire.NewMsgBlock(&wire.BlockHeader{
+		PrevBlock: a1.Hash,
+		Timestamp: time.Unix(4, 0).UTC(),
+	})
+	b2Hash := b2Block.BlockHash()
+
+	require.NoError(t, store.ApplyScanBatch(ctx, db.ScanBatchParams{
+		WalletID:     id,
+		SyncedBlocks: []db.Block{genesis, a1},
+	}))
+
+	s := newTestSyncer(
+		Config{
+			Name:        "sql-watch-only-scripts",
+			Chain:       src,
+			ChainParams: &chainParams,
+			SyncMethod:  SyncMethodFullBlocks,
+		}, nil, nil, &mockTxPublisher{}, store, id,
+	)
+
+	a2Payment := reorgRecord(t, 120)
+	require.NoError(t, s.putTxNotifications(
+		ctx, liveMatches(a2Payment), &a2Meta,
+	))
+
+	// Arrange scanBatch for height 2 (B2): first call hits ErrBlockMismatch
+	// against A2 and purges A2 via disconnectBlock; second call commits B2.
+	src.On("GetBlockHashes", int64(2), int64(2)).
+		Return([]chainhash.Hash{b2Hash}, nil).Times(3)
+	src.On("GetBlockHeaders", []chainhash.Hash{b2Hash}).
+		Return([]*wire.BlockHeader{&b2Block.Header}, nil).Times(3)
+	src.On("IsCurrent").Return(true).Once()
+	src.On("GetBestBlock").Return(&b2Hash, int32(2), nil).Twice()
+	src.On("GetBlockHash", int64(1)).Return(&a1.Hash, nil).Once()
+
+	tipA1 := waddrmgr.BlockStamp{Height: 1, Hash: a1.Hash}
+
+	// Act: First scanBatch hits db.ErrBlockMismatch, purges A2, and returns
+	// nil; second scanBatch commits replacement block B2 cleanly.
+	require.NoError(t, s.scanBatch(ctx, tipA1, 2))
+	require.NoError(t, s.scanBatch(ctx, tipA1, 2))
+
+	// Assert: SyncedTo advances to replacement block B2 and the detached
+	// tx from A2 is unconfirmed rather than wedging catch-up.
+	tip, err := s.syncedTo(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, tip.Height)
+	require.Equal(t, b2Hash, tip.Hash)
+
+	txInfo, err := store.GetTx(ctx, db.GetTxQuery{
+		WalletID: id,
+		Txid:     a2Payment.Hash,
+	})
+	require.NoError(t, err)
+	require.Nil(t, txInfo.Block)
+}
