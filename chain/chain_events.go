@@ -102,10 +102,18 @@ type EventSubscription interface {
 	// buffer overflow.
 	Done() <-chan struct{}
 
-	// Err returns the terminal result after Done closes. Cancellation and
-	// source shutdown return nil. Overflowing BlockEvents ends the
-	// subscription with [ErrEventSubscriptionBufferFull].
+	// Err returns the terminal result after Done closes. Caller-initiated
+	// Cancel returns [context.Canceled], parent context cancellation
+	// returns ctx.Err(), overflowing BlockEvents returns
+	// [ErrEventSubscriptionBufferFull], and source shutdown returns nil.
 	Err() error
+
+	// Cancel immediately unsubscribes this handle, closes BlockEvents,
+	// MempoolTxns, and Done, unindexes its watches, unregisters its
+	// context cancellation callback, and publishes [context.Canceled] via
+	// Err if the subscription has not already terminated. Cancel is
+	// idempotent and safe for concurrent use.
+	Cancel()
 
 	// WatchAddrs registers addrs on this subscription and delegates to
 	// WatchAddrsFromTip. Received outputs are auto-indexed on delivery;
@@ -158,9 +166,10 @@ func (s eventSubscription) Done() <-chan struct{} {
 	return s.listener.done
 }
 
-// Err returns the terminal result after Done closes. Cancellation and source
-// shutdown return nil. Overflowing BlockEvents ends the subscription with
-// [ErrEventSubscriptionBufferFull].
+// Err returns the terminal result after Done closes. Caller-initiated Cancel
+// returns [context.Canceled], parent context cancellation returns ctx.Err(),
+// overflowing BlockEvents returns [ErrEventSubscriptionBufferFull], and source
+// shutdown returns nil.
 func (s eventSubscription) Err() error {
 	// Observe the owner's close before reading the published result.
 	select {
@@ -169,6 +178,17 @@ func (s eventSubscription) Err() error {
 	default:
 		return nil
 	}
+}
+
+// Cancel immediately unsubscribes this handle, closes BlockEvents,
+// MempoolTxns, and Done, releases its watch indices, and unregisters its
+// context cancellation callback. Calling Cancel is idempotent and safe for
+// concurrent use.
+func (s eventSubscription) Cancel() {
+	s.stream.mu.Lock()
+	defer s.stream.mu.Unlock()
+
+	s.stream.removeSubscriber(s.listener, context.Canceled)
 }
 
 // WatchAddrs registers addrs on this subscription and delegates to
@@ -652,8 +672,15 @@ func (s *chainEventStream) subscribe(ctx context.Context) *eventSubscription {
 	defer s.mu.Unlock()
 
 	// Close rejected handles before returning so callers can observe
-	// completion even if the native owner has already exited.
-	if ctx.Err() != nil || s.members == nil {
+	// completion even if ctx is already done or the native owner exited.
+	err := ctx.Err()
+	if err != nil {
+		l.close(err)
+
+		return sub
+	}
+
+	if s.members == nil {
 		l.close(nil)
 
 		return sub
@@ -664,7 +691,7 @@ func (s *chainEventStream) subscribe(ctx context.Context) *eventSubscription {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		s.removeSubscriber(l, nil)
+		s.removeSubscriber(l, ctx.Err())
 	})
 
 	return sub

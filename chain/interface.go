@@ -104,7 +104,9 @@ type Interface interface {
 	// and ends the subscription with [ErrEventSubscriptionBufferFull],
 	// whereas a full MempoolTxns buffer drops incoming mempool txns without
 	// retiring the subscription. Check [EventSubscription.Err] after
-	// [EventSubscription.Done] closes, and cancel ctx when finished.
+	// [EventSubscription.Done] closes (Cancel and ctx cancellation report
+	// the context error; source shutdown reports nil), and call
+	// [EventSubscription.Cancel] or cancel ctx when finished.
 	SubscribeChainEvents(ctx context.Context) EventSubscription
 
 	BackEnd() string

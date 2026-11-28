@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -268,7 +269,7 @@ func TestBitcoindSubscriptionPreCanceled(t *testing.T) {
 		require.FailNow(t, "refused subscription stayed active")
 	}
 
-	require.NoError(t, sub.Err())
+	require.ErrorIs(t, sub.Err(), context.Canceled)
 
 	select {
 	case _, ok := <-sub.BlockEvents():
@@ -306,7 +307,7 @@ func TestBitcoindSubscriptionCancellation(t *testing.T) {
 	// no reader. Leave the old reader's BlockEvents channel unread.
 	cancel()
 	waitSubDone(t, first)
-	require.NoError(t, first.Err())
+	require.ErrorIs(t, first.Err(), context.Canceled)
 
 	client.onBlockDisconnected(&hash, 2, time.Time{})
 
@@ -1460,7 +1461,7 @@ func TestChainEventSubscriptionUnindexOnCancel(t *testing.T) {
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 
-	require.NoError(t, subA.Err())
+	require.ErrorIs(t, subA.Err(), context.Canceled)
 	require.Nil(t, subA.listener.scripts)
 	require.Nil(t, subA.listener.outpoints)
 	require.NotContains(t, stream.scriptListeners, onlyAScript)
@@ -2584,8 +2585,8 @@ func TestChainEventSubscriptionCloseOrderOnRetirement(t *testing.T) {
 		waitSubDone(t, sub)
 
 		// Assert: both channels closed before Done, buffered items
-		// remained readable, and Err reports nil.
-		require.NoError(t, sub.Err())
+		// remained readable, and Err reports context.Canceled.
+		require.ErrorIs(t, sub.Err(), context.Canceled)
 		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
 		require.Len(t, blocks, 1)
 		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
@@ -2639,5 +2640,202 @@ func TestChainEventSubscriptionCloseOrderOnRetirement(t *testing.T) {
 		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
 		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
 		mc.AssertExpectations(t)
+	})
+}
+
+// TestChainEventSubscriptionCancel verifies direct EventSubscription.Cancel
+// semantics: immediate synchronous channel closure, idempotent concurrent use,
+// watch unregistration, post-cancel watch rejection, and Err distinguishing
+// cancellation from source shutdown and block overflow.
+func TestChainEventSubscriptionCancel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("direct cancel and watch cleanup", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: enroll two subscriptions on a shared stream with
+		// both shared and exclusive address/outpoint watches while
+		// leaving the parent context live, and buffer one mempool tx
+		// plus one block disconnect before canceling sub.
+		parentCtx, parentCancel := context.WithCancel(t.Context())
+		defer parentCancel()
+
+		sharedAddr, sharedScript := randTestP2PKHAddr(t)
+		onlyAddr, onlyScript := randTestP2PKHAddr(t)
+		sharedOp := wire.OutPoint{Hash: chainhash.Hash{0x61}, Index: 0}
+		onlyOp := wire.OutPoint{Hash: chainhash.Hash{0x62}, Index: 1}
+
+		mc := &mockChainClient{}
+		stream := newChainEventStream(
+			&chaincfg.RegressionNetParams, mc,
+		)
+		sub := stream.subscribe(parentCtx)
+		sibling := stream.subscribe(t.Context())
+
+		stream.mu.Lock()
+		stopAfterFunc := stream.members[sub.listener]
+		stream.mu.Unlock()
+		require.NotNil(t, stopAfterFunc)
+
+		mc.On(
+			"WatchAddrsFromTip", mock.Anything,
+			[]address.Address{sharedAddr, onlyAddr},
+		).Return(nil).Once()
+		mc.On(
+			"WatchAddrsFromTip", mock.Anything,
+			[]address.Address{sharedAddr},
+		).Return(nil).Once()
+		mc.On(
+			"NotifySpent", []*wire.OutPoint{&sharedOp, &onlyOp},
+		).Return(nil).Once()
+		mc.On(
+			"NotifySpent", []*wire.OutPoint{&sharedOp},
+		).Return(nil).Once()
+
+		require.NoError(t, sub.WatchAddrs(
+			t.Context(), []address.Address{sharedAddr, onlyAddr},
+		))
+		require.NoError(t, sibling.WatchAddrs(
+			t.Context(), []address.Address{sharedAddr},
+		))
+		require.NoError(t, sub.WatchOutputs(
+			t.Context(), []*wire.OutPoint{&sharedOp, &onlyOp},
+		))
+		require.NoError(t, sibling.WatchOutputs(
+			t.Context(), []*wire.OutPoint{&sharedOp},
+		))
+
+		tx := wire.NewMsgTx(wire.TxVersion)
+		tx.AddTxOut(wire.NewTxOut(2500, onlyScript))
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(t, err)
+
+		stream.publish(RelevantTx{TxRecord: rec})
+		stream.publish(BlockDisconnected{Height: 7})
+
+		// Act: invoke Cancel concurrently from multiple goroutines and
+		// again sequentially to prove concurrency safety and
+		// idempotency while parentCtx remains uncanceled.
+		const callers = 8
+
+		start := make(chan struct{})
+
+		var wg sync.WaitGroup
+
+		for range callers {
+			wg.Go(func() {
+				<-start
+				sub.Cancel()
+			})
+		}
+
+		close(start)
+		wg.Wait()
+		sub.Cancel()
+
+		// Assert: Done, BlockEvents, and MempoolTxns are immediately
+		// closed, buffered items remain readable, Err reports
+		// context.Canceled, and the context.AfterFunc callback is
+		// already unregistered while parentCtx is still live.
+		select {
+		case <-sub.Done():
+		default:
+			require.FailNow(t, "Cancel did not close Done")
+		}
+
+		require.ErrorIs(t, sub.Err(), context.Canceled)
+		require.NoError(t, parentCtx.Err())
+		require.False(t, stopAfterFunc())
+
+		blocks := drainClosedChan(t, sub.BlockEvents(), "BlockEvents")
+		require.Len(t, blocks, 1)
+		mempool := drainClosedChan(t, sub.MempoolTxns(), "MempoolTxns")
+		require.Equal(t, []*wtxmgr.TxRecord{rec}, mempool)
+
+		// Verify watch indices dropped sub's exclusive watches while
+		// retaining sibling's shared watches.
+		stream.mu.Lock()
+		require.NotContains(t, stream.members, sub.listener)
+		require.Contains(t, stream.members, sibling.listener)
+		require.NotContains(
+			t, stream.scriptListeners, string(onlyScript),
+		)
+		require.Len(t, stream.scriptListeners[string(sharedScript)], 1)
+		require.NotContains(t, stream.outpointListeners, onlyOp)
+		require.Len(t, stream.outpointListeners[sharedOp], 1)
+		stream.mu.Unlock()
+
+		// Verify post-cancel WatchAddrs and WatchOutputs fail with
+		// context.Canceled without invoking backend client mocks.
+		err = sub.WatchAddrs(
+			t.Context(), []address.Address{onlyAddr},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+		err = sub.WatchOutputs(
+			t.Context(), []*wire.OutPoint{&onlyOp},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+
+		// Cancel parentCtx after direct Cancel and shut down the
+		// stream; sibling must observe source shutdown (nil) while
+		// sub's terminal error stays context.Canceled.
+		parentCancel()
+		stream.close()
+		waitSubDone(t, sibling)
+		require.NoError(t, sibling.Err())
+		require.ErrorIs(t, sub.Err(), context.Canceled)
+
+		mc.AssertExpectations(t)
+	})
+
+	t.Run("cancel preserves prior terminal result", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: create three subscriptions that terminate via source
+		// shutdown, BlockEvents overflow, and parent deadline expiry
+		// respectively before Cancel is called.
+		shutdownStream := newChainEventStream(
+			&chaincfg.RegressionNetParams, &mockChainClient{},
+		)
+		shutdownSub := shutdownStream.subscribe(t.Context())
+		shutdownStream.close()
+		waitSubDone(t, shutdownSub)
+
+		overflowStream := newChainEventStream(
+			&chaincfg.RegressionNetParams, &mockChainClient{},
+		)
+		overflowSub := overflowStream.subscribe(t.Context())
+
+		overflowCount := int32(chainEventSubscriberBufferSize) + 1
+		for i := int32(1); i <= overflowCount; i++ {
+			overflowStream.publish(BlockDisconnected{Height: i})
+		}
+
+		waitSubDone(t, overflowSub)
+
+		deadlineCtx, cancelDeadline := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		defer cancelDeadline()
+
+		deadlineStream := newChainEventStream(
+			&chaincfg.RegressionNetParams, &mockChainClient{},
+		)
+		deadlineSub := deadlineStream.subscribe(deadlineCtx)
+		waitSubDone(t, deadlineSub)
+
+		// Act: invoke Cancel on every already-terminated subscription.
+		shutdownSub.Cancel()
+		overflowSub.Cancel()
+		deadlineSub.Cancel()
+
+		// Assert: each subscription preserves its original terminal
+		// error so callers can distinguish source shutdown (nil),
+		// overflow, and deadline expiry from direct Cancel.
+		require.NoError(t, shutdownSub.Err())
+		require.ErrorIs(
+			t, overflowSub.Err(), ErrEventSubscriptionBufferFull,
+		)
+		require.ErrorIs(t, deadlineSub.Err(), context.DeadlineExceeded)
 	})
 }

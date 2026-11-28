@@ -231,6 +231,9 @@ func (noopEventSubscription) Done() <-chan struct{} { return nil }
 // Err returns nil because MempoolChain never terminates a live event stream.
 func (noopEventSubscription) Err() error { return nil }
 
+// Cancel is a no-op because MempoolChain never opens a live event stream.
+func (noopEventSubscription) Cancel() {}
+
 // rejectWatch rejects watch registration because no live stream is attached,
 // preserving any caller context error such as DeadlineExceeded.
 func (noopEventSubscription) rejectWatch(ctx context.Context) error {

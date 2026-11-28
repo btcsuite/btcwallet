@@ -291,10 +291,11 @@ func TestRPCClientSubscriptionLifecycle(t *testing.T) {
 	require.Equal(t, *hashes[0], legacyHash)
 	cancel()
 
-	// Assert cancellation retires this reader while the owner is still
-	// running. A different live context then exercises handler shutdown.
+	// Assert cancellation retires this reader with context.Canceled while
+	// the owner is still running. A different live context then exercises
+	// handler shutdown (nil Err).
 	waitSubDone(t, sub)
-	require.NoError(t, sub.Err())
+	require.ErrorIs(t, sub.Err(), context.Canceled)
 
 	live := client.SubscribeChainEvents(t.Context())
 	client.Stop()
