@@ -4235,7 +4235,7 @@ func TestRefreshLiveWatches(t *testing.T) {
 
 	// Act: Refresh through the same method used by initialization and by
 	// the worker after committed scan results introduce new interests.
-	err = s.refreshLiveWatches(t.Context())
+	err = s.refreshLiveWatches(t.Context(), bwmock.NewEventSubscription(t.Context(), s.cfg.Chain))
 
 	// Assert: Both native calls preserve the Store-selected identities;
 	// expectations verify one coherent read and one installation per group.
@@ -4265,7 +4265,7 @@ func TestRefreshLiveWatchesStoreError(t *testing.T) {
 		Return(db.WatchSet{}, errDBMock).Once()
 
 	// Act: Attempt the worker's refresh against the failed snapshot lookup.
-	err := s.refreshLiveWatches(t.Context())
+	err := s.refreshLiveWatches(t.Context(), bwmock.NewEventSubscription(t.Context(), s.cfg.Chain))
 
 	// Assert: Callers can identify the Store failure through error wrapping,
 	// and the strict mocks verify the single read without native activation.
@@ -4302,7 +4302,7 @@ func TestRefreshLiveWatchesInvalidScript(t *testing.T) {
 	).Once()
 
 	// Act: Refresh from the snapshot containing no receiving address.
-	err := s.refreshLiveWatches(t.Context())
+	err := s.refreshLiveWatches(t.Context(), bwmock.NewEventSubscription(t.Context(), s.cfg.Chain))
 
 	// Assert: Preserve the scan reader's identifiable missing-address failure;
 	// strict mocks verify one snapshot read and forbid native activation.

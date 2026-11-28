@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -310,7 +311,7 @@ type syncer struct {
 
 	// pendingDisconnect retains the first failed live disconnect so the
 	// next initialization replays it before startup rollback or later
-	// mailbox events can overtake it.
+	// subscription events can overtake it.
 	pendingDisconnect *wtxmgr.BlockMeta
 }
 
@@ -335,6 +336,48 @@ func (s *syncer) closeSubscription() {
 	if sub != nil {
 		(*sub).Cancel()
 	}
+}
+
+// openSubscription enrolls a fresh chain event subscription, publishes it for
+// concurrent watchAddrs callers, installs the persisted watch set, and enables
+// block notifications. On error, the subscription is closed before returning.
+func (s *syncer) openSubscription(ctx context.Context) error {
+	sub := s.cfg.Chain.SubscribeChainEvents(ctx)
+
+	// Publish the subscription before reading the persisted watch set so a
+	// concurrent NewAddress or Broadcast registers directly on sub instead
+	// of landing between LoadWatchSet and publication.
+	s.sub.Store(&sub)
+
+	err := s.refreshLiveWatches(ctx, sub)
+	if err != nil {
+		s.closeSubscription()
+
+		return err
+	}
+
+	// If refreshLiveWatches self-healed a BlockEvents buffer overflow by
+	// retiring the subscription, skip NotifyBlocks so the sync loop catches
+	// up and re-subscribes cleanly.
+	if s.currentSub() == nil {
+		return nil
+	}
+
+	// Explicitly request connected/disconnected block notifications. Only
+	// the bitcoind and neutrino wrappers enable block notifications as a
+	// side effect of WatchAddrsFromTip; btcd's NotifyReceived registers
+	// only address notifications, so without this call a btcd-backed wallet
+	// would stop receiving live block connect/disconnect events. The call
+	// is idempotent on wrappers that already enabled notifications.
+	err = s.cfg.Chain.NotifyBlocks()
+	if err != nil {
+		s.closeSubscription()
+
+		return fmt.Errorf("unable to start block notifications: %w",
+			err)
+	}
+
+	return nil
 }
 
 // watchAddrs registers addresses on the active subscription when synced. While
@@ -400,9 +443,11 @@ func isSubRetiredForResync(sub chain.EventSubscription) bool {
 	}
 }
 
-// refreshLiveWatches registers stored addresses and outpoints for transaction
-// notifications. The Store selects the addresses and outputs to watch.
-func (s *syncer) refreshLiveWatches(ctx context.Context) error {
+// refreshLiveWatches registers stored addresses and outpoints on the given
+// subscription. The Store selects the addresses and outputs to watch.
+func (s *syncer) refreshLiveWatches(ctx context.Context,
+	sub chain.EventSubscription) error {
+
 	// Read both interest groups together so retries cannot combine address
 	// and output selections from separately timed storage snapshots.
 	watches, err := s.store.LoadWatchSet(ctx, s.walletID)
@@ -427,9 +472,11 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 
 	// Wallet shutdown must still cancel registration. A later sync
 	// initialization reads the persisted watch set again.
-	err = s.chainSyncer.watchAddresses(ctx, s.walletID, addrs)
+	err = sub.WatchAddrs(ctx, addrs)
 	if err != nil {
-		return fmt.Errorf("register addresses: %w", err)
+		return s.reconcileSubWatchErr(
+			ctx, sub, fmt.Errorf("register addresses: %w", err),
+		)
 	}
 
 	if len(watches.OutPoints) == 0 {
@@ -442,7 +489,30 @@ func (s *syncer) refreshLiveWatches(ctx context.Context) error {
 		outpoints = append(outpoints, &watches.OutPoints[i])
 	}
 
-	return s.chainSyncer.watchOutpoints(ctx, s.walletID, outpoints)
+	err = sub.WatchOutputs(ctx, outpoints)
+	if err != nil {
+		return s.reconcileSubWatchErr(ctx, sub, err)
+	}
+
+	return nil
+}
+
+// reconcileSubWatchErr checks whether a watch-registration failure happened
+// because sub already closed while ctx remained live, routing closure through
+// handleSubClosed so BlockEvents overflow self-heals uniformly across
+// openSubscription, commitSyncBatch, and putTargetedBatch.
+func (s *syncer) reconcileSubWatchErr(ctx context.Context,
+	sub chain.EventSubscription, err error) error {
+
+	if ctx.Err() == nil {
+		select {
+		case <-sub.Done():
+			return s.handleSubClosed(ctx, sub)
+		default:
+		}
+	}
+
+	return err
 }
 
 // watchAddress decodes a receiving script for live and recovery watches.
@@ -491,9 +561,9 @@ func (s *syncer) syncState() syncState {
 }
 
 // initChainSync performs the initial setup for the chain synchronization loop.
-// This includes waiting for the backend to sync, checking for rollbacks, and
-// enabling block notifications. It returns an error if any of these setup
-// steps fail.
+// This includes waiting for the backend to sync, retrying any pending
+// disconnect, and checking for rollbacks. Live subscriptions and watches are
+// opened only once catch-up reaches the chain tip.
 func (s *syncer) initChainSync(ctx context.Context) error {
 	// Wait for the backend to be synced to the network. We require the
 	// backend to be synced before we start scanning to ensure we have a
@@ -518,29 +588,6 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	err = s.checkRollback(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to check for rollback: %w", err)
-	}
-
-	// A retry may follow a committed scan whose registration failed.
-	// Register stored addresses and outpoints even if the tip is current.
-	//
-	// TODO(yy): Avoid rereading and registering the full set on each retry
-	// while preserving registration that failed after a committed scan.
-	err = s.refreshLiveWatches(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Explicitly request connected/disconnected block notifications. Only
-	// the bitcoind and neutrino wrappers enable block notifications as a
-	// side effect of NotifyReceived; btcd's NotifyReceived (the embedded
-	// rpcclient method) registers only address notifications, so without
-	// this call a btcd-backed wallet would stop receiving live block
-	// connect/disconnect events. The call is idempotent on the wrappers
-	// that already enabled notifications, so it is safe for all backends.
-	err = s.chainSyncer.notifyBlocks(ctx)
-	if err != nil {
-		return fmt.Errorf("unable to start block "+
-			"notifications: %w", err)
 	}
 
 	return nil
@@ -898,12 +945,13 @@ func (s *syncer) findForkPoint(localHashes []*chainhash.Hash,
 
 // run executes the main synchronization loop.
 func (s *syncer) run(ctx context.Context) error {
+	// Retire any active subscription whenever the sync loop exits.
+	defer s.closeSubscription()
+
 	// Initialize the chain sync state.
 	err := s.initChainSync(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) ||
-			errors.Is(err, ErrWalletShuttingDown) {
-
+		if isShutdownErr(ctx, err) {
 			return nil
 		}
 
@@ -913,9 +961,7 @@ func (s *syncer) run(ctx context.Context) error {
 	for {
 		err := s.runSyncStep(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) ||
-				errors.Is(err, ErrWalletShuttingDown) {
-
+			if isShutdownErr(ctx, err) {
 				return nil
 			}
 
@@ -924,6 +970,16 @@ func (s *syncer) run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// isShutdownErr reports whether err represents a clean worker shutdown rather
+// than a transient dependency or subscription cancellation.
+func isShutdownErr(ctx context.Context, err error) bool {
+	if errors.Is(err, ErrWalletShuttingDown) {
+		return true
+	}
+
+	return ctx.Err() != nil && errors.Is(err, context.Canceled)
 }
 
 // runSyncStep performs a single iteration of the synchronization loop. It
@@ -1307,8 +1363,7 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 }
 
 // commitSyncBatch persists one recovery scan batch, announces committed
-// transactions, and refreshes live watches when horizons or transactions
-// changed.
+// transactions, and refreshes live watches when a subscription is active.
 func (s *syncer) commitSyncBatch(ctx context.Context,
 	scanState *RecoveryState, results []scanResult) error {
 
@@ -1317,8 +1372,10 @@ func (s *syncer) commitSyncBatch(ctx context.Context,
 		return err
 	}
 
-	refreshWatches := len(params.Horizons) > 0 ||
-		len(params.Transactions) > 0
+	sub := s.currentSub()
+
+	refreshWatches := sub != nil &&
+		(len(params.Horizons) > 0 || len(params.Transactions) > 0)
 	if refreshWatches {
 		// Clear readiness before publishing the tip. Normal catch-up
 		// restores it only after watch registration succeeds.
@@ -1341,11 +1398,15 @@ func (s *syncer) commitSyncBatch(ctx context.Context,
 		s.txManager.notifyTx(ctx, tx.Tx.TxHash())
 	}
 
-	if !refreshWatches {
-		return nil
+	// A committed horizon or credit can introduce watches while a live
+	// subscription is open; finish registration before catch-up reports
+	// this batch complete. When no subscription is open, openSubscription
+	// installs the full persisted watch set before entering Synced.
+	if refreshWatches {
+		return s.refreshLiveWatches(ctx, sub)
 	}
 
-	return s.refreshLiveWatches(ctx)
+	return nil
 }
 
 // putTargetedBatch records targeted recovery scan results through the store.
@@ -1366,7 +1427,9 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 		// An unknown commit outcome may have persisted new watches. Keep
 		// readiness revoked so initialization rereads them; only definite
 		// write failures can restore readiness without registration.
-		if !errors.Is(err, dbruntime.ErrAmbiguousTxCommit) {
+		if !errors.Is(err, dbruntime.ErrAmbiguousTxCommit) &&
+			s.currentSub() != nil {
+
 			s.state.Store(uint32(syncStateRescanning))
 		}
 
@@ -1380,9 +1443,13 @@ func (s *syncer) putTargetedBatch(ctx context.Context,
 	}
 
 	// Targeted scans can also store new addresses and outputs. Register
-	// them after the commit using the scan worker's lifetime context.
-	if len(params.Horizons) > 0 || len(params.Transactions) > 0 {
-		return s.refreshLiveWatches(ctx)
+	// them on the active subscription after the commit; if no subscription
+	// is open, openSubscription installs the full watch set before Synced.
+	sub := s.currentSub()
+	if sub != nil &&
+		(len(params.Horizons) > 0 || len(params.Transactions) > 0) {
+
+		return s.refreshLiveWatches(ctx, sub)
 	}
 
 	return nil
@@ -2056,9 +2123,9 @@ func (s *syncer) dispatchScanStrategy(ctx context.Context,
 
 // advanceChainSync checks if the wallet is behind the chain tip and processes
 // a batch of blocks if necessary. It returns (syncFinished, error) where
-// syncFinished is true if the wallet is caught up to the best known tip, and
-// false if a sync operation was performed (or attempted) indicating that the
-// caller should continue polling.
+// syncFinished is true if the wallet is caught up to the best known tip with
+// an active live subscription, and false if a sync operation or subscription
+// setup was performed indicating that the caller should continue polling.
 func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	// Check the chain tip.
 	bestHash, bestHeight, err := s.cfg.Chain.GetBestBlock()
@@ -2079,8 +2146,6 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	// If the wallet is caught up to the best known tip, log this and
-	// return.
 	if syncedTo.Height >= bestHeight {
 		return s.ensureSyncedAtTip(ctx, syncedTo, bestHash, bestHeight)
 	}
@@ -2088,12 +2153,19 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	// Calculate the gap.
 	gap := bestHeight - syncedTo.Height
 
-	// If the gap is large (> 6 blocks), we treat it as a major event
-	// requiring Syncing state protection. Smaller gaps keep requests available
-	// until putSyncBatch clears readiness for watch registration at commit.
-	isLargeGap := gap > syncStateSwitchThreshold
+	// If the gap is large (> 6 blocks), drain any buffered disconnects so
+	// detached blocks recorded above SyncedTo by targeted scans are purged,
+	// then retire the live subscription and switch to explicit Syncing
+	// state so catch-up runs without bounded live delivery pressure.
+	if gap > syncStateSwitchThreshold {
+		if sub := s.currentSub(); sub != nil {
+			err = s.drainBufferedDisconnects(ctx, sub)
+			if err != nil {
+				return false, err
+			}
+		}
 
-	if isLargeGap {
+		s.closeSubscription()
 		s.state.Store(uint32(syncStateSyncing))
 	}
 
@@ -2114,18 +2186,35 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// ensureSyncedAtTip verifies exact tip equality and transitions the syncer to
-// Synced when caught up to the best known block.
-func (s *syncer) ensureSyncedAtTip(_ context.Context,
+// ensureSyncedAtTip verifies exact tip equality, opens a live subscription if
+// none is active (returning false so one final tip check closes any 0-1 block
+// window during watch installation), and transitions the syncer to Synced.
+func (s *syncer) ensureSyncedAtTip(ctx context.Context,
 	syncedTo waddrmgr.BlockStamp, bestHash *chainhash.Hash,
 	bestHeight int32) (bool, error) {
 
-	if syncedTo.Height != bestHeight ||
-		bestHash == nil || syncedTo.Hash != *bestHash {
-
+	if syncedTo.Height != bestHeight || syncedTo.Hash != *bestHash {
 		return false, fmt.Errorf("wallet tip %d (%v) diverges from "+
 			"chain tip %d (%v): %w", syncedTo.Height,
 			syncedTo.Hash, bestHeight, bestHash, ErrStateChanged)
+	}
+
+	sub := s.currentSub()
+	if sub == nil {
+		err := s.openSubscription(ctx)
+		if err != nil {
+			return false, err
+		}
+
+		return false, nil
+	}
+
+	// Reconcile a subscription that retired after publication (for
+	// example, overflow during watch activation) before marking Synced.
+	select {
+	case <-sub.Done():
+		return false, s.handleSubClosed(ctx, sub)
+	default:
 	}
 
 	s.state.Store(uint32(syncStateSynced))
@@ -2195,7 +2284,121 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	}
 
 	// Process Batch (Update). We do this in a single DB transaction.
-	return s.putSyncBatch(ctx, scanState, results)
+	return s.reconcileSyncBatchErr(
+		ctx, syncedTo, s.putSyncBatch(ctx, scanState, results),
+	)
+}
+
+// reconcileSyncBatchErr handles recoverable scan-batch commit errors: a
+// pre-commit overflow that closed sub retries immediately without backoff, and
+// a block mismatch against a detached targeted-scan block above SyncedTo
+// purges detached blocks above SyncedTo so the next step commits cleanly.
+func (s *syncer) reconcileSyncBatchErr(ctx context.Context,
+	syncedTo waddrmgr.BlockStamp, err error) error {
+
+	if errors.Is(err, ErrStateChanged) && s.currentSub() == nil {
+		return nil
+	}
+
+	if errors.Is(err, db.ErrBlockMismatch) {
+		purged, purgeErr := s.purgeDetachedBlocksAboveTip(ctx, syncedTo)
+		if purgeErr != nil {
+			return purgeErr
+		}
+
+		if purged {
+			return nil
+		}
+	}
+
+	return err
+}
+
+// drainBufferedDisconnects applies any already-buffered disconnect events
+// before retiring sub for large-gap catch-up so detached blocks retained above
+// SyncedTo by targeted scans are purged cleanly.
+func (s *syncer) drainBufferedDisconnects(ctx context.Context,
+	sub chain.EventSubscription) error {
+
+	for {
+		select {
+		case event, ok := <-sub.BlockEvents():
+			if !ok {
+				return nil
+			}
+
+			if event.Type != chain.EventBlockDisconnected {
+				continue
+			}
+
+			err := s.disconnectBlock(ctx, *event.Block)
+			if err != nil {
+				return err
+			}
+
+		default:
+			return nil
+		}
+	}
+}
+
+// purgeDetachedBlocksAboveTip disconnects orphaned confirmed blocks retained
+// above SyncedTo whose disconnect events were lost (such as on BlockEvents
+// overflow or restart), allowing forward catch-up to commit replacement blocks.
+func (s *syncer) purgeDetachedBlocksAboveTip(ctx context.Context,
+	syncedTo waddrmgr.BlockStamp) (bool, error) {
+
+	minHeight := uint32(syncedTo.Height) + 1
+
+	txns, err := s.store.ListTxns(ctx, db.ListTxnsQuery{
+		WalletID:    s.walletID,
+		StartHeight: minHeight,
+		EndHeight:   math.MaxInt32,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	blocksByHeight := make(map[uint32]db.Block, len(txns))
+	heights := make([]uint32, 0, len(txns))
+
+	for i := range txns {
+		blk := txns[i].Block
+		if blk == nil || blk.Height < minHeight {
+			continue
+		}
+
+		if _, ok := blocksByHeight[blk.Height]; ok {
+			continue
+		}
+
+		blocksByHeight[blk.Height] = *blk
+		heights = append(heights, blk.Height)
+	}
+
+	if len(heights) == 0 {
+		return false, nil
+	}
+
+	slices.Sort(heights)
+
+	for _, h := range heights {
+		blk := blocksByHeight[h]
+		meta := wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Hash:   blk.Hash,
+				Height: int32(blk.Height),
+			},
+			Time: blk.Timestamp,
+		}
+
+		err = s.disconnectBlock(ctx, meta)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
 }
 
 // handleChainUpdate logs legacy rescan progress. The Wallet worker applies
@@ -2503,6 +2706,12 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	log.Infof("Rewinding sync status from %d to %d for rescan",
 		current.Height, req.startBlock.Height)
 
+	// Retire the live subscription and mark the wallet syncing before
+	// rewinding so full historical catch-up runs without bounded live
+	// delivery pressure.
+	s.closeSubscription()
+	s.state.Store(uint32(syncStateSyncing))
+
 	err = s.rewindWallet(ctx, req.startBlock)
 	if err != nil {
 		log.Errorf("Failed to rewind sync status: %v", err)
@@ -2537,8 +2746,11 @@ func (s *syncer) loadTargetedScanTip(ctx context.Context,
 // rewinding the global sync state.
 func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	err, eventErr := s.runTargetedScan(ctx, req)
-	if eventErr != nil {
+	if eventErr != nil || s.currentSub() == nil {
 		s.state.Store(uint32(syncStateSyncing))
+	}
+
+	if eventErr != nil {
 		err = errors.Join(err, eventErr)
 	}
 
@@ -2617,7 +2829,9 @@ func (s *syncer) runTargetedScan(ctx context.Context,
 			return batchErr, eventErr
 		}
 
-		s.state.Store(uint32(syncStateRescanning))
+		if s.currentSub() != nil {
+			s.state.Store(uint32(syncStateRescanning))
+		}
 
 		// Advance startHeight; batch size is bounded.
 		startHeight += int32(len(results))
@@ -3499,7 +3713,7 @@ func (s *syncer) disconnectBlock(ctx context.Context,
 		} else if s.pendingDisconnect == nil {
 			// Retain the first failed disconnect so the next
 			// initChainSync replays it before checkRollback or
-			// later mailbox events.
+			// later subscription events.
 			pending := event
 			s.pendingDisconnect = &pending
 		}
