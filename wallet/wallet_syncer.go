@@ -233,10 +233,6 @@ type chainProcessor interface {
 	// run executes the main synchronization loop.
 	run(ctx context.Context) error
 
-	// waitForRetry services eligible events until the Wallet's retry timer
-	// expires or its lifetime ends.
-	waitForRetry(ctx context.Context, retry <-chan time.Time) error
-
 	// requestScan submits a rescan job to the syncer.
 	requestScan(ctx context.Context, req *scanReq) error
 
@@ -293,11 +289,6 @@ type syncer struct {
 	// txManager rebroadcasts unmined transactions and announces committed
 	// observations while Wallet retains subscriber state and lifecycle.
 	txManager txManager
-
-	// chainSyncer owns subscriptions and prepares live matches for this
-	// processor; every maintained Wallet receives its Manager's instance.
-	chainSyncer    chainRouter
-	chainEventChan <-chan chainEvent
 
 	// sub holds the active per-Wallet chain event subscription while
 	// synced, or nil while catching up, rewinding, or waiting for retry.
@@ -535,23 +526,19 @@ func (s *syncer) watchAddress(script []byte) (address.Address, error) {
 // newSyncer creates a new syncer instance. The Store and its wallet ID are
 // mandatory: every migrated runtime path reads and writes through the Store,
 // so there is no nil-store fallback. The notifier observes successful commits
-// without owning persistence or scan lifecycle. The Manager's required routing
-// owner and inbox supply prepared live events to this existing worker.
+// without owning persistence or scan lifecycle.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
 	txStore wtxmgr.TxStore, txManager txManager, store db.Store,
-	walletID uint32, chainSyncer chainRouter,
-	events <-chan chainEvent) *syncer {
+	walletID uint32) *syncer {
 
 	return &syncer{
-		cfg:            cfg,
-		addrStore:      addrStore,
-		txStore:        txStore,
-		scanReqChan:    make(chan *scanReq, 1),
-		txManager:      txManager,
-		store:          store,
-		walletID:       walletID,
-		chainSyncer:    chainSyncer,
-		chainEventChan: events,
+		cfg:         cfg,
+		addrStore:   addrStore,
+		txStore:     txStore,
+		scanReqChan: make(chan *scanReq, 1),
+		txManager:   txManager,
+		store:       store,
+		walletID:    walletID,
 	}
 }
 
@@ -593,40 +580,6 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 	return nil
 }
 
-// waitForRetry lets the worker service mailbox events across retries while the
-// Wallet controls the retry deadline.
-func (s *syncer) waitForRetry(ctx context.Context,
-	retry <-chan time.Time) error {
-
-	for {
-		// Pause mailbox reads while a failed disconnect awaits retry so
-		// queued events cannot overtake the pending rewind.
-		events := s.chainEventChan
-		if s.pendingDisconnect != nil {
-			events = nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-
-		case <-retry:
-			return nil
-
-		case event := <-events:
-			err := s.processChainEventBeforeSync(ctx, event)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			if err != nil {
-				log.Errorf("Chain event processing failed "+
-					"during retry: %v", err)
-			}
-		}
-	}
-}
-
 // waitUntilBackendSynced blocks until the chain backend considers itself
 // "current".
 func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
@@ -641,20 +594,7 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 	defer t.Stop()
 
 	for {
-		// Pause mailbox reads while a failed disconnect awaits retry so
-		// queued events cannot overtake the pending rewind.
-		events := s.chainEventChan
-		if s.pendingDisconnect != nil {
-			events = nil
-		}
-
 		select {
-		case event := <-events:
-			err := s.processChainEventBeforeSync(ctx, event)
-			if err != nil {
-				return err
-			}
-
 		case <-t.C:
 			if s.cfg.Chain.IsCurrent() {
 				return nil
@@ -945,7 +885,8 @@ func (s *syncer) findForkPoint(localHashes []*chainhash.Hash,
 
 // run executes the main synchronization loop.
 func (s *syncer) run(ctx context.Context) error {
-	// Retire any active subscription whenever the sync loop exits.
+	// Always retire any active live subscription when this worker exits so
+	// no subscription outlives the syncer run or leaks during backoff.
 	defer s.closeSubscription()
 
 	// Initialize the chain sync state.
@@ -1344,18 +1285,20 @@ func (s *syncer) applyStoreTxBatch(ctx context.Context,
 func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	results []scanResult) error {
 
-	// Check for rollback before committing. If a disconnect is queued,
-	// process it and abort the batch. Any non-disconnect event stays out of
-	// the sync batch so historical recovery does not advance past it.
+	// Rollback invalidates fetched facts before persistence. Ordinary work
+	// stays behind this attempt, including conversion or Store failures.
 	pending, err := s.checkForRollbackBeforeCommit(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Retained observations must not checkpoint an unfetched next block:
+	// live matches can omit recovery addresses until historical scanning.
+	// An empty subscription poll returns EventUnknown and needs no replay.
 	err = s.commitSyncBatch(ctx, scanState, results)
-	if pending.notification != nil {
+	if pending.Type != chain.EventUnknown {
 		err = errors.Join(
-			err, s.processChainEventBeforeSync(ctx, pending),
+			err, s.processBlockEventBeforeSync(ctx, pending),
 		)
 	}
 
@@ -2401,63 +2344,6 @@ func (s *syncer) purgeDetachedBlocksAboveTip(ctx context.Context,
 	return true, nil
 }
 
-// handleChainUpdate logs legacy rescan progress. The Wallet worker applies
-// disconnects and matching payments before they reach this handler.
-func (s *syncer) handleChainUpdate(n any) {
-	switch msg := n.(type) {
-	case *chain.RescanProgress:
-		log.Debugf("Rescanned through block %v (height %d)",
-			msg.Hash, msg.Height)
-
-	// Consume and log the legacy RescanFinished notification. We no longer
-	// perform state updates here as the new controller- driven sync loop
-	// manages wallet synchronization.
-	case *chain.RescanFinished:
-		log.Debugf("Received legacy RescanFinished notification for "+
-			"block %v (height %d). No wallet state updates "+
-			"performed.", msg.Hash, msg.Height)
-	}
-}
-
-// processChainEventBeforeSync handles initialization, retry and scan-time
-// observations without checkpointing past payments omitted by live watches.
-func (s *syncer) processChainEventBeforeSync(ctx context.Context,
-	event chainEvent) error {
-
-	// Known matches are safe to record, but historical scanning must still
-	// visit this height after recovery and watch registration finish. Leave
-	// malformed metadata to the ordinary handler's existing validation.
-	if block, ok := event.notification.(chain.FilteredBlockConnected); ok &&
-		block.Block != nil {
-
-		return s.putTxNotifications(ctx, event.matches, block.Block)
-	}
-
-	return s.processChainEvent(ctx, event)
-}
-
-// processChainEvent orders a Wallet rewind with the same worker's payment
-// and historical writes. Manager supplies the matches for this stream.
-func (s *syncer) processChainEvent(ctx context.Context,
-	event chainEvent) error {
-
-	switch n := event.notification.(type) {
-	case chain.BlockDisconnected:
-		return s.disconnectBlock(ctx, wtxmgr.BlockMeta(n))
-
-	case chain.RelevantTx:
-		return s.putTxNotifications(ctx, event.matches, n.Block)
-
-	case chain.FilteredBlockConnected:
-		return s.putBlockNotifications(ctx, event.matches, n.Block)
-
-	default:
-		s.handleChainUpdate(event.notification)
-
-		return nil
-	}
-}
-
 // processBlockEventBeforeSync handles scan-time block observations without
 // checkpointing past payments omitted by live watches or persisting blocks
 // above the synced tip or on a detached branch.
@@ -2606,39 +2492,69 @@ func (s *syncer) handleScanReq(ctx context.Context,
 	return s.scanWithRewind(ctx, req)
 }
 
-// checkForRollbackBeforeCommit handles a queued disconnect before a
-// scan commits. It returns ordinary queued events unprocessed; callers apply
-// them after the batch attempt, preserving prepared matches and result order.
+// checkForRollbackBeforeCommit handles a queued disconnect before a scan
+// commits. It returns an ordinary queued connected block event unprocessed so
+// callers can apply it after the batch attempt without advancing SyncedTo.
 func (s *syncer) checkForRollbackBeforeCommit(ctx context.Context) (
-	chainEvent, error) {
+	chain.Event, error) {
+
+	sub := s.currentSub()
+	if sub == nil {
+		return chain.Event{}, nil
+	}
 
 	select {
-	case event := <-s.chainEventChan:
-		if _, ok := event.notification.(chain.BlockDisconnected); !ok {
+	case event, ok := <-sub.BlockEvents():
+		if !ok {
+			err := s.handleSubClosed(ctx, sub)
+			if err != nil {
+				return chain.Event{}, err
+			}
+
+			// Overflow recovery may have rewound SyncedTo,
+			// invalidating this batch's fetched history.
+			return chain.Event{}, ErrStateChanged
+		}
+
+		if event.Type != chain.EventBlockDisconnected {
 			return event, nil
 		}
 
-		err := s.processChainEvent(ctx, event)
+		err := s.processBlockEvent(ctx, event)
 		if err != nil {
-			return chainEvent{}, err
+			return chain.Event{}, err
 		}
 
-		// Rollback has completed, invalidating this batch's fetched history.
-		// ErrStateChanged makes targeted scans reload and refetch their range;
-		// normal catch-up restarts through its existing retry/backoff loop.
-		return chainEvent{}, ErrStateChanged
+		// Rollback has completed, invalidating this batch's fetched
+		// history. ErrStateChanged makes targeted scans reload and
+		// refetch their range; normal catch-up restarts through its
+		// existing retry/backoff loop.
+		return chain.Event{}, ErrStateChanged
 
 	default:
-		return chainEvent{}, nil
+		return chain.Event{}, nil
 	}
 }
 
-// waitForEvent blocks until a notification, rescan job, or context
-// cancellation occurs, processing the event accordingly.
+// waitForEvent blocks until a block event, mempool transaction, rescan job, or
+// context cancellation occurs, processing the event accordingly.
 func (s *syncer) waitForEvent(ctx context.Context) error {
+	sub := s.currentSub()
+
 	select {
-	case event := <-s.chainEventChan:
-		return s.processChainEvent(ctx, event)
+	case event, ok := <-sub.BlockEvents():
+		if !ok {
+			return s.handleSubClosed(ctx, sub)
+		}
+
+		return s.processBlockEvent(ctx, event)
+
+	case rec, ok := <-sub.MempoolTxns():
+		if !ok {
+			return s.handleSubClosed(ctx, sub)
+		}
+
+		return s.processMempoolTx(ctx, rec)
 
 	// Handle synchronous rescan or resync requests submitted via the
 	// controller.
@@ -2754,8 +2670,9 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 		err = errors.Join(err, eventErr)
 	}
 
-	// Failed registration or retained live-event errors keep readiness
-	// revoked until initialization retries.
+	// Failed registration, retained live-event errors, or a retired
+	// subscription keep readiness revoked until catch-up or initialization
+	// retries.
 	s.state.CompareAndSwap(
 		uint32(syncStateRescanning), uint32(syncStateSynced),
 	)
@@ -2843,7 +2760,7 @@ func (s *syncer) runTargetedScan(ctx context.Context,
 }
 
 // applyTargetedBatch checks for a queued disconnect before committing one
-// targeted batch, then replays any retained non-disconnect live event without
+// targeted batch, then replays any retained non-disconnect block event without
 // advancing SyncedTo.
 func (s *syncer) applyTargetedBatch(ctx context.Context,
 	scanState *RecoveryState, results []scanResult) (error, error) {
@@ -2857,8 +2774,11 @@ func (s *syncer) applyTargetedBatch(ctx context.Context,
 
 	// The selected accounts cannot prove full-wallet historical coverage.
 	// Replay known matches without a checkpoint; preserve any error until
-	// this accepted range finishes. An empty event remains a no-op.
-	pendingErr := s.processChainEventBeforeSync(ctx, pending)
+	// this accepted range finishes. An empty poll remains a no-op.
+	var pendingErr error
+	if pending.Type != chain.EventUnknown {
+		pendingErr = s.processBlockEventBeforeSync(ctx, pending)
+	}
 
 	return err, pendingErr
 }

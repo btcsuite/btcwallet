@@ -289,15 +289,16 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 
 	log.Infof("Restarting sync loop in %v...", backoff)
 
-	// The worker knows which events can still be processed while its
-	// first failed disconnect awaits another attempt.
-	err := w.sync.waitForRetry(w.lifetimeCtx, timerFn(backoff))
-	if err != nil {
+	// No live subscription is open during retry backoff, so wait directly
+	// for either wallet shutdown or the retry timer.
+	select {
+	case <-w.lifetimeCtx.Done():
 		log.Debug("Backoff interrupted by wallet shutdown")
 		return 0, false
-	}
 
-	return min(backoff*backoffMultiplier, maxBackoff), true
+	case <-timerFn(backoff):
+		return min(backoff*backoffMultiplier, maxBackoff), true
+	}
 }
 
 // performRuntimeSetup executes the synchronous initialization tasks required

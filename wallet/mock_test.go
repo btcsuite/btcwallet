@@ -6,7 +6,6 @@ package wallet
 
 import (
 	"context"
-	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -123,14 +122,6 @@ var _ chainProcessor = (*mockChainProcessor)(nil)
 // run implements the chainProcessor interface.
 func (m *mockChainProcessor) run(ctx context.Context) error {
 	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// waitForRetry observes the Wallet's retry deadline in controller tests.
-func (m *mockChainProcessor) waitForRetry(ctx context.Context,
-	retry <-chan time.Time) error {
-
-	args := m.Called(ctx, retry)
 	return args.Error(0)
 }
 

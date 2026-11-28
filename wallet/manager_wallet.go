@@ -41,7 +41,6 @@ func newManagedWallet(cfg Config, data *walletData,
 
 	processor := newSyncer(
 		cfg, w.addrStore, w.txStore, w, w.store, w.id,
-		syncer, w.chainEventChan,
 	)
 	w.sync = processor
 	w.state = newWalletState(w.sync)

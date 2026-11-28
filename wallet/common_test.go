@@ -187,7 +187,6 @@ func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 		},
 	}
 
-	m.chainSyncer = newChainSyncer(m.config.ChainSource, &m.config.ChainParams)
 	// This Store fixture has no native input; the owner serves Create.
 	m.started.Store(true)
 	m.wg.Go(m.mainLoop)
@@ -331,9 +330,6 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 			ChainParams: &chainParams,
 		},
 	}
-	// Match managed assembly so every producer declares its routing interest.
-	w.chainSyncer = newChainSyncer(mockChain, &chainParams)
-	w.chainEventChan = make(chan chainEvent, 1)
 	w.cache = newStoreRuntimeCache(mockStore)
 
 	// Stop the timer immediately to avoid leaks.
