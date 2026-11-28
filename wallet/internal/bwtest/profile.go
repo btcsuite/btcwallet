@@ -2,15 +2,37 @@
 package bwtest
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// BenchmarkReadCount returns the fixed number of measured calls requested by
+// -test.benchtime=Nx. Different-item and not-found benchmarks need this count
+// to prepare a different input for each call before measurement starts.
+func BenchmarkReadCount(b *testing.B) int {
+	b.Helper()
+
+	// A time target can request more items than the saved Wallet contains.
+	value := flag.Lookup("test.benchtime").Value.String()
+	if !strings.HasSuffix(value, "x") {
+		b.Fatal("different-item and not-found benchmarks require " +
+			"a fixed call count; use duration=10x or -benchtime=10x")
+	}
+
+	count, err := strconv.Atoi(strings.TrimSuffix(value, "x"))
+	require.NoError(b, err)
+
+	return count
+}
 
 // StartBenchmarkProfile starts the requested diagnostic after fixture setup.
 // Call the returned function immediately after the workload, before cleanup;
